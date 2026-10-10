@@ -201,7 +201,8 @@ defmodule Runlight.Mail do
   @doc false
   # One POST. `explains` reads the service's own message from a refusal.
   def post(fetch, url, headers, body, explains \\ true) do
-    case fetch.(url, method: "POST", headers: headers, body: body, timeout: 20_000) do
+    # Only a refusal's message is read, so no more than one could need.
+    case fetch.(url, method: "POST", headers: headers, body: body, timeout: 20_000, max_bytes: 65_536, truncate: true) do
       {:error, reason} ->
         detail = fetch_message(reason)
         host = host_of(url)

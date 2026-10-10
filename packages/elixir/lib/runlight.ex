@@ -106,6 +106,8 @@ defmodule Runlight do
   @rollup_delay_ms 2 * 3_600_000
   # The most a connected install's list of sites may weigh; a real one is a few kilobytes.
   @remote_max_bytes 2 * 1024 * 1024
+  # Read one byte past it, so an answer that long reads as too long rather than as unreachable.
+  @remote_read [max_bytes: @remote_max_bytes + 1, truncate: true]
 
   @doc "The choices for how long a site keeps its visits, in months."
   def retention_months, do: [6, 12, 24, 36, 60]
@@ -567,9 +569,10 @@ defmodule Runlight do
         info = %{last_seen: if(cached, do: cached.last_seen), retention_months: :undefined, connection: "unreachable"}
 
         info =
-          case Safefetch.install_fetch(rl, "#{remote["url"]}/api/sites",
-                 headers: [{"authorization", "Bearer #{remote["token"]}"}],
-                 timeout: 8000
+          case Safefetch.install_fetch(
+                 rl,
+                 "#{remote["url"]}/api/sites",
+                 [headers: [{"authorization", "Bearer #{remote["token"]}"}], timeout: 8000] ++ @remote_read
                ) do
             {:ok, answer} ->
               info = if answer.status in [401, 403], do: %{info | connection: "refused"}, else: info
@@ -604,7 +607,9 @@ defmodule Runlight do
       Safefetch.install_fetch(rl, "#{remote["url"]}/api/token",
         method: "DELETE",
         headers: [{"authorization", "Bearer #{remote["token"]}"}],
-        timeout: 5000
+        timeout: 5000,
+        max_bytes: 65_536,
+        truncate: true
       )
 
     :ok
@@ -628,7 +633,7 @@ defmodule Runlight do
     auth = [{"authorization", "Bearer #{token}"}]
 
     answer =
-      case Safefetch.install_fetch(rl, "#{url}/api/sites", headers: auth, timeout: 10_000) do
+      case Safefetch.install_fetch(rl, "#{url}/api/sites", [headers: auth, timeout: 10_000] ++ @remote_read) do
         {:ok, answer} ->
           answer
 
@@ -660,7 +665,7 @@ defmodule Runlight do
 
     # What the token may do there; an install from before manage tokens has no /api/token and reads only.
     {scope, token_site} =
-      case Safefetch.install_fetch(rl, "#{url}/api/token", headers: auth, timeout: 10_000) do
+      case Safefetch.install_fetch(rl, "#{url}/api/token", [headers: auth, timeout: 10_000] ++ @remote_read) do
         {:ok, about} ->
           info =
             if Response.ok?(about) do

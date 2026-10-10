@@ -16,6 +16,8 @@ defmodule Runlight.Assistant do
   # However many rounds a question takes, the answer comes within this long or the assistant stops.
   @deadline_ms 120_000
   @max_tokens 1500
+  # The most a provider's answer may weigh; one past it is cut short and reads as unreadable.
+  @max_bytes 16 * 1024 * 1024
 
   @doc "The services the assistant can use, as the setup form lists them."
   def providers do
@@ -118,7 +120,9 @@ defmodule Runlight.Assistant do
            method: "POST",
            headers: [{"content-type", "application/json"} | headers],
            body: JS.stringify(body),
-           timeout: min(90_000, left)
+           timeout: min(90_000, left),
+           max_bytes: @max_bytes,
+           truncate: true
          ) do
       {:error, :timeout} ->
         host = host_of(url)
@@ -480,7 +484,7 @@ defmodule Runlight.Assistant do
     host = host_of(base)
 
     answer =
-      case Runlight.fetch(rl, url, headers: headers, timeout: 20_000) do
+      case Runlight.fetch(rl, url, headers: headers, timeout: 20_000, max_bytes: @max_bytes, truncate: true) do
         {:ok, answer} ->
           answer
 
