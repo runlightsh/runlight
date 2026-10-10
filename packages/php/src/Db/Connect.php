@@ -16,15 +16,26 @@ final class Connect
     public static function sqlite(string $path): PdoDb
     {
         return new PdoDb(static function () use ($path): \PDO {
-            // A file in a folder that is not there yet gets the folder, as a fresh app's data/ often is.
-            if ($path !== '' && $path !== ':memory:' && !str_starts_with($path, 'file:') && !is_dir(dirname($path))) {
-                @mkdir(dirname($path), 0755, true);
+            $file = $path !== '' && $path !== ':memory:' && !str_starts_with($path, 'file:');
+            // A file in a folder that is not there yet gets the folder, as a fresh app's data/ often is, open to
+            // this user alone, since the database holds password hashes and sealed keys.
+            if ($file && !is_dir(dirname($path))) {
+                @mkdir(dirname($path), 0700, true);
             }
+            $new = $file && !file_exists($path);
             // better-sqlite3 waits up to five seconds for a lock from the moment it opens, pragmas included.
             $pdo = new \PDO("sqlite:$path", null, null, [\PDO::ATTR_TIMEOUT => 5]);
             $pdo->exec('PRAGMA journal_mode = WAL');
             $pdo->exec('PRAGMA synchronous = NORMAL');
             $pdo->exec('PRAGMA busy_timeout = 5000');
+            // A database this made is readable by this user alone, and so are the files SQLite keeps beside it.
+            if ($new && DIRECTORY_SEPARATOR === '/') {
+                foreach (['', '-wal', '-shm'] as $suffix) {
+                    if (file_exists($path . $suffix)) {
+                        @chmod($path . $suffix, 0600);
+                    }
+                }
+            }
             return $pdo;
         }, 'sqlite');
     }

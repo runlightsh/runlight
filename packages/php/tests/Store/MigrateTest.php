@@ -129,6 +129,30 @@ final class MigrateTest extends TestCase
         }
     }
 
+    public function testANewSqliteDatabaseAndItsFolderAreTheUsersAlone(): void
+    {
+        if (DIRECTORY_SEPARATOR !== '/') {
+            $this->markTestSkipped('File modes are checked on Unix-like systems.');
+        }
+        $dir = sys_get_temp_dir() . '/rl-migrate-' . bin2hex(random_bytes(5));
+        $file = "$dir/data/runlight.db";
+        array_push($this->files, $file, "$file-wal", "$file-shm");
+        $store = Stores::sqlite($file);
+        $store->migrate();
+        $this->assertSame(0o700, fileperms("$dir/data") & 0o777);
+        foreach (['', '-wal', '-shm'] as $suffix) {
+            if (file_exists($file . $suffix)) {
+                $this->assertSame(0o600, fileperms($file . $suffix) & 0o777, "runlight.db$suffix");
+            }
+        }
+        $store->close();
+        foreach ($this->files as $made) {
+            @unlink($made);
+        }
+        @rmdir("$dir/data");
+        @rmdir($dir);
+    }
+
     public function testADatabaseThatCanOnlyBeReadStillAnswersReports(): void
     {
         $file = $this->file();
