@@ -51,6 +51,34 @@ defmodule Runlight.AccountsTest do
     end
   end
 
+  test "invites go with whoever sent them: removed, made a member, or no longer allowed when the link is used",
+       %{acc: acc} do
+    Accounts.set_password(acc, "owner@example.com", "a long password", 1)
+    accept = fn code -> Accounts.accept_invite(acc, code, "a long password", 20) end
+    %{code: code} = Accounts.invite(acc, "ada@example.com", "admin", "owner@example.com", 10)
+    ada = accept.(code)
+
+    # Made a member: what they sent stops working.
+    %{code: from_ada} = Accounts.invite(acc, "eve@example.com", "admin", "ada@example.com", 11)
+    Accounts.set_role(acc, ada["id"], "member")
+    assert Accounts.invite_by_code(acc, from_ada, 12) == nil
+
+    # Removed: the same.
+    Accounts.set_role(acc, ada["id"], "admin")
+    %{code: again} = Accounts.invite(acc, "eve@example.com", "admin", "ada@example.com", 13)
+    Accounts.remove(acc, ada["id"])
+    assert_raise AccountError, ~r/expired/, fn -> accept.(again) end
+    assert Accounts.invites(acc, 14) == []
+
+    # An invite left from before, whose sender is no longer an admin, is refused when used, and is gone afterwards.
+    %{code: code} = Accounts.invite(acc, "bo@example.com", "admin", "owner@example.com", 15)
+    accept.(code)
+    %{code: from_bo} = Accounts.invite(acc, "zed@example.com", "admin", "bo@example.com", 16)
+    Runlight.Db.run(acc.store.db, "UPDATE rl_users SET role = 'viewer' WHERE email = ?", ["bo@example.com"])
+    assert_raise AccountError, ~r/expired/, fn -> accept.(from_bo) end
+    assert Accounts.invite_by_code(acc, from_bo, 17) == nil
+  end
+
   test "sessions follow the password and two-factor", %{acc: acc} do
     user = Accounts.set_password(acc, "owner@example.com", "a long password", 1)
     now = 1_791_288_000_000

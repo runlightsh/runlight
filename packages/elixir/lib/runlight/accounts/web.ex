@@ -666,7 +666,10 @@ defmodule Runlight.Accounts.Web do
                    )}
                 ])
               rescue
-                error in AccountError -> again.(error.message)
+                error in AccountError ->
+                  if error.code == "invite_gone",
+                    do: html(Pages.invite_gone_page(base), 410),
+                    else: again.(error.message)
               end
             end
         end
