@@ -259,6 +259,7 @@ export function AssistantSettings({ owner }: { owner: boolean }) {
   const [modelError, setModelError] = useState("");
   const [daily, setDaily] = useState("");
   const [dailyState, setDailyState] = useState<{ saved?: boolean; error?: string }>({});
+  const [removeError, setRemoveError] = useState("");
   const loadModels = () => {
     setModelError("");
     setLoading(true);
@@ -428,8 +429,18 @@ export function AssistantSettings({ owner }: { owner: boolean }) {
             <span class="field-label">{t("assistant.remove")}</span>
             <span class="field-hint">{t("assistant.removeHint")}</span>
             <div>
-              <DeleteButton name={chosen?.name ?? ""} onDelete={() => void api.removeAssistant().then(load)} />
+              <DeleteButton
+                name={chosen?.name ?? ""}
+                onDelete={() => {
+                  setRemoveError("");
+                  void api
+                    .removeAssistant()
+                    .then(load)
+                    .catch((err: Error) => setRemoveError(err.message));
+                }}
+              />
             </div>
+            {removeError ? <span class="settings-error">{removeError}</span> : null}
           </div>
         </div>
       ) : null}
