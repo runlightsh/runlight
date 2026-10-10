@@ -50,6 +50,12 @@ public sealed class Accounts
     /// <summary>A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed.</summary>
     private static string? _decoy;
 
+    /// <summary>Password checks run at once, in this process, and the most that may wait for one.</summary>
+    private const int Checking = 4;
+    private const int Waiting = 64;
+    private static readonly SemaphoreSlim Checks = new(Checking, Checking);
+    private static int _waiting;
+
     private readonly SqlStore _store;
     private readonly string _secret;
     private bool _ready;
@@ -591,17 +597,53 @@ public sealed class Accounts
             cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The account for an email and password, or null. Takes the same time either way.</summary>
+    /// <summary>
+    /// Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core.
+    /// Past the queue's length it refuses at once, with an AccountError coded "busy".
+    /// </summary>
+    private static async Task<T> SlotAsync<T>(Func<Task<T>> fn, CancellationToken cancellationToken)
+    {
+        if (!Checks.Wait(0, cancellationToken))
+        {
+            if (Interlocked.Increment(ref _waiting) > Waiting)
+            {
+                Interlocked.Decrement(ref _waiting);
+                throw new AccountError("Runlight is busy checking other sign-ins. Try again in a moment.", "busy");
+            }
+            try
+            {
+                await Checks.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _waiting);
+            }
+        }
+        try
+        {
+            return await fn().ConfigureAwait(false);
+        }
+        finally
+        {
+            Checks.Release();
+        }
+    }
+
+    /// <summary>
+    /// The account for an email and password, or null. Takes the same time either way. Only a few checks run at
+    /// once; with too many waiting it throws an AccountError coded "busy".
+    /// </summary>
     public async Task<JsObject?> SignInAsync(string email, string password, CancellationToken cancellationToken = default)
     {
         var user = await ByEmailAsync(email, cancellationToken).ConfigureAwait(false);
         if (user == null)
         {
             _decoy ??= await Crypto.HashPasswordAsync(Crypto.Hex(Crypto.RandomBytes(16)), cancellationToken).ConfigureAwait(false);
-            await Crypto.CheckPasswordAsync(password, _decoy, cancellationToken).ConfigureAwait(false);
+            string decoy = _decoy;
+            await SlotAsync(() => Crypto.CheckPasswordAsync(password, decoy, cancellationToken), cancellationToken).ConfigureAwait(false);
             return null;
         }
-        return await Crypto.CheckPasswordAsync(password, UserHash(user), cancellationToken).ConfigureAwait(false) ? user : null;
+        return await SlotAsync(() => Crypto.CheckPasswordAsync(password, UserHash(user), cancellationToken), cancellationToken).ConfigureAwait(false) ? user : null;
     }
 
     /// <summary>

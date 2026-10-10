@@ -115,13 +115,17 @@ public sealed class Web
     private readonly bool _asksForToken;
     private bool _existing;
 
-    // Wrong passwords are counted twice. Per account and address, ten tries;
+    // Wrong passwords are counted three times. Per account and address, ten tries;
     // per account from anywhere, fifty, so a caller who invents a new address
     // for every try still cannot guess on and on. Addresses come from
-    // forwarding headers a client can write, so they never stand alone.
+    // forwarding headers a client can write, so they never stand alone. And per
+    // address across every account, thirty, so one caller trying made-up emails
+    // cannot keep the server hashing; a request with no known address skips that one,
+    // since it would hold up everyone at once.
     // Each try counts before the password is checked, and a right one is taken back.
     private readonly Throttle _perAddress;
     private readonly Throttle _perAccount;
+    private readonly Throttle _perIp;
 
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
@@ -144,6 +148,7 @@ public sealed class Web
         _asksForToken = _first.Kind == "token";
         _perAddress = new Throttle(_store, "address", 10);
         _perAccount = new Throttle(_store, "account", 50);
+        _perIp = new Throttle(_store, "ip", 30);
         _codeTries = new Throttle(_store, "code", 5);
         _decoyTries = new Throttle(_store, "decoy", 5);
         _confirmTries = new Throttle(_store, "confirm", 5);
@@ -653,62 +658,80 @@ public sealed class Web
         string address = _o.ClientIp(request, ip);
         string pair = account + "\n" + (address.Length > 0 ? address : "unknown");
         Response TooMany() => Html(Pages.LoginPage(b, _o.Forgot, "Too many tries. Wait fifteen minutes and try again.", email, next), 429);
+        if (address.Length > 0 && !await _perIp.TakeAsync(address, Now(), cancellationToken).ConfigureAwait(false))
+        {
+            return TooMany();
+        }
         if (!await _perAddress.TakeAsync(pair, Now(), cancellationToken).ConfigureAwait(false))
         {
             return TooMany();
         }
-        // A browser that signed in to the account before is never held up by others' failures.
-        var known = await Accounts.ByEmailAsync(account, cancellationToken).ConfigureAwait(false);
-        bool trusted = known != null && Accounts.TrustsDevice(ReadCookie(request, DeviceCookie), known);
-        bool over = !trusted && !await _perAccount.TakeAsync(account, Now(), cancellationToken).ConfigureAwait(false);
-        // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-        // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-        // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-        if (over && !(known?.Bool("twoFactor") ?? false))
+        try
         {
-            string? home = HomeOrigin();
-            if (!await HasMailAsync(cancellationToken).ConfigureAwait(false) || string.IsNullOrEmpty(home))
+            // A browser that signed in to the account before is never held up by others' failures.
+            var known = await Accounts.ByEmailAsync(account, cancellationToken).ConfigureAwait(false);
+            bool trusted = known != null && Accounts.TrustsDevice(ReadCookie(request, DeviceCookie), known);
+            bool over = !trusted && !await _perAccount.TakeAsync(account, Now(), cancellationToken).ConfigureAwait(false);
+            // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
+            // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
+            // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
+            if (over && !(known?.Bool("twoFactor") ?? false))
             {
-                return TooMany();
-            }
-            var right = await Accounts.SignInAsync(email, password, cancellationToken).ConfigureAwait(false);
-            if (right != null)
-            {
-                // Sent once the answer is out, as TypeScript does, so a right password takes no longer to answer than a wrong one.
-                _o.Later(async () =>
+                string? home = HomeOrigin();
+                if (!await HasMailAsync(cancellationToken).ConfigureAwait(false) || string.IsNullOrEmpty(home))
                 {
-                    try
+                    return TooMany();
+                }
+                var right = await Accounts.SignInAsync(email, password, cancellationToken).ConfigureAwait(false);
+                if (right != null)
+                {
+                    // Sent once the answer is out, as TypeScript does, so a right password takes no longer to answer than a wrong one.
+                    _o.Later(async () =>
                     {
-                        await SendLinkAsync(right, next, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch (Exception error)
-                    {
-                        await Console.Error.WriteLineAsync("Runlight: could not send a sign-in link " + error.Message).ConfigureAwait(false);
-                    }
-                });
+                        try
+                        {
+                            await SendLinkAsync(right, next, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception error)
+                        {
+                            await Console.Error.WriteLineAsync("Runlight: could not send a sign-in link " + error.Message).ConfigureAwait(false);
+                        }
+                    });
+                }
+                return Html(Pages.LoginPage(b, _o.Forgot, "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email, next), 429);
             }
-            return Html(Pages.LoginPage(b, _o.Forgot, "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email, next), 429);
-        }
-        var user = await Accounts.SignInAsync(email, password, cancellationToken).ConfigureAwait(false);
-        if (user == null)
-        {
-            if (over && known != null)
+            var user = await Accounts.SignInAsync(email, password, cancellationToken).ConfigureAwait(false);
+            if (user == null)
             {
-                return Html(Pages.CodePage(b, Accounts.DecoyFor(known, Now()), next));
+                if (over && known != null)
+                {
+                    return Html(Pages.CodePage(b, Accounts.DecoyFor(known, Now()), next));
+                }
+                return Html(Pages.LoginPage(b, _o.Forgot, "That email and password do not match an account.", email, next), 401);
             }
-            return Html(Pages.LoginPage(b, _o.Forgot, "That email and password do not match an account.", email, next), 401);
+            await _perAddress.ClearAsync(pair, cancellationToken).ConfigureAwait(false);
+            if (address.Length > 0)
+            {
+                await _perIp.ForgiveAsync(address, cancellationToken).ConfigureAwait(false);
+            }
+            if (!over && !trusted)
+            {
+                await _perAccount.ForgiveAsync(account, cancellationToken).ConfigureAwait(false);
+            }
+            // With two-factor on, the password only earns the second step.
+            if (user.Bool("twoFactor"))
+            {
+                return Html(Pages.CodePage(b, Accounts.PendingFor(user, Now()), next));
+            }
+            return SignedInTo(request, user, next);
         }
-        await _perAddress.ClearAsync(pair, cancellationToken).ConfigureAwait(false);
-        if (!over && !trusted)
+        catch (AccountError error) when (error.Code == "busy")
         {
-            await _perAccount.ForgiveAsync(account, cancellationToken).ConfigureAwait(false);
+            // Too many password checks already waiting, so this one was never run: try again in a moment.
+            var busy = Html(Pages.LoginPage(b, _o.Forgot, error.Message, email, next), 503);
+            busy.Headers["retry-after"] = "5";
+            return busy;
         }
-        // With two-factor on, the password only earns the second step.
-        if (user.Bool("twoFactor"))
-        {
-            return Html(Pages.CodePage(b, Accounts.PendingFor(user, Now()), next));
-        }
-        return SignedInTo(request, user, next);
     }
 
     /// <summary>Your own account, and for the owner and admins, everyone else's.</summary>
@@ -738,7 +761,16 @@ public sealed class Web
             {
                 return Coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429);
             }
-            if (await Accounts.SignInAsync(user.Str("email")!, Field(input, field), cancellationToken).ConfigureAwait(false) == null)
+            JsObject? right;
+            try
+            {
+                right = await Accounts.SignInAsync(user.Str("email")!, Field(input, field), cancellationToken).ConfigureAwait(false);
+            }
+            catch (AccountError error) when (error.Code == "busy")
+            {
+                return Coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503);
+            }
+            if (right == null)
             {
                 return Coded(wrong, wrongCode, 400);
             }
