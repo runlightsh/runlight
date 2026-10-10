@@ -197,12 +197,8 @@ public static class Connect
     {
         string state = parameters.Get("state") ?? "";
         string key = "connect:" + state;
-        string? stored = State.IsMatch(state) ? await store.SettingAsync(key, cancellationToken).ConfigureAwait(false) : null;
-        // Each attempt works once.
-        if (!string.IsNullOrEmpty(stored))
-        {
-            await store.SetSettingAsync(key, null, cancellationToken).ConfigureAwait(false);
-        }
+        // Each attempt works once, even when it comes back twice at once.
+        string? stored = State.IsMatch(state) ? await store.TakeSettingAsync(key, cancellationToken).ConfigureAwait(false) : null;
         var pending = !string.IsNullOrEmpty(stored) ? PendingFrom(stored, now()) : null;
         if (pending == null)
         {

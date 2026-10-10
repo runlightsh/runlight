@@ -434,12 +434,8 @@ public static class OAuth
             return OauthError("unsupported_grant_type", "Only authorization_code is supported");
         }
         string key = "oauth-code:" + Hash.Sha256(form.Get("code") ?? "");
-        string? stored = await ctx.Store.SettingAsync(key, cancellationToken).ConfigureAwait(false);
-        // A code works once: it is gone before anything else is checked.
-        if (!string.IsNullOrEmpty(stored))
-        {
-            await ctx.Store.SetSettingAsync(key, null, cancellationToken).ConfigureAwait(false);
-        }
+        // A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+        string? stored = await ctx.Store.TakeSettingAsync(key, cancellationToken).ConfigureAwait(false);
         var grant = !string.IsNullOrEmpty(stored) ? Json.Parse(stored) as JsObject : null;
         long now = ctx.Now();
         if (grant == null || grant.Num("expires") < now)
