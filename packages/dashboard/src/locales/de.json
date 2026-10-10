@@ -881,6 +881,7 @@
   "error.check_not_runlight": "etwas hat geantwortet, aber nicht Runlight",
   "error.check_status": "er hat mit {status} geantwortet",
   "error.assistant_address": "Gib die Adresse des Dienstes unter Einstellungen, KI-Assistent ein.",
+  "error.address_refused": "{host} ist eine Link-Local- oder Cloud-Metadaten-Adresse, mit der sich Runlight nie verbindet.",
   "error.assistant_address_bad": "Gib die Adresse des Dienstes ein, beginnend mit https://",
   "error.assistant_cancelled": "Die Frage wurde abgebrochen.",
   "error.assistant_key": "Gib deinen {provider}-Schlüssel ein.",

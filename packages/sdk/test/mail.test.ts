@@ -154,6 +154,25 @@ test("SMTP: a reply that comes just before the server closes is the error, not t
   }
 });
 
+test("SMTP: never a link-local or metadata address, and something that is not a mail server is not quoted", async () => {
+  await assert.rejects(smtpSend({ service: "smtp", host: "169.254.169.254", port: "25", security: "none" }, message, "reports@example.com"), (error: MailError) => error.code === "address_refused");
+  await assert.rejects(smtpSend({ service: "smtp", host: "[fd00:ec2::254]", port: "25", security: "none" }, message, "reports@example.com"), (error: MailError) => error.code === "address_refused");
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64) });
+  await assert.rejects(rl.saveMailSettings({ service: "smtp", host: "metadata.google.internal", port: "587", security: "starttls", from: "a@example.com" }), (error: MailError) => error.code === "address_refused");
+  const server = createServer((s) => s.end("HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n"));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    await assert.rejects(smtpSend({ service: "smtp", host: "127.0.0.1", port: String(port), security: "none" }, message, "reports@example.com"), (error: MailError) => {
+      assert.match(error.message, /did not answer as a mail server does/);
+      assert.doesNotMatch(error.message, /internal|HTTP/);
+      return true;
+    });
+  } finally {
+    server.close();
+  }
+});
+
 test("SMTP: a character split across two reads comes through whole", async () => {
   const socket = new EventEmitter();
   const reader = smtpReplies(socket as never);

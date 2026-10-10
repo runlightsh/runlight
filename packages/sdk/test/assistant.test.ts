@@ -104,6 +104,17 @@ test("the assistant answers through the stats tools, with the key kept on the se
   }
 });
 
+test("the assistant never calls a link-local or cloud metadata address, though one on this computer is fine", async () => {
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64) });
+  await rl.init();
+  for (const baseUrl of ["http://169.254.169.254/latest", "http://[fd00:ec2::254]/v1", "http://metadata.google.internal/v1"]) {
+    await assert.rejects(rl.saveAssistantSettings({ provider: "custom", model: "m", baseUrl, key: "" }), (error: Error & { code?: string }) => error.code === "address_refused", baseUrl);
+  }
+  await rl.saveAssistantSettings({ provider: "ollama", model: "llama3", baseUrl: "", key: "" });
+  const { listModels } = await import("../src/assistant.js");
+  await assert.rejects(listModels({ provider: "custom", baseUrl: "http://169.254.169.254/v1", key: "" }), (error: Error & { code?: string }) => error.code === "address_refused");
+});
+
 test("thanks gets a short reply without the model or the tools", async () => {
   const { acknowledgement } = await import("../src/assistant.js");
   for (const text of ["Thanks!", "thank you", "Thanks!! 🙏", "ok", "Great, thanks.", "👍", "merci beaucoup", "Danke schön!", "valeu"]) {

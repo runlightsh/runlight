@@ -9,6 +9,7 @@
  * OpenRouter, Ollama, LM Studio, and most others speak. Plain fetch, no SDKs.
  */
 import { INSTRUCTIONS, TOOLS, callTool, type ApiRead } from "./mcp.js";
+import { metadataHost } from "./safefetch.js";
 
 export interface Provider {
   id: string;
@@ -86,8 +87,18 @@ function inTime(deadline: number, signal?: AbortSignal): void {
   if (Date.now() >= deadline) throw new AssistantError(TOO_LONG, "assistant_slow");
 }
 
+/**
+ * Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
+ * private network is allowed, as the person setting it up means it to be.
+ */
+export async function refuseMetadata(url: string): Promise<void> {
+  const host = new URL(url).hostname;
+  if (await metadataHost(host)) throw new AssistantError(`${host} is a link-local or cloud metadata address, which Runlight never connects to`, "address_refused", { host });
+}
+
 async function post(url: string, headers: Record<string, string>, body: unknown, deadline: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
   inTime(deadline, signal);
+  await refuseMetadata(url);
   const left = deadline - Date.now();
   let answer: Response;
   try {
@@ -250,6 +261,7 @@ export async function listModels(settings: Omit<AssistantSettings, "model">): Pr
   if (provider.key === "yes" && !settings.key) throw new AssistantError(`Enter your ${provider.name} key first`, "assistant_key", { provider: provider.name });
   const headers: Record<string, string> =
     provider.protocol === "anthropic" ? { "x-api-key": settings.key, "anthropic-version": "2023-06-01" } : settings.key ? { authorization: `Bearer ${settings.key}` } : {};
+  await refuseMetadata(base);
   let answer: Response;
   try {
     answer = await fetch(`${base}/models${provider.protocol === "anthropic" ? "?limit=100" : ""}`, { headers, signal: AbortSignal.timeout(20_000) });

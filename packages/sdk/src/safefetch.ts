@@ -77,6 +77,47 @@ export function publicAddress(ip: string): boolean {
   return true;
 }
 
+/** Names clouds give their metadata services. */
+const METADATA_NAMES = new Set(["metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal"]);
+
+/**
+ * Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service (fd00:ec2::254,
+ * Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail server is never there,
+ * though it may well be on this computer or a private network, so those stay allowed where this is checked.
+ */
+export function metadataAddress(ip: string): boolean {
+  const four = v4(ip);
+  const g = four ? null : v6(ip);
+  // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+  const inner =
+    four ??
+    (g && ((g.slice(0, 5).every((x) => x === 0) && (g[5] === 0xffff || g[5] === 0)) || (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)))
+      ? [g[6]! >> 8, g[6]! & 255, g[7]! >> 8, g[7]! & 255]
+      : null);
+  if (inner) return (inner[0] === 169 && inner[1] === 254) || inner.join(".") === "100.100.100.200";
+  if (!g) return false;
+  if ((g[0]! & 0xffc0) === 0xfe80) return true;
+  return g[0] === 0xfd00 && g[1] === 0xec2 && g.slice(2, 7).every((x) => x === 0) && g[7] === 0x254;
+}
+
+/**
+ * Whether a host, by its name, its address, or any address its name resolves to now, is link-local or a
+ * metadata service. A name that does not resolve here, or a runtime with no resolver, is let through,
+ * since the connection then goes nowhere such a check could have stopped.
+ */
+export async function metadataHost(host: string): Promise<boolean> {
+  const name = host.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (METADATA_NAMES.has(name) || metadataAddress(name)) return true;
+  if (v4(name) || v6(name)) return false;
+  const dns = await resolver();
+  if (!dns) return false;
+  try {
+    return (await dns.lookup(name, { all: true })).some((a) => metadataAddress(a.address));
+  } catch {
+    return false;
+  }
+}
+
 type Https = typeof import("node:https");
 type Dns = typeof import("node:dns");
 type Stream = typeof import("node:stream");
