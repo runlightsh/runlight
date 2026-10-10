@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Mutex as StdMutex;
 
 use tokio::sync::{Mutex, OnceCell};
 
@@ -13,6 +13,7 @@ use super::crypto::{
 };
 use crate::goals::CodedError;
 use crate::js::{self, Value};
+use crate::limit::Turns;
 use crate::obj;
 use crate::params;
 use crate::store::{DbError, Dialect, Hold, MYSQL_COLLATION, Row, SqlStore};
@@ -358,7 +359,7 @@ pub struct Accounts {
     /// Changes to who has an account take turns in this process, and across processes through the database's lock.
     queue: Mutex<()>,
     /// One second-factor check at a time per account.
-    checking: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    checking: Turns,
 }
 
 impl Accounts {
@@ -369,7 +370,7 @@ impl Accounts {
             secret: secret.into(),
             ready: Mutex::new(false),
             queue: Mutex::new(()),
-            checking: StdMutex::new(HashMap::new()),
+            checking: Turns::default(),
         }
     }
 
@@ -569,17 +570,8 @@ impl Accounts {
     /// A code works once: one already used, or older, is refused, and a recovery code is crossed off.
     pub async fn check_second_factor(&self, id: &str, code: &str, now: i64) -> R<bool> {
         // One check at a time per account, so two sign-ins at once cannot both use the same code.
-        let lock = self.checking.lock().expect("the checks").entry(id.to_string()).or_default().clone();
-        let result = {
-            let _turn = lock.lock().await;
-            self.check_second_factor_now(id, code, now).await
-        };
-        let mut checking = self.checking.lock().expect("the checks");
-        // Nobody else waiting: the map and this hold the only two.
-        if checking.get(id).is_some_and(|l| Arc::ptr_eq(l, &lock) && Arc::strong_count(l) == 2) {
-            checking.remove(id);
-        }
-        result
+        let _turn = self.checking.take(id).await;
+        self.check_second_factor_now(id, code, now).await
     }
 
     async fn check_second_factor_now(&self, id: &str, code: &str, now: i64) -> R<bool> {

@@ -10,7 +10,7 @@ use crate::geo::{SharedGeo, locate};
 use crate::hash::{new_id, random_salt, visitor_hash};
 use crate::http::{FetchInit, Headers, Request, Response, SharedFetcher, Url, default_fetcher};
 use crate::js::{self, Object, Value};
-use crate::limit::RateLimit;
+use crate::limit::{RateLimit, Turns};
 use crate::payload::{MAX_BODY, Payload, parse_payload};
 use crate::re::{js_re, test};
 use crate::safefetch::{Lookup, public_address};
@@ -244,7 +244,7 @@ pub(crate) struct Inner {
     state: Mutex<State>,
     ready: tokio::sync::Mutex<bool>,
     checking: tokio::sync::Mutex<()>,
-    turns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    turns: Turns,
     pruning: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     prune_turn: Arc<tokio::sync::Mutex<()>>,
     pub(crate) route_bases: Mutex<Vec<String>>,
@@ -303,7 +303,7 @@ impl Runlight {
             state: Mutex::new(State { configured, ..State::default() }),
             ready: tokio::sync::Mutex::new(false),
             checking: tokio::sync::Mutex::new(()),
-            turns: Mutex::new(HashMap::new()),
+            turns: Turns::default(),
             pruning: Mutex::new(Vec::new()),
             prune_turn: Arc::new(tokio::sync::Mutex::new(())),
             route_bases: Mutex::new(Vec::new()),
@@ -1247,13 +1247,8 @@ impl Runlight {
         }
         // One visitor's requests often arrive together (a pageview and the event right after it). Taking
         // turns per visitor means only the first opens a session and the rest find it.
-        let key = format!("{}:{today}", site.id);
-        let turn = {
-            let mut turns = self.0.turns.lock().unwrap_or_else(|e| e.into_inner());
-            turns.entry(key.clone()).or_default().clone()
-        };
-        let guard = turn.lock().await;
-        let result = async {
+        let _turn = self.0.turns.take(&format!("{}:{today}", site.id)).await;
+        async {
             let store = &self.0.store;
             if let Some(open) = store.open_session(&site.id, &candidates, now - SESSION_IDLE_MS).await? {
                 return Ok(open);
@@ -1300,13 +1295,7 @@ impl Runlight {
                 .await?;
             Ok::<(String, String), Error>((id, today.clone()))
         }
-        .await;
-        drop(guard);
-        let mut turns = self.0.turns.lock().unwrap_or_else(|e| e.into_inner());
-        if turns.get(&key).is_some_and(|t| Arc::strong_count(t) <= 2) {
-            turns.remove(&key);
-        }
-        result
+        .await
     }
 
     /// The link domains, read at most every 30 seconds.
