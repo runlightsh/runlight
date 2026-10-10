@@ -164,15 +164,10 @@ func FinishConnect(ctx context.Context, r *Runlight, params *whatwg.SearchParams
 	key := "connect:" + state
 	var stored string
 	var has bool
+	// Each attempt works once, even when it comes back twice at once.
 	if connectState.MatchString(state) {
 		var err error
-		if stored, has, err = r.Store.Setting(ctx, key); err != nil {
-			return "", err
-		}
-	}
-	// Each attempt works once.
-	if has && stored != "" {
-		if err := r.Store.SetSetting(ctx, key, nil); err != nil {
+		if stored, has, err = r.Store.TakeSetting(ctx, key); err != nil {
 			return "", err
 		}
 	}
