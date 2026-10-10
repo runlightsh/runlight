@@ -332,8 +332,8 @@ impl AccountsWeb {
         if value.is_empty() {
             return Ok(None);
         }
-        // decodeURIComponent throws a URIError here in TypeScript.
-        let decoded = decode_uri_component(&value).ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
+        // A cookie that is not valid percent-encoding is nobody's session, never an error.
+        let Some(decoded) = decode_uri_component(&value) else { return Ok(None) };
         Ok(self.0.accounts.from_session(&decoded, self.now()).await?)
     }
 
