@@ -934,6 +934,14 @@ public final class Routes {
         + ".js\"></script>\n</body>\n</html>\n";
   }
 
+  /** An event property name that may go into a JSON path: 1 to 64 characters, no quote or \. */
+  private static boolean safeProperty(String name) {
+    return !name.isEmpty()
+        && name.length() <= 64
+        && name.indexOf('"') < 0
+        && name.indexOf('\\') < 0;
+  }
+
   private static boolean sharedPath(String path) {
     return SHARED_PATHS.contains(path) || GOAL_PAGE.matcher(path).find();
   }
@@ -3771,15 +3779,20 @@ public final class Routes {
       }
       List<Map<String, Object>> keys = store.eventPropKeys(query, event);
       String asked = params.get("key");
-      // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-      if (asked != null
-          && (asked.isEmpty()
-              || asked.length() > 64
-              || asked.indexOf('"') >= 0
-              || asked.indexOf('\\') >= 0)) {
+      // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and
+      // without one asked for, the most used name that has none is shown.
+      if (asked != null && !safeProperty(asked)) {
         return coded("Bad property name", "property_bad", 400);
       }
-      Object key = asked != null ? asked : keys.isEmpty() ? null : keys.get(0).get("key");
+      Object key = asked;
+      if (key == null) {
+        for (Map<String, Object> k : keys) {
+          if (k.get("key") instanceof String name && safeProperty(name)) {
+            key = name;
+            break;
+          }
+        }
+      }
       double limit = limit(params.get("limit"), 100);
       List<Map<String, Object>> rows =
           key instanceof String k && !k.isEmpty()
