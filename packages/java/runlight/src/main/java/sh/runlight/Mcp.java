@@ -581,6 +581,9 @@ public final class Mcp {
         "content-type", "application/json; charset=utf-8", "cache-control", "no-store");
   }
 
+  /** The most messages one batch may hold. */
+  public static final int MAX_BATCH = 20;
+
   /** Answers one POST to the MCP endpoint, already authorised. */
   public static Response mcpResponse(Request request, ApiRead readApi) {
     Json.Parsed parsed = Json.tryParse(request.text());
@@ -589,8 +592,18 @@ public final class Mcp {
       return new Response(
           Json.stringify(rpcError(null, -32700, "Send a JSON-RPC message")), 400, jsonHeaders());
     }
-    // Batches were in the 2025-03-26 protocol; answering them costs nothing.
+    // Batches were in the 2025-03-26 protocol. TypeScript runs four of a batch's messages at a
+    // time;
+    // here they run one after another, from a short list, so one request cannot start hundreds of
+    // reports at once.
     if (body instanceof List<?> batch) {
+      if (batch.size() > MAX_BATCH) {
+        return new Response(
+            Json.stringify(
+                rpcError(null, -32600, "Send at most " + MAX_BATCH + " messages in a batch")),
+            400,
+            jsonHeaders());
+      }
       List<Object> answers = new ArrayList<>();
       for (Object message : batch) {
         Map<String, Object> one = answer(message, readApi);
