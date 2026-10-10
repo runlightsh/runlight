@@ -66,7 +66,14 @@ func (rt *Routes) embedAPI(c *call) (*Response, error) {
 	if parsed == nil || parsed.Origin() != origin {
 		return Coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400, nil), nil
 	}
-	host := HostName(parsed.Host())
+	// Only https and the default port, so a plain http page or another service on the same name cannot frame
+	// the dashboard; a page on this computer, for development, may use http and any port. The name must be
+	// one of the site's own, which are kept without www, so www. is the only difference allowed.
+	local := parsed.Hostname == "localhost" || parsed.Hostname == "127.0.0.1" || parsed.Hostname == "[::1]"
+	if !local && (parsed.Protocol != "https:" || parsed.Port != "") {
+		return Coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400, nil), nil
+	}
+	host := strings.TrimPrefix(parsed.Hostname, "www.")
 	hostnames := site.Hostnames
 	if remote, isRemote := r.Remote(site.ID); isRemote {
 		hostnames = remote.Hostnames
