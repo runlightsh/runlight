@@ -1,11 +1,21 @@
 package sh.runlight.accounts;
 
+import java.util.concurrent.Semaphore;
+
 /**
  * scrypt (RFC 7914) in plain Java, since javax.crypto has none. It gives the same bytes as Node's
  * crypto.scrypt, so a password hashed by either implementation checks out in the other.
  */
 public final class Scrypt {
   private Scrypt() {}
+
+  /**
+   * Derivations at once, about one per core. Each holds 128 * N * r bytes (16 MiB at the cost
+   * passwords use), and every request has a virtual thread, so a flood of sign-ins would otherwise
+   * hash all at once and run out of memory; the rest wait their turn.
+   */
+  private static final Semaphore TURNS =
+      new Semaphore(Math.max(2, Runtime.getRuntime().availableProcessors()), true);
 
   /**
    * The derived key for a password and salt.
@@ -20,16 +30,21 @@ public final class Scrypt {
     if (r < 1 || p < 1 || length < 1) {
       throw new IllegalArgumentException("r, p, and the key length must be at least 1");
     }
-    int blockBytes = 128 * r;
-    byte[] b = Crypto.pbkdf2Bytes(password, salt, 1, blockBytes * p);
-    int words = 32 * r;
-    int[] x = new int[words];
-    int[] y = new int[words];
-    int[] v = new int[words * n];
-    for (int i = 0; i < p; i++) {
-      roMix(b, i * blockBytes, x, y, v, n, r);
+    TURNS.acquireUninterruptibly();
+    try {
+      int blockBytes = 128 * r;
+      byte[] b = Crypto.pbkdf2Bytes(password, salt, 1, blockBytes * p);
+      int words = 32 * r;
+      int[] x = new int[words];
+      int[] y = new int[words];
+      int[] v = new int[words * n];
+      for (int i = 0; i < p; i++) {
+        roMix(b, i * blockBytes, x, y, v, n, r);
+      }
+      return Crypto.pbkdf2Bytes(password, b, 1, length);
+    } finally {
+      TURNS.release();
     }
-    return Crypto.pbkdf2Bytes(password, b, 1, length);
   }
 
   /** scryptROMix: fills N blocks, then reads them back in an order that depends on each result. */
