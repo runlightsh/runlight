@@ -79,7 +79,7 @@ public static partial class CsvVisits
         return "";
     }
 
-    /// <summary>A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids.</summary>
+    /// <summary>A row with no visitor is its own visit, keyed by its whole content.</summary>
     private static string OwnKey(JsObject row)
     {
         var entries = row.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => (object?)Js.List(e.Key, e.Value)).ToList();

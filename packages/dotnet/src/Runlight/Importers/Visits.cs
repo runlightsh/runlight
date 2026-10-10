@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Runlight.Accounts;
 using Runlight.Http;
 using Runlight.Store;
 
@@ -46,6 +47,10 @@ public static partial class Visits
 
     [GeneratedRegex("^[A-Za-z0-9-]{1,64}\\z", RegexOptions.CultureInvariant)]
     private static partial Regex WebsiteId();
+
+    /// <summary>A CSV import's secret as the caller sends it back.</summary>
+    [GeneratedRegex("^[A-Za-z0-9_-]{22,128}\\z", RegexOptions.CultureInvariant)]
+    private static partial Regex CsvSecret();
 
     private static string ProgressKey(string site, string website) => "import:umami-visits:" + site + ":" + website;
 
@@ -224,10 +229,12 @@ public static partial class Visits
             const string imported = "SELECT id FROM rl_sessions WHERE site = ? AND imported = 1";
             await store.Db.RunAsync("DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (" + imported + ")", [siteId, from, to, siteId], cancellationToken).ConfigureAwait(false);
             // Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
-            // so the time bounds let the (site, ts) index find them, with no scan of every event.
+            // so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+            // EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
+            // CSV imported again has new ids, so its new visit does not take that one's place.
             await store.Db.RunAsync(
                 "DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?\n         AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)",
-                [siteId, from, to, siteId, from, to + SqlStore.EventTailMs],
+                [siteId, from - SqlStore.EventTailMs, to, siteId, from - SqlStore.EventTailMs, to + SqlStore.EventTailMs],
                 cancellationToken).ConfigureAwait(false);
             foreach (var (ns, hit) in hits)
             {
@@ -435,12 +442,20 @@ public static partial class Visits
     /// Runlight's own first visit, and within what the site keeps, are written. A batch can run again: its time
     /// span is cleared first, so batches must not share a moment, which the dashboard sees to.
     /// </summary>
+    /// <remarks>
+    /// A CSV's visitor column can hold anything, an email or an IP address among them, and a plain hash of one
+    /// is easily undone by trying every address. So each key is an HMAC under a random secret made for the
+    /// import and never stored: the first batch gets one, the answer carries it, and the caller sends it with
+    /// every later batch of the same file, so a visit that runs across two batches stays one. A file imported
+    /// again gets a new secret and new ids; its time span is cleared first, as always, so nothing is counted twice.
+    /// </remarks>
     /// <param name="runlight">The Runlight.</param>
     /// <param name="siteId">The site.</param>
     /// <param name="rows">The rows, a list of objects keyed by column (as JSON parses them).</param>
+    /// <param name="secret">The secret an earlier batch of the same file answered with; anything else makes a new one.</param>
     /// <param name="cancellationToken">Stops the work.</param>
-    /// <returns>{ pageviews, events, visits, skipped }.</returns>
-    public static async Task<JsObject> ImportCsvVisitsAsync(Runlight runlight, string siteId, object? rows, CancellationToken cancellationToken = default)
+    /// <returns>{ pageviews, events, visits, skipped, secret }.</returns>
+    public static async Task<JsObject> ImportCsvVisitsAsync(Runlight runlight, string siteId, object? rows, object? secret = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(runlight);
         await runlight.InitAsync(cancellationToken).ConfigureAwait(false);
@@ -466,6 +481,7 @@ public static partial class Visits
             clean.Add(row);
         }
         string? format = CsvVisits.CsvFormat(clean.Count > 0 ? [.. clean[0].Keys] : []) ?? throw new ImportError("This CSV is not an Umami export or Runlight's visit format", "import_csv_format");
+        string key = secret is string given && CsvSecret().IsMatch(given) ? given : Crypto.Base64url(Crypto.RandomBytes(24));
         double cutoff = await runlight.RetentionCutoffAsync(siteId, cancellationToken).ConfigureAwait(false) ?? 0;
         double end = Math.Min(await runlight.Store.FirstOwnVisitAsync(siteId, cancellationToken).ConfigureAwait(false) ?? double.PositiveInfinity, runlight.Now());
         var hits = new List<(string Ns, JsObject Hit)>();
@@ -482,9 +498,13 @@ public static partial class Visits
         long skipped = clean.Count - hits.Count;
         if (hits.Count == 0)
         {
-            return new JsObject { ["pageviews"] = 0L, ["events"] = 0L, ["visits"] = 0L, ["skipped"] = skipped };
+            return new JsObject { ["pageviews"] = 0L, ["events"] = 0L, ["visits"] = 0L, ["skipped"] = skipped, ["secret"] = key };
+        }
+        foreach (var (_, hit) in hits)
+        {
+            hit["key"] = Crypto.Base64url(Crypto.Hmac("SHA-256", Js.Utf8(key), Js.Utf8(Js.String(hit.Get("key")))));
         }
         var counts = await WriteStepAsync(runlight, siteId, hits[0].Hit.Long("ts"), hits[^1].Hit.Long("ts") + 1, hits, null, cancellationToken).ConfigureAwait(false);
-        return counts.With(new JsObject { ["skipped"] = skipped });
+        return counts.With(new JsObject { ["skipped"] = skipped, ["secret"] = key });
     }
 }
