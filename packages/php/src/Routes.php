@@ -2511,8 +2511,22 @@ final class Routes
             return self::coded('Unknown site', 'unknown_site', 404);
         }
         $remote = $rl->remote($site['id']);
+        // A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+        // each visit, with its time and city, since anyone with the link could watch one person's way through the site.
+        $unfeed = static function (array $live) use ($shared): array {
+            if ($shared !== null) {
+                $live['recent'] = [];
+            }
+            return $live;
+        };
         if ($remote !== null) {
-            return $this->passThrough($remote, $path, $url, $request);
+            $answer = $this->passThrough($remote, $path, $url, $request);
+            if ($path !== '/api/realtime' || $shared === null || !$answer->ok()) {
+                return $answer;
+            }
+            [$parsed, $live] = Js::parseJson($answer->text());
+            $host = (new Url($remote['url']))->host();
+            return $parsed && Js::isObject($live) ? self::json($unfeed((array) $live)) : self::coded("Could not reach $host", 'unreachable', 502, ['host' => $host]);
         }
 
         if ($path === '/api/icon') {
@@ -2532,7 +2546,7 @@ final class Routes
         }
 
         if ($path === '/api/realtime') {
-            return self::json($store->realtime($site['id'], $rl->now()));
+            return self::json($unfeed($store->realtime($site['id'], $rl->now())));
         }
 
         $read = $this->readQuery($url, $site);
