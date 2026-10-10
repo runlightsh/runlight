@@ -162,7 +162,7 @@ class AccountsWebTest < Minitest::Test
     assert_equal "/runlight/login", out.headers.get("location")
     assert_equal ["runlight_session=; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=0; Secure"], out.headers.get_set_cookie
 
-    ["//evil.example/", "/\\evil.example", "/\t/evil.example", "https://evil.example/", "", "runlight"].each do |nxt|
+    ["//evil.example/", "/..//evil.example/", "/a/../..//evil.example", "/\\evil.example", "/\t/evil.example", "https://evil.example/", "", "runlight"].each do |nxt|
       assert_equal "/runlight/", web.safe_next(nxt), "never sent off the app: #{nxt}"
     end
     assert_equal "/runlight/", web.safe_next(nil)
