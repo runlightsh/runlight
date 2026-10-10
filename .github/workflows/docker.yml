@@ -2,7 +2,8 @@
 # Dockerfile for linux/amd64 and linux/arm64 and pushed to
 # ghcr.io/runlightsh/runlight, tagged with the version (0.1.0) and, for the
 # highest stable release, latest. A prerelease (0.2.0-beta.1) is never latest,
-# and neither is a rerun for an older tag. Pushing the same tags again
+# and neither is a rerun for an older tag. The amd64 image is started and
+# must answer /healthz before anything is pushed. Pushing the same tags again
 # replaces them, so a rerun is safe. Can also be started by hand for a tag.
 #
 # Stays off until the repository variable DOCKER_ENABLED is "true". It needs
@@ -96,6 +97,27 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ needs.ci.outputs.sha }}
+      # Nothing is pushed until the image runs: the amd64 build, loaded into
+      # the runner's Docker, must start and answer /healthz. The push below
+      # reuses this build's layers.
+      - name: Build the amd64 image to try
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: runlight:smoke
+      - name: Start it and ask /healthz
+        run: |
+          docker run -d --name smoke -p 127.0.0.1:3000:3000 runlight:smoke
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/healthz; then echo; docker rm -f smoke; exit 0; fi
+            sleep 2
+          done
+          echo "the image did not answer /healthz in a minute"
+          docker logs smoke
+          exit 1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
