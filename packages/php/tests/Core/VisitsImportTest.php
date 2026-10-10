@@ -294,7 +294,10 @@ final class VisitsImportTest extends CoreTestCase
     public function testCsvInRunlightsFormatRowsBecomeVisitsWithSourcesPlacesDevicesAndEvents(): void
     {
         $t = self::csv();
-        self::assertSame(['pageviews' => 3, 'events' => 1, 'visits' => 2, 'skipped' => 1], Visits::importCsvVisits($t->rl, 'default', self::RUNLIGHT_ROWS));
+        $step = Visits::importCsvVisits($t->rl, 'default', self::RUNLIGHT_ROWS);
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_-]{32}$/D', $step['secret']);
+        unset($step['secret']);
+        self::assertSame(['pageviews' => 3, 'events' => 1, 'visits' => 2, 'skipped' => 1], $step);
         $q = $t->query('2026-03-01', '2026-03-03');
         $stats = $t->stats($q);
         self::assertSame([3, 2, 2], [$stats['pageviews'], $stats['visits'], $stats['visitors']]);
@@ -319,7 +322,7 @@ final class VisitsImportTest extends CoreTestCase
         self::assertSame(2, Visits::importCsvVisits($t->rl, 'default', $rows)['visits']);
         Visits::importCsvVisits($t->rl, 'default', $rows);
         $q = $t->query('2026-03-01', '2026-03-03');
-        self::assertSame(2, $t->stats($q)['visits'], 'the same rows get the same ids the second time');
+        self::assertSame(2, $t->stats($q)['visits'], 'the second import replaces the first');
         $pages = $t->values($q, 'page');
         sort($pages);
         self::assertSame(['/a', '/b'], $pages);
@@ -334,13 +337,47 @@ final class VisitsImportTest extends CoreTestCase
             ['website_id' => 'w1', 'session_id' => 's1', 'created_at' => '2026-03-01 10:03:01', 'hostname' => 'blog.example.com', 'url_path' => '/pricing', 'event_type' => '5'],
             ['website_id' => 'w1', 'session_id' => 's2', 'created_at' => '2026-03-02T09:00:00.000Z', 'hostname' => 'blog.example.com', 'url_path' => '/blog', 'event_type' => '1', 'country' => 'GB', 'browser' => 'chrome', 'os' => 'Mac OS', 'device' => 'desktop'],
         ];
-        self::assertSame(['pageviews' => 2, 'events' => 1, 'visits' => 2, 'skipped' => 1], Visits::importCsvVisits($t->rl, 'default', $rows));
+        $step = Visits::importCsvVisits($t->rl, 'default', $rows);
+        unset($step['secret']);
+        self::assertSame(['pageviews' => 2, 'events' => 1, 'visits' => 2, 'skipped' => 1], $step);
         $q = $t->query('2026-03-01', '2026-03-03');
         self::assertSame(['Hacker News'], $t->values($q, 'source'));
         self::assertSame(['CA-ON'], $t->values($q, 'region'));
         $browsers = $t->values($q, 'browser');
         sort($browsers);
         self::assertSame(['Chrome', 'Safari'], $browsers);
+    }
+
+    public function testACsvVisitorColumnIsKeyedWithASecretOnlyTheImportHoldsWhichLaterBatchesOfTheFileSendBack(): void
+    {
+        $t = self::csv();
+        $people = [
+            ['time' => '2026-03-01T10:00:00Z', 'path' => '/a', 'visitor' => '203.0.113.7'],
+            ['time' => '2026-03-01T10:10:00Z', 'path' => '/b', 'visitor' => '203.0.113.7'],
+            ['time' => '2026-03-01T10:20:00Z', 'path' => '/c', 'visitor' => 'jon@example.com'],
+        ];
+        // A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+        $plain = static fn (string $key): string => substr(hash('sha256', "csv:$key:2026-03-01"), 0, 16);
+        $first = Visits::importCsvVisits($t->rl, 'default', array_slice($people, 0, 1));
+        $second = Visits::importCsvVisits($t->rl, 'default', array_slice($people, 1), $first['secret']);
+        self::assertSame($first['secret'], $second['secret']);
+        self::assertSame(1, $second['visits'], "the second batch's visitor continues the first batch's visit");
+        $visitors = array_column($t->store()->db->all('SELECT DISTINCT visitor FROM rl_sessions'), 'visitor');
+        self::assertCount(2, $visitors);
+        foreach (['203.0.113.7', 'jon@example.com'] as $key) {
+            self::assertNotContains($plain($key), $visitors, $key);
+        }
+        $q = $t->query('2026-03-01', '2026-03-03');
+        self::assertSame(2, $t->stats($q)['visits']);
+
+        // The same file again, with a new secret and so new ids, leaves no visit of the old import behind,
+        // even one that ran across its two batches.
+        $again = Visits::importCsvVisits($t->rl, 'default', array_slice($people, 0, 1));
+        self::assertNotSame($first['secret'], $again['secret']);
+        Visits::importCsvVisits($t->rl, 'default', array_slice($people, 1), $again['secret']);
+        $stats = $t->stats($q);
+        self::assertSame([2, 3], [$stats['visits'], $stats['pageviews']]);
+        self::assertCount(2, $t->store()->db->all('SELECT id FROM rl_sessions'));
     }
 
     public function testCsvRowsFromAfterRunlightsOwnFirstVisitAreLeftToRunlight(): void

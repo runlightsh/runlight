@@ -1892,7 +1892,7 @@ final class Routes
                 return $site;
             }
             try {
-                return self::json(Visits::importCsvVisits($rl, $site['id'], self::plain(Js::get($body, 'rows'))));
+                return self::json(Visits::importCsvVisits($rl, $site['id'], self::plain(Js::get($body, 'rows')), Js::get($body, 'secret')));
             } catch (ImportError $error) {
                 return self::refused($error, 'import_failed');
             }
