@@ -218,4 +218,16 @@ class RackAppTest < Minitest::Test
     status, = @rl.routes({ base_path: "/runlight" }).call(env)
     assert_equal 413, status
   end
+
+  def test_the_routes_as_a_rack_app_run_the_later_work_once_the_answer_is_sent
+    ran = []
+    @rl.later { ran << :later }
+    env = Rack::MockRequest.env_for("/runlight/s.js", "HTTP_HOST" => "example.com")
+    status, _, body = @rl.routes({ base_path: "/runlight" }).call(env)
+    assert_equal 200, status
+    assert_empty ran, "not before the answer is sent"
+    body.each { |_| nil }
+    body.close
+    assert_equal [:later], ran
+  end
 end

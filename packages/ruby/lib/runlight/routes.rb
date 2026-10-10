@@ -536,7 +536,8 @@ module Runlight
       end
     end
 
-    # The routes as a Rack app. The answer to a HEAD has no body.
+    # The routes as a Rack app. The answer to a HEAD has no body. Once the answer is sent, the work left for
+    # later (a retention change's deletions) runs in the Core's idle, as RackApp runs it.
     def call(env)
       begin
         request = Http::Request.from_rack(env)
@@ -545,7 +546,12 @@ module Runlight
                 [Json.encode({ "error" => "That request is too large" })]]
       end
       status, headers, body = handle(request).to_rack
-      [status, headers, request.method == "HEAD" ? [] : body]
+      idle = lambda do
+        @rl.idle
+      rescue StandardError => e
+        warn("Runlight: #{e.message}")
+      end
+      [status, headers, RackApp::Body.new(request.method == "HEAD" ? [] : body, idle)]
     end
 
     private
