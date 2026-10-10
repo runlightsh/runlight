@@ -23,6 +23,7 @@ test("every folder under packages/ and plugins/ is versioned and shipped, or say
   assert.deepEqual(tableProblems(ROOT), []);
   for (const dir of Object.keys(UNVERSIONED)) assert.ok(!VERSIONED.some((row) => row.file.startsWith(`${dir}/`)), `${dir} is in VERSIONED and UNVERSIONED`);
   for (const dir of Object.keys(UNPUBLISHED)) assert.ok(!PUBLISH.some((row) => row.dir === dir), `${dir} is in PUBLISH and UNPUBLISHED`);
+  for (const row of PUBLISH) assert.ok(row.workflows || row.byHand, `${row.dir} says neither how a workflow ships it nor what to run`);
 });
 
 test("a release moves every version, and the MCP fixture's four serverInfo entries", () => {
@@ -167,6 +168,12 @@ test("a dry run shows every edit and command, and writes nothing", () => {
   const sdk = out.indexOf("npm publish --workspace packages/sdk --access public");
   const server = out.indexOf("npm publish --workspace packages/server --access public");
   assert.ok(sdk > 0 && server > sdk, "the SDK is published before the server");
+  // Every publish by hand comes after the wait for CI on the release commit.
+  const wait = out.indexOf("only after CI passes on $(git rev-parse v0.1.0^{commit})");
+  assert.ok(wait > 0, "the publishes by hand wait for CI");
+  assert.match(out, /^ {2}gh run list --commit \$\(git rev-parse v0\.1\.0\^\{commit\}\) --event push$/m);
+  for (const { byHand } of PUBLISH) for (const command of byHand?.("0.1.0") ?? []) assert.ok(out.indexOf(command) > wait, command);
+  assert.ok(out.indexOf("git tag -a packages/go/v0.1.0") > wait, "the Go tags wait for CI");
   assert.match(out, /ghcr\.io\/runlightsh\/runlight as 0\.1\.0 and latest/);
   assert.match(out, /drupal\.org's repository as the tag 0\.1\.0 on the branch 0\.1\.x/);
   assert.equal(git("status", "--porcelain"), "");
