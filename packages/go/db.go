@@ -139,8 +139,10 @@ func (d *SQLDB) target(ctx context.Context) (querier, func(), error) {
 }
 
 func sqlitePragmas(ctx context.Context, conn *sql.Conn) error {
-	// An in-memory database has no journal to change, and answers "memory".
-	for _, pragma := range []string{"PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA busy_timeout = 5000"} {
+	// An in-memory database has no journal to change, and answers "memory". Deleted rows, such as a day's
+	// salt once it is gone, are overwritten where that costs no extra writes, so they do not linger in the
+	// file's free space.
+	for _, pragma := range []string{"PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA busy_timeout = 5000", "PRAGMA secure_delete = FAST"} {
 		rows, err := conn.QueryContext(ctx, pragma)
 		if err != nil {
 			return err

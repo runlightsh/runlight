@@ -292,3 +292,21 @@ func replayStore(t *testing.T, store *runlight.Store) {
 		}
 	}
 }
+
+// Deleted rows, salts among them, are overwritten in a SQLite file rather than left in its free space.
+func TestSecureDelete(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "secure.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := runlight.SQLite(db).Owned(0)
+	t.Cleanup(func() { d.Close() })
+	rows, err := d.All(context.Background(), "PRAGMA secure_delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2 is FAST: overwritten wherever that costs no extra writes.
+	if len(rows) != 1 || fmt.Sprint(rows[0]["secure_delete"]) != "2" {
+		t.Fatalf("secure_delete is %v", rows)
+	}
+}
