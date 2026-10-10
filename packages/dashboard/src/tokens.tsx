@@ -88,7 +88,16 @@ export function Tokens({ sites }: { sites: Site[] }) {
                 </span>
               </div>
               <div class="domain-actions">
-                <DeleteButton name={token.name} onDelete={() => void api.deleteToken(token.id).then(load)} />
+                <DeleteButton
+                  name={token.name}
+                  onDelete={() => {
+                    setError("");
+                    void api
+                      .deleteToken(token.id)
+                      .then(load)
+                      .catch((err: Error) => setError(err.message));
+                  }}
+                />
               </div>
             </li>
           ))}
