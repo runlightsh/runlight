@@ -2,7 +2,15 @@
 **/vendor
 **/dist
 data
+files
 plugins
 .git
 .github
 *.log
+.env
+.env.*
+**/.env
+**/.env.*
+**/*.db
+**/*.db-*
+**/*.mmdb
