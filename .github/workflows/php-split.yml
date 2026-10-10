@@ -15,6 +15,14 @@
 # Nothing runs until the repository secret PHP_SPLIT_DEPLOY_KEY holds the
 # private half of a deploy key with write access on the split repository
 # alone, as the Craft plugin's split uses.
+#
+# The key is a repository secret for now, which any workflow run can read.
+# To scope it, create an environment "php-split" (Settings, Environments)
+# whose deployment rule allows the branch main and the tags v*, move
+# PHP_SPLIT_DEPLOY_KEY into it as an environment secret, and only then add
+# `environment: php-split` to the gate, main, and tag jobs here (an
+# environment secret is empty to a job without that line, so the gate would
+# switch everything off).
 name: PHP package split
 
 on:
