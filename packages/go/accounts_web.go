@@ -145,9 +145,10 @@ func (w *AccountsWeb) SignedIn(ctx context.Context, request *Request) (*User, er
 	if value == "" {
 		return nil, nil
 	}
+	// A cookie that is not valid percent-encoding is nobody's session, never an error.
 	decoded, ok := decodeURIComponent(value)
 	if !ok {
-		return nil, errURIMalformed
+		return nil, nil
 	}
 	return w.Accounts.FromSession(ctx, decoded, w.now())
 }
