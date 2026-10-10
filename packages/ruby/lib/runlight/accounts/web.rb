@@ -429,6 +429,8 @@ module Runlight
               @existing = true
               return redirect(@home_path, { "set-cookie" => session_cookie(request, @accounts.session_for(user, now), Accounts::SESSION_MS / 1000) })
             rescue RangeError => e
+              return html(Pages.invite_gone_page(base), 410) if e.is_a?(AccountError) && e.code == "invite_gone"
+
               return again.call(e.message)
             end
           end
