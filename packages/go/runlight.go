@@ -242,6 +242,8 @@ type Runlight struct {
 	// warnDirect is true until the default trust, never chosen, has been seen
 	// answering a public address directly, and warned about once.
 	warnDirect atomic.Bool
+	// observing counts AI agent fetches the Observer is still recording.
+	observing atomic.Int32
 
 	// busy counts work running after the answer, which Idle waits for. A
 	// WaitGroup cannot take an Add while a Wait is going on, and requests
