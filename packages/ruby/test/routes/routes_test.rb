@@ -228,6 +228,10 @@ class RoutesRoutesTest < RoutesTestCase
     mint = ->(origin, key = made["secret"]) { routes.handle(RoutesMake.owner("/runlight/api/embed", "POST", { "origin" => origin }, key)) }
     assert_equal "embed_host", RoutesMake.body(mint.call("https://b.com"))["code"], "only an origin on the site's own domains"
     assert_equal "embed_origin", RoutesMake.body(mint.call("https://a.com/admin"))["code"]
+    assert_equal "embed_origin", RoutesMake.body(mint.call("http://a.com"))["code"], "only over https"
+    assert_equal "embed_origin", RoutesMake.body(mint.call("https://a.com:8443"))["code"], "and on the default port"
+    assert_equal "embed_host", RoutesMake.body(mint.call("https://b.a.com"))["code"], "the name itself, not one under it"
+    assert_equal "embed_host", RoutesMake.body(mint.call("http://localhost:8080"))["code"], "localhost is not the site's own name either"
     assert_equal "unauthorized", RoutesMake.body(mint.call("https://a.com", "secret"))["code"]
     reading = RoutesMake.body(routes.handle(RoutesMake.owner("/runlight/api/tokens", "POST", { "name" => "Read", "site" => "a" })))["secret"]
     assert_equal "embed_token", RoutesMake.body(mint.call("https://a.com", reading))["code"]
