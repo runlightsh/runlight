@@ -256,7 +256,10 @@ class CoreVisitsImportTest < CoreTestCase
 
   def test_csv_in_runlights_format_rows_become_visits_with_sources_places_devices_and_events
     t = csv
-    assert_equal({ "pageviews" => 3, "events" => 1, "visits" => 2, "skipped" => 1 }, Visits.import_csv_visits(t.rl, "default", RUNLIGHT_ROWS))
+    step = Visits.import_csv_visits(t.rl, "default", RUNLIGHT_ROWS)
+    secret = step.delete("secret")
+    assert_equal({ "pageviews" => 3, "events" => 1, "visits" => 2, "skipped" => 1 }, step)
+    assert_match(/\A[A-Za-z0-9_-]{32}\z/, secret)
     q = t.query("2026-03-01", "2026-03-03")
     stats = t.stats(q)
     assert_equal [3, 2, 2], [stats["pageviews"], stats["visits"], stats["visitors"]]
@@ -278,7 +281,7 @@ class CoreVisitsImportTest < CoreTestCase
     assert_equal 2, Visits.import_csv_visits(t.rl, "default", rows)["visits"]
     Visits.import_csv_visits(t.rl, "default", rows)
     q = t.query("2026-03-01", "2026-03-03")
-    assert_equal 2, t.stats(q)["visits"], "the same rows get the same ids the second time"
+    assert_equal 2, t.stats(q)["visits"], "the second import replaces the first"
     assert_equal ["/a", "/b"], t.values(q, "page").sort
   end
 
@@ -295,11 +298,42 @@ class CoreVisitsImportTest < CoreTestCase
       { "website_id" => "w1", "session_id" => "s2", "created_at" => "2026-03-02T09:00:00.000Z", "hostname" => "blog.example.com", "url_path" => "/blog",
         "event_type" => "1", "country" => "GB", "browser" => "chrome", "os" => "Mac OS", "device" => "desktop" },
     ]
-    assert_equal({ "pageviews" => 2, "events" => 1, "visits" => 2, "skipped" => 1 }, Visits.import_csv_visits(t.rl, "default", rows))
+    step = Visits.import_csv_visits(t.rl, "default", rows)
+    step.delete("secret")
+    assert_equal({ "pageviews" => 2, "events" => 1, "visits" => 2, "skipped" => 1 }, step)
     q = t.query("2026-03-01", "2026-03-03")
     assert_equal ["Hacker News"], t.values(q, "source")
     assert_equal ["CA-ON"], t.values(q, "region")
     assert_equal %w[Chrome Safari], t.values(q, "browser").sort
+  end
+
+  def test_a_csv_visitor_column_is_keyed_with_a_secret_only_the_import_holds_which_later_batches_of_the_file_send_back
+    t = csv
+    people = [
+      { "time" => "2026-03-01T10:00:00Z", "path" => "/a", "visitor" => "203.0.113.7" },
+      { "time" => "2026-03-01T10:10:00Z", "path" => "/b", "visitor" => "203.0.113.7" },
+      { "time" => "2026-03-01T10:20:00Z", "path" => "/c", "visitor" => "jon@example.com" },
+    ]
+    # A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+    plain = ->(key, length) { Runlight::Hashing.sha256("csv:#{key}:2026-03-01")[0, length] }
+    first = Visits.import_csv_visits(t.rl, "default", people[0, 1])
+    second = Visits.import_csv_visits(t.rl, "default", people[1..], first["secret"])
+    assert_equal first["secret"], second["secret"]
+    assert_equal 1, second["visits"], "the second batch's visitor continues the first batch's visit"
+    visitors = t.rl.store.db.all("SELECT DISTINCT visitor FROM rl_sessions").map { |r| r["visitor"] }
+    assert_equal 2, visitors.length
+    ["203.0.113.7", "jon@example.com"].each { |key| refute_includes visitors, plain.call(key, 16), key }
+    q = t.query("2026-03-01", "2026-03-03")
+    assert_equal 2, t.stats(q)["visits"]
+
+    # The same file again, with a new secret and so new ids, leaves no visit of the old import behind,
+    # even one that ran across its two batches.
+    again = Visits.import_csv_visits(t.rl, "default", people[0, 1])
+    refute_equal first["secret"], again["secret"]
+    Visits.import_csv_visits(t.rl, "default", people[1..], again["secret"])
+    stats = t.stats(q)
+    assert_equal [2, 3], [stats["visits"], stats["pageviews"]]
+    assert_equal 2, t.rl.store.db.all("SELECT id FROM rl_sessions").length
   end
 
   def test_csv_rows_from_after_runlights_own_first_visit_are_left_to_runlight
