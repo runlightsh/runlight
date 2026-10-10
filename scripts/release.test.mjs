@@ -133,16 +133,17 @@ before(() => {
   if (current !== "0.0.0") {
     const readCopy = (file) => readFileSync(path.join(copy, file), "utf8");
     for (const [file, { after }] of planEdits(VERSIONED, readCopy, current, "0.0.0")) writeFileSync(path.join(copy, file), after);
-    const version = current.replace(/\./g, "\\.");
-    const unrelease = (file, released, unreleased, heading) => {
+    // Every released section folds into one Unreleased section at the top, so no
+    // version the tests release (0.1.0) is already there.
+    const unrelease = (file, released, heading) => {
       const text = readCopy(file);
-      // With notes already waiting, the released heading goes and its notes join them.
-      writeFileSync(path.join(copy, file), unreleased.test(text) ? text.replace(new RegExp(`${released.source}\\n+`, "m"), "") : text.replace(released, heading));
+      const at = text.search(released);
+      if (at < 0) return;
+      const notes = text.indexOf(heading) >= 0 && text.indexOf(heading) < at ? text : text.slice(0, at) + heading + "\n\n" + text.slice(at);
+      writeFileSync(path.join(copy, file), notes.replace(new RegExp(`${released.source}\\n+`, "gm"), ""));
     };
-    for (const file of ["CHANGELOG.md", "plugins/craft/CHANGELOG.md"]) {
-      unrelease(file, new RegExp(`^## ${version} - \\d{4}-\\d{2}-\\d{2}$`, "m"), /^## Unreleased[ \t]*$/m, "## Unreleased");
-    }
-    unrelease("plugins/wordpress/readme.txt", new RegExp(`^= ${version} =$`, "m"), /^= Unreleased =$/m, "= Unreleased =");
+    for (const file of ["CHANGELOG.md", "plugins/craft/CHANGELOG.md"]) unrelease(file, /^## \d+\.\d+\.\d+ - \d{4}-\d{2}-\d{2}$/m, "## Unreleased");
+    unrelease("plugins/wordpress/readme.txt", /^= \d+\.\d+\.\d+ =$/m, "= Unreleased =");
   }
   git("init", "-q", "-b", "main");
   git("add", "-A");
