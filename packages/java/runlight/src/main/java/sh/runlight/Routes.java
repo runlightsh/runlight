@@ -2736,7 +2736,10 @@ public final class Routes {
       try {
         return json(
             Visits.importCsvVisits(
-                rl, (String) asMap(found).get("id"), plain(Js.get(asMap(read), "rows"))));
+                rl,
+                (String) asMap(found).get("id"),
+                plain(Js.get(asMap(read), "rows")),
+                Js.get(asMap(read), "secret")));
       } catch (ImportError error) {
         return refused(error, "import_failed");
       }

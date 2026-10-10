@@ -69,10 +69,7 @@ public final class CsvVisits {
     return "";
   }
 
-  /**
-   * A row with no visitor is its own visit, keyed by its whole content so a second import gives it
-   * the same ids.
-   */
+  /** A row with no visitor is its own visit, keyed by its whole content. */
   private static String ownKey(Map<String, String> row) {
     List<Object> entries = new ArrayList<>();
     for (Map.Entry<String, Object> e : Js.entries(row)) {

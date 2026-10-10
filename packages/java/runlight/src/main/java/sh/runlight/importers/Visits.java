@@ -13,6 +13,7 @@ import sh.runlight.Json;
 import sh.runlight.Runlight;
 import sh.runlight.Sources;
 import sh.runlight.Time;
+import sh.runlight.accounts.Crypto;
 import sh.runlight.http.Fetcher;
 import sh.runlight.http.Url;
 import sh.runlight.store.SqlStore;
@@ -44,6 +45,9 @@ public final class Visits {
 
   /** A single day with more than this is refused rather than read without end. */
   private static final int MAX_DAY_EVENTS = 200_000;
+
+  /** A CSV import's secret as an earlier batch's answer gave it. */
+  private static final Pattern SECRET = Pattern.compile("^[A-Za-z0-9_-]{22,128}\\z");
 
   /** Umami's event types that are visits: a pageview, and a custom event. */
   private static final double PAGEVIEW = 1;
@@ -292,13 +296,21 @@ public final class Visits {
                       List.of(siteId, from, to, siteId));
               // Visits of these days that kept no rows go too. Their rows would come within
               // EVENT_TAIL_MS of the step, so the time bounds let the (site, ts) index find them,
-              // with no scan of every event.
+              // with no scan of every event. That reaches back EVENT_TAIL_MS too, for a visit an
+              // earlier import began before this step whose rows were all in it: a CSV imported
+              // again has new ids, so its new visit does not take that one's place.
               store
                   .db()
                   .run(
                       "DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?\n"
                           + "         AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)",
-                      List.of(siteId, from, to, siteId, from, to + SqlStore.EVENT_TAIL_MS));
+                      List.of(
+                          siteId,
+                          from - SqlStore.EVENT_TAIL_MS,
+                          to,
+                          siteId,
+                          from - SqlStore.EVENT_TAIL_MS,
+                          to + SqlStore.EVENT_TAIL_MS));
               for (Map<String, Object> entry : hits) {
                 Map<String, Object> hit = Js.map(entry.get("hit"));
                 if (writeEvent(store, site, (String) entry.get("ns"), hit)) {
@@ -549,16 +561,31 @@ public final class Visits {
     return open == null;
   }
 
+  /** As {@link #importCsvVisits(Host, String, Object, Object)}, with a new secret. */
+  public static Map<String, Object> importCsvVisits(Host runlight, String siteId, Object rows) {
+    return importCsvVisits(runlight, siteId, rows, null);
+  }
+
   /**
    * One batch of a CSV file, sorted oldest first by the dashboard. As with Umami, only rows from
    * before Runlight's own first visit, and within what the site keeps, are written. A batch can run
    * again: its time span is cleared first, so batches must not share a moment, which the dashboard
    * sees to.
    *
+   * <p>A CSV's visitor column can hold anything, an email or an IP address among them, and a plain
+   * hash of one is easily undone by trying every address. So each key is an HMAC under a random
+   * secret made for the import and never stored: the first batch gets one, the answer carries it,
+   * and the caller sends it with every later batch of the same file, so a visit that runs across
+   * two batches stays one. A file imported again gets a new secret and new ids; its time span is
+   * cleared first, as always, so nothing is counted twice.
+   *
    * @param rows the rows as the request sent them: a list of objects
-   * @return {@code pageviews}, {@code events}, {@code visits}, and {@code skipped}
+   * @param secret the secret an earlier batch of the same file answered with, or anything else for
+   *     a new one
+   * @return {@code pageviews}, {@code events}, {@code visits}, {@code skipped}, and {@code secret}
    */
-  public static Map<String, Object> importCsvVisits(Host runlight, String siteId, Object rows) {
+  public static Map<String, Object> importCsvVisits(
+      Host runlight, String siteId, Object rows, Object secret) {
     runlight.init();
     if (runlight.site(siteId) == null) {
       throw new ImportError("Unknown site", "unknown_site");
@@ -592,6 +619,10 @@ public final class Visits {
       throw new ImportError(
           "This CSV is not an Umami export or Runlight's visit format", "import_csv_format");
     }
+    String key =
+        secret instanceof String s && SECRET.matcher(s).matches()
+            ? s
+            : Crypto.base64url(Crypto.randomBytes(24));
     Long cutoffValue = runlight.retentionCutoff(siteId);
     double cutoff = cutoffValue == null ? 0 : cutoffValue;
     Object own = runlight.store().firstOwnVisit(siteId);
@@ -610,12 +641,18 @@ public final class Visits {
     hits.sort((a, b) -> Long.compare(hitTs(a), hitTs(b)));
     long skipped = (long) clean.size() - hits.size();
     if (hits.isEmpty()) {
-      return Json.object("pageviews", 0L, "events", 0L, "visits", 0L, "skipped", skipped);
+      return Json.object(
+          "pageviews", 0L, "events", 0L, "visits", 0L, "skipped", skipped, "secret", key);
+    }
+    for (Map<String, Object> h : hits) {
+      Map<String, Object> hit = Js.map(h.get("hit"));
+      hit.put("key", Crypto.base64url(Crypto.hmac("SHA-256", key, (String) hit.get("key"))));
     }
     Map<String, Object> counts =
         writeStep(
             runlight, siteId, hitTs(hits.get(0)), hitTs(hits.get(hits.size() - 1)) + 1, hits, null);
     counts.put("skipped", skipped);
+    counts.put("secret", key);
     return counts;
   }
 
