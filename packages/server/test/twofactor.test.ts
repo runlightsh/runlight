@@ -292,3 +292,29 @@ test("signing in again right after turning on two-factor works with the same cod
   assert.equal(await server.accounts.checkSecondFactor(user.id, code, now), true);
   assert.equal(await server.accounts.checkSecondFactor(user.id, code, now), false, "and then only once");
 });
+
+test("one address trying made-up emails waits after thirty, before any password is hashed", async () => {
+  const now = Date.UTC(2026, 9, 7, 12);
+  const server = createServer({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64), now: () => now });
+  await server.accounts.setPassword("jon@example.com", "a long password", now);
+  const login = (email: string, password: string, ip: string) =>
+    server.handler(new Request(`${origin}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip }, body: new URLSearchParams({ email, password }).toString() }));
+  // A right password is taken back, so signing in now and then from a shared address never adds up.
+  assert.equal((await login("jon@example.com", "a long password", "203.0.113.9")).status, 303);
+  for (let i = 0; i < 30; i++) assert.equal((await login(`nobody${i}@example.com`, "wrong wrong wrong", "203.0.113.9")).status, 401);
+  assert.equal((await login("someone@example.com", "wrong wrong wrong", "203.0.113.9")).status, 429);
+  assert.equal((await login("jon@example.com", "a long password", "203.0.113.9")).status, 429);
+  assert.equal((await login("jon@example.com", "a long password", "203.0.113.10")).status, 303, "another address is not held up");
+});
+
+test("only a few passwords are checked at once, and past a queue the rest are told to wait", async () => {
+  const now = Date.UTC(2026, 9, 7, 12);
+  const server = createServer({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64), now: () => now });
+  await server.accounts.setPassword("jon@example.com", "a long password", now);
+  const login = (email: string, password: string, ip: string) =>
+    server.handler(new Request(`${origin}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip }, body: new URLSearchParams({ email, password }).toString() }));
+  const statuses = await Promise.all(Array.from({ length: 100 }, (_, i) => login(`n${i}@example.com`, "wrong wrong wrong", `198.51.100.${i}`).then((r) => r.status)));
+  assert.equal(statuses.filter((s) => s === 401).length, 68, "four checking and sixty-four waiting");
+  assert.equal(statuses.filter((s) => s === 503).length, 32);
+  assert.equal((await login("jon@example.com", "a long password", "192.0.2.1")).status, 303, "and once they are done, sign-ins go on");
+});

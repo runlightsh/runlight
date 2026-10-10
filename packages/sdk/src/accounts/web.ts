@@ -73,13 +73,17 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   const accounts = new Accounts(store, options.secret);
   const cookiePath = base || "/";
   const home = `${base}/`;
-  // Wrong passwords are counted twice. Per account and address, ten tries;
+  // Wrong passwords are counted three times. Per account and address, ten tries;
   // per account from anywhere, fifty, so a caller who invents a new address
   // for every try still cannot guess on and on. Addresses come from
-  // forwarding headers a client can write, so they never stand alone.
+  // forwarding headers a client can write, so they never stand alone. And per
+  // address across every account, thirty, so one caller trying made-up emails
+  // cannot keep the server hashing; a request with no known address skips that one,
+  // since it would hold up everyone at once.
   // Each try counts before the password is checked, and a right one is taken back.
   const perAddress = new Throttle(10);
   const perAccount = new Throttle(50);
+  const perIp = new Throttle(30);
   // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
   // Password re-checks in Account: ten.
   const codeTries = new Throttle(5);
@@ -250,33 +254,42 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
         const password = form.get("password") ?? "";
         const next = safeNext(form.get("next"));
         const account = email.trim().toLowerCase();
-        const pair = `${account}\n${rl.clientIp(request, context) || "unknown"}`;
+        const ip = rl.clientIp(request, context);
+        const pair = `${account}\n${ip || "unknown"}`;
         const login = (opts: { error?: string; email?: string }) => loginPage(base, { ...opts, next, forgot: options.forgot });
         const tooMany = () => html(login({ error: "Too many tries. Wait fifteen minutes and try again.", email }), 429);
+        if (ip && !(await perIp.take(ip, now()))) return tooMany();
         if (!(await perAddress.take(pair, now()))) return tooMany();
-        // A browser that signed in to the account before is never held up by others' failures.
-        const known = await accounts.byEmail(account);
-        const trusted = Boolean(known && (await accounts.trustsDevice(readCookie(request, DEVICE_COOKIE), known)));
-        const over = !trusted && !(await perAccount.take(account, now()));
-        // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-        // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-        // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-        if (over && !known?.twoFactor) {
-          if (!(await rl.mailSettings()) || !(await options.home?.())) return tooMany();
+        try {
+          // A browser that signed in to the account before is never held up by others' failures.
+          const known = await accounts.byEmail(account);
+          const trusted = Boolean(known && (await accounts.trustsDevice(readCookie(request, DEVICE_COOKIE), known)));
+          const over = !trusted && !(await perAccount.take(account, now()));
+          // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
+          // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
+          // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
+          if (over && !known?.twoFactor) {
+            if (!(await rl.mailSettings()) || !(await options.home?.())) return tooMany();
+            const user = await accounts.signIn(email, password);
+            if (user) void sendLink(user, next).catch((error) => console.error("Runlight: could not send a sign-in link", error));
+            return html(login({ error: "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email }), 429);
+          }
           const user = await accounts.signIn(email, password);
-          if (user) void sendLink(user, next).catch((error) => console.error("Runlight: could not send a sign-in link", error));
-          return html(login({ error: "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email }), 429);
+          if (!user) {
+            if (over && known) return html(codePage(base, { pending: await accounts.decoyFor(known, now()), next }));
+            return html(login({ error: "That email and password do not match an account.", email }), 401);
+          }
+          await perAddress.clear(pair);
+          if (ip) await perIp.forgive(ip);
+          if (!over && !trusted) await perAccount.forgive(account);
+          // With two-factor on, the password only earns the second step.
+          if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }));
+          return signedInTo(request, user, next);
+        } catch (error) {
+          // Too many password checks already waiting, so this one was never run: try again in a moment.
+          if (error instanceof AccountError && error.code === "busy") return html(login({ error: error.message, email }), 503, { "retry-after": "5" });
+          throw error;
         }
-        const user = await accounts.signIn(email, password);
-        if (!user) {
-          if (over && known) return html(codePage(base, { pending: await accounts.decoyFor(known, now()), next }));
-          return html(login({ error: "That email and password do not match an account.", email }), 401);
-        }
-        await perAddress.clear(pair);
-        if (!over && !trusted) await perAccount.forgive(account);
-        // With two-factor on, the password only earns the second step.
-        if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }));
-        return signedInTo(request, user, next);
       }
     }
 
@@ -343,7 +356,12 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     if (path === "/api/account" && request.method === "GET") return reply({ account: person(user) });
     const recheck = async (input: Record<string, unknown>, field: string, wrong: [string, string]): Promise<Response | null> => {
       if (!(await rechecks.take(user.id, now()))) return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429);
-      if (!(await accounts.signIn(user.email, String(input[field] ?? "")))) return coded(wrong[0], wrong[1], 400);
+      const right = await accounts.signIn(user.email, String(input[field] ?? "")).catch((error) => {
+        if (error instanceof AccountError && error.code === "busy") return "busy" as const;
+        throw error;
+      });
+      if (right === "busy") return coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503);
+      if (!right) return coded(wrong[0], wrong[1], 400);
       await rechecks.forgive(user.id);
       return null;
     };
