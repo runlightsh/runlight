@@ -89,7 +89,10 @@ class RoutesOAuthTest < RoutesTestCase
     # Again, properly this time.
     second = routes.handle(at("#{origin}/runlight/oauth/authorize", "POST", owner.merge("origin" => origin).merge(form_type), "#{params}&decision=allow&site=b"))
     code2 = Url.new(second.headers.get("location") || "").search_params.get("code")
-    issued = RoutesMake.body(exchange.call(code2, verifier))
+    # The same code swapped twice at once makes one token, not two.
+    both = Array.new(2) { Thread.new { exchange.call(code2, verifier) } }.map(&:value)
+    assert_equal [200, 400], both.map(&:status).sort
+    issued = RoutesMake.body(both.find { |r| r.status == 200 })
     assert_equal "Bearer", issued["token_type"]
     assert_equal "read", issued["scope"]
     assert_equal "b", issued["site"]
