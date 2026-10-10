@@ -509,6 +509,9 @@ final class Web
     /** @param array{ip?: string} $context */
     private function login(Request $request, array $context): Response
     {
+                    if ($error instanceof AccountError && $error->code === 'invite_gone') {
+                        return self::html(Pages::inviteGonePage($base), 410);
+                    }
         $base = $this->base;
         $form = new SearchParams($request->text());
         $email = $form->get('email') ?? '';
