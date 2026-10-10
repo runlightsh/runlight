@@ -107,6 +107,10 @@ final class Smtp
         $s->connect($security === 'tls', self::REPLY_TIMEOUT_MS);
         $expect = static function (array $codes, string $what) use ($s): array {
             $reply = $s->next(self::REPLY_TIMEOUT_MS);
+            // Something that is not a mail server gets no more than that said, so its own words are never passed on.
+            if (!($reply['code'] >= 200 && $reply['code'] <= 599)) {
+                throw new MailError("SMTP $what: {$s->where()} did not answer as a mail server does");
+            }
             if (!in_array($reply['code'], $codes, true)) {
                 throw new MailError(Transports::slice16("SMTP $what: {$reply['code']} {$reply['text']}", 300));
             }

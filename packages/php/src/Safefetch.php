@@ -142,6 +142,65 @@ final class Safefetch
         return true;
     }
 
+    /** Names clouds give their metadata services. */
+    private const METADATA_NAMES = ['metadata', 'metadata.google.internal', 'metadata.goog', 'instance-data', 'instance-data.ec2.internal'];
+
+    /**
+     * Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service (fd00:ec2::254,
+     * Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail server is never there,
+     * though it may well be on this computer or a private network, so those stay allowed where this is checked.
+     */
+    public static function metadataAddress(string $ip): bool
+    {
+        $four = self::v4($ip);
+        $g = $four === null ? self::v6($ip) : null;
+        $zero = static fn (array $groups): bool => array_filter($groups, static fn ($x) => $x !== 0) === [];
+        // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+        $inner = $four;
+        if ($inner === null && $g !== null && (($zero(array_slice($g, 0, 5)) && ($g[5] === 0xffff || $g[5] === 0)) || ($g[0] === 0x64 && $g[1] === 0xff9b && $zero(array_slice($g, 2, 4))))) {
+            $inner = [$g[6] >> 8, $g[6] & 255, $g[7] >> 8, $g[7] & 255];
+        }
+        if ($inner !== null) {
+            return ($inner[0] === 169 && $inner[1] === 254) || $inner === [100, 100, 100, 200];
+        }
+        if ($g === null) {
+            return false;
+        }
+        if (($g[0] & 0xffc0) === 0xfe80) {
+            return true;
+        }
+        return $g[0] === 0xfd00 && $g[1] === 0xec2 && $zero(array_slice($g, 2, 5)) && $g[7] === 0x254;
+    }
+
+    /**
+     * Whether a host, by its name, its address, or any address its name resolves to now, is link-local or a
+     * metadata service. A name that does not resolve here is let through, since the connection then goes
+     * nowhere such a check could have stopped.
+     *
+     * @param (callable(string): list<string>)|null $lookup stands in for DNS in tests
+     */
+    public static function metadataHost(string $host, ?callable $lookup = null): bool
+    {
+        $name = (string) preg_replace('/\.+\z/', '', (string) preg_replace('/^\[|\]\z/', '', strtolower(Js::trim($host))));
+        if (in_array($name, self::METADATA_NAMES, true) || self::metadataAddress($name)) {
+            return true;
+        }
+        if (self::v4($name) !== null || self::v6($name) !== null) {
+            return false;
+        }
+        try {
+            $addresses = ($lookup ?? self::$testLookup ?? self::lookup(...))($name);
+        } catch (\Throwable) {
+            return false;
+        }
+        foreach ($addresses as $address) {
+            if (self::metadataAddress($address)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Every address a name resolves to, v4 and v6, as getaddrinfo() would give
      * them (the hosts file included). Empty when it does not resolve.

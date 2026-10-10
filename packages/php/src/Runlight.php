@@ -280,6 +280,9 @@ final class Runlight
         $fromName = Js::slice(Js::trim(Js::string($input['fromName'] ?? '')), 0, 80);
         $config = [...$settings, 'from' => $from, ...($fromName !== '' ? ['fromName' => $fromName] : [])];
         Transports::checkConfig($config);
+        if ($config['service'] === 'smtp' && ($config['host'] ?? '') !== '' && Safefetch::metadataHost($config['host'])) {
+            throw new MailError("{$config['host']} is a link-local or cloud metadata address, which Runlight never connects to", 'address_refused', ['host' => $config['host']]);
+        }
         $this->store->setSetting('mail', Secret::seal(Json::encode($config), $this->secret));
     }
 
@@ -973,6 +976,9 @@ final class Runlight
             $parsed = Url::parse($baseUrl);
             if ($parsed === null || ($parsed->protocol !== 'https:' && $parsed->protocol !== 'http:')) {
                 throw new SettingsError("Enter the service's address, starting with https://", 'assistant_address_bad');
+            }
+            if (Safefetch::metadataHost($parsed->hostname)) {
+                throw new SettingsError("{$parsed->hostname} is a link-local or cloud metadata address, which Runlight never connects to", 'address_refused', ['host' => $parsed->hostname]);
             }
         }
         if ($baseUrl === '' && $provider['baseUrl'] === '') {

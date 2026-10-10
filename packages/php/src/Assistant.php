@@ -107,10 +107,23 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
         return is_string($message) ? $message : '';
     }
 
+    /**
+     * Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
+     * private network is allowed, as the person setting it up means it to be.
+     */
+    public static function refuseMetadata(string $url): void
+    {
+        $host = (new Url($url))->hostname;
+        if (Safefetch::metadataHost($host)) {
+            throw new AssistantError("$host is a link-local or cloud metadata address, which Runlight never connects to", 'address_refused', ['host' => $host]);
+        }
+    }
+
     /** @param array<string, string> $headers */
     private static function post(Fetcher $fetcher, string $url, array $headers, mixed $body, int $deadline, \Closure $now, ?\Closure $cancelled): mixed
     {
         self::inTime($deadline, $now, $cancelled);
+        self::refuseMetadata($url);
         $left = $deadline - $now();
         try {
             $answer = $fetcher->fetch($url, [
@@ -374,6 +387,7 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
         $headers = $provider['protocol'] === 'anthropic'
             ? ['x-api-key' => $key, 'anthropic-version' => '2023-06-01']
             : ($key !== '' ? ['authorization' => "Bearer $key"] : []);
+        self::refuseMetadata($base);
         try {
             $answer = $fetcher->fetch("$base/models" . ($provider['protocol'] === 'anthropic' ? '?limit=100' : ''), ['headers' => $headers, 'timeoutMs' => 20_000]);
         } catch (\Throwable) {

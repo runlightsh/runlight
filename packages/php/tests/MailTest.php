@@ -13,6 +13,8 @@ use Runlight\Mail\Secret;
 use Runlight\Mail\Ses;
 use Runlight\Mail\Smtp;
 use Runlight\Mail\Transports;
+use Runlight\Runlight;
+use Runlight\Store\Stores;
 use Runlight\Tests\Support\FakeFetcher;
 use Runlight\Tests\Support\SmtpServer;
 
@@ -276,6 +278,35 @@ final class MailTest extends TestCase
             $this->assertSame('mail_unreachable', $error->code);
             $this->assertSame("127.0.0.1:$port", $error->params['host']);
             $this->assertStringStartsWith("SMTP: could not connect to 127.0.0.1:$port: ", $error->getMessage());
+        }
+    }
+
+    public function testSmtpNeverALinkLocalOrMetadataAddressAndSomethingThatIsNotAMailServerIsNotQuoted(): void
+    {
+        foreach (['169.254.169.254', '[fd00:ec2::254]'] as $host) {
+            try {
+                Smtp::send(['service' => 'smtp', 'host' => $host, 'port' => '25', 'security' => 'none'], self::MESSAGE, 'reports@example.com');
+                $this->fail($host);
+            } catch (MailError $error) {
+                $this->assertSame('address_refused', $error->code, $host);
+            }
+        }
+        $rl = new Runlight(['store' => Stores::sqlite(':memory:'), 'secret' => str_repeat('s', 64)]);
+        try {
+            $rl->saveMailSettings(['service' => 'smtp', 'host' => 'metadata.google.internal', 'port' => '587', 'security' => 'starttls', 'from' => 'a@example.com']);
+            $this->fail('metadata.google.internal');
+        } catch (MailError $error) {
+            $this->assertSame('address_refused', $error->code);
+        }
+        $server = new SmtpServer('http');
+        try {
+            Smtp::send(['service' => 'smtp', 'host' => '127.0.0.1', 'port' => (string) $server->port, 'security' => 'none'], self::MESSAGE, 'reports@example.com');
+            $this->fail('the send should fail');
+        } catch (MailError $error) {
+            $this->assertMatchesRegularExpression('/did not answer as a mail server does/', $error->getMessage());
+            $this->assertDoesNotMatchRegularExpression('/internal|HTTP/', $error->getMessage());
+        } finally {
+            $server->stop();
         }
     }
 
