@@ -32,11 +32,14 @@ module Runlight
       # the path's limit raises TooLarge once one byte past it has been read.
       def self.from_rack(env, read_body: true)
         scheme = env["rack.url_scheme"] || "http"
-        host = env["HTTP_HOST"]
-        if host.nil? || host.empty?
+        # A Host header no URL can hold (a space, a bad port, a userinfo @) is read as the server's own name, as
+        # an absent one is, so the request still has a URL; the header itself is kept as it came.
+        host = env["HTTP_HOST"].to_s
+        unless host?(scheme, host)
           port = env["SERVER_PORT"].to_s
           default = (scheme == "https" && port == "443") || (scheme == "http" && port == "80") || port.empty?
           host = "#{env["SERVER_NAME"] || "localhost"}#{default ? "" : ":#{port}"}"
+          host = "localhost" unless host?(scheme, host)
         end
         path = "#{env["SCRIPT_NAME"]}#{env["PATH_INFO"]}"
         path = "/#{path}" unless path.start_with?("/")
@@ -65,6 +68,12 @@ module Runlight
         url = "#{scheme}://#{host}#{path}#{query.empty? ? "" : "?#{query}"}"
         new(url, method: method, headers: headers, body: body, remote_address: env["REMOTE_ADDR"].to_s)
       end
+
+      # Whether a Host header is a name (or [address]) and maybe a port, and nothing a URL would read as more.
+      def self.host?(scheme, host)
+        host.match?(%r{\A(?:\[[0-9A-Fa-f:.]+\]|[^\s/?#@\\\[\]:]+)(?::\d{1,5})?\z}) && !Url.parse("#{scheme}://#{host}/").nil?
+      end
+      private_class_method :host?
 
       # The most a body may hold at this path: little for the collect endpoint, more for everything else.
       def self.limit_for(path)

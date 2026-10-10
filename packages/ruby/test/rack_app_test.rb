@@ -63,6 +63,58 @@ class RackAppTest < Minitest::Test
     assert_equal "app saw GET /launch ", @app.get("/launch", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI).body
   end
 
+  # A database that cannot be reached, for every statement.
+  class DownDb
+    def dialect = "sqlite"
+    def all(*) = raise("could not connect to server")
+    def run(*) = raise("could not connect to server")
+    def exclusive = raise("could not connect to server")
+    def transaction = raise("could not connect to server")
+  end
+
+  def test_the_app_still_answers_when_runlight_cannot_reach_its_database
+    rl = Runlight.new(store: Runlight::Stores.from_db(DownDb.new), site: { hostnames: ["example.com"] })
+    middleware = Runlight::RackApp.new(@inner, runlight: rl, base_path: "/runlight", token: TOKEN)
+    app = Rack::MockRequest.new(middleware)
+    _, err = capture_io do
+      page = app.get("/products", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI)
+      assert_equal "app saw GET /products ", page.body
+      middleware.instance_variable_get(:@warming)&.join
+      assert_equal 500, app.get("/runlight/api/sites", "HTTP_HOST" => "example.com", "HTTP_AUTHORIZATION" => "Bearer #{TOKEN}").status
+    end
+    assert_match(/could not connect/, err)
+  end
+
+  def test_a_host_header_no_url_can_hold_still_reaches_the_app
+    @rl.init
+    ["exa mple.com", "[", "a@b", "example.com:99999", "%zz"].each do |host|
+      env = Rack::MockRequest.env_for("/products", "HTTP_HOST" => host)
+      status, _, body = Runlight::RackApp.new(@inner, runlight: @rl, base_path: "/runlight", token: TOKEN).call(env)
+      text = +""
+      body.each { |chunk| text << chunk }
+      assert_equal [200, "app saw GET /products "], [status, text], host
+    end
+    request = Runlight::Http::Request.from_rack(Rack::MockRequest.env_for("/x", "HTTP_HOST" => "a@b", "SERVER_NAME" => "example.com"))
+    assert_equal "http://example.com/x", request.url
+    assert_equal "a@b", request.headers.get("host"), "the header is kept as it came"
+  end
+
+  def test_the_apps_requests_do_not_wait_for_runlight_to_make_its_tables
+    started = Queue.new
+    go = Queue.new
+    @store.define_singleton_method(:migrate) do |*args|
+      started << 1
+      go.pop
+      super(*args)
+    end
+    assert_equal "app saw GET /products ", @app.get("/products", "HTTP_HOST" => "example.com").body
+    started.pop
+    refute @rl.ready?, "init runs beside the app's requests"
+    assert_equal "app saw GET /pricing ", @app.get("/pricing", "HTTP_HOST" => "example.com").body
+    go << 1
+    Timeout.timeout(5) { sleep 0.01 until @rl.ready? }
+  end
+
   def test_init_runs_once_however_many_threads_ask_at_once
     migrations = Queue.new
     @store.define_singleton_method(:migrate) do |*args|

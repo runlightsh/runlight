@@ -33,6 +33,8 @@ module Runlight
       @observe = observe
       @route_options = route_options
       @lock = Mutex.new
+      @warming = nil
+      @warm_failed_at = nil
     end
 
     def core
@@ -51,10 +53,16 @@ module Runlight
       rescue Http::Request::TooLarge
         # The rest is never read, so the connection is not fit for another request.
         return [413, { "content-type" => "application/json; charset=utf-8", "connection" => "close" }, [TOO_LARGE]]
+      rescue StandardError => e
+        raise if @app.nil?
+
+        # Whatever Runlight cannot read, the app behind still answers.
+        warn "Runlight: #{e.message}"
+        return @app.call(env)
       end
       response = answer(request)
       if response.nil?
-        core.observe(request) if @observe && request.method == "GET"
+        observe(request) if @observe && request.method == "GET"
         return @app.call(env)
       end
       status, headers, body = response.to_rack
@@ -63,21 +71,28 @@ module Runlight
     end
 
     # The answer to one request, or nil when it is not Runlight's and an app sits behind.
+    #
+    # The app's own requests never wait on Runlight: until Runlight has made its tables they go straight to
+    # the app while init runs beside them (a link domain is known only once it has), and anything that goes
+    # wrong in Runlight is logged and the request still reaches the app.
     def answer(request)
       context = { "ip" => request.remote_address }
-      linked = core.link_domain_response(request, context)
-      return linked unless linked.nil?
-
       path = Http::Url.parse(request.url)&.pathname || "/"
       link_path = core.link_path
-      if request.method == "GET" && path.match?(%r{\A#{Regexp.escape(link_path)}/[^/]+/?\z})
-        return core.link_handler.call(request, context)
+      link = request.method == "GET" && path.match?(%r{\A#{Regexp.escape(link_path)}/[^/]+/?\z})
+      own = @app.nil? || mine?(path) || link
+      if own || ready?
+        linked = core.link_domain_response(request, context)
+        return linked unless linked.nil?
       end
-      return routes.handle(request) if @app.nil? || mine?(path)
+      return core.link_handler.call(request, context) if link
+      return routes.handle(request) if own
 
       nil
     rescue StandardError => e
       warn "Runlight: #{e.message}"
+      return nil if @app && !own
+
       Http::Response.new(INTERNAL, status: 500, headers: {
                            "content-type" => "application/json; charset=utf-8",
                            "cache-control" => "no-store",
@@ -86,6 +101,37 @@ module Runlight
     end
 
     private
+
+    # Whether Runlight has made its tables. Until it has, an app's request starts init beside it, once at a
+    # time, and again no sooner than a minute after one that failed.
+    def ready?
+      return true unless core.respond_to?(:ready?)
+      return true if core.ready?
+
+      @lock.synchronize do
+        return false if @warming&.alive?
+        return false if @warm_failed_at && monotonic - @warm_failed_at < 60
+
+        @warming = Thread.new do
+          core.init
+        rescue StandardError => e
+          @warm_failed_at = monotonic
+          warn "Runlight: could not get ready #{e.message}"
+        end
+      end
+      false
+    end
+
+    # AI agent fetches are recorded once Runlight is ready, and never hold up or break the page.
+    def observe(request)
+      core.observe(request) if ready?
+    rescue StandardError => e
+      warn "Runlight: #{e.message}"
+    end
+
+    def monotonic
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
 
     def idle
       core.idle if core.respond_to?(:idle)
