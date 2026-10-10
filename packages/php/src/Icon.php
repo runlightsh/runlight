@@ -193,6 +193,7 @@ final class Icon
         }
         $saved = ['at' => $entry['at']] + ($entry['icon'] !== null ? ['type' => $entry['icon']['type'], 'body' => base64_encode($entry['icon']['body'])] : []);
         @file_put_contents($file, (string) json_encode($saved), LOCK_EX);
+        Scratch::protect($file);
         // Past the cap the oldest files go.
         $files = glob(dirname($file) . '/*.json') ?: [];
         if (count($files) > self::CACHE_SIZE) {
@@ -205,10 +206,7 @@ final class Icon
 
     private static function file(string $origin, ?string $dir): ?string
     {
-        $dir = ($dir ?? sys_get_temp_dir()) . '/runlight-icons';
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-            return null;
-        }
-        return "$dir/" . hash('sha256', $origin) . '.json';
+        $dir = Scratch::dir('runlight-icons', $dir);
+        return $dir === null ? null : "$dir/" . hash('sha256', $origin) . '.json';
     }
 }

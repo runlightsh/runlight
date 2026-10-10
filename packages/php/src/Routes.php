@@ -2493,7 +2493,7 @@ final class Routes
         if ($path === '/api/icon') {
             $host = $site['hostnames'][0] ?? null;
             // Only a site's own domain, never the request's Host header, which a caller can write.
-            $icon = $host !== null && $host !== '' ? Icon::fetchIcon("https://$host", $rl->now(), $rl->fetcher) : null;
+            $icon = $host !== null && $host !== '' ? Icon::fetchIcon("https://$host", $rl->now(), $rl->fetcher, $rl->dataDir) : null;
             if ($icon === null) {
                 return self::coded('No icon', 'icon_none', 404, null, ['cache-control' => 'private, max-age=3600']);
             }

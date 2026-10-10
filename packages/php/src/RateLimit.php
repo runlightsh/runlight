@@ -12,8 +12,9 @@ namespace Runlight;
  *
  * PHP forgets everything between requests, so the counts live where requests
  * can share them: APCu when it is loaded, or else one small file per window in
- * the system's temporary folder. Several servers behind a load balancer each
- * count on their own, as the TypeScript SDK's processes do.
+ * the server's data folder or the system's temporary folder (see Scratch).
+ * Several servers behind a load balancer each count on their own, as the
+ * TypeScript SDK's processes do.
  */
 final class RateLimit
 {
@@ -23,6 +24,8 @@ final class RateLimit
     /** @var array<string, string> today's key by its file, read once per process */
     private static array $keys = [];
     private ?string $ownKey = null;
+    /** The folder the counts are kept in, null when there is none to use, and false until looked for. */
+    private string|false|null $folder = false;
 
     /**
      * @param callable(): int $now milliseconds
@@ -75,7 +78,11 @@ final class RateLimit
         $ms = ($this->now)();
         $window = intdiv($ms, 60_000);
         $today = 'key-' . intdiv($ms, 86_400_000);
-        foreach (glob($this->folder() . '/*') ?: [] as $old) {
+        $dir = $this->folder();
+        if ($dir === null) {
+            return;
+        }
+        foreach (glob($dir . '/*') ?: [] as $old) {
             $name = basename($old);
             // A bare "key" is one an earlier version kept for good.
             $stale = preg_match('/^[0-9]+\z/', $name) ? (int) $name < $window - 1 : ($name === 'key' || (str_starts_with($name, 'key-') && $name !== $today));
@@ -85,9 +92,12 @@ final class RateLimit
         }
     }
 
-    private function folder(): string
+    private function folder(): ?string
     {
-        return ($this->dir ?? sys_get_temp_dir()) . '/runlight-rate';
+        if ($this->folder === false) {
+            $this->folder = Scratch::dir('runlight-rate', $this->dir);
+        }
+        return $this->folder;
     }
 
     private static function apcu(): bool
@@ -98,7 +108,7 @@ final class RateLimit
     private function countInFile(int $window, string $id): ?int
     {
         $dir = $this->folder();
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+        if ($dir === null) {
             return null;
         }
         $file = "$dir/$window";
@@ -107,6 +117,7 @@ final class RateLimit
             return null;
         }
         try {
+            Scratch::protect($file);
             flock($handle, LOCK_EX);
             $counts = json_decode((string) stream_get_contents($handle), true);
             $counts = is_array($counts) ? $counts : [];
@@ -133,7 +144,7 @@ final class RateLimit
             return $this->ownKey ??= random_bytes(16);
         }
         $dir = $this->folder();
-        $file = "$dir/key-$day";
+        $file = ($dir ?? '') . "/key-$day";
         if (isset(self::$keys[$file])) {
             return self::$keys[$file];
         }
@@ -149,7 +160,7 @@ final class RateLimit
             }
         }
         $made = random_bytes(16);
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+        if ($dir === null) {
             return self::$keys[$file] = $made;
         }
         $handle = @fopen($file, 'c+');
@@ -159,7 +170,7 @@ final class RateLimit
         try {
             // Readable by the owner alone before anything is in it, and written under a lock so two first
             // requests agree.
-            @chmod($file, 0600);
+            Scratch::protect($file);
             flock($handle, LOCK_EX);
             $stored = (string) stream_get_contents($handle);
             if (strlen($stored) !== 16) {
