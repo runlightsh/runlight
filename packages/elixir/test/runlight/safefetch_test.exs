@@ -17,6 +17,39 @@ defmodule Runlight.SafefetchTest do
     {Runlight.new(store: store, fetcher: fetcher, now: fn -> :counters.get(clock, 1) end), clock}
   end
 
+  test "link-local and cloud metadata addresses are told apart from loopback and private ones" do
+    for ip <- [
+          "169.254.169.254",
+          "169.254.0.1",
+          "100.100.100.200",
+          "fe80::1",
+          "fe80::a9fe:a9fe",
+          "fd00:ec2::254",
+          "::ffff:169.254.169.254",
+          "::ffff:a9fe:a9fe",
+          "64:ff9b::a9fe:a9fe"
+        ],
+        do: assert(Safefetch.metadata_address?(ip), ip)
+
+    for ip <- [
+          "127.0.0.1",
+          "::1",
+          "10.0.0.5",
+          "192.168.1.20",
+          "fd00::1",
+          "fd00:ec2::253",
+          "93.184.215.14",
+          "not an address"
+        ],
+        do: refute(Safefetch.metadata_address?(ip), ip)
+
+    assert Safefetch.metadata_host?("metadata.google.internal")
+    assert Safefetch.metadata_host?("[fd00:ec2::254]")
+    assert Safefetch.metadata_host?("169.254.169.254")
+    refute Safefetch.metadata_host?("localhost"), "a model on this computer is fine"
+    refute Safefetch.metadata_host?("192.168.1.20")
+  end
+
   test "only addresses on the public internet count as public" do
     for ip <- ["93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e"],
         do: assert(Safefetch.public_address?(ip), ip)

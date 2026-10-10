@@ -141,14 +141,39 @@ defmodule Runlight.Mail.Smtp do
   @timeout 20_000
 
   defp converse(config, m, from, host, port, security, opts) do
+    # A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+    # address. The name is resolved here and the connection goes to an address that was checked, so a name cannot
+    # answer differently later; TLS still checks the certificate against the name.
+    case Runlight.Safefetch.mail_address(String.replace(host, ~r/^\[|\]$/, "")) do
+      {:error, :refused} ->
+        {:error,
+         MailError.exception(
+           message: "SMTP: #{host} is a link-local or cloud metadata address, which Runlight never connects to",
+           code: "address_refused",
+           params: %{"host" => host}
+         )}
+
+      {:ok, address} ->
+        open_socket(config, m, from, host, port, security, opts, address)
+    end
+  end
+
+  defp open_socket(config, m, from, host, port, security, opts, address) do
     tls = tls_options(host)
+
+    {target, family} =
+      case :inet.parse_address(String.to_charlist(address)) do
+        {:ok, ip} when tuple_size(ip) == 8 -> {ip, [:inet6]}
+        {:ok, ip} -> {ip, []}
+        {:error, _} -> {String.to_charlist(address), []}
+      end
 
     connect =
       if security == "tls",
-        do: &:ssl.connect(&1, &2, [:binary, active: false] ++ tls, @timeout),
-        else: &:gen_tcp.connect(&1, &2, [:binary, active: false], @timeout)
+        do: &:ssl.connect(&1, &2, [:binary, active: false] ++ family ++ tls, @timeout),
+        else: &:gen_tcp.connect(&1, &2, [:binary, active: false] ++ family, @timeout)
 
-    case connect.(String.to_charlist(host), port) do
+    case connect.(target, port) do
       {:error, reason} ->
         detail = describe(reason)
 
@@ -161,7 +186,7 @@ defmodule Runlight.Mail.Smtp do
 
       {:ok, socket} ->
         mod = if security == "tls", do: :ssl, else: :gen_tcp
-        conn = %{mod: mod, socket: socket, buffer: ""}
+        conn = %{mod: mod, socket: socket, buffer: "", host: host, port: port}
 
         try do
           conversation(conn, config, m, from, host, security, tls, opts)
@@ -203,7 +228,7 @@ defmodule Runlight.Mail.Smtp do
 
         case :ssl.connect(conn.socket, tls, @timeout) do
           {:ok, secured} ->
-            conn = %{mod: :ssl, socket: secured, buffer: ""}
+            conn = %{conn | mod: :ssl, socket: secured, buffer: ""}
             conn = write(conn, "EHLO #{name}")
             {conn, _} = expect(conn, [250], "EHLO")
             conn
@@ -272,11 +297,18 @@ defmodule Runlight.Mail.Smtp do
   defp expect(conn, codes, what) do
     {conn, reply} = read_reply(conn, @timeout)
 
-    if reply.code in codes do
-      {conn, reply}
-    else
-      message = Runlight.JS.slice("SMTP #{what}: #{reply.code} #{reply.text}", 0, 300)
-      throw({:smtp, MailError.exception(message: message), conn})
+    cond do
+      # Something that is not a mail server gets no more than that said, so its own words are never passed on.
+      not (is_number(reply.code) and reply.code >= 200 and reply.code <= 599) ->
+        message = "SMTP #{what}: #{conn.host}:#{conn.port} did not answer as a mail server does"
+        throw({:smtp, MailError.exception(message: message), conn})
+
+      reply.code in codes ->
+        {conn, reply}
+
+      true ->
+        message = Runlight.JS.slice("SMTP #{what}: #{reply.code} #{reply.text}", 0, 300)
+        throw({:smtp, MailError.exception(message: message), conn})
     end
   end
 
