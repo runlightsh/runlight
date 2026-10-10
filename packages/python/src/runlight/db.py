@@ -13,6 +13,7 @@ connections rather than each opening its own.
 from __future__ import annotations
 
 import decimal
+import inspect
 import os
 import re
 import sys
@@ -671,13 +672,132 @@ def _option(value: str) -> str:
     return re.sub(r"([\\\s'])", r"\\\1", value)
 
 
+# TLS settings in a database URL. Anything else whose name starts with "ssl" is refused, never dropped, so a URL
+# that asks for an encrypted connection never quietly gets a plain one.
+
+# libpq's own, passed to it as they are.
+_PG_TLS = (
+    "sslmode",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+    "sslpassword",
+    "sslcrl",
+    "sslcrldir",
+    "sslsni",
+    "sslcompression",
+    "sslcertmode",
+    "sslnegotiation",
+    "ssl_min_protocol_version",
+    "ssl_max_protocol_version",
+)
+
+
+def _yes_no(name: str, value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in ("true", "1", "yes", "on"):
+        return True
+    if lowered in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"Runlight: the database URL's {name}={value} is not true or false")
+
+
+def postgres_tls(query: dict[str, str]) -> dict[str, str]:
+    """The libpq settings for a Postgres URL's TLS parameters. libpq's own go through as they are; the two that
+    pg, the TypeScript driver, also reads are put in libpq's words: ssl=true (verify the server against the
+    system's certificates) and sslmode=no-verify (encrypt, verify nothing). A sslmode of its own wins over ssl."""
+    for name in query:
+        if name not in _PG_TLS and name != "ssl" and name.lower().startswith("ssl"):
+            raise ValueError(f"Runlight: the database URL's {name} is not a setting Runlight knows for Postgres")
+    out = {name: value for name, value in query.items() if name in _PG_TLS}
+    if "ssl" in query:
+        on = _yes_no("ssl", query["ssl"])
+        if "sslmode" not in out:
+            out["sslmode"] = "verify-full" if on else "disable"
+            if on:
+                out.setdefault("sslrootcert", "system")
+    if out.get("sslmode") == "no-verify":
+        out["sslmode"] = "require"
+    return out
+
+
+def mysql_tls(query: dict[str, str]) -> dict[str, Any]:
+    """PyMySQL's settings for a MySQL URL's TLS parameters: ssl (true, false, or mysql2's JSON with
+    rejectUnauthorized), ssl-mode (DISABLED, PREFERRED, REQUIRED, VERIFY_CA, or VERIFY_IDENTITY, or libpq's
+    disable, prefer, require, verify-ca, and verify-full), sslaccept (strict or accept_invalid_certs), and the
+    files: ssl-ca (or sslrootcert), ssl-cert, and ssl-key. Names may use dashes or underscores. A CA file on its
+    own verifies the server, as mysql2 does with one."""
+    import ssl as _ssl
+
+    mode: str | None = None
+    files: dict[str, str] = {}
+    for given, value in query.items():
+        name = given.lower().replace("-", "_")
+        if not name.startswith("ssl"):
+            continue
+        if name == "ssl":
+            text = value.strip()
+            if text.startswith("{"):
+                ok, options = _js.try_loads(text)
+                if not ok or not isinstance(options, dict) or any(k != "rejectUnauthorized" for k in options):
+                    raise ValueError("Runlight: the database URL's ssl={...} may only hold rejectUnauthorized")
+                mode = "verify_identity" if options.get("rejectUnauthorized", True) is not False else "required"
+            else:
+                mode = "verify_identity" if _yes_no(given, value) else "disabled"
+        elif name in ("ssl_mode", "sslmode"):
+            mode = {
+                "disabled": "disabled",
+                "disable": "disabled",
+                "preferred": "preferred",
+                "prefer": "preferred",
+                "required": "required",
+                "require": "required",
+                "verify_ca": "verify_ca",
+                "verify-ca": "verify_ca",
+                "verify_identity": "verify_identity",
+                "verify-full": "verify_identity",
+            }.get(value.strip().lower())
+            if mode is None:
+                raise ValueError(f"Runlight: the database URL's {given}={value} is not a TLS mode MySQL has")
+        elif name == "sslaccept":
+            accept = {"strict": "verify_identity", "accept_invalid_certs": "required"}.get(value.strip().lower())
+            if accept is None:
+                raise ValueError(f"Runlight: the database URL's {given}={value} is not strict or accept_invalid_certs")
+            mode = accept
+        elif name in ("ssl_ca", "sslca", "sslrootcert"):
+            files["ca"] = value
+        elif name in ("ssl_cert", "sslcert"):
+            files["cert"] = value
+        elif name in ("ssl_key", "sslkey"):
+            files["key"] = value
+        else:
+            raise ValueError(f"Runlight: the database URL's {given} is not a setting Runlight knows for MySQL")
+    if mode is None and files:
+        mode = "verify_identity"
+    if mode is None or mode == "preferred":
+        # The driver's own default.
+        return {}
+    if mode == "disabled":
+        return {"ssl_disabled": True}
+    context = _ssl.create_default_context(cafile=files.get("ca"))
+    if mode == "required":
+        context.check_hostname = False
+        context.verify_mode = _ssl.CERT_NONE
+    elif mode == "verify_ca":
+        context.check_hostname = False
+    if "cert" in files:
+        context.load_cert_chain(files["cert"], keyfile=files.get("key"))
+    return {"ssl": context}
+
+
 def sqlite(path: str) -> SqliteDb:
     """A SQLite file, or ":memory:", with the pragmas stores/sqlite.ts sets."""
     return SqliteDb(path)
 
 
 def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = None, max: int = 10) -> PostgresDb:  # noqa: A002
-    """Postgres from a URL like postgres://user:pass@host:5432/db?sslmode=require. `statement_timeout` stops any
+    """Postgres from a URL like postgres://user:pass@host:5432/db?sslmode=verify-full, with libpq's TLS settings
+    (postgres_tls() lists them). `statement_timeout` stops any
     one statement after that many milliseconds; 0 turns it off. `schema`, when given, is the search path. `max`
     is the most connections open at once."""
     try:
@@ -686,6 +806,7 @@ def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = No
         raise ImportError('Runlight: the Postgres store needs psycopg 3. Install it with pip install "runlight[postgres]"') from None
 
     parts = _parts(url)
+    tls = postgres_tls(parts["query"])
 
     def connect() -> Any:
         options = [parts["query"]["options"]] if "options" in parts["query"] else []
@@ -706,8 +827,7 @@ def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = No
             kwargs["user"] = parts["user"]
         if parts["password"] is not None:
             kwargs["password"] = parts["password"]
-        if "sslmode" in parts["query"]:
-            kwargs["sslmode"] = parts["query"]["sslmode"]
+        kwargs.update(tls)
         if options:
             kwargs["options"] = " ".join(options)
         return psycopg.connect(**kwargs)
@@ -716,7 +836,8 @@ def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = No
 
 
 def mysql(url: str, statement_timeout: int = 120_000, max: int = 10) -> MysqlDb:  # noqa: A002
-    """MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://). The
+    """MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://), with
+    the TLS settings mysql_tls() lists, such as ?ssl-mode=VERIFY_IDENTITY. The
     session is utf8mb4, with IGNORE_SPACE added to the server's SQL mode as mysql2 asks for it. Runlight's tables
     carry their own binary collation, so text compares and sorts by code point. `max` is the most connections
     open at once."""
@@ -726,6 +847,10 @@ def mysql(url: str, statement_timeout: int = 120_000, max: int = 10) -> MysqlDb:
         raise ImportError('Runlight: the MySQL store needs PyMySQL. Install it with pip install "runlight[mysql]"') from None
 
     parts = _parts(re.sub(r"^mariadb:", "mysql:", url, flags=re.I))
+    tls = mysql_tls(parts["query"])
+    # An older PyMySQL has no ssl_disabled, and never tries TLS unless asked to.
+    if "ssl_disabled" in tls and "ssl_disabled" not in inspect.signature(pymysql.connect).parameters:
+        tls = {}
 
     def connect() -> Any:
         conn = pymysql.connect(
@@ -738,6 +863,7 @@ def mysql(url: str, statement_timeout: int = 120_000, max: int = 10) -> MysqlDb:
             autocommit=True,
             connect_timeout=10,
             client_flag=pymysql.constants.CLIENT.IGNORE_SPACE,
+            **tls,
         )
         try:
             backslash_escapes_on(conn)
