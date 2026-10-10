@@ -224,8 +224,14 @@ class JdkServerTest {
     assertEquals(
         "the app", get("/docs/", "user-agent", GPTBOT, "x-forwarded-host", "example.com").body());
     get("/about", "user-agent", CHROME, "x-forwarded-host", "example.com");
-    List<Map<String, Object>> fetches =
-        rl.store.db().all("SELECT path FROM rl_events WHERE kind = 'fetch'", List.of());
+    // The fetch is recorded once the answer has gone, so it may land a moment after.
+    List<Map<String, Object>> fetches = List.of();
+    for (int i = 0; i < 200 && fetches.isEmpty(); i++) {
+      if (i > 0) {
+        Thread.sleep(50);
+      }
+      fetches = rl.store.db().all("SELECT path FROM rl_events WHERE kind = 'fetch'", List.of());
+    }
     assertEquals(1, fetches.size(), fetches.toString());
     assertEquals("/docs/", fetches.get(0).get("path"));
   }
