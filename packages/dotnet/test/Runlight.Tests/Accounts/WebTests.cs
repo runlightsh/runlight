@@ -525,10 +525,11 @@ public sealed class WebTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_broken_session_cookie_throws_as_decode_uri_component_does()
+    public async Task A_session_cookie_that_is_not_valid_percent_encoding_reads_as_signed_out()
     {
         var web = await WebAsync();
-        await Assert.ThrowsAsync<ArgumentException>(() => web.SignedInAsync(Req("/", "GET", new Dictionary<string, string> { ["cookie"] = "runlight_session=%E0%A4%A" })));
+        Assert.Null(await web.SignedInAsync(Req("/", "GET", new Dictionary<string, string> { ["cookie"] = "runlight_session=%E0%A4%A" })));
+        Assert.Null(await web.SignedInAsync(Req("/", "GET", new Dictionary<string, string> { ["cookie"] = "runlight_session=%" })));
     }
 
     [Fact]

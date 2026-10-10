@@ -226,7 +226,12 @@ public sealed class Web
         {
             return null;
         }
-        string decoded = Js.DecodeURIComponent(value) ?? throw new ArgumentException("URI malformed");
+        // A cookie that is not valid percent-encoding is nobody's session, never an error.
+        string? decoded = Js.DecodeURIComponent(value);
+        if (decoded == null)
+        {
+            return null;
+        }
         return await Accounts.FromSessionAsync(decoded, Now(), cancellationToken).ConfigureAwait(false);
     }
 
