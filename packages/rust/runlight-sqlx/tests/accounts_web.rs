@@ -13,11 +13,12 @@ use runlight::{BoxFuture, Routes, RoutesOptions, Runlight, RunlightOptions, Site
 
 const NOW: i64 = 1_791_288_000_000;
 
-/// A mail webhook that keeps what it was sent, or fails when told to.
+/// A mail webhook that keeps what it was sent, or fails or never answers when told to.
 #[derive(Default)]
 struct Hook {
     sent: Mutex<Vec<Value>>,
     down: AtomicBool,
+    hang: AtomicBool,
 }
 
 impl Fetcher for Hook {
@@ -25,6 +26,9 @@ impl Fetcher for Hook {
         Box::pin(async move {
             if self.down.load(Ordering::SeqCst) {
                 return Err(FetchError::Failed("fetch failed".into()));
+            }
+            if self.hang.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
             }
             let body = init.body.as_deref().map(runlight::http::utf8).unwrap_or_default();
             self.sent.lock().unwrap().push(js::parse(&body).unwrap());
@@ -358,6 +362,24 @@ async fn each_viewer_account_has_its_own_daily_questions() {
     // Bob's questions are his own, not every viewer's.
     let other = app.routes.handle(json(&bob, "POST", "/api/assistant/chat", &ask)).await;
     assert_ne!(other.status, 429, "{}", code(&other));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn questions_given_up_on_do_not_count_as_still_asking() {
+    let app = app(false, None).await;
+    let owner = app.owner().await;
+    let set = runlight::obj! { "provider" => "anthropic", "model" => "claude", "key" => "sk-test" };
+    assert_eq!(app.routes.handle(json(&owner, "PUT", "/api/assistant", &set)).await.status, 200);
+    let ask = runlight::obj! { "messages" => runlight::arr![runlight::obj! { "role" => "user", "content" => "Hi" }] };
+    // Two questions whose askers leave while the service is still thinking.
+    app.hook.hang.store(true, Ordering::SeqCst);
+    for _ in 0..2 {
+        let asked = app.routes.handle(json(&owner, "POST", "/api/assistant/chat", &ask));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(300), asked).await.is_err());
+    }
+    app.hook.hang.store(false, Ordering::SeqCst);
+    let next = app.routes.handle(json(&owner, "POST", "/api/assistant/chat", &ask)).await;
+    assert_ne!(next.status, 429, "{:?}", next.json_body().ok());
 }
 
 fn web(first: FirstAccount, rl: &Runlight) -> AccountsWeb {
