@@ -179,6 +179,35 @@ async fn invites_work_once_and_the_newest_link_wins() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn invites_go_with_whoever_sent_them() {
+    each(async |_, store| {
+        let accounts = Accounts::new(store.clone(), SECRET);
+        accounts.set_password("jon@example.com", "a long password", NOW, None).await.unwrap();
+        let ada = accounts.set_password("ada@example.com", "a long password", NOW, Some(Role::Admin)).await.unwrap();
+
+        // Made a member: what they sent stops working.
+        let from_ada = accounts.invite("eve@example.com", Role::Admin, "ada@example.com", NOW).await.unwrap();
+        accounts.set_role(&ada.id, Role::Member).await.unwrap();
+        assert_eq!(accounts.invite_by_code(&from_ada.code, NOW).await.unwrap(), None);
+
+        // Removed: the same.
+        accounts.set_role(&ada.id, Role::Admin).await.unwrap();
+        let again = accounts.invite("eve@example.com", Role::Admin, "ada@example.com", NOW).await.unwrap();
+        accounts.remove(&ada.id).await.unwrap();
+        assert_eq!(code_of(accounts.accept_invite(&again.code, "a long password", NOW).await), "invite_gone");
+        assert_eq!(accounts.invites(NOW).await.unwrap(), []);
+
+        // An invite left from before, whose sender is no longer an admin, is refused when used, and goes.
+        accounts.set_password("bo@example.com", "a long password", NOW, Some(Role::Admin)).await.unwrap();
+        let from_bo = accounts.invite("zed@example.com", Role::Admin, "bo@example.com", NOW).await.unwrap();
+        store.db().run("UPDATE rl_users SET role = 'viewer' WHERE email = 'bo@example.com'", vec![]).await.unwrap();
+        assert_eq!(code_of(accounts.accept_invite(&from_bo.code, "a long password", NOW).await), "invite_gone");
+        assert_eq!(accounts.invite_by_code(&from_bo.code, NOW).await.unwrap(), None);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_double_clicked_invite_makes_one() {
     each(async |_, store| {
         let accounts = Arc::new(Accounts::new(store, SECRET));

@@ -108,6 +108,11 @@ impl Role {
         }
     }
 
+    /// Whether the role may invite people. The owner and admins invite as admin, member, or viewer.
+    pub fn may_invite(self) -> bool {
+        matches!(self, Role::Owner | Role::Admin)
+    }
+
     /// The role a name is, if it is one.
     pub fn parse(name: &str) -> Option<Role> {
         Role::ALL.into_iter().find(|r| r.as_str() == name)
@@ -734,6 +739,10 @@ impl Accounts {
                 return Err(AccountError::new("Ownership is handed over by the owner", "owner_hand_over", &[]).into());
             }
             self.store.db().run("UPDATE rl_users SET role = ? WHERE id = ?", params![role.as_str(), id]).await?;
+            // Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+            if !role.may_invite() {
+                self.store.db().run("DELETE FROM rl_invites WHERE invited_by = ?", params![&user.email]).await?;
+            }
             Ok(User { role, ..user })
         })
         .await
@@ -774,6 +783,7 @@ impl Accounts {
                 return Err(AccountError::new("The owner cannot be removed", "owner_protected", &[]).into());
             }
             self.store.db().run("DELETE FROM rl_users WHERE id = ?", params![id]).await?;
+            self.store.db().run("DELETE FROM rl_invites WHERE invited_by = ?", params![&user.email]).await?;
             self.store.set_setting(&format!("login-link-used:{id}"), None).await?;
             Ok(())
         })
@@ -912,27 +922,34 @@ impl Accounts {
         Ok(before > 0)
     }
 
-    /// Turns an invite into an account with the password its person chose. The link then stops working.
+    /// Turns an invite into an account with the password its person chose. The link then stops working. It takes a
+    /// turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite.
     pub async fn accept_invite(&self, code: &str, password: &str, now: i64) -> R<User> {
-        let Some(invite) = self.invite_by_code(code, now).await? else {
-            return Err(AccountError::new(
-                "This invite has expired or was already used. Ask for a new one.",
-                "invite_gone",
-                &[],
-            )
-            .into());
-        };
-        if self.by_email(&invite.email).await?.is_some() {
-            return Err(AccountError::new(
-                format!("{} already has an account", invite.email),
-                "account_exists",
-                &[("email", &invite.email)],
-            )
-            .into());
-        }
-        let user = self.set_password(&invite.email, password, now, Some(invite.role)).await?;
-        self.store.db().run("DELETE FROM rl_invites WHERE id = ?", params![&invite.id]).await?;
-        Ok(user)
+        // The tables first: making them takes the same lock as a turn.
+        self.init().await?;
+        self.turn(|| async {
+            let gone = || {
+                AccountError::new("This invite has expired or was already used. Ask for a new one.", "invite_gone", &[])
+            };
+            let Some(invite) = self.invite_by_code(code, now).await? else { return Err(gone().into()) };
+            let sender = self.by_email(&invite.invited_by).await?;
+            if !sender.is_some_and(|s| s.role.may_invite()) {
+                self.store.db().run("DELETE FROM rl_invites WHERE id = ?", params![&invite.id]).await?;
+                return Err(gone().into());
+            }
+            if self.by_email(&invite.email).await?.is_some() {
+                return Err(AccountError::new(
+                    format!("{} already has an account", invite.email),
+                    "account_exists",
+                    &[("email", &invite.email)],
+                )
+                .into());
+            }
+            let user = self.set_password(&invite.email, password, now, Some(invite.role)).await?;
+            self.store.db().run("DELETE FROM rl_invites WHERE id = ?", params![&invite.id]).await?;
+            Ok(user)
+        })
+        .await
     }
 
     /// The account for an email and password, or `None`. Takes the same time either way.
