@@ -3,6 +3,8 @@ package runlight
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,6 +43,50 @@ func TestLaterWhileIdleWaits(t *testing.T) {
 	defer r.busyMu.Unlock()
 	if r.busy != 0 {
 		t.Fatalf("%d pieces of work still counted after Idle", r.busy)
+	}
+}
+
+// stuckDb holds every query until open is closed, then has nothing.
+type stuckDb struct{ open chan struct{} }
+
+func (stuckDb) Dialect() string { return "sqlite" }
+func (d stuckDb) All(context.Context, string, ...any) ([]Row, error) {
+	<-d.open
+	return nil, nil
+}
+func (d stuckDb) Run(context.Context, string, ...any) error {
+	<-d.open
+	return nil
+}
+
+// A crawler flooding a slow database gets a bounded number of recordings,
+// and the rest are dropped rather than piling up.
+func TestObserverDropsFetchesPastItsLimit(t *testing.T) {
+	db := stuckDb{open: make(chan struct{})}
+	r, err := New(Options{Store: NewStore(db), Logf: func(string, ...any) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passed := 0
+	handler := r.Observer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { passed++ }))
+	for range 3 * observerMax {
+		req := httptest.NewRequest("GET", "https://example.com/", nil)
+		req.Header.Set("user-agent", "Mozilla/5.0 (compatible; GPTBot/1.2)")
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if passed != 3*observerMax {
+		t.Fatalf("%d requests passed on, want %d", passed, 3*observerMax)
+	}
+	r.busyMu.Lock()
+	busy := r.busy
+	r.busyMu.Unlock()
+	if got := r.observing.Load(); got != observerMax || busy != observerMax {
+		t.Fatalf("%d recording and %d running, want %d", got, busy, observerMax)
+	}
+	close(db.open)
+	r.Idle()
+	if got := r.observing.Load(); got != 0 {
+		t.Fatalf("%d still recording after Idle", got)
 	}
 }
 

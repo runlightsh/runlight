@@ -202,16 +202,27 @@ var OAuthDocuments = []string{"/.well-known/oauth-protected-resource", "/.well-k
 // LinksHTTP answers short links on the app's own domain, at {LinkPath}/{slug}.
 func (r *Runlight) LinksHTTP() http.Handler { return HTTPHandler(r.LinkHandler()) }
 
+// observerMax is how many AI agent fetches the Observer records at once.
+const observerMax = 64
+
 // Observer is middleware that records AI agent fetches of the app's pages
 // and always passes the request on. It reads only the URL and headers, never
 // the body, and the recording runs beside the request, so the page is not
-// held up.
+// held up. Past observerMax fetches still being recorded, as when a crawler
+// floods a slow database, more are dropped rather than queued.
 func (r *Runlight) Observer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		// Most requests are people, which need no more than this look at the user agent.
 		if req.Method == "GET" && AiAgentOf(req.Header.Get("user-agent")) != nil {
-			if request, err := FromHTTP(req); err == nil {
-				r.later(func(ctx context.Context) { r.Observe(ctx, request, nil) })
+			if r.observing.Add(1) > observerMax {
+				r.observing.Add(-1)
+			} else if request, err := FromHTTP(req); err != nil {
+				r.observing.Add(-1)
+			} else {
+				r.later(func(ctx context.Context) {
+					defer r.observing.Add(-1)
+					r.Observe(ctx, request, nil)
+				})
 			}
 		}
 		next.ServeHTTP(w, req)
