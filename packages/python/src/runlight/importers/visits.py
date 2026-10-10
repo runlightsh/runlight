@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .. import _js
+from ..accounts.crypto import base64url, hmac, random_bytes
 from ..http import Fetcher, Url
 from ..sources import attribute, parse_page
 from ..store import EVENT_TAIL_MS
@@ -193,11 +194,13 @@ def _write_step(
             [site_id, from_, to, site_id],
         )
         # Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
-        # so the time bounds let the (site, ts) index find them, with no scan of every event.
+        # so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+        # EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
+        # CSV imported again has new ids, so its new visit does not take that one's place.
         store.db.run(
             """DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
          AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)""",
-            [site_id, from_, to, site_id, from_, to + EVENT_TAIL_MS],
+            [site_id, from_ - EVENT_TAIL_MS, to, site_id, from_ - EVENT_TAIL_MS, to + EVENT_TAIL_MS],
         )
         for item in hits:
             hit = item["hit"]
@@ -369,11 +372,22 @@ def _write_event(store: Any, site: dict[str, Any], ns: str, e: dict[str, Any]) -
     return not open
 
 
-def import_csv_visits(runlight: Any, site_id: str, rows: Any) -> dict[str, int]:
+# A secret a caller sends back with a CSV's later batches.
+_SECRET = re.compile(r"[A-Za-z0-9_-]{22,128}\Z")
+
+
+def import_csv_visits(runlight: Any, site_id: str, rows: Any, secret: Any = None) -> dict[str, Any]:
     """One batch of a CSV file, sorted oldest first by the dashboard. As with Umami, only rows from before
     Runlight's own first visit, and within what the site keeps, are written. A batch can run again: its
     time span is cleared first, so batches must not share a moment, which the dashboard sees to.
-    Gives {pageviews, events, visits, skipped}."""
+    Gives {pageviews, events, visits, skipped, secret}.
+
+    A CSV's visitor column can hold anything, an email or an IP address among them, and a plain hash of
+    one is easily undone by trying every address. So each key is an HMAC under a random secret made for
+    the import and never stored: the first batch gets one, the answer carries it, and the caller sends
+    it with every later batch of the same file, so a visit that runs across two batches stays one. A file
+    imported again gets a new secret and new ids; its time span is cleared first, as always, so nothing is
+    counted twice."""
     runlight.init()
     if not runlight.site(site_id):
         raise ImportError("Unknown site", "unknown_site")
@@ -386,6 +400,7 @@ def import_csv_visits(runlight: Any, site_id: str, rows: Any) -> dict[str, int]:
     format = csv_format(list(clean[0].keys()) if clean else [])
     if not format:
         raise ImportError("This CSV is not an Umami export or Runlight's visit format", "import_csv_format")
+    key = secret if isinstance(secret, str) and _SECRET.match(secret) else base64url(random_bytes(24))
     cutoff = runlight.retention_cutoff(site_id) or 0
     own = runlight.store.first_own_visit(site_id)
     end = min(math.inf if own is None else own, runlight.now())
@@ -395,6 +410,8 @@ def import_csv_visits(runlight: Any, site_id: str, rows: Any) -> dict[str, int]:
         h["hit"]["ts"] = _js.whole(h["hit"]["ts"])
     skipped = len(clean) - len(hits)
     if not hits:
-        return {"pageviews": 0, "events": 0, "visits": 0, "skipped": skipped}
+        return {"pageviews": 0, "events": 0, "visits": 0, "skipped": skipped, "secret": key}
+    for h in hits:
+        h["hit"]["key"] = base64url(hmac("SHA-256", key, h["hit"]["key"]))
     counts = _write_step(runlight, site_id, hits[0]["hit"]["ts"], hits[-1]["hit"]["ts"] + 1, hits)
-    return {**counts, "skipped": skipped}
+    return {**counts, "skipped": skipped, "secret": key}

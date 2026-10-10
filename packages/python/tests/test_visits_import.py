@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import math
+import re
 import time
 from typing import Any
 
@@ -335,7 +337,10 @@ def csv(databases: Any, now: int = 0) -> Harness:
 
 def test_csv_in_runlights_format_rows_become_visits_with_sources_places_devices_and_events(databases: Any) -> None:
     t = csv(databases)
-    assert import_csv_visits(t.rl, "default", RUNLIGHT_ROWS) == {"pageviews": 3, "events": 1, "visits": 2, "skipped": 1}
+    step = import_csv_visits(t.rl, "default", RUNLIGHT_ROWS)
+    secret = step.pop("secret")
+    assert step == {"pageviews": 3, "events": 1, "visits": 2, "skipped": 1}
+    assert re.fullmatch(r"[A-Za-z0-9_-]{32}", secret)
     q = t.query("2026-03-01", "2026-03-03")
     stats = t.stats(q)
     assert [stats["pageviews"], stats["visits"], stats["visitors"]] == [3, 2, 2]
@@ -357,7 +362,7 @@ def test_csv_in_runlights_format_without_a_visitor_column_every_row_is_its_own_v
     assert import_csv_visits(t.rl, "default", rows)["visits"] == 2
     import_csv_visits(t.rl, "default", rows)
     q = t.query("2026-03-01", "2026-03-03")
-    assert t.stats(q)["visits"] == 2, "the same rows get the same ids the second time"
+    assert t.stats(q)["visits"] == 2, "the second import replaces the first"
     assert sorted(t.values(q, "page")) == ["/a", "/b"]
 
 
@@ -369,11 +374,47 @@ def test_csv_from_umamis_export_pageviews_and_named_events_come_across_other_eve
         {"website_id": "w1", "session_id": "s1", "created_at": "2026-03-01 10:03:01", "hostname": "blog.example.com", "url_path": "/pricing", "event_type": "5"},
         {"website_id": "w1", "session_id": "s2", "created_at": "2026-03-02T09:00:00.000Z", "hostname": "blog.example.com", "url_path": "/blog", "event_type": "1", "country": "GB", "browser": "chrome", "os": "Mac OS", "device": "desktop"},  # noqa: E501
     ]
-    assert import_csv_visits(t.rl, "default", rows) == {"pageviews": 2, "events": 1, "visits": 2, "skipped": 1}
+    step = import_csv_visits(t.rl, "default", rows)
+    step.pop("secret")
+    assert step == {"pageviews": 2, "events": 1, "visits": 2, "skipped": 1}
     q = t.query("2026-03-01", "2026-03-03")
     assert t.values(q, "source") == ["Hacker News"]
     assert t.values(q, "region") == ["CA-ON"]
     assert sorted(t.values(q, "browser")) == ["Chrome", "Safari"]
+
+
+def test_a_csv_visitor_column_is_keyed_with_a_secret_only_the_import_holds_which_later_batches_of_the_file_send_back(databases: Any) -> None:
+    t = csv(databases)
+    people = [
+        {"time": "2026-03-01T10:00:00Z", "path": "/a", "visitor": "203.0.113.7"},
+        {"time": "2026-03-01T10:10:00Z", "path": "/b", "visitor": "203.0.113.7"},
+        {"time": "2026-03-01T10:20:00Z", "path": "/c", "visitor": "jon@example.com"},
+    ]
+
+    # A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+    def plain(key: str, length: int) -> str:
+        return hashlib.sha256(f"csv:{key}:2026-03-01".encode()).hexdigest()[:length]
+
+    first = import_csv_visits(t.rl, "default", people[:1])
+    second = import_csv_visits(t.rl, "default", people[1:], first["secret"])
+    assert second["secret"] == first["secret"]
+    assert second["visits"] == 1, "the second batch's visitor continues the first batch's visit"
+    visitors = [r["visitor"] for r in t.rl.store.db.all("SELECT DISTINCT visitor FROM rl_sessions")]
+    assert len(visitors) == 2
+    for key in ["203.0.113.7", "jon@example.com"]:
+        assert plain(key, 16) not in visitors, key
+    q = t.query("2026-03-01", "2026-03-03")
+    assert t.stats(q)["visits"] == 2
+
+    # The same file again, with a new secret and so new ids, leaves no visit of the old import behind,
+    # even one that ran across its two batches.
+    again = import_csv_visits(t.rl, "default", people[:1])
+    assert again["secret"] != first["secret"]
+    import_csv_visits(t.rl, "default", people[1:], again["secret"])
+    stats = t.stats(q)
+    assert stats["visits"] == 2
+    assert stats["pageviews"] == 3
+    assert len(t.rl.store.db.all("SELECT id FROM rl_sessions")) == 2
 
 
 def test_csv_rows_from_after_runlights_own_first_visit_are_left_to_runlight(databases: Any) -> None:

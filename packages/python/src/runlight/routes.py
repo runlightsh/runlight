@@ -1626,7 +1626,7 @@ class Routes:
             if isinstance(site, Response):
                 return site
             try:
-                return json(import_csv_visits(rl, site["id"], _get(body, "rows")))
+                return json(import_csv_visits(rl, site["id"], _get(body, "rows"), _get(body, "secret")))
             except ImporterError as error:
                 return _refused(error, "import_failed")
 
