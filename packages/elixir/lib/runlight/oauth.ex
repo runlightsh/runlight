@@ -378,9 +378,8 @@ defmodule Runlight.OAuth do
   defp exchange(ctx, _request, get) do
     rl = ctx.rl
     key = "oauth-code:#{Hash.sha256(get.("code") || "")}"
-    stored = Store.setting(rl.store, key)
-    # A code works once: it is gone before anything else is checked.
-    if stored, do: Store.set_setting(rl.store, key, nil)
+    # A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+    stored = Store.take_setting(rl.store, key)
     grant = stored && JS.parse!(stored)
 
     cond do

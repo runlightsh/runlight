@@ -189,9 +189,8 @@ defmodule Runlight.Connect do
   def finish_connect(rl, params) do
     state = SearchParams.get(params, "state") || ""
     key = "connect:#{state}"
-    stored = if Regex.match?(~r/\A[a-f0-9]{32}\z/, state), do: Store.setting(rl.store, key)
-    # Each attempt works once.
-    if stored, do: Store.set_setting(rl.store, key, nil)
+    # Each attempt works once, even when it comes back twice at once.
+    stored = if Regex.match?(~r/\A[a-f0-9]{32}\z/, state), do: Store.take_setting(rl.store, key)
     pending = if stored not in [nil, ""], do: pending_from(stored, Runlight.now(rl))
 
     if pending == nil,
