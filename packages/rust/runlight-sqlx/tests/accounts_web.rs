@@ -402,12 +402,12 @@ async fn cookies_codes_and_where_a_sign_in_goes() {
     let web = web(FirstAccount::Code("printed".into()), &app.rl);
     assert!(web.signed_in(&req("GET", "/").header("cookie", format!("a=b; {owner} ; c=d=e"))).await.unwrap().is_some());
     assert!(
-        web.signed_in(&req("GET", "/").header("cookie", "runlight_session=%E0%A4%A")).await.is_err(),
-        "decodeURIComponent throws"
+        web.signed_in(&req("GET", "/").header("cookie", "runlight_session=%E0%A4%A")).await.unwrap().is_none(),
+        "a cookie that is not valid percent-encoding is nobody's session"
     );
     assert_eq!(
         app.routes.handle(req("GET", "/api/account").header("cookie", "runlight_session=%E0%A4%A")).await.status,
-        500
+        401
     );
 
     let plain = Request::new("POST", "http://example.com/runlight/login")
