@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: php-split-tag
+      group: php-split-tag-${{ github.ref_name }}
       cancel-in-progress: false
     env:
       DEPLOY_KEY: ${{ secrets.PHP_SPLIT_DEPLOY_KEY }}
