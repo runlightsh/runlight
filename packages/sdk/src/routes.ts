@@ -1741,7 +1741,15 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (site instanceof Response) return site;
     if (!site || (only && site.id !== only)) return coded("Unknown site", "unknown_site", 404);
     const remote = runlight.remote(site.id);
-    if (remote) return passThrough(remote, path, url, request, runlight.localInstalls);
+    // A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+    // each visit, with its time and city, since anyone with the link could watch one person's way through the site.
+    const unfeed = (live: Record<string, unknown>) => (shared ? { ...live, recent: [] } : live);
+    if (remote) {
+      const answer = await passThrough(remote, path, url, request, runlight.localInstalls);
+      if (path !== "/api/realtime" || !shared || !answer.ok) return answer;
+      const live = (await answer.json().catch(() => null)) as Record<string, unknown> | null;
+      return live && typeof live === "object" ? json(unfeed(live)) : coded(`Could not reach ${new URL(remote.url).host}`, "unreachable", 502, { host: new URL(remote.url).host });
+    }
 
     if (path === "/api/icon") {
       const host = site.hostnames[0];
@@ -1760,7 +1768,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     }
 
     if (path === "/api/realtime") {
-      return json(await runlight.store.realtime(site.id, runlight.now()));
+      return json(unfeed({ ...(await runlight.store.realtime(site.id, runlight.now())) }));
     }
 
     const read = await readQuery(url, site);

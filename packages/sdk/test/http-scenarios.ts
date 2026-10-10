@@ -628,6 +628,8 @@ const SHARING: Scenario[] = [
       { method: "GET", path: "/api/sites", headers: { "x-runlight-embed": "{{session}}" } },
       { method: "GET", path: "/api/stats?period=today&compare=off", headers: { "x-runlight-embed": "{{session}}" } },
       { method: "GET", path: "/api/breakdown?period=today&dimension=source", headers: { "x-runlight-embed": "{{session}}" } },
+      // Here now, but no feed of single visits.
+      { method: "GET", path: "/api/realtime", headers: { "x-runlight-embed": "{{session}}" } },
       { method: "GET", path: "/api/stats?site=shop&period=today&compare=off", headers: { "x-runlight-embed": "{{session}}" } },
       { method: "GET", path: "/api/links?period=today", headers: { "x-runlight-embed": "{{session}}" } },
       { method: "GET", path: "/api/tokens", headers: { "x-runlight-embed": "{{session}}" } },

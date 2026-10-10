@@ -18332,18 +18332,7 @@
                 0,
                 1
               ],
-              "recent": [
-                {
-                  "ts": 1791288000000,
-                  "kind": "pageview",
-                  "path": "/",
-                  "name": "",
-                  "country": "",
-                  "city": "",
-                  "source": "Google",
-                  "device": "desktop"
-                }
-              ]
+              "recent": []
             }
           }
         },
@@ -19735,6 +19724,70 @@
                   "visitDuration": 0
                 }
               ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/realtime",
+          "headers": {
+            "x-runlight-embed": "{{session}}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "visitors": 1,
+              "pages": [
+                {
+                  "value": "/",
+                  "visitors": 1
+                }
+              ],
+              "sources": [
+                {
+                  "value": "Google",
+                  "visitors": 1
+                }
+              ],
+              "countries": [],
+              "minutes": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1
+              ],
+              "recent": []
             }
           }
         },
