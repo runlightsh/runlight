@@ -3035,16 +3035,33 @@ defmodule Runlight.Routes do
               coded("Unknown site", "unknown_site", 404)
 
             Runlight.remote(rl, site["id"]) != nil ->
-              pass_through(routes, Runlight.remote(rl, site["id"]), path, url, request)
+              remote = Runlight.remote(rl, site["id"])
+              answer = pass_through(routes, remote, path, url, request)
+
+              if path != "/api/realtime" or shared == nil or answer.status not in 200..299 do
+                answer
+              else
+                host = Url.host(Url.new(remote["url"]))
+
+                case Response.json(answer) do
+                  {:ok, %Object{} = live} -> json(unfeed(live, shared))
+                  _ -> coded("Could not reach #{host}", "unreachable", 502, %{"host" => host})
+                end
+              end
 
             true ->
-              site_reads(routes, path, url, site)
+              site_reads(routes, path, url, site, shared)
           end
       end
     end
   end
 
-  defp site_reads(routes, path, url, site) do
+  # A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of each
+  # visit, with its time and city, since anyone with the link could watch one person's way through the site.
+  defp unfeed(live, nil), do: live
+  defp unfeed(live, _shared), do: Object.put(live, "recent", [])
+
+  defp site_reads(routes, path, url, site, shared) do
     rl = routes.rl
 
     cond do
@@ -3066,7 +3083,7 @@ defmodule Runlight.Routes do
         end
 
       path == "/api/realtime" ->
-        json(Store.realtime(rl.store, site["id"], Runlight.now(rl)))
+        json(unfeed(Store.realtime(rl.store, site["id"], Runlight.now(rl)), shared))
 
       true ->
         case read_query(routes, url, site) do
