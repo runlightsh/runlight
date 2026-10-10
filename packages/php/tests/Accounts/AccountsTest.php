@@ -223,7 +223,7 @@ final class AccountsTest extends TestCase
     public function testTheThrottleCountsBeforeTheCheckAndForgivesARightTry(): void
     {
         $store = self::store('sqlite');
-        $throttle = new Throttle($store, 'test', 3, 1000);
+        $throttle = new Throttle($store, 'test', 3, 1000, static fn (): int => self::NOW);
         for ($i = 0; $i < 3; $i++) {
             $this->assertTrue($throttle->take('jon@example.com', self::NOW));
         }
@@ -249,5 +249,40 @@ final class AccountsTest extends TestCase
         // A new entry clears expired ones.
         $throttle->fail('zed@example.com', self::NOW + 2000);
         $this->assertCount(1, $store->settingsStartingWith('throttle:test:'));
+    }
+
+    public function testThrottleIdsAreHashedWithAKeyForTheDaySoNothingMadeFromAnAddressOutlastsADay(): void
+    {
+        $store = self::store('sqlite');
+        $now = self::NOW;
+        $throttle = new Throttle($store, 'ip', 3, 15 * 60_000, static function () use (&$now): int {
+            return $now;
+        });
+        $store->setSetting('throttle-key', 'the one key kept before');
+        $this->assertTrue($throttle->take('203.0.113.7', $now));
+        $day = static fn (int $ms): string => 'throttle-key:' . gmdate('Y-m-d', intdiv($ms, 1000));
+        $this->assertNotNull($store->setting($day($now)));
+        $this->assertNull($store->setting('throttle-key'), 'the old lasting key is gone');
+        [$first] = array_column($store->settingsStartingWith('throttle:ip:'), 'key');
+        $throttle->forgive('203.0.113.7');
+
+        // The next day has its own key, so the same address gets another id; yesterday's key stays a day for windows across midnight.
+        $now += 86_400_000;
+        $this->assertTrue($throttle->take('203.0.113.7', $now));
+        $this->assertNotContains($first, array_column($store->settingsStartingWith('throttle:ip:'), 'key'), 'the same address, another id');
+        $this->assertNotNull($store->setting($day($now - 86_400_000)));
+
+        // Two days on, the first key has gone, and so has every count that ran out.
+        $now += 86_400_000;
+        $this->assertTrue($throttle->take('198.51.100.1', $now));
+        $this->assertNull($store->setting($day(self::NOW)), 'keys older than yesterday are deleted');
+        $this->assertCount(1, $store->settingsStartingWith('throttle:ip:'));
+
+        // The scheduled check's sweep takes counts that ran out, from every throttle.
+        $store->setSetting('throttle:account:old', '{"count":2,"until":1}');
+        Throttle::sweep($store, $now + 15 * 60_000);
+        $this->assertSame([], $store->settingsStartingWith('throttle:'));
+        $this->assertNotNull($store->setting($day($now)), "today's key stays");
+        $this->assertNull($store->setting($day(self::NOW)));
     }
 }

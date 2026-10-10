@@ -100,13 +100,14 @@ final class Web
         $this->cookiePath = $this->base !== '' ? $this->base : '/';
         $this->homePath = "$this->base/";
         $this->asksForToken = is_array($this->first) && array_key_exists('token', $this->first);
-        $this->perAddress = new Throttle($this->store, 'address', 10);
-        $this->perAccount = new Throttle($this->store, 'account', 50);
-        $this->perIp = new Throttle($this->store, 'ip', 30);
-        $this->codeTries = new Throttle($this->store, 'code', 5);
-        $this->decoyTries = new Throttle($this->store, 'decoy', 5);
-        $this->confirmTries = new Throttle($this->store, 'confirm', 5);
-        $this->rechecks = new Throttle($this->store, 'recheck', 10);
+        $clock = fn (): int => $this->now();
+        $this->perAddress = new Throttle($this->store, 'address', 10, clock: $clock);
+        $this->perAccount = new Throttle($this->store, 'account', 50, clock: $clock);
+        $this->perIp = new Throttle($this->store, 'ip', 30, clock: $clock);
+        $this->codeTries = new Throttle($this->store, 'code', 5, clock: $clock);
+        $this->decoyTries = new Throttle($this->store, 'decoy', 5, clock: $clock);
+        $this->confirmTries = new Throttle($this->store, 'confirm', 5, clock: $clock);
+        $this->rechecks = new Throttle($this->store, 'recheck', 10, clock: $clock);
         $this->checks = new Slots($this->rl->dataDir ?? null);
     }
 
