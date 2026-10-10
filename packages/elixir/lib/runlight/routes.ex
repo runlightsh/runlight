@@ -1979,10 +1979,16 @@ defmodule Runlight.Routes do
             if Regex.match?(~r/\Ahttps?:\/\/[^\/?#\s]+\z/, origin) and JS.len16(origin) <= 200,
               do: Url.parse(origin)
 
-          if parsed == nil or Url.origin(parsed) != origin do
+          # Only https and the default port, so a plain http page or another service on the same name cannot frame
+          # the dashboard; a page on this computer, for development, may use http and any port. The name must be
+          # one of the site's own, which are kept without www, so www. is the only difference allowed.
+          local = parsed != nil and parsed.hostname in ["localhost", "127.0.0.1", "[::1]"]
+
+          if parsed == nil or Url.origin(parsed) != origin or
+               (not local and (parsed.protocol != "https:" or parsed.port != "")) do
             coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400)
           else
-            host = host_name(Url.host(parsed))
+            host = String.replace(parsed.hostname, ~r/^www\./, "")
             remote = Runlight.remote(rl, site["id"])
             domains = Enum.map((remote && remote["hostnames"]) || site["hostnames"] || [], &host_name/1)
 
