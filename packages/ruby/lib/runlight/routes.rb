@@ -504,7 +504,7 @@ module Runlight
     extend Helpers
     include Helpers
 
-    PUBLIC_HELPERS = %i[coded json json? host_name cookie_value read_cookie bearer normalise_base dashboard manage_path].freeze
+    PUBLIC_HELPERS = %i[coded json json? host_name cookie_value read_cookie bearer normalise_base dashboard manage_path oauth_document?].freeze
     private_constant :PUBLIC_HELPERS
     private(*Helpers.instance_methods(false))
     private_class_method(*(Helpers.instance_methods(false) - PUBLIC_HELPERS))

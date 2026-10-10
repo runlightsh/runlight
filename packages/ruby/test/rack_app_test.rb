@@ -138,6 +138,16 @@ class RackAppTest < Minitest::Test
     assert_equal "send_json", Runlight::Json.decode(answer.body)["code"]
   end
 
+  def test_oauth_discovery_at_the_sites_root_is_answered_before_the_app
+    %w[/.well-known/oauth-authorization-server /.well-known/openid-configuration /.well-known/oauth-protected-resource].each do |path|
+      answer = @app.get(path, "HTTP_HOST" => "example.com")
+      assert_equal 200, answer.status, path
+      document = Runlight::Json.decode(answer.body)
+      assert_equal "http://example.com/runlight", document["issuer"] || document["authorization_servers"][0], path
+    end
+    assert_equal "app saw GET /.well-known/security.txt ", @app.get("/.well-known/security.txt", "HTTP_HOST" => "example.com").body
+  end
+
   def test_alone_it_answers_everything_and_a_head_has_no_body
     alone = Rack::MockRequest.new(Runlight::RackApp.new(runlight: @rl, base_path: "/runlight", token: TOKEN))
     assert_equal 404, alone.get("/elsewhere", "HTTP_HOST" => "example.com").status

@@ -80,7 +80,8 @@ module Runlight
       path = Http::Url.parse(request.url)&.pathname || "/"
       link_path = core.link_path
       link = request.method == "GET" && path.match?(%r{\A#{Regexp.escape(link_path)}/[^/]+/?\z})
-      own = @app.nil? || mine?(path) || link
+      # The discovery documents OAuth clients read at the site's root are answered too, as under the base path.
+      own = @app.nil? || mine?(path) || link || Routes.oauth_document?(path)
       if own || ready?
         linked = core.link_domain_response(request, context)
         return linked unless linked.nil?
