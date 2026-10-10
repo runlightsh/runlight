@@ -385,9 +385,10 @@ class AccountsWebTest < Minitest::Test
     refute_nil accounts.by_email("jon@example.com")
   end
 
-  def test_a_broken_session_cookie_raises_as_decode_uri_component_does
+  def test_a_session_cookie_that_is_not_valid_percent_encoding_reads_as_signed_out
     web = web()
-    assert_raises(ArgumentError) { web.signed_in(req("/", "GET", { "cookie" => "runlight_session=%E0%A4%A" })) }
+    assert_nil web.signed_in(req("/", "GET", { "cookie" => "runlight_session=%E0%A4%A" }))
+    assert_nil web.signed_in(req("/", "GET", { "cookie" => "runlight_session=%" }))
   end
 
   def test_the_session_cookie_is_read_among_others

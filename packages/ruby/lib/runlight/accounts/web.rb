@@ -93,9 +93,9 @@ module Runlight
         value = read_cookie(request, Accounts::SESSION_COOKIE)
         return nil if value == ""
 
+        # A cookie that is not valid percent-encoding is nobody's session, never an error.
         decoded = Js.decode_uri_component(value)
-        # decodeURIComponent throws a URIError here in TypeScript.
-        raise ArgumentError, "URI malformed" if decoded.nil?
+        return nil if decoded.nil?
 
         @accounts.from_session(decoded, now)
       end
