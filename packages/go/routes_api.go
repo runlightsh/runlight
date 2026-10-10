@@ -1131,15 +1131,21 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 			return nil, err
 		}
 		askedKey, hasKey := queryValue(u, "key")
-		// A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
+		// A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+		// one asked for, the most used name that has none is shown.
 		if hasKey && !propName64.MatchString(askedKey) {
 			return Coded("Bad property name", "property_bad", 400, nil), nil
 		}
 		var key any
 		if hasKey {
 			key = askedKey
-		} else if len(keys) > 0 {
-			key = keys[0].Key
+		} else {
+			for _, k := range keys {
+				if propName64.MatchString(k.Key) {
+					key = k.Key
+					break
+				}
+			}
 		}
 		limit := clampedNumber(u, "limit", 100)
 		rows := []PropValue{}
