@@ -58,6 +58,10 @@ const BASICS: Scenario[] = [
       get("/api/rhythm?period=today"),
       get("/api/realtime"),
       get("/api/event-props?period=today&event=Signup"),
+      // The most used property has a quote in its name, so the next one is shown, as an asked-for one would be refused.
+      hit({ k: "event", u: "https://example.com/pricing", i: "pv7", n: "Odd", p: { 'a"b': "1", plan: "pro" } }, "203.0.113.1"),
+      get("/api/event-props?period=today&event=Odd"),
+      get('/api/event-props?period=today&event=Odd&key=a"b'),
     ],
   },
   {

@@ -1868,9 +1868,11 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (!event) return coded("Name the event", "event_needed", 400);
       const keys = await runlight.store.eventPropKeys(query, event);
       const asked = url.searchParams.get("key");
-      // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-      if (asked !== null && !/^[^"\\]{1,64}$/.test(asked)) return coded("Bad property name", "property_bad", 400);
-      const key = asked ?? keys[0]?.key ?? null;
+      // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+      // one asked for, the most used name that has none is shown.
+      const safe = (name: string) => /^[^"\\]{1,64}$/.test(name);
+      if (asked !== null && !safe(asked)) return coded("Bad property name", "property_bad", 400);
+      const key = asked ?? keys.find((k) => safe(k.key))?.key ?? null;
       const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit")) || 100));
       const rows = key ? await runlight.store.eventPropValues(query, event, key, limit) : [];
       return json({ site: site.id, range: rangeOut, event, keys, key, rows });

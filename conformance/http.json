@@ -4366,6 +4366,92 @@
               ]
             }
           }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.1"
+          },
+          "body": {
+            "k": "event",
+            "u": "https://example.com/pricing",
+            "i": "pv7",
+            "n": "Odd",
+            "p": {
+              "a\"b": "1",
+              "plan": "pro"
+            }
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/event-props?period=today&event=Odd",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "Europe/London"
+              },
+              "event": "Odd",
+              "keys": [
+                {
+                  "key": "a\"b",
+                  "events": 1
+                },
+                {
+                  "key": "plan",
+                  "events": 1
+                }
+              ],
+              "key": "plan",
+              "rows": [
+                {
+                  "value": "pro",
+                  "events": 1,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/event-props?period=today&event=Odd&key=a\"b",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Bad property name",
+              "code": "property_bad"
+            }
+          }
         }
       ]
     },
