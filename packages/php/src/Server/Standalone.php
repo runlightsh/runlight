@@ -62,6 +62,7 @@ final class Standalone
      *     fetcher?: \Runlight\Http\Fetcher,
      *     setupCode?: string,
      *     setupWhere?: string,
+     *     dataDir?: string|null,
      *     cronSecret?: string|null,
      *     observeKey?: string|null,
      * } $options
@@ -74,6 +75,7 @@ final class Standalone
      * - setupCode: the one-time code that unlocks /setup while no account exists; setupWhere says where it is
      *   written down, for the page that asks for it.
      * - cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
+     * - dataDir: the server's data folder, where the files requests share go rather than the system's temporary folder.
      */
     public function __construct(array $options)
     {
@@ -102,6 +104,9 @@ final class Standalone
         }
         if (isset($options['fetcher'])) {
             $runlight['fetcher'] = $options['fetcher'];
+        }
+        if (isset($options['dataDir'])) {
+            $runlight['dataDir'] = $options['dataDir'];
         }
         $rl = $this->runlight = new Runlight($runlight);
 

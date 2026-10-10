@@ -47,6 +47,9 @@ use Runlight\Store\SqlStore;
  * - localInstalls: lets a connected install be at http://localhost or http://127.0.0.1, for trying a hub and
  *   an app on one machine. Default false: otherwise anyone who can add a site could have this server ask
  *   services on its own machine, so other installs must be public https addresses.
+ * - dataDir: a folder of the server's own, outside the web root, for the small files requests share when APCu
+ *   is not loaded: rate counts and cached site icons. Default the system's temporary folder, where they go in
+ *   a folder only this server's user can open.
  * - now: callable(): int, the clock in milliseconds. For tests.
  * - fetcher: the Fetcher every outgoing request goes through. Default CurlFetcher.
  *
@@ -95,6 +98,8 @@ final class Runlight
     public readonly Fetcher $fetcher;
     /** Whether a connected install may be on this machine, at http://localhost or http://127.0.0.1. */
     public readonly bool $localInstalls;
+    /** The folder for files shared between requests, or null for the system's temporary folder. See Scratch. */
+    public readonly ?string $dataDir;
     /**
      * Where routes() serves the dashboard and API, which a link domain leaves alone, as a list without
      * repeats. Middleware often runs apart from the routes, where none were made, so the default "/runlight"
@@ -163,7 +168,8 @@ final class Runlight
         $perMinute = $options['rateLimit'] ?? 120;
         // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
         $number = $perMinute === false ? NAN : Js::number($perMinute);
-        $this->limit = !($number > 0) ? null : new RateLimit((int) min(PHP_INT_MAX, floor($number)), fn (): int => $this->now(), null, !isset($options['now']));
+        $this->dataDir = isset($options['dataDir']) && $options['dataDir'] !== '' ? (string) $options['dataDir'] : null;
+        $this->limit = !($number > 0) ? null : new RateLimit((int) min(PHP_INT_MAX, floor($number)), fn (): int => $this->now(), $this->dataDir, !isset($options['now']));
         $this->clock = $options['now'] ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->fetcher = $options['fetcher'] ?? new CurlFetcher();
         $this->localInstalls = (bool) ($options['localInstalls'] ?? false);
@@ -1152,7 +1158,11 @@ final class Runlight
         if (function_exists('apcu_enabled') && apcu_enabled()) {
             return apcu_add('runlight:warned-direct', 1, 86_400);
         }
-        $marker = sys_get_temp_dir() . '/runlight-warned-direct';
+        $dir = Scratch::dir('runlight-rate', $this->dataDir);
+        if ($dir === null) {
+            return true;
+        }
+        $marker = "$dir/warned-direct";
         $at = @filemtime($marker);
         if ($at !== false && $at > time() - 86_400) {
             return false;

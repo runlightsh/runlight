@@ -257,6 +257,7 @@ final class Config
             'geoCredit' => $dbIp !== null,
             'cronSecret' => $this->get('CRON_SECRET'),
             'observeKey' => $this->get('RUNLIGHT_OBSERVE_KEY'),
+            'dataDir' => $this->dataDir(),
         ];
         if ($geo !== null) {
             $settings['geo'] = $geo;
