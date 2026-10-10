@@ -21,6 +21,7 @@ import java.util.function.LongSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import sh.runlight.CodedError.SettingsError;
+import sh.runlight.accounts.Throttle;
 import sh.runlight.http.BodyTooLong;
 import sh.runlight.http.Fetcher;
 import sh.runlight.http.Headers;
@@ -2379,6 +2380,12 @@ public final class Runlight
       currentSalts(now(), zone);
     }
     dropOldSalts(now());
+    // Sign-in counts made from an address go once their window ends, and their day's key after.
+    try {
+      Throttle.sweep(store, now());
+    } catch (RuntimeException error) {
+      log("Runlight: could not clear old sign-in counts " + error.getMessage());
+    }
     // Every site's retention covers any one site's that is still waiting.
     pruning.clear();
     try {
