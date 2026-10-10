@@ -95,7 +95,6 @@ public sealed class Routes
     private static readonly Regex PrivateSuffix = R("\\.(internal|intranet|private|local|localhost|localdomain|lan|home|corp|home\\.arpa|arpa|test|invalid|example)\\z");
     private static readonly Regex Email = R("^[^" + Space + "@<>\"]+@[^" + Space + "@<>\"]+\\.[^" + Space + "@<>\"]+\\z");
     private static readonly Regex OriginPattern = R("^https?://[^/?#" + Space + "]+\\z");
-    private static readonly Regex HttpAddress = R("^https?://[^" + Space + "]+\\z");
     private static readonly Regex Filename = R("filename=\"([A-Za-z0-9._-]+)\"");
     private static readonly Regex ErrorCode = R("^[a-z_]{1,40}\\z");
     private static readonly Regex NotFileChar = R("[^A-Za-z0-9._-]");
@@ -1642,15 +1641,15 @@ public sealed class Routes
                     {
                         return Coded("A site can send to at most 50 addresses", "report_limit", 400);
                     }
-                    // Links in the email point back to the configured address, or else to this dashboard as the
-                    // browser sees it. A report made from a hub needs the configured address, where its unsubscribe
-                    // link answers, since the Host its request names is the hub's to choose.
+                    // Links in the email point back to the configured address, or else to this dashboard at the address
+                    // the request came to. An address in the body is never used, so whoever adds a report cannot point
+                    // its links somewhere else. A report made from a hub needs the configured address, where its
+                    // unsubscribe link answers, since the Host its request names is the hub's to choose.
                     if (_managed.TryGetValue(request, out _) && _origin == null)
                     {
                         return OriginNeeded();
                     }
-                    string given = _origin != null ? "" : Text(body, "origin");
-                    string home = HttpAddress.IsMatch(given) ? TrailingSlashes.Replace(given, "") : (_origin ?? url.Origin) + _base;
+                    string home = (_origin ?? url.Origin) + _base;
                     // A period already due counts as sent, so a report added mid-week first goes out on the next Monday, as the form says.
                     long now = _rl.Now();
                     var due = Reports.LastPeriod(frequency, now, site.Str("timezone")!);
