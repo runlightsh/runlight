@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 
 	"runlight.sh/go/internal/js"
@@ -464,6 +465,9 @@ func answer(ctx context.Context, message any, readAPI APIRead) *js.Object {
 	return js.NewObject("jsonrpc", "2.0", "id", id, "result", result)
 }
 
+// MaxBatch is the most messages one batch may hold.
+const MaxBatch = 20
+
 // MCPResponse answers one POST to the MCP endpoint, already authorised.
 func MCPResponse(ctx context.Context, request *web.Request, readAPI APIRead) *web.Response {
 	headers := []string{"content-type", "application/json; charset=utf-8", "cache-control", "no-store"}
@@ -471,8 +475,12 @@ func MCPResponse(ctx context.Context, request *web.Request, readAPI APIRead) *we
 	if err != nil || !isObject(body) {
 		return web.NewResponse(400, []byte(js.Stringify(rpcError(nil, -32700, "Send a JSON-RPC message"))), headers...)
 	}
-	// Batches were in the 2025-03-26 protocol; answering them costs nothing.
+	// Batches were in the 2025-03-26 protocol. The messages run one at a time, from a short list, so one
+	// request cannot start hundreds of reports at once.
 	if batch, ok := body.([]any); ok {
+		if len(batch) > MaxBatch {
+			return web.NewResponse(400, []byte(js.Stringify(rpcError(nil, -32600, "Send at most "+strconv.Itoa(MaxBatch)+" messages in a batch"))), headers...)
+		}
 		answers := []any{}
 		for _, m := range batch {
 			if one := answer(ctx, m, readAPI); one != nil {
