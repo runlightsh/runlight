@@ -531,6 +531,10 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			}
 			user, err := w.Accounts.AcceptInvite(ctx, code, form.Value("password"), w.now())
 			if err != nil {
+				var ae *AccountError
+				if asAccountError(err, &ae) && ae.Code == "invite_gone" {
+					return html(accounts.InviteGonePage(base), 410), nil
+				}
 				if isRangeError(err) {
 					return again(err.Error()), nil
 				}
