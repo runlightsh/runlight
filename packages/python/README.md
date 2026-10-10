@@ -44,6 +44,8 @@ Add the script to every page, just before `</head>`.
 
 Set `RUNLIGHT_TOKEN` to a long random string, then open `/runlight/?token=` followed by that string to sign in.
 
+A `token` passed to `rl.routes()` works the same way. `None` counts as not given, so `os.environ.get()` of a variable that is not set falls back to `RUNLIGHT_TOKEN` and never opens the dashboard. To leave it open on purpose, behind your own sign-in, pass `token=runlight.OPEN`.
+
 The [Python guide](https://runlight.sh/docs/python/) has the code for Django, FastAPI, and plain WSGI or ASGI apps, the Postgres, MySQL, and MariaDB stores, the scheduled check, and the standalone server.
 
 ## License

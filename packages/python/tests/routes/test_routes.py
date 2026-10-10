@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import pytest
 
-from runlight import _js, assets
+from runlight import OPEN, _js, assets
 from runlight.routes import bearer, coded, cookie_value, dashboard, is_json, read_cookie
 from runlight.store import Stores
 from support.routes import body, owner, req, runlight
@@ -61,6 +61,23 @@ def test_with_no_token_everything_but_development_refuses_writes_included() -> N
     os.environ["NODE_ENV"] = "development"
     with contextlib.redirect_stderr(io.StringIO()):
         assert runlight().routes({}).handle(req("/runlight/api/stats")).status == 200
+
+
+def test_a_token_of_none_is_not_given_and_open_is_asked_for_by_name() -> None:
+    os.environ["NODE_ENV"] = "production"
+    os.environ.pop("RUNLIGHT_TOKEN", None)
+    # As os.environ.get() gives it for a variable that is not set: never open.
+    assert runlight().routes({"token": None}).handle(req("/runlight/api/stats")).status == 503
+    assert runlight().routes(token=None).handle(req("/runlight/api/stats")).status == 503
+    os.environ["RUNLIGHT_TOKEN"] = "from-env"
+    try:
+        routes = runlight().routes({"token": None})
+        assert routes.handle(req("/runlight/api/stats")).status == 401, "None falls back to RUNLIGHT_TOKEN"
+        assert routes.handle(req("/runlight/api/stats", "GET", {"authorization": "Bearer from-env"})).status == 200
+    finally:
+        os.environ.pop("RUNLIGHT_TOKEN", None)
+    assert runlight().routes({"token": OPEN}).handle(req("/runlight/api/stats")).status == 200
+    assert repr(OPEN) == "runlight.OPEN"
 
 
 def test_authorize_replaces_the_token() -> None:
@@ -132,7 +149,7 @@ def test_base_path_moves_everything() -> None:
 
 
 def test_bad_queries_are_400s_with_a_reason() -> None:
-    routes = runlight().routes({"token": None})
+    routes = runlight().routes({"token": OPEN})
     for path in ("/runlight/api/stats?period=forever", "/runlight/api/stats?filter=nope", "/runlight/api/stats?filter=page:like:x", "/runlight/api/breakdown?dimension=shoe_size"):
         response = routes.handle(req(path))
         assert response.status == 400, path
@@ -165,7 +182,7 @@ def test_the_dashboard_page_loads_its_hashed_assets_under_a_strict_csp() -> None
 def test_a_sites_name_and_timezone_can_be_changed_and_survive_a_restart() -> None:
     store = Stores.sqlite(":memory:")
     first = runlight({"store": store, "site": {"name": "From code", "timezone": "UTC"}})
-    routes = first.routes({"token": None})
+    routes = first.routes({"token": OPEN})
 
     def patch(given, type_="application/json"):
         return routes.handle(req("/runlight/api/sites/default", "PATCH", {"content-type": type_}, _js.dumps(given)))
@@ -383,7 +400,7 @@ def test_a_request_with_no_type_is_not_json() -> None:
 
 
 def test_writes_must_be_json_unless_a_bearer_token_is_sent() -> None:
-    routes = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]}).routes({"token": None})
+    routes = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]}).routes({"token": OPEN})
     # A form from another page cannot send JSON, so a cookie or an open install never lets it write.
     for method, path in (("POST", "/runlight/api/goals?site=blog"), ("PUT", "/runlight/api/mail"), ("PATCH", "/runlight/api/sites/blog")):
         answer = routes.handle(req(path, method, {"content-type": "application/x-www-form-urlencoded"}, "name=x"))
@@ -403,7 +420,7 @@ def test_errors_are_json_with_their_code_and_never_sniffed() -> None:
 
 
 def test_an_error_inside_a_route_is_an_internal_error_that_says_nothing_more() -> None:
-    routes = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]}).routes({"token": None})
+    routes = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]}).routes({"token": OPEN})
     with contextlib.redirect_stderr(io.StringIO()):
         # A broken escape in a path makes decodeURIComponent throw, as it does in TypeScript.
         answer = routes.handle(req("/runlight/api/goals/%E0%A4%A?site=blog", "DELETE"))

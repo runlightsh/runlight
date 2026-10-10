@@ -19,6 +19,7 @@ from .http import Headers, Request, Response, Url
 __all__ = [
     "API_VERSION",
     "LINK_DOMAIN_CHECK",
+    "OPEN",
     "SESSION_IDLE_MS",
     "VERSION",
     "Headers",
@@ -44,6 +45,10 @@ def __getattr__(name: str) -> Any:
         from . import core
 
         return getattr(core, name)
+    if name == "OPEN":
+        from .routes import OPEN
+
+        return OPEN
     if name == "Stores":
         from .store import Stores
 

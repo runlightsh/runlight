@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from runlight import _js
+from runlight import OPEN, _js
 from runlight.http import BodyTooLong, FetchError, Headers, Request, Response, SearchParams, Url
 
 FILE = Path(__file__).resolve().parents[4] / "conformance" / "http.json"
@@ -212,11 +212,11 @@ def runlight_options(scenario: dict[str, Any]) -> dict[str, Any]:
 
 
 def routes_options(scenario: dict[str, Any]) -> dict[str, Any]:
-    """The options routes() gets. The token is always there: a string, "" for none, or None to leave the routes
-    open, never left out, which would read RUNLIGHT_TOKEN."""
+    """The options routes() gets. The token is always there: a string, "" for none, or OPEN (null in the
+    scenarios) to leave the routes open, never left out or None, which would read RUNLIGHT_TOKEN."""
     options = scenario.get("options") or {}
     out: dict[str, Any] = {
-        "token": scenario["token"],
+        "token": OPEN if scenario["token"] is None else scenario["token"],
         "observeKey": options.get("observeKey", ""),
         "cronSecret": options.get("cronSecret", ""),
     }

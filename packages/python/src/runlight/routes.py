@@ -5,9 +5,10 @@ answers every request under the base path. Options take the TypeScript names:
 
 - basePath: where the routes are mounted. Default "/runlight".
 - token: required to read stats. Send it as `Authorization: Bearer <token>`, or open the dashboard once with
-  `?token=<token>` and a cookie is set. Absent means RUNLIGHT_TOKEN. Without one, the dashboard and API are open
-  only when NODE_ENV is "development", and answer 503 everywhere else. Pass None to leave them open everywhere,
-  for example behind your own auth middleware.
+  `?token=<token>` and a cookie is set. Absent or None means RUNLIGHT_TOKEN, so os.environ.get() of a variable
+  that is not set never opens anything. Without one, the dashboard and API are open only when NODE_ENV is
+  "development", and answer 503 everywhere else. Pass runlight.OPEN (TypeScript's null) to leave them open
+  everywhere, for example behind your own auth middleware.
 - authorize: a callable(Request) giving True, "member", "read", or False, your own check instead of a token. True
   is full access, "member" changes everything but the install-wide controls (the mail service, the assistant's
   settings, and deleting a site), "read" reads every site's stats and changes nothing (as an API token can).
@@ -478,6 +479,16 @@ DASHBOARD_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-sr
 # A line of a JavaScript `.`: anything but a line terminator.
 _DOT = "[^\\n\\r\\u2028\\u2029]"
 
+class _Open:
+    """The token that leaves the routes open everywhere, as `token: null` does in TypeScript. None cannot say it:
+    it is what os.environ.get() gives for a variable that is not set, which must never open anything."""
+
+    def __repr__(self) -> str:
+        return "runlight.OPEN"
+
+
+OPEN = _Open()
+
 _READ_ONLY_SIGN_IN = {"id": "", "name": "", "site": "", "scope": "read", "hash": "", "hint": "", "createdAt": 0, "lastUsedAt": None}
 
 
@@ -492,8 +503,10 @@ class Routes:
         self.rl = runlight
         self.options = options
         self.base = normalise_base(options["basePath"] if options.get("basePath") is not None else "/runlight")
-        # None leaves the routes open on purpose; an unset RUNLIGHT_TOKEN is no token (""), never open.
-        self.token: str | None = options["token"] if "token" in options else (env("RUNLIGHT_TOKEN") or "")
+        # OPEN leaves the routes open on purpose, and is kept as None from here on. A token that is None or absent
+        # falls back to RUNLIGHT_TOKEN, and an unset one is no token (""), never open.
+        given = options.get("token")
+        self.token: str | None = None if given is OPEN else (env("RUNLIGHT_TOKEN") or "") if given is None else given
         self.cron_secret = options["cronSecret"] if options.get("cronSecret") is not None else env("CRON_SECRET")
         self.observe_key = options["observeKey"] if options.get("observeKey") is not None else env("RUNLIGHT_OBSERVE_KEY")
         self.origin = Url(options["origin"]).origin if _js.truthy(options.get("origin")) else None
@@ -508,7 +521,7 @@ class Routes:
 
         # Accounts: the standalone server passes its own, and an app turns them on with True. Sessions need a secret
         # that outlives the process; in development without one, a made-up one does, so a restart signs everyone
-        # out. An app left open on purpose (token None) is treated like development here.
+        # out. An app left open on purpose (token OPEN) is treated like development here.
         token = self.token
         open_setup = token is None or (not token and _is_development())
         account_secret = runlight.secret if runlight.secret is not None else (random_id(32) if open_setup else None)
