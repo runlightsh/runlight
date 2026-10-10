@@ -9,6 +9,9 @@
 // every Zone and Link line), by default the system's; a newer one can be given:
 //
 //   node scripts/dotnet-zones.mjs [path/to/tzdata.zi]
+//
+// Then run scripts/dotnet-tzdata.mjs, so the zone files the library carries
+// cover the same names.
 import { readFileSync, writeFileSync } from "node:fs";
 
 const source = process.argv[2] ?? "/usr/share/zoneinfo/tzdata.zi";

@@ -1,15 +1,17 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 
 namespace Runlight;
 
 /// <summary>
 /// A time zone's offset from UTC at any instant, to the second, as ICU gives it to JavaScript's
-/// Intl: read from the IANA database's compiled files (TZif, RFC 8536) where the system has them,
-/// with the rule in each file's footer for times past its last transition. .NET's TimeZoneInfo
-/// is the fallback where there are no such files (Windows); it rounds old local mean times to the
-/// minute and misreads footers whose changes fall at hour 24, which the files read here do not.
+/// Intl: read from the IANA database's compiled files (TZif, RFC 8536), the system's where it has
+/// them and otherwise the copies this library carries, with the rule in each file's footer for
+/// times past its last transition. .NET's TimeZoneInfo is the last resort; it rounds old local mean
+/// times to the minute and misreads footers whose changes fall at hour 24, which these files do not.
 /// </summary>
 internal sealed class Tz
 {
@@ -33,6 +35,67 @@ internal sealed class Tz
     private Tz(TimeZoneInfo info) => _info = info;
 
     private Tz(int fixedSeconds) => _fixed = fixedSeconds;
+
+    /// <summary>
+    /// The database's files for every zone name Intl accepts, carried in the library (written by
+    /// scripts/dotnet-tzdata.mjs), for systems with no zoneinfo of their own, like slim containers.
+    /// </summary>
+    private static readonly Lazy<Dictionary<string, byte[]>> Embedded = new(LoadEmbedded);
+
+    private static Dictionary<string, byte[]> LoadEmbedded()
+    {
+        var zones = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        using var resource = typeof(Tz).Assembly.GetManifestResourceStream("Runlight.Zoneinfo/tzdata.gz");
+        if (resource == null)
+        {
+            return zones;
+        }
+        using var gzip = new GZipStream(resource, CompressionMode.Decompress);
+        using var buffer = new MemoryStream();
+        gzip.CopyTo(buffer);
+        byte[] data = buffer.ToArray();
+        int pos = 0;
+        int U32()
+        {
+            int n = checked((int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(pos, 4)));
+            pos += 4;
+            return n;
+        }
+        var files = new byte[U32()][];
+        for (int i = 0; i < files.Length; i++)
+        {
+            int length = U32();
+            files[i] = data[pos..(pos + length)];
+            pos += length;
+        }
+        int names = U32();
+        for (int i = 0; i < names; i++)
+        {
+            int length = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(pos, 2));
+            pos += 2;
+            string name = System.Text.Encoding.UTF8.GetString(data, pos, length);
+            pos += length;
+            zones[name] = files[U32()];
+        }
+        return zones;
+    }
+
+    /// <summary>The zone from the files this library carries, or null.</summary>
+    internal static Tz? Carried(string id)
+    {
+        if (!Embedded.Value.TryGetValue(id, out byte[]? file))
+        {
+            return null;
+        }
+        try
+        {
+            return Read(file);
+        }
+        catch (Exception e) when (e is FormatException or ArgumentException or IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>A zone at a fixed offset, in seconds east of UTC.</summary>
     public static Tz Fixed(int seconds) => new(seconds);
@@ -65,10 +128,14 @@ internal sealed class Tz
                     }
                     catch (Exception e) when (e is IOException or UnauthorizedAccessException or FormatException or ArgumentException)
                     {
-                        // Fall through to the system's zones.
+                        // Fall through to the files this library carries.
                     }
                 }
             }
+        }
+        if (Carried(id) is { } carried)
+        {
+            return carried;
         }
         try
         {

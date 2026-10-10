@@ -13,3 +13,4 @@
 *.js -text
 *.png -text
 *.svg -text
+*.gz -text
