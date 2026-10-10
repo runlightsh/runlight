@@ -142,4 +142,41 @@ class SafefetchTest < Minitest::Test
     assert_equal 302, Safefetch.owner_fetch("http://127.0.0.1:4100/api/sites", { "timeoutMs" => 2000 }, inside, true).status
     assert_equal [["http://127.0.0.1:4100/api/sites", "manual"]], asked
   end
+
+  # A server on a local port that answers each request with its name, and counts them.
+  def local_server(name)
+    server = TCPServer.new("127.0.0.1", 0)
+    seen = Queue.new
+    thread = Thread.new do
+      loop do
+        client = server.accept
+        seen << client.gets.to_s
+        while (line = client.gets) && line != "\r\n"; end
+        client.write("HTTP/1.1 200 OK\r\ncontent-length: #{name.bytesize}\r\nconnection: close\r\n\r\n#{name}")
+        client.close
+      end
+    rescue IOError
+      nil
+    end
+    [server, seen, thread]
+  end
+
+  def test_a_pinned_request_never_goes_through_a_proxy_from_the_environment
+    target, = local_server("target")
+    proxy, through_proxy = local_server("proxy")
+    port = target.addr[1]
+    saved = ENV.to_h.slice("http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY")
+    ENV["http_proxy"] = ENV["HTTP_PROXY"] = "http://127.0.0.1:#{proxy.addr[1]}"
+    ENV.delete("no_proxy")
+    ENV.delete("NO_PROXY")
+    fetcher = Runlight::Http::NetFetcher.new
+    answer = fetcher.fetch("http://site.example:#{port}/", { "resolve" => ["site.example:#{port}:127.0.0.1"], "timeoutMs" => 3000 })
+    assert_equal "target", answer.text
+    assert_equal 0, through_proxy.size
+    assert_equal "proxy", fetcher.fetch("http://site.example:#{port}/", { "timeoutMs" => 3000 }).text, "unpinned, the proxy still applies"
+  ensure
+    %w[http_proxy HTTP_PROXY no_proxy NO_PROXY].each { |k| saved&.key?(k) ? ENV[k] = saved[k] : ENV.delete(k) }
+    target&.close
+    proxy&.close
+  end
 end
