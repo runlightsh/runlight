@@ -3,10 +3,18 @@
  * links on a site's home page or a link domain, and only from the public
  * internet. Only https is fetched, never a private, loopback, link-local,
  * or metadata address, and redirects are followed by hand under the same
- * rules. On Node, Bun, and Deno the check runs on the address the
- * connection uses, so a name that answers differently a moment later gets
- * nowhere. Elsewhere, such as an edge runtime that cannot reach a private
- * network anyway, only the name is checked.
+ * rules. The check runs on the address the connection uses, so a name that
+ * answers differently a moment later (DNS rebinding) gets nowhere: on Node
+ * and Deno through the lookup their https module connects with, and on Bun
+ * by fetching the checked address itself, with the name in the Host header,
+ * which Bun checks the certificate against.
+ *
+ * Elsewhere, such as Cloudflare Workers and other edge runtimes, fetch
+ * cannot be told which address to use, so only the name is checked, where
+ * the runtime can resolve one at all, and a name that resolves to a public
+ * address for the check and a private one a moment later is not caught.
+ * Those runtimes reach no private network of the install's own, which is
+ * what the check protects.
  */
 import type { LookupAddress } from "node:dns";
 
@@ -221,6 +229,25 @@ function once(node: NonNullable<ReturnType<typeof builtins>>, url: URL, ask: Ask
   });
 }
 
+const onBun = () => (globalThis as { Bun?: unknown }).Bun !== undefined;
+
+/**
+ * On Bun, the URL with its name swapped for one public address the name resolves to now, after every address it
+ * resolves to has been checked. Bun takes the Host header for the TLS name and the certificate check, so the
+ * request still goes to, and is verified as, the name. A name that does not resolve is refused.
+ */
+async function pin(url: URL): Promise<URL> {
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (v4(host) || v6(host)) return url;
+  const dns = await resolver();
+  if (!dns) throw new PrivateAddressError(host);
+  const found = await dns.lookup(host, { all: true }).catch(() => []);
+  if (!found.length || found.some((a) => !publicAddress(a.address))) throw new PrivateAddressError(host);
+  const pinned = new URL(url);
+  pinned.hostname = found[0]!.family === 6 ? `[${found[0]!.address}]` : found[0]!.address;
+  return pinned;
+}
+
 /**
  * For tests: publicFetch asks the runtime's fetch, as a test has replaced it,
  * instead of connecting itself. Addresses written as an IP, and localhost,
@@ -255,11 +282,17 @@ export async function publicFetch(
     const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
     if ((v4(host) || v6(host)) && !publicAddress(host)) throw new PrivateAddressError(host);
     if (host === "localhost" || host.endsWith(".localhost")) throw new PrivateAddressError(host);
-    // Without a connection of its own to check, the name is resolved first where the runtime can.
-    if (!node && !throughGlobalFetch && (await resolvesPrivately(host))) throw new PrivateAddressError(host);
+    // On Bun the address checked is the one fetched; elsewhere, without a connection of its own to check,
+    // the name is resolved first where the runtime can.
+    const pinned = !node && !init.fetch && !throughGlobalFetch && onBun() ? await pin(url) : null;
+    if (!node && !pinned && !throughGlobalFetch && (await resolvesPrivately(host))) throw new PrivateAddressError(host);
     let answer: Response;
     try {
-      answer = node ? await once(node, url, ask, signal) : await (init.fetch ?? fetch)(url, { ...ask, redirect: "manual", signal });
+      answer = node
+        ? await once(node, url, ask, signal)
+        : pinned
+          ? await fetch(pinned, { ...ask, headers: { ...ask.headers, host: url.host }, redirect: "manual", signal })
+          : await (init.fetch ?? fetch)(url, { ...ask, redirect: "manual", signal });
     } catch (error) {
       // Whichever way the runtime says it gave up, the caller hears that time ran out.
       if (signal.aborted) throw signal.reason;
