@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from support import fixtures
@@ -39,6 +42,30 @@ def test_passwords_hashed_by_typescript_check_here():
         assert crypto.check_password(case["password"], case["hash"]), case["hash"]
         if i == 0:
             assert not crypto.check_password(f"{case['password']}!", case["hash"])
+
+
+def test_no_more_than_four_password_hashes_run_at_once(monkeypatch):
+    running = [0]
+    most = [0]
+    lock = threading.Lock()
+    real = crypto.hashlib.scrypt
+
+    def counted(*args, **kwargs):
+        with lock:
+            running[0] += 1
+            most[0] = max(most[0], running[0])
+        try:
+            time.sleep(0.02)
+            return real(*args, **kwargs)
+        finally:
+            with lock:
+                running[0] -= 1
+
+    monkeypatch.setattr(crypto.hashlib, "scrypt", counted)
+    hashed = crypto.hash_password("a long password")
+    with ThreadPoolExecutor(20) as pool:
+        assert all(pool.map(lambda _: crypto.check_password("a long password", hashed), range(20)))
+    assert most[0] == crypto.PASSWORD_SLOTS == 4
 
 
 def test_new_hashes_use_scrypt_and_check():

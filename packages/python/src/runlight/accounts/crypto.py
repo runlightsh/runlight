@@ -11,6 +11,7 @@ import hashlib
 import hmac as _hmac
 import re
 import secrets
+import threading
 from typing import Literal
 
 from .. import _aesgcm, _js
@@ -19,6 +20,11 @@ SCRYPT = {"N": 16384, "r": 8, "p": 1, "maxmem": 64 * 1024 * 1024}
 
 # As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on.
 PBKDF2_ROUNDS = 100_000
+
+# Password hashes worked out at once, at most. Each scrypt holds 16 MB while it runs, so a burst of sign-ins on as
+# many threads cannot take memory without bound. Node runs them on its thread pool of four.
+PASSWORD_SLOTS = 4
+_slots = threading.BoundedSemaphore(PASSWORD_SLOTS)
 
 # The shortest stored key accepted. Ours are 32 bytes; an empty or cut key would match too easily, or anything.
 MIN_KEY_BYTES = 16
@@ -75,7 +81,8 @@ def scrypt(password: str, salt: bytes, n: int, r: int, p: int, length: int) -> b
     """scrypt as Node's crypto.scrypt gives it, the password as UTF-8. Raises ValueError for a cost Node refuses."""
     if length == 0:
         return b""
-    return hashlib.scrypt(_js.encode(password), salt=salt, n=n, r=r, p=p, maxmem=SCRYPT["maxmem"], dklen=length)
+    with _slots:
+        return hashlib.scrypt(_js.encode(password), salt=salt, n=n, r=r, p=p, maxmem=SCRYPT["maxmem"], dklen=length)
 
 
 def _run_scrypt(password: str, salt: bytes, length: int) -> bytes:
@@ -83,7 +90,10 @@ def _run_scrypt(password: str, salt: bytes, length: int) -> bytes:
 
 
 def _pbkdf2(password: str, salt: bytes, rounds: int, length: int) -> bytes:
-    return b"" if length == 0 else hashlib.pbkdf2_hmac("sha256", _js.encode(password), salt, rounds, length)
+    if length == 0:
+        return b""
+    with _slots:
+        return hashlib.pbkdf2_hmac("sha256", _js.encode(password), salt, rounds, length)
 
 
 def hash_password(password: str) -> str:
