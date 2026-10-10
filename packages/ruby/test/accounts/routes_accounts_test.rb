@@ -84,6 +84,42 @@ class AccountsRoutesAccountsTest < RoutesTestCase
     assert_equal "/runlight/", elsewhere.headers.get("location"), "never sent off the app"
   end
 
+  def test_invites_go_with_whoever_sent_them_removed_made_a_member_or_no_longer_allowed_when_the_link_is_used
+    rl = Runlight::Core.new({ "store" => Databases.fresh("sqlite"), "secret" => "k" * 64 })
+    routes = rl.routes({ "token" => "app-token", "accounts" => true })
+    handler = ->(r) { routes.handle(r) }
+    json = lambda do |cookie, method, path, body = nil|
+      handler.call(req("/runlight#{path}", method, { "cookie" => cookie, "content-type" => "application/json" }, body.nil? ? "" : Json.encode(body)))
+    end
+    owner = cookie_of(handler.call(form("/runlight/setup", { "code" => "app-token", "email" => "jon@example.com", "password" => "a long password", "again" => "a long password" })))
+    join = lambda do |email, role, by = owner|
+      Url.new(Json.decode(json.call(by, "POST", "/api/people", { "email" => email, "role" => role }).text)["link"]).search_params.get("code").to_s
+    end
+    accept = ->(code) { handler.call(form("/runlight/invite", { "code" => code, "password" => "a long password", "again" => "a long password" })) }
+    admin = cookie_of(accept.call(join.call("ada@example.com", "admin")))
+    admin_id = Json.decode(json.call(admin, "GET", "/api/account").text)["account"]["id"]
+
+    # Made a member: what they sent stops working.
+    from_ada = join.call("eve@example.com", "admin", admin)
+    assert_equal 200, json.call(owner, "PATCH", "/api/people/#{admin_id}", { "role" => "member" }).status
+    assert_equal 410, handler.call(req("/runlight/invite?code=#{from_ada}")).status
+    assert_equal 410, accept.call(from_ada).status
+
+    # Removed: the same.
+    json.call(owner, "PATCH", "/api/people/#{admin_id}", { "role" => "admin" })
+    again = join.call("eve@example.com", "admin", admin)
+    assert_equal 200, json.call(owner, "DELETE", "/api/people/#{admin_id}").status
+    assert_equal 410, accept.call(again).status
+    assert_equal [], Json.decode(json.call(owner, "GET", "/api/people").text)["invites"]
+
+    # An invite left from before, whose sender is no longer an admin, is refused when used.
+    second = cookie_of(accept.call(join.call("bo@example.com", "admin")))
+    from_bo = join.call("zed@example.com", "admin", second)
+    rl.store.db.run("UPDATE rl_users SET role = 'viewer' WHERE email = ?", ["bo@example.com"])
+    assert_equal 410, accept.call(from_bo).status
+    assert_equal 410, handler.call(req("/runlight/invite?code=#{from_bo}")).status, "and it is gone afterwards"
+  end
+
   def test_in_development_or_left_open_on_purpose_the_first_account_needs_no_proof_in_production_without_a_token_setup_stays_shut
     ENV["NODE_ENV"] = "development"
     dev = Runlight::Core.new({ "store" => Databases.fresh("sqlite") }).routes({ "accounts" => true })

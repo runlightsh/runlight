@@ -50,6 +50,11 @@ module Runlight
         ROLES.include?(value) ? value : "viewer"
       end
 
+      # Whether a role may invite people. The owner and admins invite as admin, member, or viewer.
+      def self.may_invite?(role)
+        role == "owner" || role == "admin"
+      end
+
       # Starts turning on two-factor: a new secret, kept aside until a code from it is confirmed.
       def start_two_factor(id)
         init
@@ -184,6 +189,8 @@ module Runlight
           raise AccountError.new("Ownership is handed over by the owner", "owner_hand_over") if role == "owner"
 
           @store.db.run("UPDATE rl_users SET role = ? WHERE id = ?", [role, id])
+          # Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+          @store.db.run("DELETE FROM rl_invites WHERE invited_by = ?", [user["email"]]) unless self.class.may_invite?(role)
           user["role"] = role
           user
         end
@@ -215,6 +222,7 @@ module Runlight
           raise AccountError.new("The owner cannot be removed", "owner_protected") if user["role"] == "owner"
 
           @store.db.run("DELETE FROM rl_users WHERE id = ?", [id])
+          @store.db.run("DELETE FROM rl_invites WHERE invited_by = ?", [user["email"]])
           @store.set_setting("login-link-used:#{id}", nil)
         end
         nil
@@ -283,16 +291,31 @@ module Runlight
         before.positive?
       end
 
-      # Turns an invite into an account with the password its person chose. The link then stops working.
+      # Turns an invite into an account with the password its person chose. The link then stops working. It takes a
+      # turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite.
       def accept_invite(code, password, now)
-        invite = invite_by_code(code, now)
-        raise AccountError.new("This invite has expired or was already used. Ask for a new one.", "invite_gone") if invite.nil?
-        unless by_email(invite["email"]).nil?
-          raise AccountError.new("#{invite["email"]} already has an account", "account_exists", { "email" => invite["email"] })
-        end
+        # The tables first: making them takes the same lock as a turn.
+        init
+        user = turn do
+          invite = invite_by_code(code, now)
+          next nil if invite.nil?
 
-        user = set_password(invite["email"], password, now, invite["role"])
-        @store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+          sender = by_email(invite["invitedBy"])
+          if sender.nil? || !self.class.may_invite?(sender["role"])
+            # Left without raising, since an error inside a turn on SQLite would roll this back.
+            @store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+            next nil
+          end
+          unless by_email(invite["email"]).nil?
+            raise AccountError.new("#{invite["email"]} already has an account", "account_exists", { "email" => invite["email"] })
+          end
+
+          made = set_password(invite["email"], password, now, invite["role"])
+          @store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+          made
+        end
+        raise AccountError.new("This invite has expired or was already used. Ask for a new one.", "invite_gone") if user.nil?
+
         user
       end
 
