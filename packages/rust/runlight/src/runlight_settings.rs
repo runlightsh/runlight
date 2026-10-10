@@ -9,6 +9,7 @@ use crate::mail::secret::{seal, unseal};
 use crate::mail::transports::{Message, SERVICES, check_config, send};
 use crate::reports::{ReportPeriod, build_report, last_period};
 use crate::runlight::{Runlight, is_email};
+use crate::safefetch::metadata_host;
 use crate::store::{ReportRow, SiteRow};
 
 fn mail_error(message: &str, code: &str) -> Error {
@@ -78,6 +79,14 @@ impl Runlight {
             settings.set("fromName", from_name);
         }
         check_config(&settings).map_err(Error::Mail)?;
+        let host = js::str_or_empty(settings.get("host"));
+        if service.id == "smtp" && !host.is_empty() && metadata_host(&host, None).await {
+            return Err(Error::Mail(CodedError::new(
+                format!("{host} is a link-local or cloud metadata address, which Runlight never connects to"),
+                "address_refused",
+                &[("host", &host)],
+            )));
+        }
         let sealed = seal(&settings.to_json(), self.secret());
         self.store().set_setting("mail", Some(&sealed)).await?;
         Ok(())
@@ -188,12 +197,20 @@ impl Runlight {
         };
         let base_url = js::trim(&js::str_or_empty(input.get("baseUrl"))).trim_end_matches('/').to_string();
         if !base_url.is_empty() {
-            let ok = Url::parse(&base_url).is_some_and(|u| u.protocol() == "https:" || u.protocol() == "http:");
-            if !ok {
+            let parsed = Url::parse(&base_url).filter(|u| u.protocol() == "https:" || u.protocol() == "http:");
+            let Some(parsed) = parsed else {
                 return Err(Error::settings(
                     "Enter the service's address, starting with https://",
                     "assistant_address_bad",
                     &[],
+                ));
+            };
+            let host = parsed.hostname();
+            if metadata_host(&host, None).await {
+                return Err(Error::settings(
+                    format!("{host} is a link-local or cloud metadata address, which Runlight never connects to"),
+                    "address_refused",
+                    &[("host", &host)],
                 ));
             }
         }

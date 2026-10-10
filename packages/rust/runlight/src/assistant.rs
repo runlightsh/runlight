@@ -314,6 +314,21 @@ fn parse_url(url: &str) -> Result<Url, AssistantFailure> {
     Url::parse(url).ok_or_else(|| AssistantFailure::Thrown("Invalid URL".into()))
 }
 
+/// Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
+/// private network is allowed, as the person setting it up means it to be.
+pub async fn refuse_metadata(url: &str) -> Result<(), AssistantFailure> {
+    let host = parse_url(url)?.hostname();
+    if crate::safefetch::metadata_host(&host, None).await {
+        return Err(AssistantError::new(
+            format!("{host} is a link-local or cloud metadata address, which Runlight never connects to"),
+            "address_refused",
+            &[("host", &host)],
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Sends the request, giving up as soon as the person has left (checked
 /// every 50 milliseconds), as the TypeScript's signal aborts the fetch.
 async fn fetch(
@@ -357,6 +372,7 @@ async fn post(
     cancelled: Cancelled<'_>,
 ) -> Result<Value, AssistantFailure> {
     in_time(deadline, now, cancelled)?;
+    refuse_metadata(url).await?;
     let left = deadline - now();
     let mut init = FetchInit::method("POST").header("content-type", "application/json");
     for (name, value) in headers {
@@ -689,6 +705,7 @@ pub async fn list_models(
     } else if !settings.key.is_empty() {
         init = init.header("authorization", format!("Bearer {}", settings.key));
     }
+    refuse_metadata(&base).await?;
     let url = format!("{base}/models{}", if anthropic { "?limit=100" } else { "" });
     let answer = match fetch(fetcher, &url, init, None).await {
         Ok(answer) => answer,

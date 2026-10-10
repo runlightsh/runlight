@@ -353,6 +353,34 @@ async fn answers_runlight_cannot_read_are_refused() {
 }
 
 #[tokio::test]
+async fn a_link_local_or_cloud_metadata_address_is_never_called() {
+    let api = Canned { api: obj! {}, log: Mutex::new(Vec::new()) };
+    let at = |base_url: &str| AssistantSettings {
+        provider: "custom".into(),
+        model: "m".into(),
+        base_url: base_url.into(),
+        key: String::new(),
+    };
+    let rec = recording(vec![json(200, "{}"), json(200, "{}")]);
+    let fetcher: SharedFetcher = rec.clone();
+    let failure = assistant::list_models(&at("http://169.254.169.254/v1"), &fetcher).await.unwrap_err();
+    assert_eq!(
+        error_value(&failure),
+        obj! {
+            "message" => "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to",
+            "code" => "address_refused",
+            "params" => obj! { "host" => "169.254.169.254" },
+        }
+    );
+    let failure =
+        assistant::chat(&at("http://[fd00:ec2::254]/v1"), &ask(), &context_en(), &api, &fetcher, &fixed, None)
+            .await
+            .unwrap_err();
+    assert_eq!(error_value(&failure).at("params").at("host").as_str(), Some("[fd00:ec2::254]"));
+    assert!(rec.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_url_with_credentials_is_never_sent() {
     let api = Canned { api: obj! {}, log: Mutex::new(Vec::new()) };
     let settings = AssistantSettings {
