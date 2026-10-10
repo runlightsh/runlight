@@ -14,6 +14,10 @@ from .message import Response
 from .url import Url
 
 
+# Headers that carry a credential, dropped when a redirect leaves the origin they were sent to.
+_CREDENTIALS = ("authorization", "cookie", "proxy-authorization", "x-api-key")
+
+
 class FetchError(Exception):
     """No answer came back: the connection was refused, timed out, or failed TLS. fetch() rejects with a
     TypeError then."""
@@ -70,7 +74,8 @@ class _PinnedHTTP(http.client.HTTPConnection):
 
 
 class UrllibFetcher:
-    """Fetches with the standard library's http.client: redirects followed (up to 20) unless asked not to, one
+    """Fetches with the standard library's http.client: redirects followed (up to 20) unless asked not to, with
+    credentials dropped when one leaves their origin and none from https to http, one
     deadline for the whole request, gzip and deflate bodies decoded, and pins honoured."""
 
     def fetch(self, url: str, init: dict[str, Any] | None = None) -> Response:
@@ -92,6 +97,16 @@ class UrllibFetcher:
                 target = Url.parse(location, url)
                 if target is None or target.protocol not in ("http:", "https:"):
                     raise FetchError("fetch failed")
+                here = Url(url)
+                # Never from an encrypted address to a plain one, where anything still sent could be read on the way.
+                if here.protocol == "https:" and target.protocol == "http:":
+                    raise FetchError("fetch failed: a redirect from https to http")
+                # Credentials are for the address they were given to, so they go no further than its origin, as
+                # fetch() drops them.
+                if target.origin != here.origin:
+                    headers = headers.copy()
+                    for name in _CREDENTIALS:
+                        headers.delete(name)
                 if status == 303 or (status in (301, 302) and method == "POST"):
                     method = "GET" if method != "HEAD" else method
                     data = None
