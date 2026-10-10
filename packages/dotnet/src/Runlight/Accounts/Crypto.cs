@@ -3,6 +3,8 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Runlight.Accounts;
 
@@ -131,6 +133,33 @@ public static class Crypto
         byte[] salt = RandomBytes(16);
         return "scrypt$" + Base64url(salt) + "$" + Base64url(ScryptKey(password, salt, 32));
     }
+
+    /// <summary>
+    /// Password hashes being worked out at once. Each scrypt holds 16 MB and a core for a while, so a flood
+    /// of sign-ins waits its turn here instead of taking all the memory and every request thread.
+    /// </summary>
+    private static readonly SemaphoreSlim Hashing = new(Math.Clamp(Environment.ProcessorCount, 1, 8));
+
+    private static async Task<T> HashingAsync<T>(Func<T> fn, CancellationToken cancellationToken)
+    {
+        await Hashing.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(fn, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Hashing.Release();
+        }
+    }
+
+    /// <summary><see cref="HashPassword"/> off the calling thread, taking its turn with the others.</summary>
+    public static Task<string> HashPasswordAsync(string password, CancellationToken cancellationToken = default) =>
+        HashingAsync(() => HashPassword(password), cancellationToken);
+
+    /// <summary><see cref="CheckPassword"/> off the calling thread, taking its turn with the others.</summary>
+    public static Task<bool> CheckPasswordAsync(string password, string stored, CancellationToken cancellationToken = default) =>
+        HashingAsync(() => CheckPassword(password, stored), cancellationToken);
 
     /// <summary>
     /// Whether a password matches a hash, scrypt or PBKDF2. A stored key under <see cref="MinKeyBytes"/> is
