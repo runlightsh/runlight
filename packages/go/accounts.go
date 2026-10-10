@@ -93,6 +93,48 @@ var (
 	decoyHash string
 )
 
+// Password checks run at once, in this process, and the most that may wait for one.
+const (
+	checking   = 4
+	maxWaiting = 64
+)
+
+var (
+	checkSlots = make(chan struct{}, checking)
+	waitingMu  sync.Mutex
+	waiting    int
+)
+
+// slot runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core.
+// Past the queue's length it refuses at once, with an AccountError coded "busy".
+func slot(ctx context.Context, fn func() bool) (bool, error) {
+	select {
+	case checkSlots <- struct{}{}:
+	default:
+		waitingMu.Lock()
+		if waiting >= maxWaiting {
+			waitingMu.Unlock()
+			return false, accountError("Runlight is busy checking other sign-ins. Try again in a moment.", "busy")
+		}
+		waiting++
+		waitingMu.Unlock()
+		var err error
+		select {
+		case checkSlots <- struct{}{}:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		waitingMu.Lock()
+		waiting--
+		waitingMu.Unlock()
+		if err != nil {
+			return false, err
+		}
+	}
+	defer func() { <-checkSlots }()
+	return fn(), nil
+}
+
 // AccountStore keeps the accounts in the store's database.
 type AccountStore struct {
 	store  *Store
@@ -777,7 +819,8 @@ func (a *AccountStore) AcceptInvite(ctx context.Context, code, password string, 
 	return out, err
 }
 
-// SignIn is the account for an email and password, or nil. Takes the same time either way.
+// SignIn is the account for an email and password, or nil. Takes the same time either way. Only a few checks
+// run at once; with too many waiting it returns an AccountError coded "busy".
 func (a *AccountStore) SignIn(ctx context.Context, email, password string) (*User, error) {
 	user, err := a.ByEmail(ctx, email)
 	if err != nil {
@@ -785,13 +828,14 @@ func (a *AccountStore) SignIn(ctx context.Context, email, password string) (*Use
 	}
 	if user == nil {
 		decoyOnce.Do(func() { decoyHash, _ = accounts.HashPassword(accounts.Hex(accounts.RandomBytes(16))) })
-		accounts.CheckPassword(password, decoyHash)
-		return nil, nil
+		_, err := slot(ctx, func() bool { return accounts.CheckPassword(password, decoyHash) })
+		return nil, err
 	}
-	if accounts.CheckPassword(password, user.Hash) {
-		return user, nil
+	right, err := slot(ctx, func() bool { return accounts.CheckPassword(password, user.Hash) })
+	if err != nil || !right {
+		return nil, err
 	}
-	return nil, nil
+	return user, nil
 }
 
 // SessionFor is a cookie value naming the user and when it expires, signed
