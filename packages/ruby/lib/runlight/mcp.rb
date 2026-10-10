@@ -28,6 +28,8 @@ module Runlight
     ].freeze
     # query.ts's MAX_FILTERS.
     MAX_FILTERS = 6
+    # The most messages one batch may hold.
+    MAX_BATCH = 20
 
     RANGE_KEYS = %w[site period from to filters].freeze
     COMPARE_KEYS = [*RANGE_KEYS, "compare", "compare_from", "compare_to"].freeze
@@ -321,8 +323,13 @@ module Runlight
       parsed, body = Js.parse_json(request.text)
       return Http::Response.new(Json.encode(rpc_error(nil, -32_700, "Send a JSON-RPC message")), status: 400, headers: headers) if !parsed || !Js.object?(body)
 
-      # Batches were in the 2025-03-26 protocol; answering them costs nothing.
+      # Batches were in the 2025-03-26 protocol. Only a short list, so one request cannot start hundreds of
+      # reports; they run one after another here, where TypeScript runs four at a time.
       if body.is_a?(Array)
+        if body.length > MAX_BATCH
+          return Http::Response.new(Json.encode(rpc_error(nil, -32_600, "Send at most #{MAX_BATCH} messages in a batch")), status: 400, headers: headers)
+        end
+
         answers = body.map { |message| answer(message, read_api) }.compact
         return answers.empty? ? Http::Response.new("", status: 202) : Http::Response.new(Json.encode(answers), status: 200, headers: headers)
       end
