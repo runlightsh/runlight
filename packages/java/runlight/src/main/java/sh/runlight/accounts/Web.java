@@ -94,13 +94,17 @@ public final class Web {
   private final boolean asksForToken;
   private volatile boolean existing;
 
-  // Wrong passwords are counted twice. Per account and address, ten tries;
+  // Wrong passwords are counted three times. Per account and address, ten tries;
   // per account from anywhere, fifty, so a caller who invents a new address
   // for every try still cannot guess on and on. Addresses come from
-  // forwarding headers a client can write, so they never stand alone.
+  // forwarding headers a client can write, so they never stand alone. And per
+  // address across every account, thirty, so one caller trying made-up emails
+  // cannot keep the server hashing; a request with no known address skips that one,
+  // since it would hold up everyone at once.
   // Each try counts before the password is checked, and a right one is taken back.
   private final Throttle perAddress;
   private final Throttle perAccount;
+  private final Throttle perIp;
   // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the
   // first one. Password re-checks in Account: ten.
   private final Throttle codeTries;
@@ -135,6 +139,7 @@ public final class Web {
     this.asksForToken = first instanceof Map<?, ?> m && m.containsKey("token");
     this.perAddress = new Throttle(store, "address", 10);
     this.perAccount = new Throttle(store, "account", 50);
+    this.perIp = new Throttle(store, "ip", 30);
     this.codeTries = new Throttle(store, "code", 5);
     this.decoyTries = new Throttle(store, "decoy", 5);
     this.confirmTries = new Throttle(store, "confirm", 5);
@@ -761,10 +766,36 @@ public final class Web {
     String next = safeNext(form.get("next"));
     String account = Js.lower(Js.trim(email));
     String ip = rl.clientIp(request, context);
-    String pair = account + "\n" + (ip != null && !ip.isEmpty() ? ip : "unknown");
+    boolean knownIp = ip != null && !ip.isEmpty();
+    String pair = account + "\n" + (knownIp ? ip : "unknown");
+    if (knownIp && !perIp.take(ip, now())) {
+      return loginAgain("Too many tries. Wait fifteen minutes and try again.", email, next, 429);
+    }
     if (!perAddress.take(pair, now())) {
       return loginAgain("Too many tries. Wait fifteen minutes and try again.", email, next, 429);
     }
+    try {
+      return checkLogin(request, email, password, next, account, pair, knownIp ? ip : null);
+    } catch (AccountError error) {
+      // Too many password checks already waiting, so this one was never run: try again in a
+      // moment.
+      if (error.code().equals("busy")) {
+        Response busy = loginAgain(error.getMessage(), email, next, 503);
+        busy.headers().set("retry-after", "5");
+        return busy;
+      }
+      throw error;
+    }
+  }
+
+  private Response checkLogin(
+      Request request,
+      String email,
+      String password,
+      String next,
+      String account,
+      String pair,
+      String ip) {
     // A browser that signed in to the account before is never held up by others' failures.
     Map<String, Object> known = accounts.byEmail(account);
     boolean trusted =
@@ -809,6 +840,9 @@ public final class Web {
       return loginAgain("That email and password do not match an account.", email, next, 401);
     }
     perAddress.clear(pair);
+    if (ip != null) {
+      perIp.forgive(ip);
+    }
     if (!over && !trusted) {
       perAccount.forgive(account);
     }
@@ -843,7 +877,17 @@ public final class Web {
     if (!rechecks.take(id, at)) {
       return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429);
     }
-    if (accounts.signIn((String) user.get("email"), field(input, fieldName)) == null) {
+    Map<String, Object> right;
+    try {
+      right = accounts.signIn((String) user.get("email"), field(input, fieldName));
+    } catch (AccountError error) {
+      if (error.code().equals("busy")) {
+        return coded(
+            "Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503);
+      }
+      throw error;
+    }
+    if (right == null) {
       return coded(wrong, wrongCode, 400);
     }
     rechecks.forgive(id);

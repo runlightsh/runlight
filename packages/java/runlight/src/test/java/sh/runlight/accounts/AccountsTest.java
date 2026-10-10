@@ -356,4 +356,44 @@ class AccountsTest {
     assertEquals(5, let.get());
     assertTrue(new Throttle(store, "burst", 5, 60_000).blocked("jon@example.com", NOW));
   }
+
+  @Test
+  void onlyAFewPasswordChecksRunAtOnceAndPastTheQueueTheRestAreTurnedAway() throws Exception {
+    CountDownLatch running = new CountDownLatch(4);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicInteger ran = new AtomicInteger();
+    List<Future<?>> done = new ArrayList<>();
+    try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (int i = 0; i < 4 + 64; i++) {
+        done.add(
+            pool.submit(
+                () ->
+                    Accounts.slot(
+                        () -> {
+                          running.countDown();
+                          try {
+                            release.await();
+                          } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                          }
+                          return ran.incrementAndGet();
+                        })));
+      }
+      running.await();
+      long deadline = System.nanoTime() + 10_000_000_000L;
+      while (Accounts.waitingChecks() < 64 && System.nanoTime() < deadline) {
+        Thread.onSpinWait();
+      }
+      assertEquals(64, Accounts.waitingChecks());
+      AccountError busy = assertThrows(AccountError.class, () -> Accounts.slot(() -> true));
+      assertEquals("busy", busy.code());
+      release.countDown();
+      for (Future<?> one : done) {
+        one.get();
+      }
+    }
+    assertEquals(68, ran.get(), "everyone in the queue got their turn");
+    assertEquals(0, Accounts.waitingChecks());
+    assertTrue(Accounts.slot(() -> true), "and a check runs again once they have");
+  }
 }

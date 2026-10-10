@@ -3,6 +3,8 @@ package sh.runlight.accounts;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import sh.runlight.Js;
@@ -55,6 +57,13 @@ public final class Accounts {
    * when first needed.
    */
   private static volatile String decoy;
+
+  /** Password checks run at once, in this process, and the most that may wait for one. */
+  private static final int CHECKING = 4;
+
+  private static final int WAITING = 64;
+  private static final Semaphore CHECKS = new Semaphore(CHECKING, true);
+  private static final AtomicInteger WAITERS = new AtomicInteger();
 
   private final SqlStore store;
   private final String secret;
@@ -685,7 +694,10 @@ public final class Accounts {
         "This invite has expired or was already used. Ask for a new one.", "invite_gone");
   }
 
-  /** The account for an email and password, or null. Takes the same time either way. */
+  /**
+   * The account for an email and password, or null. Takes the same time either way. Only a few
+   * checks run at once; with too many waiting it throws an AccountError coded "busy".
+   */
   public Map<String, Object> signIn(String email, String password) {
     Map<String, Object> user = byEmail(email);
     if (user == null) {
@@ -694,10 +706,41 @@ public final class Accounts {
         against = Crypto.hashPassword(Crypto.hex(Crypto.randomBytes(16)));
         decoy = against;
       }
-      Crypto.checkPassword(password, against);
+      String hash = against;
+      slot(() -> Crypto.checkPassword(password, hash));
       return null;
     }
-    return Crypto.checkPassword(password, (String) user.get("hash")) ? user : null;
+    return slot(() -> Crypto.checkPassword(password, (String) user.get("hash"))) ? user : null;
+  }
+
+  /**
+   * Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take
+   * every core. Past the queue's length it refuses at once, with an AccountError coded "busy".
+   * Scrypt's own turns, about one per core, still bound every derivation's memory besides.
+   */
+  static <T> T slot(Supplier<T> fn) {
+    if (!CHECKS.tryAcquire()) {
+      if (WAITERS.incrementAndGet() > WAITING) {
+        WAITERS.decrementAndGet();
+        throw new AccountError(
+            "Runlight is busy checking other sign-ins. Try again in a moment.", "busy");
+      }
+      try {
+        CHECKS.acquireUninterruptibly();
+      } finally {
+        WAITERS.decrementAndGet();
+      }
+    }
+    try {
+      return fn.get();
+    } finally {
+      CHECKS.release();
+    }
+  }
+
+  /** How many password checks wait for a slot now, for tests. */
+  static int waitingChecks() {
+    return WAITERS.get();
   }
 
   /**
