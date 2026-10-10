@@ -53,6 +53,7 @@ type AccountsWeb struct {
 	perAddress   *Throttle
 	perAccount   *Throttle
 	codeTries    *Throttle
+	decoyTries   *Throttle
 	confirmTries *Throttle
 	rechecks     *Throttle
 	mu           sync.Mutex
@@ -78,12 +79,13 @@ const madeBy = "token-by:"
 func NewAccountsWeb(options AccountsWebOptions) *AccountsWeb {
 	// Wrong passwords are counted twice. Per account and address, ten tries; per account from anywhere,
 	// fifty, so a caller who invents a new address for every try still cannot guess on and on. Six-digit
-	// codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
+	// codes: five wrong tries an account every fifteen minutes, and five to confirm the first one. A decoy
+	// ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
 	// Password re-checks in Account: ten.
 	return &AccountsWeb{
 		Accounts: NewAccountStore(options.Runlight.Store, options.Secret), o: options, r: options.Runlight,
 		cookiePath: firstNonEmpty(options.Base, "/"), home: options.Base + "/",
-		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), codeTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
+		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), codeTries: NewThrottle(5, 0), decoyTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
 		linkSent: map[string]int64{},
 	}
 }
@@ -481,7 +483,11 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			return redirect(base + "/login?next=" + encodeURIComponent(next)), nil
 		}
 		// Counted before the check, so a burst cannot get past five.
-		if !w.codeTries.Take(user.ID, w.now()) {
+		tries := w.codeTries
+		if !real {
+			tries = w.decoyTries
+		}
+		if !tries.Take(user.ID, w.now()) {
 			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: "Too many tries. Wait fifteen minutes and try again."}), 429), nil
 		}
 		ok := false
