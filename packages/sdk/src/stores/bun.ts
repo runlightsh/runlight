@@ -27,6 +27,8 @@ export function bunSqlite(options: BunSqliteOptions): SqlStore {
       handle.exec("PRAGMA journal_mode = WAL");
       handle.exec("PRAGMA synchronous = NORMAL");
       handle.exec("PRAGMA busy_timeout = 5000");
+      // Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes.
+      handle.exec("PRAGMA secure_delete = FAST");
     }
     return handle;
   };

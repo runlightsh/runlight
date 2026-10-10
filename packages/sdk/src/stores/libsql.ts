@@ -63,6 +63,8 @@ export function libsql(options: LibsqlOptions): SqlStore {
   if ((options.client as { protocol?: string }).protocol === "file") {
     // Another process holding the file waits a little rather than failing at once.
     void options.client.execute("PRAGMA busy_timeout = 5000").catch(() => {});
+    // Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes.
+    void options.client.execute("PRAGMA secure_delete = FAST").catch(() => {});
     return new SqlStore(takingTurns(db(options.client, options.client)));
   }
   return new SqlStore(db(options.client, options.client));
