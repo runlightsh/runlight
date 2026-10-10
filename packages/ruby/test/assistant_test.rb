@@ -109,6 +109,20 @@ class AssistantTest < Minitest::Test
     assert_equal [], fetcher.requests
   end
 
+  def test_the_assistant_never_calls_a_link_local_or_cloud_metadata_address_though_one_on_this_computer_is_fine
+    rl = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(":memory:"), "secret" => "s" * 64 })
+    rl.init
+    ["http://169.254.169.254/latest", "http://[fd00:ec2::254]/v1", "http://metadata.google.internal/v1"].each do |base_url|
+      error = assert_raises(Runlight::SettingsError, base_url) { rl.save_assistant_settings({ "provider" => "custom", "model" => "m", "baseUrl" => base_url, "key" => "" }) }
+      assert_equal "address_refused", error.code, base_url
+    end
+    rl.save_assistant_settings({ "provider" => "ollama", "model" => "llama3", "baseUrl" => "", "key" => "" })
+    fetcher = RecordingFetcher.new([])
+    error = assert_raises(Runlight::AssistantError) { Assistant.list_models({ "provider" => "custom", "baseUrl" => "http://169.254.169.254/v1", "key" => "" }, fetcher) }
+    assert_equal "address_refused", error.code
+    assert_equal [], fetcher.requests
+  end
+
   def test_models_are_listed_within_twenty_seconds
     fetcher = RecordingFetcher.new([Response.new('{"data":[{"id":"b"},{"id":"a"}]}')])
     assert_equal [{ "id" => "a", "name" => "a" }, { "id" => "b", "name" => "b" }],

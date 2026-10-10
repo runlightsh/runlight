@@ -215,6 +215,10 @@ module Runlight
       config = settings.merge("from" => from)
       config["fromName"] = from_name unless from_name == ""
       Mail::Transports.check_config(config)
+      if config["service"] == "smtp" && Js.truthy?(config["host"]) && Safefetch.metadata_host?(config["host"].to_s)
+        raise Mail::MailError.new("#{config["host"]} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused",
+                                  { "host" => config["host"] })
+      end
       @store.set_setting("mail", Mail::Secret.seal(Json.encode(config), @secret))
     end
 
@@ -613,6 +617,10 @@ module Runlight
         parsed = Http::Url.parse(base_url)
         if parsed.nil? || (parsed.protocol != "https:" && parsed.protocol != "http:")
           raise SettingsError.new("Enter the service's address, starting with https://", "assistant_address_bad")
+        end
+        if Safefetch.metadata_host?(parsed.hostname)
+          raise SettingsError.new("#{parsed.hostname} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused",
+                                  { "host" => parsed.hostname })
         end
       end
       raise SettingsError.new("Enter the service's address", "assistant_address") if base_url == "" && provider["baseUrl"] == ""

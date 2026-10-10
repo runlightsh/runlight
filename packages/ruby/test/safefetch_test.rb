@@ -15,6 +15,19 @@ class SafefetchTest < Minitest::Test
     ->(name) { names[name] || [] }
   end
 
+  def test_link_local_and_cloud_metadata_addresses_are_told_apart_from_loopback_and_private_ones
+    ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe",
+     "64:ff9b::a9fe:a9fe"].each { |ip| assert Safefetch.metadata_address?(ip), ip }
+    ["127.0.0.1", "::1", "10.0.0.5", "192.168.1.20", "fd00::1", "fd00:ec2::253", "93.184.215.14", "not an address"].each do |ip|
+      refute Safefetch.metadata_address?(ip), ip
+    end
+    assert Safefetch.metadata_host?("metadata.google.internal")
+    assert Safefetch.metadata_host?("[fd00:ec2::254]")
+    assert Safefetch.metadata_host?("169.254.169.254")
+    refute Safefetch.metadata_host?("localhost"), "a model on this computer is fine"
+    refute Safefetch.metadata_host?("192.168.1.20")
+  end
+
   def test_only_addresses_on_the_public_internet_count_as_public
     ["93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e"].each do |ip|
       assert Safefetch.public_address?(ip), ip

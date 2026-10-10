@@ -83,6 +83,8 @@ module Runlight
         s.connect(security == "tls", REPLY_TIMEOUT_MS)
         expect = lambda do |codes, what|
           reply = s.next_reply(REPLY_TIMEOUT_MS)
+          # Something that is not a mail server gets no more than that said, so its own words are never passed on.
+          raise MailError, "SMTP #{what}: #{s.host}:#{s.port} did not answer as a mail server does" unless reply["code"].between?(200, 599)
           raise MailError, Transports.slice16("SMTP #{what}: #{reply["code"]} #{reply["text"]}", 300) unless codes.include?(reply["code"])
 
           reply

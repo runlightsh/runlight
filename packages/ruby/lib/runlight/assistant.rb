@@ -85,8 +85,18 @@ module Runlight
       message.is_a?(String) ? message : ""
     end
 
+    # Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
+    # private network is allowed, as the person setting it up means it to be.
+    def refuse_metadata(url)
+      host = Http::Url.new(url).hostname
+      return unless Safefetch.metadata_host?(host)
+
+      raise AssistantError.new("#{host} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", { "host" => host })
+    end
+
     def post(fetcher, url, headers, body, deadline, now, cancelled)
       in_time(deadline, now, cancelled)
+      refuse_metadata(url)
       left = deadline - now.call
       begin
         answer = fetcher.fetch(url, {
@@ -293,6 +303,7 @@ module Runlight
                 elsif key != "" then { "authorization" => "Bearer #{key}" }
                 else {}
                 end
+      refuse_metadata(base)
       begin
         answer = fetcher.fetch("#{base}/models#{provider["protocol"] == "anthropic" ? "?limit=100" : ""}", { "headers" => headers, "timeoutMs" => 20_000 })
       rescue StandardError
