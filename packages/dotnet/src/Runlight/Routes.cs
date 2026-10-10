@@ -3034,9 +3034,20 @@ public sealed class Routes
         string siteId = current.Str("id")!;
         string timezone = current.Str("timezone")!;
         var connected = rl.Remote(siteId);
+        // A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+        // each visit, with its time and city, since anyone with the link could watch one person's way through the site.
+        JsObject Unfeed(JsObject live) => shared != null ? live.With(new JsObject { ["recent"] = new List<object?>() }) : live;
         if (connected != null)
         {
-            return await PassThroughAsync(connected, path, url, request, cancellationToken).ConfigureAwait(false);
+            var answer = await PassThroughAsync(connected, path, url, request, cancellationToken).ConfigureAwait(false);
+            if (path != "/api/realtime" || shared == null || !answer.Ok)
+            {
+                return answer;
+            }
+            string remoteHost = new Url(connected.Str("url")!).Host;
+            return Js.ParseJson(await answer.BytesAsync(cancellationToken).ConfigureAwait(false), out object? live) && live is JsObject liveObject
+                ? JsonResponse(Unfeed(liveObject))
+                : Coded("Could not reach " + remoteHost, "unreachable", 502, new JsObject { ["host"] = remoteHost });
         }
 
         if (path == "/api/icon")
@@ -3060,7 +3071,7 @@ public sealed class Routes
 
         if (path == "/api/realtime")
         {
-            return JsonResponse(await store.RealtimeAsync(siteId, rl.Now(), cancellationToken).ConfigureAwait(false));
+            return JsonResponse(Unfeed(await store.RealtimeAsync(siteId, rl.Now(), cancellationToken).ConfigureAwait(false)));
         }
 
         object readOrRefusal = await ReadQueryAsync(url, current, cancellationToken).ConfigureAwait(false);
