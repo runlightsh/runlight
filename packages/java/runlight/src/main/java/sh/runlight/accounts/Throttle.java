@@ -10,7 +10,6 @@ import java.util.function.UnaryOperator;
 import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
-import sh.runlight.db.Db;
 import sh.runlight.store.SqlStore;
 
 /**
@@ -67,7 +66,7 @@ public final class Throttle {
     // Made once: of two processes making one at once, the first written is the one both use, or
     // they would count the same key apart.
     String made = Hash.randomId(16);
-    return swap(KEY, saved, made) ? made : store.setting(KEY);
+    return store.swapSetting(KEY, saved, made) ? made : store.setting(KEY);
   }
 
   /** Runs fn while no other try under the same id in this process reads or counts. */
@@ -122,35 +121,11 @@ public final class Throttle {
               return null;
             }
             String value = Json.stringify(Json.object("count", next[0], "until", next[1]));
-            if (swap(key, saved, value)) {
+            if (store.swapSetting(key, saved, value)) {
               return next;
             }
           }
         });
-  }
-
-  /** Sets a setting to value if it still holds before (null for not there), and says if it did. */
-  private boolean swap(String key, String before, String value) {
-    Db db = store.db();
-    boolean my = db.dialect().equals("mysql");
-    if (before == null) {
-      if (my) {
-        return db.affected(
-                "INSERT IGNORE INTO rl_settings (\"key\", value) VALUES (?, ?)",
-                List.of(key, value))
-            == 1;
-      }
-      return db.all(
-                  "INSERT INTO rl_settings (\"key\", value) VALUES (?, ?) ON CONFLICT (\"key\") DO NOTHING RETURNING \"key\"",
-                  List.of(key, value))
-              .size()
-          == 1;
-    }
-    String sql = "UPDATE rl_settings SET value = ? WHERE \"key\" = ? AND value = ?";
-    List<Object> params = List.of(value, key, before);
-    return my
-        ? db.affected(sql, params) == 1
-        : db.all(sql + " RETURNING \"key\"", params).size() == 1;
   }
 
   /** A try counted on an entry: the first of a new window when there is none or it has ended. */

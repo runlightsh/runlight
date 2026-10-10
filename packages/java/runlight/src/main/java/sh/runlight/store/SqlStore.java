@@ -1440,6 +1440,33 @@ public final class SqlStore implements AutoCloseable {
     return gone == 1 ? value : null;
   }
 
+  /**
+   * Sets a setting only if it still holds {@code before} (null for not there), and says whether it
+   * did, so a value read, changed, and written back is never written over one another caller wrote
+   * meanwhile, in this process or another.
+   */
+  public boolean swapSetting(String key, String before, String value) {
+    boolean my = db.dialect().equals("mysql");
+    if (before == null) {
+      if (my) {
+        return db.affected(
+                "INSERT IGNORE INTO rl_settings (\"key\", value) VALUES (?, ?)",
+                List.of(key, value))
+            == 1;
+      }
+      return db.all(
+                  "INSERT INTO rl_settings (\"key\", value) VALUES (?, ?) ON CONFLICT (\"key\") DO NOTHING RETURNING \"key\"",
+                  List.of(key, value))
+              .size()
+          == 1;
+    }
+    String sql = "UPDATE rl_settings SET value = ? WHERE \"key\" = ? AND value = ?";
+    List<Object> params = List.of(value, key, before);
+    return my
+        ? db.affected(sql, params) == 1
+        : db.all(sql + " RETURNING \"key\"", params).size() == 1;
+  }
+
   public void setSetting(String key, String value) {
     if (value == null) {
       db.run("DELETE FROM rl_settings WHERE \"key\" = ?", List.of(key));
