@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -138,5 +139,51 @@ func TestAskTurnGivesBackARefusedQuestion(t *testing.T) {
 	mine := rt.asked["viewer"]
 	if mine.open != 0 || len(mine.at) != 0 {
 		t.Fatalf("%d open and %d this hour, want none", mine.open, len(mine.at))
+	}
+}
+
+// A few password checks run at once and a short line waits; past that a check is refused as busy, never queued.
+func TestPasswordChecksTakeTurns(t *testing.T) {
+	ctx := context.Background()
+	for range checking {
+		checkSlots <- struct{}{}
+	}
+	release := make(chan struct{})
+	var started sync.WaitGroup
+	results := make(chan error, maxWaiting)
+	for range maxWaiting {
+		started.Add(1)
+		go func() {
+			started.Done()
+			_, err := slot(ctx, func() bool { <-release; return true })
+			results <- err
+		}()
+	}
+	started.Wait()
+	for {
+		waitingMu.Lock()
+		full := waiting == maxWaiting
+		waitingMu.Unlock()
+		if full {
+			break
+		}
+		runtime.Gosched()
+	}
+	_, err := slot(ctx, func() bool { return true })
+	var ae *AccountError
+	if !asAccountError(err, &ae) || ae.Code != "busy" {
+		t.Fatalf("a check past the line answered %v", err)
+	}
+	close(release)
+	for range checking {
+		<-checkSlots
+	}
+	for range maxWaiting {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if right, err := slot(ctx, func() bool { return true }); !right || err != nil {
+		t.Fatalf("a check after the rush answered %v, %v", right, err)
 	}
 }

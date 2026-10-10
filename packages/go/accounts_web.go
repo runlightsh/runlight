@@ -52,6 +52,7 @@ type AccountsWeb struct {
 	home         string
 	perAddress   *Throttle
 	perAccount   *Throttle
+	perIP        *Throttle
 	codeTries    *Throttle
 	decoyTries   *Throttle
 	confirmTries *Throttle
@@ -77,15 +78,17 @@ const madeBy = "token-by:"
 
 // NewAccountsWeb makes the accounts' pages and APIs.
 func NewAccountsWeb(options AccountsWebOptions) *AccountsWeb {
-	// Wrong passwords are counted twice. Per account and address, ten tries; per account from anywhere,
-	// fifty, so a caller who invents a new address for every try still cannot guess on and on. Six-digit
+	// Wrong passwords are counted three times. Per account and address, ten tries; per account from anywhere,
+	// fifty, so a caller who invents a new address for every try still cannot guess on and on. And per address
+	// across every account, thirty, so one caller trying made-up emails cannot keep the server hashing; a
+	// request with no known address skips that one, since it would hold up everyone at once. Six-digit
 	// codes: five wrong tries an account every fifteen minutes, and five to confirm the first one. A decoy
 	// ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
 	// Password re-checks in Account: ten.
 	return &AccountsWeb{
 		Accounts: NewAccountStore(options.Runlight.Store, options.Secret), o: options, r: options.Runlight,
 		cookiePath: firstNonEmpty(options.Base, "/"), home: options.Base + "/",
-		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), codeTries: NewThrottle(5, 0), decoyTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
+		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), perIP: NewThrottle(30, 0), codeTries: NewThrottle(5, 0), decoyTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
 		linkSent: map[string]int64{},
 	}
 }
@@ -564,14 +567,22 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 	next := w.safeNext(form.Value("next"))
 	account := lower(jsTrim(email))
 	ip := w.r.ClientIP(request)
-	if ip == "" {
-		ip = "unknown"
-	}
-	pair := account + "\n" + ip
+	pair := account + "\n" + firstNonEmpty(ip, "unknown")
 	page := func(message string) string {
 		return accounts.LoginPage(base, accounts.LoginOptions{Error: message, Email: email, Next: &next, Forgot: w.o.Forgot})
 	}
 	tooMany := func() *Response { return html(page("Too many tries. Wait fifteen minutes and try again."), 429) }
+	// Too many password checks already waiting, so this one was never run: try again in a moment.
+	busy := func(err error) (*Response, error) {
+		var ae *AccountError
+		if asAccountError(err, &ae) && ae.Code == "busy" {
+			return html(page(ae.Message), 503, "retry-after", "5"), nil
+		}
+		return nil, err
+	}
+	if ip != "" && !w.perIP.Take(ip, w.now()) {
+		return tooMany(), nil
+	}
 	if !w.perAddress.Take(pair, w.now()) {
 		return tooMany(), nil
 	}
@@ -595,7 +606,7 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 		}
 		user, err := w.Accounts.SignIn(ctx, email, password)
 		if err != nil {
-			return nil, err
+			return busy(err)
 		}
 		if user != nil {
 			// Sent after the answer, so a right password is no slower than a wrong one.
@@ -610,7 +621,7 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 	}
 	user, err := w.Accounts.SignIn(ctx, email, password)
 	if err != nil {
-		return nil, err
+		return busy(err)
 	}
 	if user == nil {
 		if over && known != nil {
@@ -623,6 +634,9 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 		return html(page("That email and password do not match an account."), 401), nil
 	}
 	w.perAddress.Clear(pair)
+	if ip != "" {
+		w.perIP.Forgive(ip)
+	}
 	if !over && !trusted {
 		w.perAccount.Forgive(account)
 	}
@@ -689,6 +703,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		}
 		ok, err := w.Accounts.SignIn(ctx, user.Email, field(input, key))
 		if err != nil {
+			var ae *AccountError
+			if asAccountError(err, &ae) && ae.Code == "busy" {
+				return accountCoded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503, nil), nil
+			}
 			return nil, err
 		}
 		if ok == nil {
