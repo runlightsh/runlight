@@ -100,10 +100,13 @@ function CsvVisits({ site }: { site: Site }) {
     const unreadable = file.rows.length - parts.reduce((n, p) => n + p.length, 0);
     let state = { ...idle, skipped: unreadable, running: true, total: file.rows.length };
     setProgress(state);
+    // The secret the server keys this file's visitors with, from its first answer; held only here.
+    let secret: string | undefined;
     try {
       for (const part of parts) {
         if (stop.current) break;
-        const step = await api.importCsvVisits(site.id, part);
+        const step = await api.importCsvVisits(site.id, part, secret);
+        secret = step.secret ?? secret;
         state = {
           ...state,
           done: state.done + part.length,

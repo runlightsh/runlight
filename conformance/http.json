@@ -36894,7 +36894,8 @@
               "pageviews": 3,
               "events": 1,
               "visits": 3,
-              "skipped": 2
+              "skipped": 2,
+              "secret": "<secret>"
             }
           }
         },
@@ -36928,8 +36929,9 @@
             "body": {
               "pageviews": 1,
               "events": 0,
-              "visits": 0,
-              "skipped": 0
+              "visits": 1,
+              "skipped": 0,
+              "secret": "<secret>"
             }
           }
         },
@@ -36980,7 +36982,141 @@
               "pageviews": 1,
               "events": 1,
               "visits": 1,
-              "skipped": 1
+              "skipped": 1,
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/import/csv/visits",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "rows": [
+              {
+                "time": "2026-09-25T10:00:00Z",
+                "path": "/one",
+                "visitor": "203.0.113.50"
+              }
+            ]
+          },
+          "capture": {
+            "csvSecret": "secret"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "pageviews": 1,
+              "events": 0,
+              "visits": 1,
+              "skipped": 0,
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/import/csv/visits",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "rows": [
+              {
+                "time": "2026-09-25T10:05:00Z",
+                "path": "/two",
+                "visitor": "203.0.113.50"
+              }
+            ],
+            "secret": "{{csvSecret}}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "pageviews": 1,
+              "events": 0,
+              "visits": 0,
+              "skipped": 0,
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/import/csv/visits",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "rows": [
+              {
+                "time": "2026-09-25T10:10:00Z",
+                "path": "/three",
+                "visitor": "203.0.113.50"
+              }
+            ],
+            "secret": "short"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "pageviews": 1,
+              "events": 0,
+              "visits": 1,
+              "skipped": 0,
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?from=2026-09-25&to=2026-09-25&compare=off",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-09-25",
+                "to": "2026-09-25",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 2,
+                "visits": 2,
+                "pageviews": 3,
+                "viewsPerVisit": 1.5,
+                "bounceRate": 0.5,
+                "visitDuration": 150000
+              }
             }
           }
         },
@@ -37006,12 +37142,12 @@
                 "timezone": "UTC"
               },
               "stats": {
-                "visitors": 3,
-                "visits": 3,
+                "visitors": 4,
+                "visits": 4,
                 "pageviews": 4,
-                "viewsPerVisit": 1.33,
-                "bounceRate": 0,
-                "visitDuration": 20000
+                "viewsPerVisit": 1,
+                "bounceRate": 0.25,
+                "visitDuration": 90000
               }
             }
           }
@@ -37088,20 +37224,20 @@
               "dimension": "source",
               "rows": [
                 {
+                  "value": "Google",
+                  "visitors": 2,
+                  "visits": 2,
+                  "bounceRate": 0.5,
+                  "pageviews": 3,
+                  "visitDuration": 150000
+                },
+                {
                   "value": "Bing",
                   "visitors": 1,
                   "visits": 1,
                   "bounceRate": 0,
                   "pageviews": 1,
                   "visitDuration": 60000
-                },
-                {
-                  "value": "Google",
-                  "visitors": 1,
-                  "visits": 1,
-                  "bounceRate": 0,
-                  "pageviews": 3,
-                  "visitDuration": 0
                 }
               ]
             }
@@ -37858,7 +37994,8 @@
               "pageviews": 1,
               "events": 0,
               "visits": 1,
-              "skipped": 0
+              "skipped": 0,
+              "secret": "<secret>"
             }
           }
         },

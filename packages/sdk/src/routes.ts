@@ -1356,7 +1356,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       const site = await querySite(url);
       if (site instanceof Response) return site;
       try {
-        return json(await importCsvVisits(runlight, site.id, body.rows));
+        return json(await importCsvVisits(runlight, site.id, body.rows, body.secret));
       } catch (error) {
         if (error instanceof ImportError) return refused(error, "import_failed");
         throw error;
