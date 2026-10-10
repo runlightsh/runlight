@@ -244,6 +244,20 @@ class AccountsAccountsTest < Minitest::Test
     end
   end
 
+  def test_the_tables_are_made_once_however_many_threads_ask_at_once
+    store = store("sqlite")
+    accounts = Accounts.new(store, SECRET)
+    made = Queue.new
+    db = store.db
+    db.define_singleton_method(:exclusive) do |&block|
+      made << 1
+      sleep 0.05
+      super(&block)
+    end
+    Array.new(6) { Thread.new { accounts.count } }.each(&:join)
+    assert_equal 1, made.size
+  end
+
   def test_the_throttle_lets_no_more_tries_through_at_once_than_its_limit
     skip "no fork here" unless Process.respond_to?(:fork)
 
