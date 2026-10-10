@@ -225,6 +225,35 @@ class MailTest < Minitest::Test
     server&.stop
   end
 
+  def test_smtp_never_a_link_local_or_metadata_address_and_something_that_is_not_a_mail_server_is_not_quoted
+    ["169.254.169.254", "[fd00:ec2::254]"].each do |host|
+      error = assert_raises(Mail::MailError, host) do
+        Mail::Smtp.deliver({ "service" => "smtp", "host" => host, "port" => "25", "security" => "none" }, MESSAGE, "reports@example.com")
+      end
+      assert_equal "address_refused", error.code
+    end
+    rl = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(":memory:"), "secret" => "s" * 64 })
+    error = assert_raises(Mail::MailError) do
+      rl.save_mail_settings({ "service" => "smtp", "host" => "metadata.google.internal", "port" => "587", "security" => "starttls", "from" => "a@example.com" })
+    end
+    assert_equal "address_refused", error.code
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.addr[1]
+    answering = Thread.new do
+      client = server.accept
+      client.write("HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n")
+      client.close
+    end
+    error = assert_raises(Mail::MailError) do
+      Mail::Smtp.deliver({ "service" => "smtp", "host" => "127.0.0.1", "port" => port.to_s, "security" => "none" }, MESSAGE, "reports@example.com")
+    end
+    assert_match(/did not answer as a mail server does/, error.message)
+    refute_match(/internal|HTTP/, error.message)
+  ensure
+    answering&.join
+    server&.close
+  end
+
   def test_smtp_character_split_across_two_reads_comes_through_whole
     ours, theirs = UNIXSocket.pair
     session = Mail::SmtpSession.new("127.0.0.1", 25, Mail::Smtp.monotonic + 5_000_000_000, "late")

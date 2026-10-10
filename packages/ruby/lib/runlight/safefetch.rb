@@ -96,6 +96,41 @@ module Runlight
       true
     end
 
+    # Names clouds give their metadata services.
+    METADATA_NAMES = %w[metadata metadata.google.internal metadata.goog instance-data instance-data.ec2.internal].freeze
+
+    # Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service (fd00:ec2::254,
+    # Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail server is never there,
+    # though it may well be on this computer or a private network, so those stay allowed where this is checked.
+    def metadata_address?(ip)
+      four = v4(ip)
+      g = four.nil? ? v6(ip) : nil
+      # IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+      if four.nil? && !g.nil? && ((g[0, 5].all?(&:zero?) && (g[5] == 0xffff || g[5].zero?)) || (g[0] == 0x64 && g[1] == 0xff9b && g[2, 4].all?(&:zero?)))
+        four = [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255]
+      end
+      return (four[0] == 169 && four[1] == 254) || four == [100, 100, 100, 200] unless four.nil?
+      return false if g.nil?
+      return true if (g[0] & 0xffc0) == 0xfe80
+
+      g[0] == 0xfd00 && g[1] == 0xec2 && g[2, 5].all?(&:zero?) && g[7] == 0x254
+    end
+
+    # Whether a host, by its name, its address, or any address its name resolves to now, is link-local or a
+    # metadata service. A name that does not resolve here is let through, since the connection then goes
+    # nowhere such a check could have stopped.
+    def metadata_host?(host)
+      name = Js.lower(Js.trim(host)).sub(/\A\[/, "").sub(/\]\z/, "").sub(/\.+\z/, "")
+      return true if METADATA_NAMES.include?(name) || metadata_address?(name)
+      return false if !v4(name).nil? || !v6(name).nil?
+
+      begin
+        Safefetch.resolver.call(name).any? { |address| metadata_address?(address.to_s) }
+      rescue StandardError
+        false
+      end
+    end
+
     # Every address a name resolves to, v4 and v6, as getaddrinfo() gives them (the hosts file included).
     # Empty when it does not resolve.
     def lookup(name)

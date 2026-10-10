@@ -9,6 +9,8 @@ module Runlight
     # (multi-line included, one at a time), and the whole send's deadline, which
     # every wait is held to.
     class SmtpSession
+      attr_reader :host, :port
+
       # deadline: nanoseconds on Smtp.monotonic's clock.
       def initialize(host, port, deadline, late_message)
         @host = host
@@ -20,12 +22,22 @@ module Runlight
         @lines = []
       end
 
+      # A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+      # address. The name is resolved here and the connection goes to the addresses checked, so it cannot
+      # answer differently a moment later.
       def connect(tls, timeout_ms)
         wait = [timeout_ms, left].min
         raise late if wait <= 0
 
+        bare = @host.sub(/\A\[/, "").sub(/\]\z/, "")
+        addresses = Safefetch.metadata_address?(bare) ? [bare] : Safefetch.lookup(bare)
+        if addresses.any? { |address| Safefetch.metadata_address?(address) }
+          raise MailError.new("SMTP: #{@host} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", { "host" => @host })
+        end
+
         begin
-          socket = Socket.tcp(@host, @port, connect_timeout: wait / 1000.0)
+          # A name that does not resolve is still tried by name, for the resolver's own words.
+          socket = open_socket(addresses.empty? ? [@host] : addresses, wait)
         rescue SystemCallError, SocketError, IO::TimeoutError => e
           raise late if left <= 0
 
@@ -190,6 +202,15 @@ module Runlight
           raise late if ready.nil? && left <= 0
         end
         @socket = ssl
+      end
+
+      # A connection to the first of the addresses that answers, each tried in the time left.
+      def open_socket(targets, wait)
+        targets.each_with_index do |target, i|
+          return Socket.tcp(target, @port, connect_timeout: [wait, left].min / 1000.0)
+        rescue SystemCallError, SocketError, IO::TimeoutError
+          raise if i == targets.length - 1 || left <= 0
+        end
       end
 
       def connect_detail(error, whole_wait)
