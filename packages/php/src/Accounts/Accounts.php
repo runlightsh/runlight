@@ -57,6 +57,12 @@ final class Accounts
         return in_array($value, self::ROLES, true) ? $value : 'viewer';
     }
 
+    /** Whether a role may invite people. The owner and admins invite as admin, member, or viewer. */
+    private static function mayInvite(string $role): bool
+    {
+        return $role === 'owner' || $role === 'admin';
+    }
+
     /**
      * Changes to who has an account take turns across processes, through the database's lock (SQLite's write
      * lock, taken up front), so two owners demoting each other at once cannot leave none, and a double-clicked invite makes one.
@@ -382,6 +388,10 @@ final class Accounts
                 throw new AccountError('Ownership is handed over by the owner', 'owner_hand_over');
             }
             $this->store->db->run('UPDATE rl_users SET role = ? WHERE id = ?', [$role, $id]);
+            // Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+            if (!self::mayInvite($role)) {
+                $this->store->db->run('DELETE FROM rl_invites WHERE invited_by = ?', [$user['email']]);
+            }
             $user['role'] = $role;
             return $user;
         });
@@ -433,6 +443,7 @@ final class Accounts
                 throw new AccountError('The owner cannot be removed', 'owner_protected');
             }
             $this->store->db->run('DELETE FROM rl_users WHERE id = ?', [$id]);
+            $this->store->db->run('DELETE FROM rl_invites WHERE invited_by = ?', [$user['email']]);
             $this->store->setSetting("login-link-used:$id", null);
         });
     }
@@ -566,22 +577,33 @@ final class Accounts
     }
 
     /**
-     * Turns an invite into an account with the password its person chose. The link then stops working.
+     * Turns an invite into an account with the password its person chose. The link then stops working. It takes a
+     * turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite.
      *
      * @return User
      */
     public function acceptInvite(string $code, string $password, int $now): array
     {
-        $invite = $this->inviteByCode($code, $now);
-        if ($invite === null) {
-            throw new AccountError('This invite has expired or was already used. Ask for a new one.', 'invite_gone');
-        }
-        if ($this->byEmail($invite['email']) !== null) {
-            throw new AccountError("{$invite['email']} already has an account", 'account_exists', ['email' => $invite['email']]);
-        }
-        $user = $this->setPassword($invite['email'], $password, $now, $invite['role']);
-        $this->store->db->run('DELETE FROM rl_invites WHERE id = ?', [$invite['id']]);
-        return $user;
+        // The tables first: making them takes the same lock as a turn.
+        $this->init();
+        return $this->turn(function () use ($code, $password, $now): array {
+            $invite = $this->inviteByCode($code, $now);
+            $gone = static fn (): AccountError => new AccountError('This invite has expired or was already used. Ask for a new one.', 'invite_gone');
+            if ($invite === null) {
+                throw $gone();
+            }
+            $sender = $this->byEmail($invite['invitedBy']);
+            if ($sender === null || !self::mayInvite($sender['role'])) {
+                $this->store->db->run('DELETE FROM rl_invites WHERE id = ?', [$invite['id']]);
+                throw $gone();
+            }
+            if ($this->byEmail($invite['email']) !== null) {
+                throw new AccountError("{$invite['email']} already has an account", 'account_exists', ['email' => $invite['email']]);
+            }
+            $user = $this->setPassword($invite['email'], $password, $now, $invite['role']);
+            $this->store->db->run('DELETE FROM rl_invites WHERE id = ?', [$invite['id']]);
+            return $user;
+        });
     }
 
     /**
