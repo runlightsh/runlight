@@ -248,6 +248,36 @@ def test_the_throttle_holds_its_limit_across_processes(tmp_path):
     assert taken.count(True) == 10
 
 
+def test_codes_and_links_work_once_across_processes(tmp_path):
+    # Two stores on one SQLite file stand in for two worker processes, each with its own connection.
+    path = str(tmp_path / "runlight.db")
+    stores = [Stores.sqlite(path) for _ in range(2)]
+    stores[0].migrate()
+    both = [Accounts(s, SECRET) for s in stores]
+    user = both[0].set_password("jon@example.com", "a long password", NOW)
+    secret = both[0].start_two_factor(user["id"])
+    recovery = both[0].confirm_two_factor(user["id"], totp(secret, NOW // 30_000), NOW)
+    link = both[0].link_for(user, NOW)
+
+    def race(fn) -> int:
+        start = threading.Barrier(20)
+
+        def one(i: int) -> bool:
+            start.wait()
+            return fn(both[i % 2])
+
+        with ThreadPoolExecutor(20) as pool:
+            return [bool(r) for r in pool.map(one, range(20))].count(True)
+
+    try:
+        assert race(lambda a: a.check_second_factor(user["id"], recovery[0], NOW)) == 1
+        assert race(lambda a: a.check_second_factor(user["id"], totp(secret, NOW // 30_000 + 1), NOW)) == 1
+        assert race(lambda a: a.from_link(link, NOW)) == 1
+    finally:
+        for s in stores:
+            s.close()
+
+
 def test_an_old_table_gains_roles_and_keeps_one_owner(databases):
     store = fresh(databases, "sqlite")
     store.db.run("CREATE TABLE rl_users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, hash TEXT NOT NULL, created_at BIGINT NOT NULL)")

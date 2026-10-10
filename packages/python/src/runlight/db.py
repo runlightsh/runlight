@@ -52,7 +52,7 @@ class Db(Protocol):
 
     def exclusive(self, fn: Callable[[Db], T]) -> T:
         """Runs `fn` while holding a database-wide lock, so two processes starting at once do not race to create
-        the same tables."""
+        the same tables, and changes to accounts take turns across threads and processes."""
         ...
 
     def close(self) -> None: ...
@@ -188,9 +188,10 @@ class SqliteDb(_BaseDb):
             return result
 
     def exclusive(self, fn: Callable[[Any], T]) -> T:
-        # SQLite's file lock already serialises its writers.
-        with self._lock:
-            return fn(self)
+        # A transaction begun IMMEDIATE takes the file's write lock at once, so another connection's turn, in this
+        # process or any other, waits until this one is done: a code or a link read and crossed off in one turn
+        # cannot also pass in another worker's.
+        return self.transaction(fn)
 
     def close(self) -> None:
         with self._lock:
