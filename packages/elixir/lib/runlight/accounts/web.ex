@@ -154,8 +154,9 @@ defmodule Runlight.Accounts.Web do
         nil
 
       value ->
+        # A cookie that is not valid percent-encoding is nobody's session, never an error.
         case JS.decode_uri_component(value) do
-          nil -> raise "URI malformed"
+          nil -> nil
           decoded -> Accounts.from_session(web.accounts, decoded, now(web))
         end
     end
