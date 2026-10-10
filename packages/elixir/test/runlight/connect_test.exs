@@ -232,6 +232,49 @@ defmodule Runlight.ConnectTest do
     assert error.params == %{"host" => "127.0.0.1:4100"}
   end
 
+  test "a hub asks its connected installs about their sites at once, not one after another" do
+    slow = :counters.new(1, [])
+
+    {fetcher, _} =
+      FakeFetcher.new(fn url, _ ->
+        port = url |> Url.new() |> Url.host() |> String.split(":") |> List.last()
+
+        cond do
+          String.ends_with?(url, "/api/sites") ->
+            if :counters.get(slow, 1) == 1, do: Process.sleep(400)
+            answer(o(sites: [o(id: "s", name: "Site #{port}", timezone: "UTC", hostnames: ["s#{port}.example.com"])]))
+
+          String.ends_with?(url, "/api/token") ->
+            answer(o(scope: "read", site: "s"))
+
+          true ->
+            {:ok, Response.new("{}", 404)}
+        end
+      end)
+
+    {hub, clock} = hub(fetcher)
+
+    for port <- 4101..4103,
+        do: Runlight.add_site(hub, o(remote: o(url: "http://127.0.0.1:#{port}/runlight", token: "rl_x")))
+
+    :counters.add(clock, 1, 61_000)
+    :counters.put(slow, 1, 1)
+    handle = &Runlight.Routes.handle(Runlight.routes(hub, token: "secret"), &1)
+    started = System.monotonic_time(:millisecond)
+
+    answer =
+      handle.(
+        Runlight.Http.Request.new("https://example.com/runlight/api/sites",
+          headers: [{"authorization", "Bearer secret"}]
+        )
+      )
+
+    took = System.monotonic_time(:millisecond) - started
+    sites = JS.parse!(answer.body)["sites"]
+    assert Enum.map(sites, & &1["connection"]) == ["ok", "ok", "ok"]
+    assert took < 1000, "three installs that each take 400ms answered in #{took}ms"
+  end
+
   test "a hub never asks its own machine or network for an install unless code allows it" do
     {fetcher, agent} = install()
     {hub, _} = hub(fetcher, false)
