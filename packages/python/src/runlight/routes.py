@@ -2107,8 +2107,22 @@ class Routes:
         if not site or (only and site["id"] != only):
             return coded("Unknown site", "unknown_site", 404)
         remote = rl.remote(site["id"])
+
+        # A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+        # each visit, with its time and city, since anyone with the link could watch one person's way through the
+        # site.
+        def unfeed(live: dict[str, Any]) -> dict[str, Any]:
+            return {**live, "recent": []} if shared else live
+
         if remote:
-            return _pass_through(rl, remote, path, url, request)
+            answer = _pass_through(rl, remote, path, url, request)
+            if path != "/api/realtime" or not shared or not answer.ok:
+                return answer
+            ok, live = _js.try_loads(answer.text())
+            if ok and isinstance(live, dict):
+                return json(unfeed(live))
+            host = Url(remote["url"]).host
+            return coded(f"Could not reach {host}", "unreachable", 502, {"host": host})
 
         if path == "/api/icon":
             from .icon import fetch_icon
@@ -2131,7 +2145,7 @@ class Routes:
             )
 
         if path == "/api/realtime":
-            return json(store.realtime(site["id"], rl.now()))
+            return json(unfeed(dict(store.realtime(site["id"], rl.now()))))
 
         from .time import buckets, local_weekday_hour
 
