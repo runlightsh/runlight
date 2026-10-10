@@ -88,7 +88,16 @@ defmodule Runlight.Accounts.Throttle do
 
   @spec clear(t(), String.t()) :: :ok
   def clear(t, key) do
-    State.delete(t.table, {:throttle, t.name, id(t, key)})
+    id = id(t, key)
+
+    locked(t, fn ->
+      if entry(t, id) do
+        State.delete(t.table, {:throttle, t.name, id})
+        State.bump(t.table, {:throttle_size, t.name}, -1)
+      end
+    end)
+
+    :ok
   end
 
   defp count(t, id, now) do
@@ -96,35 +105,36 @@ defmodule Runlight.Accounts.Throttle do
       %{until: until} = e when until > now ->
         State.put(t.table, {:throttle, t.name, id}, %{e | count: e.count + 1})
 
-      _ ->
+      e ->
         State.put(t.table, {:throttle, t.name, id}, %{
           count: 1,
           until: now + t.window_ms,
           seq: :erlang.unique_integer([:monotonic])
         })
+
+        if e == nil and State.bump(t.table, {:throttle_size, t.name}) > @max_throttled, do: evict(t, now)
     end
 
-    evict(t, now)
+    :ok
   end
 
-  # Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the table has a hard
-  # ceiling and a flood of made-up names cannot wipe out a real block.
+  # The keys are counted as they come and go, and the table is looked through only once there are more than the
+  # ceiling. Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the table has a
+  # hard ceiling and a flood of made-up names cannot wipe out a real block. The count is set again from what is left.
   defp evict(t, now) do
     entries = :ets.match_object(t.table, {{:throttle, t.name, :_}, :_})
+    entries = Enum.sort_by(entries, fn {_, e} -> e.seq end)
+    {expired, live} = Enum.split_with(entries, fn {_, e} -> e.until <= now end)
+    Enum.each(expired, fn {k, _} -> :ets.delete(t.table, k) end)
+    over = length(live) - @max_throttled
 
-    if length(entries) > @max_throttled do
-      entries = Enum.sort_by(entries, fn {_, e} -> e.seq end)
-      {expired, live} = Enum.split_with(entries, fn {_, e} -> e.until <= now end)
-      Enum.each(expired, fn {k, _} -> :ets.delete(t.table, k) end)
-      over = length(live) - @max_throttled
-
-      if over > 0 do
-        {unblocked, blocked} = Enum.split_with(live, fn {_, e} -> e.count < t.limit end)
-        drop = Enum.take(unblocked ++ blocked, over)
-        Enum.each(drop, fn {k, _} -> :ets.delete(t.table, k) end)
-      end
+    if over > 0 do
+      {unblocked, blocked} = Enum.split_with(live, fn {_, e} -> e.count < t.limit end)
+      drop = Enum.take(unblocked ++ blocked, over)
+      Enum.each(drop, fn {k, _} -> :ets.delete(t.table, k) end)
     end
 
+    State.put(t.table, {:throttle_size, t.name}, length(live) - max(over, 0))
     :ok
   end
 end
