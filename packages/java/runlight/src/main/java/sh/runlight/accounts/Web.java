@@ -235,20 +235,16 @@ public final class Web {
     return path.startsWith("//") || path.startsWith("/\\") ? homePath : path;
   }
 
-  /**
-   * The signed-in user, or null.
-   *
-   * @throws IllegalArgumentException for a session cookie decodeURIComponent cannot read, as it
-   *     throws a URIError in TypeScript
-   */
+  /** The signed-in user, or null. */
   public Map<String, Object> signedIn(Request request) {
     String value = readCookie(request, Accounts.SESSION_COOKIE);
     if (value.isEmpty()) {
       return null;
     }
+    // A cookie that is not valid percent-encoding is nobody's session, never an error.
     String decoded = Js.decodeURIComponent(value);
     if (decoded == null) {
-      throw new IllegalArgumentException("URI malformed");
+      return null;
     }
     return accounts.fromSession(decoded, now());
   }
