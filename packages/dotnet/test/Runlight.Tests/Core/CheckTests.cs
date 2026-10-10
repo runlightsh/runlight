@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
+using Runlight.Accounts;
 using Runlight.Store;
 using Runlight.Tests.Store;
 using Xunit;
@@ -228,6 +229,22 @@ public sealed class CheckTests : CoreTestCase
         await t.Rl.CheckAsync();
         Assert.Empty(await db.AllAsync("SELECT name FROM rl_events WHERE site = 'default'"));
         Assert.Equal("1", await t.Store.SettingAsync("orphans-swept:default"));
+    }
+
+    [Fact]
+    public async Task The_check_drops_ended_sign_in_counts_and_hashing_keys_older_than_yesterday()
+    {
+        var t = await Harness.CreateAsync("sqlite", Site("UTC"));
+        await t.Rl.InitAsync();
+        await new Throttle(t.Store, "ip", 30).FailAsync("203.0.113.7", t.Now - DAY);
+        await new Throttle(t.Store, "address", 10).FailAsync("jon@example.com|203.0.113.7", t.Now);
+        await t.Store.SetSettingAsync("throttle-key:2026-01-01", "left by a process that stopped");
+        Assert.Equal(3, (await t.Store.SettingsStartingWithAsync("throttle-key:")).Count);
+        Assert.Equal(2, (await t.Store.SettingsStartingWithAsync("throttle:")).Count);
+        await t.Rl.CheckAsync();
+        Assert.Equal(2, (await t.Store.SettingsStartingWithAsync("throttle-key:")).Count); // yesterday's and today's
+        Assert.Single(await t.Store.SettingsStartingWithAsync("throttle:address:"));
+        Assert.Empty(await t.Store.SettingsStartingWithAsync("throttle:ip:"));
     }
 
     [Fact]
