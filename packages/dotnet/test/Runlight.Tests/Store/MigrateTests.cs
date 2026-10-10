@@ -327,6 +327,36 @@ public sealed class MigrateTests : IAsyncLifetime
 
     [Theory]
     [MemberData(nameof(Servers))]
+    public async Task A_MySQL_server_set_to_take_backslashes_as_text_still_reads_values_whole(string kind)
+    {
+        if (kind is "none" or "postgres")
+        {
+            Assert.Skip("MySQL only");
+        }
+        var admin = Databases.MysqlStore(kind);
+        string before = Js.String((await admin.Db.AllAsync("SELECT @@GLOBAL.sql_mode AS mode"))[0].Get("mode"));
+        await admin.Db.RunAsync("SET GLOBAL sql_mode = ?", [before.Length == 0 ? "NO_BACKSLASH_ESCAPES" : before + ",NO_BACKSLASH_ESCAPES"]);
+        try
+        {
+            var store = await Databases.FreshAsync(kind);
+            var modes = Js.String((await store.Db.AllAsync("SELECT @@SESSION.sql_mode AS mode"))[0].Get("mode")).Split(',');
+            Assert.DoesNotContain("NO_BACKSLASH_ESCAPES", modes);
+            Assert.Contains("IGNORE_SPACE", modes);
+            await store.MigrateAsync();
+            const string Tricky = @"a\' OR 1=1 -- %_\";
+            await store.SetSettingAsync(Tricky, "kept");
+            await store.SetSettingAsync("other", "x");
+            Assert.Equal("kept", await store.SettingAsync(Tricky));
+            Assert.Equal([Tricky], (await store.SettingsStartingWithAsync(@"a\' OR")).Select(r => r.Str("key")));
+        }
+        finally
+        {
+            await admin.Db.RunAsync("SET GLOBAL sql_mode = ?", [before]);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Servers))]
     public async Task A_connection_the_server_drops_is_replaced_and_the_process_carries_on(string kind)
     {
         if (kind == "none")

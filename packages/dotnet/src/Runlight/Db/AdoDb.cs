@@ -420,12 +420,18 @@ public sealed class AdoDb : IDb
         return connection;
     }
 
+    /// <summary>The session's SQL mode less NO_BACKSLASH_ESCAPES, wherever it sits in the list.</summary>
+    private const string BackslashEscapes =
+        "TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))";
+
     /// <summary>
     /// The server's own SQL mode with IGNORE_SPACE added, which mysql2 asks for when it connects (as a
-    /// client flag MySqlConnector does not send), so a session reads SQL as the SDK's does.
+    /// client flag MySqlConnector does not send), so a session reads SQL as the SDK's does. And, as the
+    /// SDK does, less NO_BACKSLASH_ESCAPES: values are written into the SQL escaped with backslashes,
+    /// which a server in that mode reads as text, so a quote could end a value early.
     /// </summary>
     private const string IgnoreSpace =
-        "sql_mode = IF(FIND_IN_SET('IGNORE_SPACE', @@SESSION.sql_mode) > 0, @@SESSION.sql_mode, CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'IGNORE_SPACE'))";
+        "sql_mode = IF(FIND_IN_SET('IGNORE_SPACE', " + BackslashEscapes + ") > 0, " + BackslashEscapes + ", CONCAT_WS(',', NULLIF(" + BackslashEscapes + ", ''), 'IGNORE_SPACE'))";
 
     /// <summary>
     /// MySQL's statement timeout as a session setting, which MySQL and MariaDB name differently.
