@@ -843,11 +843,13 @@ impl Routes {
             }
             let keys = store.event_prop_keys(query, &event).await?;
             let asked = params.get("key").map(str::to_string);
-            // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-            if asked.as_deref().is_some_and(|a| !(1..=64).contains(&js::len16(a)) || a.contains(['"', '\\'])) {
+            // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+            // one asked for, the most used name that has none is shown.
+            let safe = |name: &str| (1..=64).contains(&js::len16(name)) && !name.contains(['"', '\\']);
+            if asked.as_deref().is_some_and(|a| !safe(a)) {
                 return Ok(coded("Bad property name", "property_bad", 400, None));
             }
-            let key = asked.or_else(|| keys.first().map(|k| k.0.clone()));
+            let key = asked.or_else(|| keys.iter().find(|k| safe(&k.0)).map(|k| k.0.clone()));
             let limit = clamp_number(params.get("limit"), 100.0);
             let rows = match &key {
                 Some(k) if !k.is_empty() => store.event_prop_values(query, &event, k, limit as i64).await?,
