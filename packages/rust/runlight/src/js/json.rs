@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use super::format_number;
 
 /// A JSON value as JavaScript holds one: numbers are `f64`, and objects keep
@@ -135,9 +137,28 @@ impl<T: Into<Value>> From<Option<T>> for Value {
 /// A JavaScript object: keys in JavaScript's order, which is every key that
 /// is an array index (a canonical whole number below 2^32 - 1) in ascending
 /// order, then every other key in the order it was first set.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// The index keys sit in a sorted map and the rest in a list with a hash
+/// index beside it, so setting or reading a key stays cheap however many keys
+/// there are.
+#[derive(Clone, Debug, Default)]
 pub struct Object {
-    entries: Vec<(String, Value)>,
+    // Boxed so a `Value` stays small: the parser and `Drop` recurse, and a
+    // wider `Value` makes every level of a deep document cost more stack.
+    k: Box<Keys>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Keys {
+    indices: BTreeMap<u32, (String, Value)>,
+    named: Vec<(String, Value)>,
+    at: HashMap<String, usize>,
+}
+
+impl PartialEq for Object {
+    fn eq(&self, other: &Self) -> bool {
+        self.k.indices == other.k.indices && self.k.named == other.k.named
+    }
 }
 
 /// Whether a key is an array index, which JavaScript orders before every
@@ -162,21 +183,16 @@ impl Object {
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<Value>) {
         let key = key.into();
         let value = value.into();
-        if let Some(e) = self.entries.iter_mut().find(|e| e.0 == key) {
-            e.1 = value;
-            return;
-        }
         if let Some(n) = array_index(&key) {
-            // Before the first key that is not an index or is a larger index.
-            let at = self
-                .entries
-                .iter()
-                .position(|(k, _)| array_index(k).is_none_or(|m| m > n))
-                .unwrap_or(self.entries.len());
-            self.entries.insert(at, (key, value));
+            self.k.indices.insert(n, (key, value));
             return;
         }
-        self.entries.push((key, value));
+        if let Some(&i) = self.k.at.get(&key) {
+            self.k.named[i].1 = value;
+            return;
+        }
+        self.k.at.insert(key.clone(), self.k.named.len());
+        self.k.named.push((key, value));
     }
 
     /// `set`, returning the object, for building one in a line.
@@ -187,7 +203,10 @@ impl Object {
 
     /// The value at `key`.
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.entries.iter().find(|e| e.0 == key).map(|e| &e.1)
+        match array_index(key) {
+            Some(n) => self.k.indices.get(&n).map(|e| &e.1),
+            None => self.k.at.get(key).map(|&i| &self.k.named[i].1),
+        }
     }
 
     /// Whether the key is there.
@@ -197,28 +216,37 @@ impl Object {
 
     /// Removes `key`, giving back its value.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
-        let at = self.entries.iter().position(|e| e.0 == key)?;
-        Some(self.entries.remove(at).1)
+        if let Some(n) = array_index(key) {
+            return self.k.indices.remove(&n).map(|e| e.1);
+        }
+        let at = self.k.at.remove(key)?;
+        let value = self.k.named.remove(at).1;
+        for (k, _) in &self.k.named[at..] {
+            if let Some(i) = self.k.at.get_mut(k) {
+                *i -= 1;
+            }
+        }
+        Some(value)
     }
 
     /// `Object.keys`: the keys in JavaScript's order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|e| e.0.as_str())
+        self.iter().map(|e| e.0)
     }
 
     /// The keys and values, in order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.entries.iter().map(|e| (e.0.as_str(), &e.1))
+        self.k.indices.values().chain(self.k.named.iter()).map(|e| (e.0.as_str(), &e.1))
     }
 
     /// How many keys there are.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.k.indices.len() + self.k.named.len()
     }
 
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// `JSON.stringify` of the object.
@@ -261,7 +289,7 @@ fn write(b: &mut String, v: &Value) {
 
 fn write_object(b: &mut String, o: &Object) {
     b.push('{');
-    for (i, (k, v)) in o.entries.iter().enumerate() {
+    for (i, (k, v)) in o.iter().enumerate() {
         if i > 0 {
             b.push(',');
         }
@@ -568,6 +596,36 @@ mod tests {
         assert_eq!(o.to_json(), r#"{"2":4,"10":2,"b":5,"a":3}"#);
         let parsed = parse(r#"{"z":1,"1":2,"z":3,"4294967295":4}"#).unwrap();
         assert_eq!(parsed.to_json(), r#"{"1":2,"z":3,"4294967295":4}"#);
+    }
+
+    #[test]
+    fn many_keys_parse_quickly() {
+        // Each key used to be found by a scan, so a 100k key body took
+        // minutes; an unauthenticated endpoint could be held on one.
+        let named: Vec<String> = (0..100_000).map(|i| format!("\"k{i}\":{i}")).collect();
+        let indexed: Vec<String> = (0..100_000).rev().map(|i| format!("\"{i}\":{i}")).collect();
+        let started = std::time::Instant::now();
+        let a = parse(&format!("{{{},\"k5\":\"last\"}}", named.join(","))).unwrap();
+        let b = parse(&format!("{{\"z\":0,{}}}", indexed.join(","))).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let a = a.as_object().unwrap();
+        assert_eq!(a.len(), 100_000);
+        assert_eq!(a.keys().nth(5), Some("k5"));
+        assert_eq!(a.get("k5").and_then(Value::as_str), Some("last"));
+        let b = b.as_object().unwrap();
+        assert_eq!(b.keys().take(2).collect::<Vec<_>>(), ["0", "1"]);
+        assert_eq!(b.keys().last(), Some("z"));
+    }
+
+    #[test]
+    fn removing_a_key_keeps_the_rest_in_place() {
+        let mut o = Object::new().with("a", 1).with("b", 2).with("c", 3).with("1", 4);
+        assert_eq!(o.remove("b"), Some(Value::Number(2.0)));
+        assert_eq!(o.remove("1"), Some(Value::Number(4.0)));
+        assert_eq!(o.remove("b"), None);
+        o.set("c", 5);
+        o.set("b", 6);
+        assert_eq!(o.to_json(), r#"{"a":1,"c":5,"b":6}"#);
     }
 
     #[test]
