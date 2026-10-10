@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.1.1 - 2026-10-10
 
 ### Changed
 - Typed keys are hidden like passwords in the settings, while keys that name an environment variable still show.
