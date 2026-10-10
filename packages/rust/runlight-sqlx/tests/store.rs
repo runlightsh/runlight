@@ -306,6 +306,16 @@ async fn rust_reads_a_database_the_typescript_sdk_wrote_and_answers_the_same() {
 }
 
 #[tokio::test]
+async fn deleted_rows_salts_among_them_are_overwritten_in_a_sqlite_file_rather_than_left_in_its_free_space() {
+    let file = copy_db();
+    let store = runlight_sqlx::connect(file.0.to_str().unwrap()).await.unwrap();
+    // 2 is FAST: overwritten wherever that costs no extra writes.
+    let rows = store.db().all("PRAGMA secure_delete", vec![]).await.unwrap();
+    assert_eq!(rows[0].int("secure_delete"), 2);
+    store.close().await;
+}
+
+#[tokio::test]
 async fn the_same_rows_in_postgres_and_mysql_answer_the_same() {
     let tables = [
         "rl_meta",
