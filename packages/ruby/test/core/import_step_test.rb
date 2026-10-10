@@ -14,14 +14,15 @@ class CoreImportStepTest < Minitest::Test
     Runlight::Core.new({ "store" => Runlight::Stores.sqlite(":memory:"), "fetcher" => router, "now" => -> { NOW } })
   end
 
-  # Runs an import to the end: [core, totals, done].
-  def run_all(router, source, credentials)
+  # Runs an import to the end: [core, totals, done]. Every domain passes here; the routes check them as
+  # Settings does (see the conformance scenarios).
+  def run_all(router, source, credentials, link_domain = ->(domain) { domain })
     rl = runlight(router)
     cursor = nil
     done = 0
     totals = { "links" => 0, "clicks" => 0, "skipped" => 0, "failed" => [] }
     loop do
-      step = Index.import_step(rl, "default", source, credentials, cursor, done)
+      step = Index.import_step(rl, "default", source, credentials, cursor, done, link_domain)
       cursor = step["cursor"]
       done = step["done"]
       totals["links"] += step["links"]
@@ -82,6 +83,30 @@ class CoreImportStepTest < Minitest::Test
     times = rl.store.db.all("SELECT ts FROM rl_events ORDER BY ts").map { |r| r["ts"].to_i }
     day = Time.utc(2026, 3, 1).to_i * 1000
     assert_equal [day + 14_400_000, day + 43_200_000, day + 72_000_000], times, "spread through the day"
+  end
+
+  def test_an_imported_links_destination_passes_the_checks_a_new_link_does_a_refused_domain_is_left_off_and_a_days_count_is_capped
+    router = Router.new([
+      [/api\.dub\.co\/links\?/, lambda { |_u, _i|
+        [
+          { "id" => "l1", "domain" => "Go.Brand.com", "key" => "x", "url" => "https://a.com", "title" => "X", "createdAt" => "2026-01-02T00:00:00Z" },
+          { "id" => "l2", "domain" => "dub.sh", "key" => "y", "url" => "javascript:alert(1)", "title" => "Y", "createdAt" => "2026-01-02T00:00:00Z" },
+          { "id" => "l3", "domain" => "stats.example.com", "key" => "z", "url" => "https://a.com/z", "title" => "Z", "createdAt" => "2026-01-02T00:00:00Z" },
+        ]
+      }],
+      [/\/events\?/, ->(_u, _i) { [403, { "error" => { "message" => "Business plan required" } }] }],
+      [/\/analytics\?.*linkId=l1/, ->(_u, _i) { [{ "start" => "2026-03-01T00:00:00.000Z", "clicks" => 5_000_000 }] }],
+      [/\/analytics\?/, ->(_u, _i) { [] }],
+    ])
+    asked = []
+    rl, totals, = run_all(router, "dub", { "apiKey" => "dub_test" }, lambda { |domain|
+      asked << domain
+      domain == "stats.example.com" ? nil : domain
+    })
+    assert_equal ["go.brand.com", "stats.example.com"], asked, "shorteners' own domains are never asked about"
+    assert_equal [%w[y link_protocol]], totals["failed"].map { |f| [f["slug"], f["code"]] }
+    assert_equal [["x", "go.brand.com"], ["z", ""]], links(rl).map { |l| [l["slug"], l["domain"]] }.sort
+    assert_equal 10_000, totals["clicks"]
   end
 
   def test_bitly_every_group_custom_back_halves_daily_counts
@@ -225,7 +250,7 @@ class CoreImportStepTest < Minitest::Test
     bad = Write.write_link(rl, "default", "dub", { "sourceId" => "y", "slug" => "a/b", "domain" => "", "name" => "", "url" => "https://a.com", "createdAt" => 0 }, {})
     assert_equal "import_slug_bad", bad["code"]
     made = Write.write_link(rl, "default", "dub", { "sourceId" => "z", "slug" => "fine", "domain" => "www.Go.Brand.com", "name" => "", "url" => "https://a.com/z", "createdAt" => 0 },
-                            { "clicks" => [{ "ts" => 5_000, "visit" => "v", "path" => "/fine", "query" => "?utm_campaign=c" }] })
+                            { "clicks" => [{ "ts" => 5_000, "visit" => "v", "path" => "/fine", "query" => "?utm_campaign=c" }] }, ->(domain) { domain })
     assert_equal({ "status" => "created", "clicks" => 1 }, made)
     link = rl.store.link_by_slug("fine")
     assert_equal ["go.brand.com", "fine", Write.imported_link_id("dub", "z")], [link["domain"], link["name"], link["id"]]
