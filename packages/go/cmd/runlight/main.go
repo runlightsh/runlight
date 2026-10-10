@@ -30,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// The zone database is built in, so reports keep their timezones on a host or image without one.
+	_ "time/tzdata"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -340,6 +342,12 @@ func run(args []string) error {
 
 	if err := srv.Runlight.Init(ctx); err != nil {
 		return err
+	}
+	// A site's reports fall back to UTC when its zone cannot be loaded, so say so rather than count days quietly wrong.
+	for _, site := range srv.Runlight.Sites() {
+		if site.Timezone != "" && !runlight.IsTimezone(site.Timezone) {
+			options.Logf("Runlight: could not load the timezone %q for site %s, so its reports use UTC", site.Timezone, site.ID)
+		}
 	}
 	port, err := strconv.Atoi(firstOf(env("PORT"), "3000"))
 	if err != nil {
