@@ -404,14 +404,31 @@ defmodule Runlight.Mcp do
     end
   end
 
+  # The most messages one batch may hold, and how many of them run at once.
+  @max_batch 20
+  @batch_at_once 4
+
   @doc "Answers one POST to the MCP endpoint, already authorised."
   def response(%Request{} = request, read_api) do
     headers = [{"content-type", "application/json; charset=utf-8"}, {"cache-control", "no-store"}]
 
     case Request.json(request) do
+      {:ok, list} when is_list(list) and length(list) > @max_batch ->
+        Response.new(
+          JS.stringify(rpc_error(nil, -32_600, "Send at most #{@max_batch} messages in a batch")),
+          400,
+          headers
+        )
+
       {:ok, list} when is_list(list) ->
-        # Batches were in the 2025-03-26 protocol; answering them costs nothing.
-        answers = list |> Enum.map(&answer(&1, read_api)) |> Enum.reject(&is_nil/1)
+        # Batches were in the 2025-03-26 protocol. A few messages run at a time, from a short list, so one request
+        # cannot start hundreds of reports at once.
+        answers =
+          list
+          |> Task.async_stream(&answer(&1, read_api), max_concurrency: @batch_at_once, timeout: :infinity)
+          |> Enum.map(fn {:ok, answer} -> answer end)
+          |> Enum.reject(&is_nil/1)
+
         if answers == [], do: Response.new(nil, 202, []), else: Response.new(JS.stringify(answers), 200, headers)
 
       {:ok, %Object{} = body} ->
