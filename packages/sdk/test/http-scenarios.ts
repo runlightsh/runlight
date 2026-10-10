@@ -1065,6 +1065,27 @@ const ACCOUNTS: Scenario[] = [
       { ...signIn("member@example.com", "member password 1", {}, "guesser"), headers: { "x-forwarded-for": "192.0.2.100" } },
     ],
   },
+  {
+    name: "accounts: a decoy code step has tries of its own",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { accounts: true, secret: "conformance-secret" },
+    steps: [
+      { method: "POST", path: "/setup", form: { code: "conformance", email: OWNER.email, password: OWNER.password, again: OWNER.password } },
+      { ...post("/api/account/2fa/start", { password: OWNER.password }, { "content-type": "application/json" }), capture: { totp: "secret" } },
+      post("/api/account/2fa/confirm", { code: "{{totp:totp}}" }, { "content-type": "application/json" }),
+      { method: "GET", path: "/logout" },
+      // Fifty wrong passwords from fifty addresses hold the account up; the next wrong one gets a decoy code step.
+      ...Array.from({ length: 50 }, (_, i) => ({ ...signIn(OWNER.email, "wrong password", {}, "guesser"), headers: { "x-forwarded-for": `203.0.113.${i}` } })),
+      { ...signIn(OWNER.email, "wrong password", {}, "guesser"), headers: { "x-forwarded-for": "203.0.113.200" }, capture: { decoy: 'text~name="pending" value="([^"]+)"' } },
+      ...Array.from({ length: 6 }, () => ({ method: "POST", path: "/login/code", jar: "guesser", form: { pending: "{{decoy}}", code: "{{totp:totp}}", next: "/runlight/" } })),
+      // The owner's right password and code still get in.
+      later(30_000, { ...signIn(OWNER.email, OWNER.password, {}, "owner"), headers: { "x-forwarded-for": "192.0.2.77" }, capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
+      { method: "POST", path: "/login/code", jar: "owner", form: { pending: "{{pending}}", code: "{{totp:totp}}", next: "/runlight/" } },
+      { method: "GET", path: "/api/account", jar: "owner" },
+    ],
+  },
 ];
 
 const MAIL: Scenario[] = [

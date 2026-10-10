@@ -139,6 +139,9 @@ test("with two-factor on, failed passwords from others cannot lock its owner out
   const fake = /name="pending" value="([^"]+)"/.exec(await decoy.text())![1]!;
   const code = async (pending: string) => server.handler(req("/login/code", form({ pending, code: (await totp(secret, Math.floor(now / 30_000))) })));
   assert.equal((await code(fake)).status, 401, "even the right code fails after a wrong password");
+  // A decoy's tries wait after five, like a real ticket's, but never use up the owner's.
+  for (let i = 0; i < 4; i++) assert.equal((await code(fake)).status, 401);
+  assert.equal((await code(fake)).status, 429);
   // The owner, from a new browser, gets the real step.
   const step = await login("a long password", "192.0.2.77");
   assert.equal(step.status, 200, "a new browser reaches the code step");
