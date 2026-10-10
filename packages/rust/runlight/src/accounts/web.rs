@@ -305,7 +305,9 @@ impl AccountsWeb {
     /// Only a path on this install, so a sign-in can never send someone elsewhere.
     /// Browsers drop tabs and newlines from a URL and read a backslash as a slash,
     /// so "/\t/evil.example" would leave; anything with those is refused outright,
-    /// and what is left must resolve to this origin.
+    /// and what is left must resolve to this origin. A path that resolves to one
+    /// starting "//", as "/..//evil.example" does, would leave from the Location
+    /// header, so that goes home too.
     pub fn safe_next(&self, value: Option<&str>) -> String {
         let home = &self.0.home_path;
         let Some(value) = value else { return home.clone() };
@@ -317,7 +319,8 @@ impl AccountsWeb {
         }
         match Url::parse_with_base(value, "http://runlight.invalid") {
             Some(url) if url.origin() == "http://runlight.invalid" => {
-                format!("{}{}{}", url.pathname(), url.search(), url.hash())
+                let path = format!("{}{}{}", url.pathname(), url.search(), url.hash());
+                if path.starts_with("//") || path.starts_with("/\\") { home.clone() } else { path }
             }
             _ => home.clone(),
         }
