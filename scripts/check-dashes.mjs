@@ -17,8 +17,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 const ROOT = process.cwd();
-// .agents and .claude hold third-party skills installed by tooling, not our prose.
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "data", ".next", "out", ".agents", ".claude"]);
+// .agents and .claude, at the top, hold third-party skills installed by
+// tooling, not our prose. In a checkout .gitignore keeps out the rest; the
+// walk outside one skips every SKIP_DIRS folder wherever it appears.
+const TOOLING = new Set([".agents", ".claude"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "data", ".next", "out", ...TOOLING]);
 const BINARY = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".woff", ".woff2", ".ttf", ".otf",
   ".pdf", ".zip", ".gz", ".tgz", ".db", ".sqlite",
@@ -41,7 +44,7 @@ function git(args) {
 function listFiles() {
   try {
     const out = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
-    return out.split("\0").filter((f) => f && !f.split("/").some((part) => SKIP_DIRS.has(part)));
+    return out.split("\0").filter((f) => f && !TOOLING.has(f.split("/")[0]));
   } catch {
     const files = [];
     const walk = (dir) => {
