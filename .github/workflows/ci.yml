@@ -79,6 +79,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # The SDK's tests run the CMS plugins' PHP (packages/sdk/test/plugins.test.ts),
+      # and fail rather than skip in CI when PHP is missing.
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.4"
+          coverage: none
       - run: npm ci --no-audit --no-fund
       - run: npm run check
       - run: npm run build

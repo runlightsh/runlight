@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { AI_AGENTS } from "../src/data/agents.js";
 
+// The tests that run PHP skip where it is not installed, except in CI, which
+// installs it (.github/workflows/ci.yml), so there they fail instead.
 const PLUGINS = ["wordpress/includes/Agents.php", "drupal/src/Agents.php", "craft/src/Agents.php"];
 
 test("each CMS plugin knows every AI agent the server records, and no others", () => {
@@ -40,7 +42,7 @@ test("a CMS plugin keeps its saved keys only while its Runlight address stays th
   try {
     answer = execFileSync("php", ["-r", script], { encoding: "utf8" });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return t.skip("PHP is not installed");
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) return t.skip("PHP is not installed");
     throw error;
   }
   assert.deepEqual(JSON.parse(answer), [["rlo_saved", "rl_saved"], ["", ""], ["rlo_new", "rl_new"]]);
@@ -88,7 +90,7 @@ test("every CMS plugin's PHP parses", (t) => {
     try {
       execFileSync("php", ["-l", file], { encoding: "utf8", stdio: "pipe" });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return t.skip("PHP is not installed");
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) return t.skip("PHP is not installed");
       throw new Error(`${file} does not parse: ${(error as { stdout?: string }).stdout ?? error}`);
     }
   }
@@ -155,7 +157,7 @@ test("the Craft plugin's settings read environment variables, check the address,
   try {
     answer = execFileSync("php", ["-r", script], { encoding: "utf8" });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return t.skip("PHP is not installed");
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) return t.skip("PHP is not installed");
     throw error;
   }
   assert.deepEqual(JSON.parse(answer), {
