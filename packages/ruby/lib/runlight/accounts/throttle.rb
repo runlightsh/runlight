@@ -30,24 +30,32 @@ module Runlight
       # that turns out right is taken back with forgive().
       def take(key, now)
         id = id(key)
-        return false if blocked_id?(id, now)
+        # Checked and counted in one turn, so tries at once from other threads and processes wait for it.
+        turn do
+          next false if blocked_id?(id, now)
 
-        count(id, now)
-        true
+          count(id, now)
+          true
+        end
       end
 
       # Takes back one counted try, for one that turned out right.
       def forgive(key)
         id = id(key)
-        entry = entry(id)
-        return unless entry && entry["count"].positive?
+        turn do
+          entry = entry(id)
+          next unless entry && entry["count"].positive?
 
-        entry["count"] -= 1
-        save(id, entry)
+          entry["count"] -= 1
+          save(id, entry)
+        end
+        nil
       end
 
       def record_failure(key, now)
-        count(id(key), now)
+        id = id(key)
+        turn { count(id, now) }
+        nil
       end
 
       def clear(key)
@@ -60,9 +68,21 @@ module Runlight
         saved = @store.setting(KEY)
         return saved if saved && saved != ""
 
-        made = Hashing.random_id(16)
-        @store.set_setting(KEY, made)
-        made
+        # Made in a turn, so two processes starting at once do not each keep a different one.
+        turn do
+          saved = @store.setting(KEY)
+          next saved if saved && saved != ""
+
+          made = Hashing.random_id(16)
+          @store.set_setting(KEY, made)
+          made
+        end
+      end
+
+      # One change to the counts at a time, across threads and processes, as the accounts take turns.
+      def turn(&block)
+        db = @store.db
+        db.respond_to?(:turn) ? db.turn { block.call } : db.exclusive { block.call }
       end
 
       def id(key)
