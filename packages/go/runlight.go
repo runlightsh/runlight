@@ -1158,9 +1158,6 @@ func (r *Runlight) finish() {
 	r.busyMu.Unlock()
 }
 
-// errURIMalformed is what decodeURIComponent throws for a broken escape.
-var errURIMalformed = errors.New("URIError: URI malformed")
-
 // Idle waits for work still running after the answer, such as retention; shutdown and tests wait for it.
 func (r *Runlight) Idle() {
 	r.busyMu.Lock()
