@@ -233,7 +233,7 @@ pub(crate) async fn umami_import(routes: &Routes, path: &str, url: &Url, body: &
 }
 
 pub(crate) async fn csv_import(routes: &Routes, site: &str, body: &Value) -> R {
-    let step = import_csv_visits(routes.rl(), site, body.get("rows")).await;
+    let step = import_csv_visits(routes.rl(), site, body.get("rows"), body.get("secret")).await;
     match step {
         Ok(s) => Ok(json(&s.to_value(), 200, &[])),
         Err(ImportError::Coded { error, .. }) => Ok(refused(&error, 400)),

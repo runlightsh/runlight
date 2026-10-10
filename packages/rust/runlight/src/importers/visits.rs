@@ -14,6 +14,8 @@ use super::http::{Http, parse_value};
 use super::types::{Credentials, ImportError, field, filled, items, or};
 use super::umami::{bearer, umami_sign_in};
 use super::write::{browser_name, device_kind, hex_id, page_of, system_name, title};
+use crate::accounts::crypto::{HmacHash, base64url, hmac};
+use crate::hash::random_bytes;
 use crate::js::{self, Object, Value};
 use crate::params;
 use crate::re::{js_re, test};
@@ -130,6 +132,8 @@ pub struct CsvImportStep {
     pub visits: f64,
     /// Rows left out.
     pub skipped: f64,
+    /// The import's secret, for the caller to send with the file's later batches.
+    pub secret: String,
 }
 
 impl CsvImportStep {
@@ -140,6 +144,7 @@ impl CsvImportStep {
         o.set("events", self.events);
         o.set("visits", self.visits);
         o.set("skipped", self.skipped);
+        o.set("secret", self.secret.as_str());
         Value::Object(o)
     }
 }
@@ -412,11 +417,14 @@ async fn write_step(
                 )
                 .await?;
                 // Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
-                // so the time bounds let the (site, ts) index find them, with no scan of every event.
+                // so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+                // EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
+                // CSV imported again has new ids, so its new visit does not take that one's place.
+                let back = from - EVENT_TAIL_MS as f64;
                 db.run(
                     "DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
          AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)",
-                    params![site_id, from, to, site_id, from, to + EVENT_TAIL_MS as f64],
+                    params![site_id, back, to, site_id, back, to + EVENT_TAIL_MS as f64],
                 )
                 .await?;
                 for (ns, hit) in hits {
@@ -650,10 +658,18 @@ async fn write_event(store: &SqlStore, site: &SiteRow, ns: &str, e: &ImportedHit
 /// Runlight's own first visit, and within what the site keeps, are written. A batch can run again: its
 /// time span is cleared first, so batches must not share a moment, which the dashboard sees to. `rows`
 /// is what the request sent (`undefined` as `None`).
+///
+/// A CSV's visitor column can hold anything, an email or an IP address among them, and a plain hash of
+/// one is easily undone by trying every address. So each key is an HMAC under a random secret made for
+/// the import and never stored: the first batch gets one, the answer carries it, and the caller sends
+/// it with every later batch of the same file, so a visit that runs across two batches stays one. A file
+/// imported again gets a new secret and new ids; its time span is cleared first, as always, so nothing is
+/// counted twice.
 pub async fn import_csv_visits(
     rl: &Runlight,
     site_id: &str,
     rows: Option<&Value>,
+    secret: Option<&Value>,
 ) -> Result<CsvImportStep, ImportError> {
     rl.init().await?;
     if rl.site(Some(site_id)).is_none() {
@@ -692,6 +708,10 @@ pub async fn import_csv_visits(
             &[],
         ));
     };
+    let key = match secret.and_then(Value::as_str) {
+        Some(given) if test(js_re!(r"^[A-Za-z0-9_-]{22,128}$"), given) => given.to_string(),
+        _ => base64url(&random_bytes(24)),
+    };
     let cutoff = rl.retention_cutoff(site_id).await?.unwrap_or(0) as f64;
     let own = rl.store().first_own_visit(site_id).await?.map_or(f64::INFINITY, |t| t as f64);
     let end = own.min(rl.now() as f64);
@@ -700,9 +720,14 @@ pub async fn import_csv_visits(
     hits.sort_by(|a, b| a.1.ts.partial_cmp(&b.1.ts).unwrap_or(std::cmp::Ordering::Equal));
     let skipped = (clean.len() - hits.len()) as f64;
     let (Some(first), Some(last)) = (hits.first(), hits.last()) else {
-        return Ok(CsvImportStep { pageviews: 0.0, events: 0.0, visits: 0.0, skipped });
+        return Ok(CsvImportStep { pageviews: 0.0, events: 0.0, visits: 0.0, skipped, secret: key });
     };
     let (from, to) = (first.1.ts, last.1.ts + 1.0);
+    for (_, hit) in hits.iter_mut() {
+        let keyed =
+            hmac(HmacHash::Sha256, key.as_bytes(), hit.key.as_bytes()).expect("a secret of 22 characters or more");
+        hit.key = base64url(&keyed);
+    }
     let counts = write_step(rl, site_id, from, to, &hits, None).await?;
-    Ok(CsvImportStep { pageviews: counts.0, events: counts.1, visits: counts.2, skipped })
+    Ok(CsvImportStep { pageviews: counts.0, events: counts.1, visits: counts.2, skipped, secret: key })
 }

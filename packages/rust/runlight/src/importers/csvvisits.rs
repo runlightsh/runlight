@@ -70,7 +70,7 @@ fn cell(row: &Object, names: &[&str]) -> String {
     String::new()
 }
 
-/// A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids.
+/// A row with no visitor is its own visit, keyed by its whole content.
 fn own_key(row: &Object) -> String {
     let mut entries: Vec<(&str, &Value)> = row.iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));

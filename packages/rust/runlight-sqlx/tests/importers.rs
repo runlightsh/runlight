@@ -1131,15 +1131,23 @@ fn runlight_rows() -> Vec<Value> {
     .clone()
 }
 
+/// A step's answer without its secret, which is new each time.
 fn csv_json(step: &runlight::importers::visits::CsvImportStep) -> String {
-    js::stringify(&step.to_value())
+    let mut value = step.to_value();
+    if let Value::Object(o) = &mut value {
+        o.remove("secret");
+    }
+    js::stringify(&value)
 }
 
 #[tokio::test]
 async fn csv_in_runlights_format_rows_become_visits_with_sources_places_devices_and_events() {
     let (rl, routes, _) = make(parse_ms("2026-03-04T00:00:00Z"), "UTC", None).await;
     let rows = Value::Array(runlight_rows());
-    let step = import_csv_visits(&rl, "default", Some(&rows)).await.unwrap();
+    let step = import_csv_visits(&rl, "default", Some(&rows), None).await.unwrap();
+    assert!(
+        step.secret.len() == 32 && step.secret.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    );
     assert_eq!(csv_json(&step), r#"{"pageviews":3,"events":1,"visits":2,"skipped":1}"#);
     let stats = get(&routes, &format!("/api/stats?{RANGE}")).await;
     assert_eq!((stat(&stats, "pageviews"), stat(&stats, "visits"), stat(&stats, "visitors")), (3.0, 2.0, 2.0));
@@ -1152,7 +1160,7 @@ async fn csv_in_runlights_format_rows_become_visits_with_sources_places_devices_
     assert_eq!(values(&routes, &format!("/api/breakdown?{RANGE}&dimension=region")).await, vec!["CA-ON"]);
 
     // The same file again replaces what it brought in, so nothing doubles.
-    import_csv_visits(&rl, "default", Some(&rows)).await.unwrap();
+    import_csv_visits(&rl, "default", Some(&rows), None).await.unwrap();
     let stats = get(&routes, &format!("/api/stats?{RANGE}")).await;
     assert_eq!((stat(&stats, "pageviews"), stat(&stats, "visits")), (3.0, 2.0));
 }
@@ -1164,16 +1172,61 @@ async fn csv_in_runlights_format_without_a_visitor_column_every_row_is_its_own_v
         r#"[{ "time": "2026-03-01 10:00:00", "path": "/a" }, { "time": "2026-03-01 10:01:00", "path": "/b?ref=x" }]"#,
     )
     .unwrap();
-    assert_eq!(import_csv_visits(&rl, "default", Some(&rows)).await.unwrap().visits, 2.0);
-    import_csv_visits(&rl, "default", Some(&rows)).await.unwrap();
+    assert_eq!(import_csv_visits(&rl, "default", Some(&rows), None).await.unwrap().visits, 2.0);
+    import_csv_visits(&rl, "default", Some(&rows), None).await.unwrap();
     assert_eq!(
         stat(&get(&routes, &format!("/api/stats?{RANGE}")).await, "visits"),
         2.0,
-        "the same rows get the same ids the second time"
+        "the second import replaces the first"
     );
     let mut pages = values(&routes, &format!("/api/breakdown?{RANGE}&dimension=page")).await;
     pages.sort();
     assert_eq!(pages, vec!["/a", "/b"]);
+}
+
+#[tokio::test]
+async fn a_csv_visitor_column_is_keyed_with_a_secret_only_the_import_holds_which_later_batches_of_the_file_send_back() {
+    let (rl, routes, _) = make(parse_ms("2026-03-04T00:00:00Z"), "UTC", None).await;
+    let people = js::parse(
+        r#"[
+        { "time": "2026-03-01T10:00:00Z", "path": "/a", "visitor": "203.0.113.7" },
+        { "time": "2026-03-01T10:10:00Z", "path": "/b", "visitor": "203.0.113.7" },
+        { "time": "2026-03-01T10:20:00Z", "path": "/c", "visitor": "jon@example.com" }
+    ]"#,
+    )
+    .unwrap();
+    let all = people.as_array().unwrap();
+    let (head, tail) = (Value::Array(all[..1].to_vec()), Value::Array(all[1..].to_vec()));
+    // A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+    let plain = |key: &str| runlight::hash::sha256(&format!("csv:{key}:2026-03-01"))[..16].to_string();
+    let first = import_csv_visits(&rl, "default", Some(&head), None).await.unwrap();
+    let second =
+        import_csv_visits(&rl, "default", Some(&tail), Some(&Value::from(first.secret.as_str()))).await.unwrap();
+    assert_eq!(second.secret, first.secret);
+    assert_eq!(second.visits, 1.0, "the second batch's visitor continues the first batch's visit");
+    let visitors: Vec<String> = rl
+        .store()
+        .db()
+        .all("SELECT DISTINCT visitor FROM rl_sessions", vec![])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.text("visitor"))
+        .collect();
+    assert_eq!(visitors.len(), 2);
+    for key in ["203.0.113.7", "jon@example.com"] {
+        assert!(!visitors.contains(&plain(key)), "{key}");
+    }
+    assert_eq!(stat(&get(&routes, &format!("/api/stats?{RANGE}")).await, "visits"), 2.0);
+
+    // The same file again, with a new secret and so new ids, leaves no visit of the old import behind,
+    // even one that ran across its two batches.
+    let again = import_csv_visits(&rl, "default", Some(&head), None).await.unwrap();
+    assert_ne!(again.secret, first.secret);
+    import_csv_visits(&rl, "default", Some(&tail), Some(&Value::from(again.secret.as_str()))).await.unwrap();
+    let stats = get(&routes, &format!("/api/stats?{RANGE}")).await;
+    assert_eq!((stat(&stats, "visits"), stat(&stats, "pageviews")), (2.0, 3.0));
+    assert_eq!(rl.store().db().all("SELECT id FROM rl_sessions", vec![]).await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1188,7 +1241,7 @@ async fn csv_from_umamis_export_pageviews_and_named_events_come_across_other_eve
     ]"#,
     )
     .unwrap();
-    let step = import_csv_visits(&rl, "default", Some(&rows)).await.unwrap();
+    let step = import_csv_visits(&rl, "default", Some(&rows), None).await.unwrap();
     assert_eq!(csv_json(&step), r#"{"pageviews":2,"events":1,"visits":2,"skipped":1}"#);
     assert_eq!(values(&routes, &format!("/api/breakdown?{RANGE}&dimension=source")).await, vec!["Hacker News"]);
     assert_eq!(values(&routes, &format!("/api/breakdown?{RANGE}&dimension=region")).await, vec!["CA-ON"]);
@@ -1202,7 +1255,7 @@ async fn csv_rows_from_after_runlights_own_first_visit_are_left_to_runlight() {
     let (rl, routes, _) = make(parse_ms("2026-03-01T23:00:00Z"), "UTC", None).await;
     live_visit(&routes).await;
     let rows = Value::Array(runlight_rows()[..4].to_vec());
-    let step = import_csv_visits(&rl, "default", Some(&rows)).await.unwrap();
+    let step = import_csv_visits(&rl, "default", Some(&rows), None).await.unwrap();
     assert_eq!(step.pageviews, 2.0, "March 2nd is left to Runlight");
     assert_eq!(step.skipped, 1.0);
 }
