@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -179,6 +180,9 @@ public final class Standalone {
   private final String publicHost;
   private List<String> ownHosts;
 
+  /** Taken while the names are read and saved, a lock since it is held across statements. */
+  private final ReentrantLock hostsLock = new ReentrantLock();
+
   public Standalone(Options options) {
     this.store = options.store;
     LongSupplier now = options.now != null ? options.now : System::currentTimeMillis;
@@ -298,11 +302,16 @@ public final class Standalone {
    * The names the owner and admins signed in from, kept in the database, so a link domain can never
    * be one of them even when whoever adds it picks another Host header.
    */
-  private synchronized List<String> knownHosts() {
-    if (ownHosts == null) {
-      ownHosts = List.copyOf(savedHosts());
+  private List<String> knownHosts() {
+    hostsLock.lock();
+    try {
+      if (ownHosts == null) {
+        ownHosts = List.copyOf(savedHosts());
+      }
+      return ownHosts;
+    } finally {
+      hostsLock.unlock();
     }
-    return ownHosts;
   }
 
   /**
@@ -310,28 +319,33 @@ public final class Standalone {
    * with made-up ones, and only real domain names. Names that are already link domains are left
    * out.
    */
-  private synchronized void learnHost(Request request) {
-    String host = hostOf(request);
-    List<String> known = new ArrayList<>(knownHosts());
-    if (!Routes.DOMAIN_NAME.matcher(host).find()
-        || known.contains(host)
-        || known.size() >= MAX_OWN_HOSTS) {
-      return;
-    }
-    for (Map<String, Object> domain : store.linkDomains()) {
-      if (host.equals(domain.get("domain"))) {
+  private void learnHost(Request request) {
+    hostsLock.lock();
+    try {
+      String host = hostOf(request);
+      List<String> known = new ArrayList<>(knownHosts());
+      if (!Routes.DOMAIN_NAME.matcher(host).find()
+          || known.contains(host)
+          || known.size() >= MAX_OWN_HOSTS) {
         return;
       }
-    }
-    // Another copy of the server may have saved names since this one read them.
-    for (String saved : savedHosts()) {
-      if (!known.contains(saved)) {
-        known.add(saved);
+      for (Map<String, Object> domain : store.linkDomains()) {
+        if (host.equals(domain.get("domain"))) {
+          return;
+        }
       }
+      // Another copy of the server may have saved names since this one read them.
+      for (String saved : savedHosts()) {
+        if (!known.contains(saved)) {
+          known.add(saved);
+        }
+      }
+      known.add(host);
+      ownHosts = List.copyOf(known.subList(0, Math.min(known.size(), MAX_OWN_HOSTS)));
+      store.setSetting("server-hosts", Json.stringify(new ArrayList<Object>(ownHosts)));
+    } finally {
+      hostsLock.unlock();
     }
-    known.add(host);
-    ownHosts = List.copyOf(known.subList(0, Math.min(known.size(), MAX_OWN_HOSTS)));
-    store.setSetting("server-hosts", Json.stringify(new ArrayList<Object>(ownHosts)));
   }
 
   /** The answer to one request, from the connection's address the request carries. */

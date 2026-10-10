@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,6 +41,9 @@ public final class SqlStore implements AutoCloseable {
   private final Db db;
   private volatile boolean ready;
   private volatile boolean checkedAll;
+
+  /** Taken while migrating, a lock rather than a monitor since it is held across statements. */
+  private final ReentrantLock migrating = new ReentrantLock();
 
   public SqlStore(Db db) {
     this.db = db;
@@ -97,45 +101,50 @@ public final class SqlStore implements AutoCloseable {
    * records the current schema version, that is taken as done; {@code full} goes over everything
    * anyway, as the scheduled check does, which adds an index a database of this version may lack.
    */
-  public synchronized void migrate(boolean full) {
-    if (checkedAll || (ready && !full)) {
-      return;
-    }
-    if (!full && !ready) {
-      try {
-        Object found =
-            at(first(db.all("SELECT value FROM rl_meta WHERE \"key\" = 'schema'")), "value");
-        if (found != null && text(found).equals(Integer.toString(Sql.SCHEMA_VERSION))) {
-          ready = true;
-          return;
-        }
-      } catch (RuntimeException e) {
-        // No rl_meta yet: a new database, made below.
+  public void migrate(boolean full) {
+    migrating.lock();
+    try {
+      if (checkedAll || (ready && !full)) {
+        return;
       }
-    }
-    db.exclusive(
-        d -> {
-          // On Postgres an index on a big table takes a while to build, so the build may run past
-          // the statement timeout, and goes CONCURRENTLY, so another process keeps writing.
-          boolean postgres = d.dialect().equals("postgres");
-          if (postgres) {
-            d.run("SET statement_timeout = 0");
+      if (!full && !ready) {
+        try {
+          Object found =
+              at(first(db.all("SELECT value FROM rl_meta WHERE \"key\" = 'schema'")), "value");
+          if (found != null && text(found).equals(Integer.toString(Sql.SCHEMA_VERSION))) {
+            ready = true;
+            return;
           }
-          try {
-            upgrade(d, postgres);
-          } finally {
+        } catch (RuntimeException e) {
+          // No rl_meta yet: a new database, made below.
+        }
+      }
+      db.exclusive(
+          d -> {
+            // On Postgres an index on a big table takes a while to build, so the build may run past
+            // the statement timeout, and goes CONCURRENTLY, so another process keeps writing.
+            boolean postgres = d.dialect().equals("postgres");
             if (postgres) {
-              try {
-                d.run("RESET statement_timeout");
-              } catch (RuntimeException e) {
-                // A lost connection takes its setting with it.
+              d.run("SET statement_timeout = 0");
+            }
+            try {
+              upgrade(d, postgres);
+            } finally {
+              if (postgres) {
+                try {
+                  d.run("RESET statement_timeout");
+                } catch (RuntimeException e) {
+                  // A lost connection takes its setting with it.
+                }
               }
             }
-          }
-          return null;
-        });
-    ready = true;
-    checkedAll = true;
+            return null;
+          });
+      ready = true;
+      checkedAll = true;
+    } finally {
+      migrating.unlock();
+    }
   }
 
   private static final Pattern INDEX =
