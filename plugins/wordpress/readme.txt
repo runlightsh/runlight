@@ -16,7 +16,7 @@ Privacy friendly analytics with no cookies, kept in your own database. Adds Runl
 
 This plugin connects a WordPress site to your Runlight:
 
-* It adds Runlight's script (under 2 KB) to every page, and marks 404 pages so broken links show up.
+* It adds Runlight's script (under 2 KB gzipped) to every page, and marks 404 pages so broken links show up.
 * It leaves out administrators' own visits, if you want.
 * It reports AI agents such as ChatGPT, Claude, and Perplexity when they fetch your pages to answer someone's question. They run no JavaScript, so no script can see them; the plugin tells Runlight from the server, without slowing the page down.
 * It adds a Runlight item to the admin menu that shows this site's dashboard right in wp-admin, read-only, with a link to open it in your Runlight.
@@ -37,7 +37,7 @@ The script sets no cookies and stores nothing in the visitor's browser. Runlight
 2. Go to Settings, Runlight, and enter the address your Runlight answers at, such as `https://example.com/runlight` for an app with Runlight mounted, or `https://stats.example.com` for the standalone server. The page checks that it answers.
 3. Make sure that Runlight counts this site's hostname.
 4. To count AI agents, copy this site's key from Settings, Install, Key for CMS plugins in your Runlight and enter it here. The key can only report AI agent fetches for this one site.
-5. To see the numbers in wp-admin, make a key under Settings, Install, Key for the dashboard in your CMS in your Runlight and enter it as the dashboard key. That Runlight must list this site's hostname among the site's domains, since only an admin on one of them may show its dashboard.
+5. To see the numbers in wp-admin, make a key under Settings, Install, Key for the dashboard in your CMS in your Runlight and enter it as the dashboard key. That Runlight must list the hostname wp-admin is served from among the site's domains, since only an admin on one of them may show its dashboard.
 
 == Frequently Asked Questions ==
 
@@ -59,7 +59,7 @@ The plugin talks to one service, the Runlight whose address you enter under Sett
 
 * Every page loads Runlight's script from that address. In the visitor's browser, the script sends the page's address, the referring page, the screen size, the browser's language, the page's title, how long it was read, and how far down it was scrolled, with any events you set up. Runlight uses the visitor's IP address and user agent to work out a daily visitor count and never stores them.
 * When an AI agent such as ChatGPT or Claude fetches a page and you have entered a key, the plugin sends that page's address and the agent's user agent to the same Runlight, from your server.
-* When you save the settings, the plugin asks that address whether it answers as Runlight, to tell you whether it is connected.
+* When an administrator opens the settings page, or saves it, the plugin asks that address whether it answers as Runlight, to tell you whether it is connected.
 * When an administrator opens the Runlight page in wp-admin and you have entered a dashboard key, the plugin sends that key and the address wp-admin is served from (its scheme, host, and port) to the same Runlight, from your server, and gets back a ticket that opens the dashboard once. The page then loads the dashboard from that Runlight in a frame, in the administrator's browser. The frame reads this site's numbers from that Runlight and keeps its session in the page, with no cookies.
 
 == Changelog ==

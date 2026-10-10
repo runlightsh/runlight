@@ -12,7 +12,7 @@ Install the library with a database driver. This one uses SQLite.
 npm install @runlight/sdk better-sqlite3
 ```
 
-Create one instance for your app.
+Create one instance for your app, here in `lib/runlight.ts`.
 
 ```ts
 import { runlight } from "@runlight/sdk";

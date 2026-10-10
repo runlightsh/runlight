@@ -12,6 +12,8 @@ Install it with pip.
 pip install runlight
 ```
 
+SQLite comes with Python. For Postgres, install `runlight[postgres]`, and for MySQL or MariaDB, `runlight[mysql]`. On Windows, add the `tzdata` extra for time zones.
+
 Create one instance for your app.
 
 ```python
@@ -23,6 +25,8 @@ rl = Runlight(
     site={"name": "example.com", "hostnames": ["example.com"], "timezone": "Europe/London"},
 )
 ```
+
+If nothing sits in front of your app (no load balancer, CDN, or reverse proxy), add `trust_proxy=False`, so a visitor cannot pick their own address with an `X-Forwarded-For` header. Runlight logs a warning once when it sees requests arrive that way with the default left on.
 
 Put it in front of your app. In Flask that is one line.
 

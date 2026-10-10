@@ -22,7 +22,15 @@ The generator writes `config/initializers/runlight.rb`, where you set the siteâ€
 
 Set `RUNLIGHT_TOKEN` to a long random string, then open `/runlight/?token=` followed by that string to sign in. Run `bin/rails runlight:check` every few minutes for the email reports and upkeep.
 
+If nothing sits in front of your app (no load balancer, CDN, or reverse proxy), add `trust_proxy: false` beside `store:` and `site:` (in `Runlight.configure` or `Runlight.new`), so a visitor cannot pick their own address with an `X-Forwarded-For` header. Runlight logs a warning once when it sees requests arrive that way with the default left on.
+
 ## Rack
+
+Add the gem with the driver for your database: `sqlite3`, `pg` for Postgres, or `trilogy` or `mysql2` for MySQL and MariaDB.
+
+```bash
+bundle add runlight sqlite3
+```
 
 ```ruby
 require "runlight"

@@ -24,6 +24,8 @@ $rl = new Runlight([
 ]);
 ```
 
+If nothing sits in front of your web server (no load balancer, CDN, or reverse proxy), add `'trustProxy' => false`, so a visitor cannot pick their own address with an `X-Forwarded-For` header. Runlight logs a warning once when it sees requests arrive that way with the default left on.
+
 Send requests under `/runlight` and `/go` to it. In plain PHP that is a few lines at the top of your `index.php`.
 
 ```php
