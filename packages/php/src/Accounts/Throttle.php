@@ -16,7 +16,8 @@ use Runlight\Store\SqlStore;
  * TypeScript keeps the counts in its process. PHP forgets everything between
  * requests, so here they live in the database's settings, as
  * "throttle:<name>:<id>" holding {count, until}, and the hashing key as
- * "throttle-key". Every process of an install then shares the same counts.
+ * "throttle-key". Every process of an install then shares the same counts,
+ * and changes them one at a time under the database's lock.
  */
 final class Throttle
 {
@@ -36,9 +37,29 @@ final class Throttle
         if ($saved !== null && $saved !== '') {
             return $saved;
         }
-        $made = Hash::randomId(16);
-        $this->store->setSetting(self::KEY, $made);
-        return $made;
+        // Made in turn, so two processes starting at once settle on one key.
+        return $this->turn(function (): string {
+            $saved = $this->store->setting(self::KEY);
+            if ($saved !== null && $saved !== '') {
+                return $saved;
+            }
+            $made = Hash::randomId(16);
+            $this->store->setSetting(self::KEY, $made);
+            return $made;
+        });
+    }
+
+    /**
+     * Runs `$fn` holding the database's lock, so a count read and written back by one process cannot interleave
+     * with another's, and a burst spread over many PHP workers is counted try by try.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    private function turn(callable $fn): mixed
+    {
+        return $this->store->db->exclusive(static fn () => $fn());
     }
 
     private function id(string $key): string
@@ -88,27 +109,32 @@ final class Throttle
     public function take(string $key, int $now): bool
     {
         $id = $this->id($key);
-        if ($this->isBlocked($id, $now)) {
-            return false;
-        }
-        $this->count($id, $now);
-        return true;
+        return $this->turn(function () use ($id, $now): bool {
+            if ($this->isBlocked($id, $now)) {
+                return false;
+            }
+            $this->count($id, $now);
+            return true;
+        });
     }
 
     /** Takes back one counted try, for one that turned out right. */
     public function forgive(string $key): void
     {
         $id = $this->id($key);
-        $entry = $this->entry($id);
-        if ($entry !== null && $entry['count'] > 0) {
-            $entry['count']--;
-            $this->save($id, $entry);
-        }
+        $this->turn(function () use ($id): void {
+            $entry = $this->entry($id);
+            if ($entry !== null && $entry['count'] > 0) {
+                $entry['count']--;
+                $this->save($id, $entry);
+            }
+        });
     }
 
     public function fail(string $key, int $now): void
     {
-        $this->count($this->id($key), $now);
+        $id = $this->id($key);
+        $this->turn(fn () => $this->count($id, $now));
     }
 
     private function count(string $id, int $now): void
