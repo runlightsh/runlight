@@ -62,6 +62,9 @@ async fn open(pool: &SqlitePool, guard: &mut Slot) -> Result<(), DbError> {
         // another process is doing the same on a new file, so that is retried.
         wal(&mut conn).await.map_err(db_error)?;
         exec(&mut conn, "PRAGMA synchronous = NORMAL").await.map_err(db_error)?;
+        // Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes,
+        // so they do not linger in the file's free space.
+        exec(&mut conn, "PRAGMA secure_delete = FAST").await.map_err(db_error)?;
         exec(&mut conn, "PRAGMA busy_timeout = 5000").await.map_err(db_error)?;
         guard.conn = Some(conn);
     }
