@@ -6,7 +6,9 @@ module Runlight
     module Write
       # Domains run by the shorteners themselves. Links there stay on Runlight's own path.
       SHORTENER_DOMAINS = %w[bit.ly bitly.com j.mp dub.sh dub.co dub.link short.gy rebrand.ly rebrandly.com rb.gy].freeze
-      private_constant :SHORTENER_DOMAINS
+      # The most clicks a day one imported link gets from a daily count.
+      MAX_DAILY = 10_000
+      private_constant :SHORTENER_DOMAINS, :MAX_DAILY
 
       # Browser and system names as other tools write them, in Runlight's spelling.
       BROWSERS = {
@@ -76,8 +78,10 @@ module Runlight
       # importing again skips what is already there.
       #
       # foreign: { "sourceId", "slug", "domain", "name", "url", "createdAt" }; history: { "clicks"?, "daily"? }.
+      # link_domain: given a branded domain, the domain as the site keeps it once it passes a link domain's checks,
+      # or nil to bring the link over without it.
       # Returns { "status", "clicks", "reason"?, "code"?, "params"? }.
-      def write_link(runlight, site, source, foreign, history)
+      def write_link(runlight, site, source, foreign, history, link_domain = ->(_domain) {})
         source_id = Js.string(foreign["sourceId"])
         id = imported_link_id(source, source_id)
         return { "status" => "skipped", "clicks" => 0 } unless runlight.store.link_by_id(id).nil?
@@ -96,8 +100,18 @@ module Runlight
                    "params" => { "slug" => slug } }
         end
 
-        domain = Sources.strip_www(Js.truthy?(foreign["domain"]) ? foreign["domain"].to_s : "")
-        domain = "" if SHORTENER_DOMAINS.include?(domain)
+        # The destination passes the checks a link made by hand does.
+        begin
+          url = Links.clean_url(foreign["url"])
+        rescue LinkError => e
+          return { "status" => "failed", "clicks" => 0, "reason" => e.message, "code" => e.code, "params" => e.params }
+        end
+
+        domain = Sources.strip_www(Js.lower(Js.truthy?(foreign["domain"]) ? foreign["domain"].to_s : ""))
+        # A branded domain must pass the checks one added in Settings does, so an import can never claim the
+        # dashboard's own host or a name inside a private network. One that fails is left off: the link is
+        # served from the app's own path instead.
+        domain = domain.empty? || SHORTENER_DOMAINS.include?(domain) ? "" : (link_domain.call(domain) || "")
         now = runlight.now
         clicks = 0
         # Nothing in the transaction is one link's own problem (those are checked above),
@@ -173,7 +187,8 @@ module Runlight
             start = Client.parse_date("#{d["day"]}T00:00:00Z")
             next if (start.is_a?(Float) && !start.finite?) || !(d["clicks"].is_a?(Numeric) && d["clicks"].positive?)
 
-            n = [d["clicks"], 1_000_000].min
+            # A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+            n = [d["clicks"], MAX_DAILY].min.floor
             i = 0
             while i < n
               store.insert_event({
@@ -194,7 +209,7 @@ module Runlight
             "domain" => domain,
             "slug" => slug,
             "name" => Js.slice(name, 0, 100),
-            "url" => foreign["url"],
+            "url" => url,
             "createdAt" => created,
             "updatedAt" => created,
           })

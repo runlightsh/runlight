@@ -779,6 +779,44 @@ module Runlight
       Http::Response.new(answer.text, status: answer.status, headers: back)
     end
 
+    # The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
+    # is kept, or the refusal to send.
+    def check_link_domain(request, url, site, value)
+      domain = Js.lower(Js.trim(value))
+      domain = domain.sub(%r{\Ahttps?://}, "")
+      domain = domain.sub(%r{/.*\z}, "")
+      domain = domain.sub(/\.+\z/, "")
+      domain = domain.sub(/\Awww\./, "")
+      return coded("That is not a domain name", "domain_invalid", 400) unless domain.match?(DOMAIN_NAME)
+
+      if private_name?(domain) || Safefetch.resolves_privately?(domain)
+        return coded("#{domain} is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, { "domain" => domain })
+      end
+
+      # A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
+      # The request's own Host is the caller's to choose, so the configured address and the names people
+      # signed in from count too. A hub cannot know every name this app answers on, so it adds none until
+      # the app knows its own address.
+      return origin_needed if @managed.key?(request) && @origin.nil?
+
+      here = [request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host].select { |h| Js.truthy?(h) }
+      own = [*(@origin.nil? ? [] : [Http::Url.new(@origin).host]), *here]
+      @options["ownHosts"]&.call&.each { |host| own << host.to_s }
+      taken = own.map { |h| host_name(h) }
+      sites.each do |s|
+        taken.concat(s["hostnames"])
+        taken.concat(@rl.remote(s["id"])&.[]("hostnames") || [])
+      end
+      if taken.include?(domain)
+        return coded("#{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.#{domain}.", "domain_in_use", 400, { "domain" => domain })
+      end
+
+      owner = store.link_domains.find { |d| d["domain"] == domain }
+      return coded("#{domain} already belongs to another site", "domain_taken", 409, { "domain" => domain }) if !owner.nil? && owner["site"] != site
+
+      domain
+    end
+
     def links_api(request, path, url)
       @rl.init
       site = query_site(url)
@@ -793,41 +831,9 @@ module Runlight
             body = read_json(request)
             return body if body.is_a?(Http::Response)
 
-            domain = Js.lower(Js.trim(text(body, "domain")))
-            domain = domain.sub(%r{\Ahttps?://}, "")
-            domain = domain.sub(%r{/.*\z}, "")
-            domain = domain.sub(/\.+\z/, "")
-            domain = domain.sub(/\Awww\./, "")
-            return coded("That is not a domain name", "domain_invalid", 400) unless domain.match?(DOMAIN_NAME)
+            domain = check_link_domain(request, url, site["id"], text(body, "domain"))
+            return domain if domain.is_a?(Http::Response)
 
-            if private_name?(domain) || Safefetch.resolves_privately?(domain)
-              return coded("#{domain} is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, { "domain" => domain })
-            end
-
-            # A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
-            # The request's own Host is the caller's to choose, so the configured address and the names people
-            # signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-            # the app knows its own address.
-            return origin_needed if @managed.key?(request) && @origin.nil?
-
-            here = [request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host].select { |h| Js.truthy?(h) }
-            own = [*(@origin.nil? ? [] : [Http::Url.new(@origin).host]), *here]
-            @options["ownHosts"]&.call&.each { |host| own << host.to_s }
-            taken = own.map { |h| host_name(h) }
-            sites.each do |s|
-              taken.concat(s["hostnames"])
-              taken.concat(@rl.remote(s["id"])&.[]("hostnames") || [])
-            end
-            if taken.include?(domain)
-              return coded("#{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.#{domain}.", "domain_in_use", 400, { "domain" => domain })
-            end
-
-            store.link_domains.each do |d|
-              next unless d["domain"] == domain
-              return coded("#{domain} already belongs to another site", "domain_taken", 409, { "domain" => domain }) if d["site"] != site["id"]
-
-              break
-            end
             store.add_link_domain(domain, site["id"], @rl.now)
             @rl.forget_link_domains
             return json({ "domain" => domain }, 201)
@@ -918,6 +924,11 @@ module Runlight
               credentials(Js.get(body, "credentials")),
               cursor.is_a?(String) ? cursor : nil,
               done.is_a?(Float) && done.nan? ? 0 : done,
+              # An imported link's domain passes the same checks as one added in Settings, or the link comes over without it.
+              lambda do |domain|
+                checked = check_link_domain(request, url, site["id"], domain)
+                checked.is_a?(Http::Response) ? nil : checked
+              end,
             )
             return json(step)
           rescue Importers::ImportError => e

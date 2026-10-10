@@ -21,6 +21,19 @@ module Runlight
       SecureRandom.random_bytes(6).bytes.map { |byte| ALPHABET[byte % ALPHABET.length] }.join
     end
 
+    # A link's destination as it is kept: a full http or https URL, up to 2,000 characters.
+    def self.clean_url(value)
+      text = Js.trim(Js.string(value.nil? ? "" : value))
+      url = Http::Url.parse(text)
+      raise LinkError.new("The destination must be a full URL, starting with https://", "link_url") if url.nil?
+      if url.protocol != "https:" && url.protocol != "http:"
+        raise LinkError.new("The destination must start with http:// or https://", "link_protocol")
+      end
+      raise LinkError.new("The destination is longer than 2,000 characters", "link_long") if Js.length(text) > 2000
+
+      url.href
+    end
+
     def create(site, input)
       input = Options.normalize(input)
       @runlight.init
@@ -109,15 +122,7 @@ module Runlight
     private
 
     def clean_url(value)
-      text = Js.trim(Js.string(value.nil? ? "" : value))
-      url = Http::Url.parse(text)
-      raise LinkError.new("The destination must be a full URL, starting with https://", "link_url") if url.nil?
-      if url.protocol != "https:" && url.protocol != "http:"
-        raise LinkError.new("The destination must start with http:// or https://", "link_protocol")
-      end
-      raise LinkError.new("The destination is longer than 2,000 characters", "link_long") if Js.length(text) > 2000
-
-      url.href
+      self.class.clean_url(value)
     end
 
     def default_name(url)

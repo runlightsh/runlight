@@ -18,7 +18,9 @@ module Runlight
       #
       # Returns { "cursor", "done", "total", "links", "clicks", "skipped", "failed" }, each failure
       # { "slug", "reason", "code"?, "params"? }.
-      def import_step(runlight, site, source, credentials, cursor, done)
+      # link_domain: the domain as a site keeps it once it passes the checks a link domain added by hand does, or nil
+      # to drop it.
+      def import_step(runlight, site, source, credentials, cursor, done, link_domain = ->(_domain) {})
         name = IMPORTERS[source]
         raise ImportError.new("Runlight cannot import from #{source}", "import_source", { "source" => source }) if name.nil?
 
@@ -37,6 +39,12 @@ module Runlight
         # A total that is not a number is as good as none.
         total = result["total"]
         total = nil unless total.is_a?(Integer) || (total.is_a?(Float) && total.finite?)
+        # Each domain is checked once a step, since the check may look it up in DNS.
+        checked = {}
+        domain_for = lambda do |domain|
+          checked[domain] = link_domain.call(domain) unless checked.key?(domain)
+          checked[domain]
+        end
         step = { "cursor" => result["cursor"], "done" => done, "total" => total, "links" => 0, "clicks" => 0, "skipped" => 0, "failed" => [] }
         result["links"].each do |item|
           if Js.truthy?(item["known"])
@@ -44,7 +52,7 @@ module Runlight
             step["skipped"] += 1
             next
           end
-          written = Write.write_link(runlight, site, source, item["link"], item)
+          written = Write.write_link(runlight, site, source, item["link"], item, domain_for)
           step["done"] += 1
           case written["status"]
           when "created"
