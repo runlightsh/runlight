@@ -131,7 +131,6 @@ public final class Routes {
   private static final String NO = "[^" + Js.SPACE + "@<>\"]+";
   private static final Pattern EMAIL = Pattern.compile("^" + NO + "@" + NO + "\\." + NO + "\\z");
   private static final Pattern ORIGIN = Pattern.compile("^https?://[^/?#" + Js.SPACE + "]+\\z");
-  private static final Pattern HOME = Pattern.compile("^https?://[^" + Js.SPACE + "]+\\z");
   private static final Pattern FILENAME = Pattern.compile("filename=\"([A-Za-z0-9._-]+)\"");
   private static final Pattern ERROR_CODE = Pattern.compile("^[a-z_]{1,40}\\z");
   private static final Pattern GOAL_PAGE = Pattern.compile("^/api/goals/[a-f0-9]{24}\\z");
@@ -2086,17 +2085,15 @@ public final class Routes {
           if (existing.size() >= 50) {
             return coded("A site can send to at most 50 addresses", "report_limit", 400);
           }
-          // Links in the email point back to the configured address, or else to this dashboard as
-          // the browser sees it. A report made from a hub needs the configured address, where its
-          // unsubscribe link answers, since the Host its request names is the hub's to choose.
+          // Links in the email point back to the configured address, or else to this dashboard at
+          // the address the request came to. An address in the body is never used, so whoever adds
+          // a report cannot point its links somewhere else. A report made from a hub needs the
+          // configured address, where its unsubscribe link answers, since the Host its request
+          // names is the hub's to choose.
           if (managed.containsKey(request) && origin == null) {
             return originNeeded();
           }
-          String given = origin != null ? "" : text(body, "origin");
-          String home =
-              HOME.matcher(given).find()
-                  ? given.replaceFirst("/+\\z", "")
-                  : (origin != null ? origin : url.origin()) + base;
+          String home = (origin != null ? origin : url.origin()) + base;
           // A period already due counts as sent, so a report added mid-week first goes out on the
           // next Monday, as the form says.
           long now = rl.now();
