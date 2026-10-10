@@ -136,7 +136,8 @@ before(() => {
     const version = current.replace(/\./g, "\\.");
     const unrelease = (file, released, unreleased, heading) => {
       const text = readCopy(file);
-      if (!unreleased.test(text)) writeFileSync(path.join(copy, file), text.replace(released, heading));
+      // With notes already waiting, the released heading goes and its notes join them.
+      writeFileSync(path.join(copy, file), unreleased.test(text) ? text.replace(new RegExp(`${released.source}\\n+`, "m"), "") : text.replace(released, heading));
     };
     for (const file of ["CHANGELOG.md", "plugins/craft/CHANGELOG.md"]) {
       unrelease(file, new RegExp(`^## ${version} - \\d{4}-\\d{2}-\\d{2}$`, "m"), /^## Unreleased[ \t]*$/m, "## Unreleased");
@@ -270,10 +271,12 @@ test("a release refuses a CHANGELOG.md without an Unreleased section", () => {
   const file = path.join(copy, "CHANGELOG.md");
   writeFileSync(file, readFileSync(file, "utf8").replace("## Unreleased", "## Later"));
   git("commit", "-q", "-am", "no notes");
+  git("push", "-q", "origin", "main");
   try {
     assert.match(release("0.1.0", "--dry-run").err, /CHANGELOG\.md: no "## Unreleased" section/);
   } finally {
     git("reset", "-q", "--hard", "HEAD~1");
+    git("push", "-q", "-f", "origin", "main");
   }
 });
 
