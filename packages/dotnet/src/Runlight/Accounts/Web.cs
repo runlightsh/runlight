@@ -126,6 +126,9 @@ public sealed class Web
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
     private readonly Throttle _codeTries;
+
+    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+    private readonly Throttle _decoyTries;
     private readonly Throttle _confirmTries;
     private readonly Throttle _rechecks;
 
@@ -142,6 +145,7 @@ public sealed class Web
         _perAddress = new Throttle(_store, "address", 10);
         _perAccount = new Throttle(_store, "account", 50);
         _codeTries = new Throttle(_store, "code", 5);
+        _decoyTries = new Throttle(_store, "decoy", 5);
         _confirmTries = new Throttle(_store, "confirm", 5);
         _rechecks = new Throttle(_store, "recheck", 10);
     }
@@ -578,7 +582,7 @@ public sealed class Web
             var (user, real) = pending.Value;
             string id = user.Str("id")!;
             // Counted before the check, so a burst cannot get past five.
-            if (!await _codeTries.TakeAsync(id, Now(), cancellationToken).ConfigureAwait(false))
+            if (!await (real ? _codeTries : _decoyTries).TakeAsync(id, Now(), cancellationToken).ConfigureAwait(false))
             {
                 return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, "Too many tries. Wait fifteen minutes and try again."), 429);
             }
