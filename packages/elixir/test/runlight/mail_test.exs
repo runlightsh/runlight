@@ -274,6 +274,62 @@ defmodule Runlight.MailTest do
     SmtpServer.stop(pid)
   end
 
+  test "SMTP: never a link-local or metadata address, and something that is not a mail server is not quoted" do
+    for host <- ["169.254.169.254", "[fd00:ec2::254]"] do
+      error =
+        assert_raise MailError, fn ->
+          Smtp.send(JS.obj(service: "smtp", host: host, port: "25", security: "none"), @message, "reports@example.com")
+        end
+
+      assert error.code == "address_refused", host
+    end
+
+    {store, cleanup} = Runlight.Test.Stores.store(:sqlite)
+    on_exit(cleanup)
+    rl = Runlight.new(store: store, secret: String.duplicate("s", 64))
+    Runlight.init(rl)
+
+    error =
+      assert_raise MailError, fn ->
+        Runlight.save_mail_settings(
+          rl,
+          JS.obj(
+            service: "smtp",
+            host: "metadata.google.internal",
+            port: "587",
+            security: "starttls",
+            from: "a@example.com"
+          )
+        )
+      end
+
+    assert error.code == "address_refused"
+
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listen)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listen, 5000)
+        :gen_tcp.send(socket, "HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n")
+        :gen_tcp.close(socket)
+      end)
+
+    error =
+      assert_raise MailError, fn ->
+        Smtp.send(
+          JS.obj(service: "smtp", host: "127.0.0.1", port: "#{port}", security: "none"),
+          @message,
+          "reports@example.com"
+        )
+      end
+
+    Task.await(server)
+    :gen_tcp.close(listen)
+    assert error.message =~ "did not answer as a mail server does"
+    refute error.message =~ ~r/internal|HTTP/
+  end
+
   test "SMTP that cannot connect says so" do
     {:ok, probe} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
     {:ok, port} = :inet.port(probe)

@@ -157,6 +157,28 @@ defmodule Runlight.EdgesTest do
     assert models == [JS.obj(id: "m1", name: "m1")]
   end
 
+  test "assistant: never a link-local or cloud metadata address, though one on this computer is fine" do
+    rl = rl()
+
+    for base_url <- ["http://169.254.169.254/latest", "http://[fd00:ec2::254]/v1", "http://metadata.google.internal/v1"] do
+      error =
+        assert_raise Runlight.SettingsError, fn ->
+          Runlight.save_assistant_settings(rl, JS.obj(provider: "custom", model: "m", baseUrl: base_url, key: ""))
+        end
+
+      assert error.code == "address_refused", base_url
+    end
+
+    Runlight.save_assistant_settings(rl, JS.obj(provider: "ollama", model: "llama3", baseUrl: "", key: ""))
+
+    error =
+      assert_raise AssistantError, fn ->
+        Assistant.list_models(rl, JS.obj(provider: "custom", baseUrl: "http://169.254.169.254/v1", key: ""))
+      end
+
+    assert error.code == "address_refused"
+  end
+
   test "icons: only the rel attribute itself says what a link is" do
     base = "https://example.com/"
     assert Icon.icon_links(~s(<link data-rel="x" rel="icon" href="/a.png">), base) == ["https://example.com/a.png"]

@@ -332,6 +332,16 @@ defmodule Runlight do
       config = settings |> Object.put("from", from)
       config = if from_name != "", do: Object.put(config, "fromName", from_name), else: config
       Runlight.Mail.check_config(config)
+
+      if config["service"] == "smtp" and JS.truthy?(config["host"]) and
+           Runlight.Safefetch.metadata_host?(config["host"]),
+         do:
+           raise(Runlight.MailError,
+             message: "#{config["host"]} is a link-local or cloud metadata address, which Runlight never connects to",
+             code: "address_refused",
+             params: %{"host" => config["host"]}
+           )
+
       Store.set_setting(rl.store, "mail", Crypto.seal(JS.stringify(config), rl.secret))
     end
   end
@@ -1041,6 +1051,14 @@ defmodule Runlight do
           raise(SettingsError,
             message: "Enter the service's address, starting with https://",
             code: "assistant_address_bad"
+          )
+
+      if Runlight.Safefetch.metadata_host?(parsed.hostname),
+        do:
+          raise(SettingsError,
+            message: "#{parsed.hostname} is a link-local or cloud metadata address, which Runlight never connects to",
+            code: "address_refused",
+            params: %{"host" => parsed.hostname}
           )
     end
 

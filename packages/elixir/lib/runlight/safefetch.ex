@@ -126,6 +126,94 @@ defmodule Runlight.Safefetch do
     end
   end
 
+  # Names clouds give their metadata services.
+  @metadata_names [
+    "metadata",
+    "metadata.google.internal",
+    "metadata.goog",
+    "instance-data",
+    "instance-data.ec2.internal"
+  ]
+
+  @doc """
+  Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's
+  metadata service (fd00:ec2::254, Alibaba's 100.100.100.200), in any of its
+  IPv6 spellings. A model's API or a mail server is never there, though it
+  may well be on this computer or a private network, so those stay allowed
+  where this is checked.
+  """
+  @spec metadata_address?(String.t()) :: boolean()
+  def metadata_address?(ip) do
+    four = v4(ip)
+    g = if four, do: nil, else: v6(ip)
+
+    # IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+    inner =
+      cond do
+        four != nil ->
+          four
+
+        g == nil ->
+          nil
+
+        Enum.all?(Enum.take(g, 5), &(&1 == 0)) and Enum.at(g, 5) in [0xFFFF, 0] ->
+          embedded(Enum.at(g, 6), Enum.at(g, 7))
+
+        Enum.take(g, 2) == [0x64, 0xFF9B] and Enum.all?(Enum.slice(g, 2, 4), &(&1 == 0)) ->
+          embedded(Enum.at(g, 6), Enum.at(g, 7))
+
+        true ->
+          nil
+      end
+
+    cond do
+      inner != nil -> match?([169, 254, _, _], inner) or inner == [100, 100, 100, 200]
+      g == nil -> false
+      (hd(g) &&& 0xFFC0) == 0xFE80 -> true
+      true -> g == [0xFD00, 0xEC2, 0, 0, 0, 0, 0, 0x254]
+    end
+  end
+
+  @doc """
+  Whether a host, by its name, its address, or any address its name resolves
+  to now, is link-local or a metadata service. A name that does not resolve
+  here is let through, since the connection then goes nowhere such a check
+  could have stopped.
+  """
+  @spec metadata_host?(String.t()) :: boolean()
+  def metadata_host?(host) do
+    name =
+      host
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace(~r/^\[|\]$/, "")
+      |> String.replace(~r/\.+\z/, "")
+
+    cond do
+      name in @metadata_names or metadata_address?(name) -> true
+      v4(name) != nil or v6(name) != nil -> false
+      true -> resolves_to_metadata?(name)
+    end
+  end
+
+  defp resolves_to_metadata?(name) do
+    case lookup(name) do
+      {:ok, list} -> Enum.any?(list, &metadata_address?/1)
+      :error -> false
+    end
+  end
+
+  @doc false
+  # The address to connect to for a mail server's name: its first, with IPv4 first, unless any address it has is
+  # link-local or a metadata service. The name itself when it does not resolve, so connecting fails as it would.
+  @spec mail_address(String.t()) :: {:ok, String.t()} | {:error, :refused}
+  def mail_address(name) do
+    case lookup(name) do
+      {:ok, list} -> if Enum.any?(list, &metadata_address?/1), do: {:error, :refused}, else: {:ok, hd(list)}
+      :error -> {:ok, name}
+    end
+  end
+
   defp lookup(name) do
     charlist = String.to_charlist(name)
 

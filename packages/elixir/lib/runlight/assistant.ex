@@ -112,8 +112,29 @@ defmodule Runlight.Assistant do
 
   defp objects?(items), do: Enum.all?(items, &is_struct(&1, Object))
 
+  @doc """
+  Refuses a service at a link-local or cloud metadata address. One on this
+  computer (Ollama, LM Studio) or a private network is allowed, as the person
+  setting it up means it to be.
+  """
+  @spec refuse_metadata(String.t()) :: :ok
+  def refuse_metadata(url) do
+    host = Url.new(url).hostname
+
+    if Runlight.Safefetch.metadata_host?(host),
+      do:
+        raise(AssistantError,
+          message: "#{host} is a link-local or cloud metadata address, which Runlight never connects to",
+          code: "address_refused",
+          params: [{"host", host}]
+        )
+
+    :ok
+  end
+
   defp post(rl, url, headers, body, deadline) do
     in_time(deadline)
+    refuse_metadata(url)
     left = deadline - clock()
 
     case Runlight.fetch(rl, url,
@@ -482,6 +503,7 @@ defmodule Runlight.Assistant do
 
     url = "#{base}/models#{if anthropic, do: "?limit=100", else: ""}"
     host = host_of(base)
+    refuse_metadata(base)
 
     answer =
       case Runlight.fetch(rl, url, headers: headers, timeout: 20_000, max_bytes: @max_bytes, truncate: true) do
