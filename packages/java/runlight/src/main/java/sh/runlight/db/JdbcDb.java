@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.logging.Level;
@@ -656,8 +657,9 @@ public final class JdbcDb implements Db {
   private static final Map<String, String> TEXTS = new ConcurrentHashMap<>();
 
   /**
-   * A small pool of connections a store opened itself from a URL: idle ones are kept for the next
-   * statement, up to a few, and a broken one is closed.
+   * A small pool of connections a store opened itself from a URL: at most {@code max} open at once,
+   * a statement past that waiting up to ten seconds for one to come free, as pg's pool waits; idle
+   * ones kept for the next statement, up to a few; and a broken one closed.
    */
   static final class Pool implements Source {
     @FunctionalInterface
@@ -665,29 +667,91 @@ public final class JdbcDb implements Db {
       Connection open() throws SQLException;
     }
 
-    private final Opener opener;
-    private final Deque<Connection> idle = new ArrayDeque<>();
-    private final ReentrantLock lock = new ReentrantLock();
+    /** Connections open at once when none is asked for, as the TypeScript stores' pools have. */
+    static final int MAX = 10;
+
     private static final int KEEP = 8;
 
+    private final Opener opener;
+    private final int max;
+    private final long waitMs;
+    private final Deque<Connection> idle = new ArrayDeque<>();
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition freed = lock.newCondition();
+
+    /** Open connections, idle or in use, and ones being opened. */
+    private int open;
+
     Pool(Opener opener) {
+      this(opener, MAX);
+    }
+
+    Pool(Opener opener, int max) {
+      this(opener, max, 10_000);
+    }
+
+    Pool(Opener opener, int max, long waitMs) {
+      if (max < 1) {
+        throw new IllegalArgumentException("Runlight: a pool needs at least 1 connection");
+      }
       this.opener = opener;
+      this.max = max;
+      this.waitMs = waitMs;
     }
 
     @Override
     public Connection open() throws SQLException {
       lock.lock();
       try {
-        while (!idle.isEmpty()) {
-          Connection connection = idle.pop();
-          if (!connection.isClosed()) {
-            return connection;
+        long until = System.nanoTime() + waitMs * 1_000_000L;
+        while (true) {
+          while (!idle.isEmpty()) {
+            Connection connection = idle.pop();
+            if (!connection.isClosed()) {
+              return connection;
+            }
+            open--;
+          }
+          if (open < max) {
+            open++;
+            break;
+          }
+          long left = until - System.nanoTime();
+          if (left <= 0) {
+            throw new SQLException(
+                "Runlight: no database connection came free within "
+                    + waitMs
+                    + " ms; all "
+                    + max
+                    + " are in use");
+          }
+          try {
+            freed.awaitNanos(left);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("Runlight: interrupted while waiting for a connection", e);
           }
         }
       } finally {
         lock.unlock();
       }
-      return opener.open();
+      try {
+        return opener.open();
+      } catch (SQLException | RuntimeException | Error e) {
+        gone();
+        throw e;
+      }
+    }
+
+    /** One connection fewer, and room for a waiting statement to open one. */
+    private void gone() {
+      lock.lock();
+      try {
+        open--;
+        freed.signal();
+      } finally {
+        lock.unlock();
+      }
     }
 
     @Override
@@ -696,8 +760,11 @@ public final class JdbcDb implements Db {
       try {
         if (!broken && idle.size() < KEEP) {
           idle.push(connection);
+          freed.signal();
           return;
         }
+        open--;
+        freed.signal();
       } finally {
         lock.unlock();
       }
@@ -718,8 +785,10 @@ public final class JdbcDb implements Db {
           } catch (SQLException e) {
             // Gone already.
           }
+          open--;
         }
         idle.clear();
+        freed.signalAll();
       } finally {
         lock.unlock();
       }

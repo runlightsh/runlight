@@ -33,10 +33,18 @@ public final class Stores {
    * @param schema the search path, or null for the server's
    */
   public static SqlStore postgres(String url, long statementTimeout, String schema) {
+    return postgres(url, statementTimeout, schema, 10);
+  }
+
+  /**
+   * As {@link #postgres(String, long, String)}, with at most {@code max} connections open; a
+   * statement past that waits up to ten seconds for one. Default 10.
+   */
+  public static SqlStore postgres(String url, long statementTimeout, String schema, int max) {
     if (url == null || url.isEmpty()) {
       throw new IllegalArgumentException("Runlight: postgres() needs a url or a pool");
     }
-    return new SqlStore(Connect.postgres(url, statementTimeout, schema));
+    return new SqlStore(Connect.postgres(url, statementTimeout, schema, max));
   }
 
   /**
@@ -50,10 +58,18 @@ public final class Stores {
 
   /** As {@link #mysql(String)}, with a statement timeout in milliseconds, 0 for none. */
   public static SqlStore mysql(String url, long statementTimeout) {
+    return mysql(url, statementTimeout, 10);
+  }
+
+  /**
+   * As {@link #mysql(String, long)}, with at most {@code max} connections open; a statement past
+   * that waits up to ten seconds for one. Default 10.
+   */
+  public static SqlStore mysql(String url, long statementTimeout, int max) {
     if (url == null || url.isEmpty()) {
       throw new IllegalArgumentException("Runlight: mysql() needs a url or a pool");
     }
-    return new SqlStore(Connect.mysql(url, statementTimeout));
+    return new SqlStore(Connect.mysql(url, statementTimeout, max));
   }
 
   /**

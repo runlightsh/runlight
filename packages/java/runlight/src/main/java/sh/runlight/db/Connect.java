@@ -57,6 +57,11 @@ public final class Connect {
    * schema}, when given, is the search path.
    */
   public static JdbcDb postgres(String url, long statementTimeout, String schema) {
+    return postgres(url, statementTimeout, schema, JdbcDb.Pool.MAX);
+  }
+
+  /** As {@link #postgres(String, long, String)}, with at most {@code max} connections open. */
+  public static JdbcDb postgres(String url, long statementTimeout, String schema, int max) {
     Parts parts = parts(url);
     return new JdbcDb(
         "postgres",
@@ -98,7 +103,8 @@ public final class Connect {
                       + "/"
                       + parts.database(),
                   props);
-            }),
+            },
+            max),
         0);
   }
 
@@ -109,6 +115,11 @@ public final class Connect {
    * sorts by code point. {@code statementTimeout} is set per connection; 0 turns it off.
    */
   public static JdbcDb mysql(String url, long statementTimeout) {
+    return mysql(url, statementTimeout, JdbcDb.Pool.MAX);
+  }
+
+  /** As {@link #mysql(String, long)}, with at most {@code max} connections open. */
+  public static JdbcDb mysql(String url, long statementTimeout, int max) {
     boolean maria = url.toLowerCase(Locale.ROOT).startsWith("mariadb:");
     Parts parts = parts(url);
     return new JdbcDb(
@@ -140,7 +151,8 @@ public final class Connect {
                 JdbcDb.limitStatements(connection, statementTimeout);
               }
               return connection;
-            }),
+            },
+            max),
         statementTimeout);
   }
 
