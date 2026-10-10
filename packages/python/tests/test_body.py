@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from runlight.body import BodyTooLong, read_json_capped, read_text_capped
-from runlight.http import Response, UrllibFetcher
+from runlight.http import FetchError, Headers, Response, UrllibFetcher
 
 
 # Fifty megabytes of zeros, sent as about fifty kilobytes of gzip.
@@ -45,7 +45,16 @@ class _Handler(BaseHTTPRequestHandler):
                 # The reader stopped at its cap.
                 pass
             return
-        body = f"host {self.headers.get('host')}".encode()
+        if parts.path == "/redirect":
+            self.send_response(302)
+            self.send_header("location", parse_qs(parts.query)["to"][0])
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        if parts.path == "/credentials":
+            body = "|".join(str(self.headers.get(h)) for h in ("authorization", "cookie", "x-api-key", "x-other")).encode()
+        else:
+            body = f"host {self.headers.get('host')}".encode()
         self.send_response(200)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -118,6 +127,25 @@ def test_a_gzip_body_is_inflated_no_further_than_max_bytes(port: int) -> None:
         tracemalloc.stop()
     assert start.content() == bytes(100_000)
     assert peak < 5_000_000, "the rest is never inflated"
+
+
+def test_credentials_go_no_further_than_their_origin(port: int) -> None:
+    headers = {"authorization": "Bearer t", "cookie": "a=b", "x-api-key": "k", "x-other": "o"}
+    same = f"http://127.0.0.1:{port}/credentials"
+    other = f"http://localhost:{port}/credentials"
+    fetcher = UrllibFetcher()
+    assert fetcher.fetch(f"http://127.0.0.1:{port}/redirect?to={same}", {"headers": headers}).text() == "Bearer t|a=b|k|o"
+    assert fetcher.fetch(f"http://127.0.0.1:{port}/redirect?to={other}", {"headers": headers}).text() == "None|None|None|o"
+
+
+def test_a_redirect_from_https_to_http_is_refused() -> None:
+    class Redirecting(UrllibFetcher):
+        def _once(self, url, *args):  # type: ignore[no-untyped-def]
+            assert url.startswith("https:"), "the plain address is never asked"
+            return 302, Headers({"location": "http://example.com/"}), "http://example.com/", b""
+
+    with pytest.raises(FetchError, match="https to http"):
+        Redirecting().fetch("https://example.com/")
 
 
 def test_the_fetcher_connects_to_the_pinned_address(port: int) -> None:
