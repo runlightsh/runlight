@@ -40,7 +40,10 @@ import javax.net.ssl.SSLSocketFactory;
 public final class JdkFetcher implements Fetcher {
   private static final int MAX_REDIRECTS = 20;
   private static final long CONNECT_TIMEOUT_MS = 15_000;
-  private static final Pattern PIN = Pattern.compile("^(.+):(\\d+):(.+)\\z");
+
+  /** host:port:addresses, the host before the first colon, since a v6 address has colons too. */
+  private static final Pattern PIN = Pattern.compile("^([^:]+):(\\d{1,5}):(.+)\\z");
+
   private static final Pattern STATUS_LINE = Pattern.compile("^HTTP/\\S+\\s+(\\d{3})(?:\\s.*)?\\z");
 
   /** Headers fetch() drops from a request whose body a redirect turned into a GET. */
@@ -169,13 +172,18 @@ public final class JdkFetcher implements Fetcher {
       return (int) Math.min(ms, Integer.MAX_VALUE);
     }
 
-    /** The addresses to try: a pin's for this host and port, else what the name resolves to. */
+    /**
+     * The addresses to try: a pin's for this host and port, else what the name resolves to. A pin
+     * that cannot be read, or that names no address, is refused rather than passed over, since
+     * passing over it would look the name up again.
+     */
     private List<InetAddress> addresses(List<String> pins) throws IOException {
       for (String pin : pins) {
         Matcher m = PIN.matcher(pin);
-        if (!m.matches()
-            || !m.group(1).equalsIgnoreCase(host)
-            || Integer.parseInt(m.group(2)) != port) {
+        if (!m.matches()) {
+          throw new IOException("unreadable resolve pin " + pin);
+        }
+        if (!m.group(1).equalsIgnoreCase(host) || Integer.parseInt(m.group(2)) != port) {
           continue;
         }
         List<InetAddress> out = new ArrayList<>();
@@ -189,9 +197,10 @@ public final class JdkFetcher implements Fetcher {
             out.add(InetAddress.getByName(bare));
           }
         }
-        if (!out.isEmpty()) {
-          return out;
+        if (out.isEmpty()) {
+          throw new IOException("the resolve pin for " + host + " names no address");
         }
+        return out;
       }
       return List.of(InetAddress.getAllByName(host));
     }
