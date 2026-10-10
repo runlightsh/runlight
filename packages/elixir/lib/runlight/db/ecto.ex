@@ -20,8 +20,11 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     with a line for every tracker hit).
 
     On SQLite keep ecto_sqlite3's `journal_mode: :wal` and give the repo a
-    `busy_timeout` of at least 5000, as the SDK's SQLite store sets them. An
-    in-memory database is one per connection, so a `database: ":memory:"`
+    `busy_timeout` of at least 5000, as the SDK's SQLite store sets them.
+    Runlight turns on `secure_delete` (FAST) itself before each statement that
+    deletes or overwrites rows, and at the start of each transaction, so a
+    deleted salt does not linger in the file's free space. An in-memory
+    database is one per connection, so a `database: ":memory:"`
     repo needs `pool_size: 1`. On MySQL and MariaDB the tables use the binary
     collation `utf8mb4_0900_bin`, which MariaDB has from 11.4.
     """
@@ -73,7 +76,8 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
         result =
           case dialect do
             :sqlite ->
-              repo.query(sql, Enum.map(params, &sqlite_value/1), log: false)
+              run = fn -> repo.query(sql, Enum.map(params, &sqlite_value/1), log: false) end
+              if sqlite_frees?(sql), do: sqlite_checkout(repo, run), else: run.()
 
             :postgres ->
               repo.query(Db.postgres_text(sql, params), [], log: false)
@@ -102,6 +106,39 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
         repo.checkout(
           fn ->
             case repo.query(@no_backslash_escapes_off, [], log: false, query_type: :text) do
+              {:ok, _} -> :ok
+              {:error, error} -> raise error
+            end
+
+            Process.put(key, true)
+
+            try do
+              fun.()
+            after
+              Process.delete(key)
+            end
+          end,
+          timeout: :infinity
+        )
+      end
+    end
+
+    # Whether a statement can leave a deleted or overwritten row in SQLite's free pages.
+    defp sqlite_frees?(sql),
+      do: Regex.match?(~r/\A\s*(DELETE|UPDATE|REPLACE)\b|\bON\s+CONFLICT\b|\bOR\s+REPLACE\b/i, sql)
+
+    # Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes, so they
+    # do not linger in the file's free space. The setting belongs to the connection, which ecto_sqlite3 opens with
+    # it off, so it is turned on once for each checkout that may delete something, as MySQL's mode is dropped.
+    defp sqlite_checkout(repo, fun) do
+      key = {__MODULE__, :sqlite_checkout, repo.get_dynamic_repo()}
+
+      if Process.get(key) do
+        fun.()
+      else
+        repo.checkout(
+          fn ->
+            case repo.query("PRAGMA secure_delete = FAST", [], log: false) do
               {:ok, _} -> :ok
               {:error, error} -> raise error
             end
@@ -166,15 +203,22 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
           end
         end
 
-        if dialect == :mysql and not repo.in_transaction?() do
-          mysql_checkout(repo, fn ->
-            # As Postgres does by default: each statement sees what was committed before it began, and
-            # InnoDB takes no gap locks, so two writers to neighbouring rows do not deadlock.
-            {:ok, _} = repo.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [], log: false, query_type: :text)
+        cond do
+          dialect == :mysql and not repo.in_transaction?() ->
+            mysql_checkout(repo, fn ->
+              # As Postgres does by default: each statement sees what was committed before it began, and
+              # InnoDB takes no gap locks, so two writers to neighbouring rows do not deadlock.
+              {:ok, _} =
+                repo.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [], log: false, query_type: :text)
+
+              run_in.()
+            end)
+
+          dialect == :sqlite and not repo.in_transaction?() ->
+            sqlite_checkout(repo, run_in)
+
+          true ->
             run_in.()
-          end)
-        else
-          run_in.()
         end
       end)
     end
