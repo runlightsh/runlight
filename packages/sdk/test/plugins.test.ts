@@ -30,12 +30,22 @@ test("a CMS plugin keeps its saved keys only while its Runlight address stays th
     function wp_unslash($v) { return $v; }
     function untrailingslashit($v) { return rtrim($v, "/"); }
     function esc_url_raw($v, $protocols) { return $v; }
+    function is_multisite() { return $GLOBALS["multisite"] ?? false; }
+    function current_user_can($capability) { return $GLOBALS["network_admin"] ?? false; }
     require ${JSON.stringify(settings)};
     $keys = [];
     foreach ([["https://stats.example.com/runlight", "", ""], ["https://evil.example/runlight", "", ""], ["https://other.example/runlight", "rlo_new", "rl_new"]] as [$address, $key, $dashboard]) {
       $saved = Settings::sanitize(["address" => $address, "observe_key" => $key, "dashboard_key" => $dashboard]);
       $keys[] = [$saved["observe_key"], $saved["dashboard_key"]];
     }
+    // On a network, a site's admin cannot move the address; a network admin can.
+    $GLOBALS["saved"] = ["address" => "https://stats.example.com/runlight", "observe_key" => "rlo_saved", "dashboard_key" => "rl_saved"];
+    $GLOBALS["multisite"] = true;
+    $moved = Settings::sanitize(["address" => "http://10.0.0.5/runlight", "observe_key" => "", "dashboard_key" => ""]);
+    $keys[] = [$moved["address"], $moved["observe_key"]];
+    $GLOBALS["network_admin"] = true;
+    $moved = Settings::sanitize(["address" => "http://10.0.0.5/runlight", "observe_key" => "", "dashboard_key" => ""]);
+    $keys[] = [$moved["address"], $moved["observe_key"]];
     echo json_encode($keys);
   `;
   let answer: string;
@@ -45,7 +55,13 @@ test("a CMS plugin keeps its saved keys only while its Runlight address stays th
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) return t.skip("PHP is not installed");
     throw error;
   }
-  assert.deepEqual(JSON.parse(answer), [["rlo_saved", "rl_saved"], ["", ""], ["rlo_new", "rl_new"]]);
+  assert.deepEqual(JSON.parse(answer), [
+    ["rlo_saved", "rl_saved"],
+    ["", ""],
+    ["rlo_new", "rl_new"],
+    ["https://stats.example.com/runlight", "rlo_saved"],
+    ["http://10.0.0.5/runlight", ""],
+  ]);
 
   // Drupal's form runs too, with stand-ins for the form base class, its state, and the saved config.
   const drupal = new URL("../../../plugins/drupal/src/Form/SettingsForm.php", import.meta.url).pathname;

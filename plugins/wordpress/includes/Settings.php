@@ -46,6 +46,18 @@ final class Settings {
 	}
 
 	/**
+	 * Whether the current user may change the Runlight address. The plugin asks
+	 * that address from the server itself, and a Runlight may be on the same
+	 * machine or network, so it cannot refuse private addresses. On a network
+	 * of sites, then, only those who manage the network may set it, or a
+	 * site's admin could have the server ask services the network keeps
+	 * private. WP-CLI may always set it.
+	 */
+	public static function can_change_address(): bool {
+		return ! is_multisite() || current_user_can( 'manage_network_options' ) || ( defined( 'WP_CLI' ) && WP_CLI );
+	}
+
+	/**
 	 * Cleans what the settings form sent.
 	 *
 	 * @param mixed $input The submitted fields.
@@ -57,7 +69,10 @@ final class Settings {
 		$key       = isset( $input['observe_key'] ) ? trim( sanitize_text_field( wp_unslash( (string) $input['observe_key'] ) ) ) : '';
 		$dashboard = isset( $input['dashboard_key'] ) ? trim( sanitize_text_field( wp_unslash( (string) $input['dashboard_key'] ) ) ) : '';
 		$address   = self::sanitize_address( isset( $input['address'] ) ? sanitize_text_field( wp_unslash( (string) $input['address'] ) ) : '' );
-		$same      = $address === $before['address'];
+		if ( ! self::can_change_address() ) {
+			$address = $before['address'];
+		}
+		$same = $address === $before['address'];
 		return array(
 			'address'     => $address,
 			'site'        => isset( $input['site'] ) ? preg_replace( '/[^a-z0-9._-]/i', '', (string) $input['site'] ) : '',

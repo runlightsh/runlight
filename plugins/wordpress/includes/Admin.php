@@ -92,8 +92,11 @@ final class Admin {
 					<tr>
 						<th scope="row"><label for="runlight-address"><?php esc_html_e( 'Runlight address', 'runlight' ); ?></label></th>
 						<td>
-							<input id="runlight-address" class="regular-text code" type="url" name="<?php echo esc_attr( Settings::OPTION ); ?>[address]" value="<?php echo esc_attr( $settings['address'] ); ?>" placeholder="https://example.com/runlight or https://stats.example.com">
+							<input id="runlight-address" class="regular-text code" type="url" name="<?php echo esc_attr( Settings::OPTION ); ?>[address]" value="<?php echo esc_attr( $settings['address'] ); ?>" placeholder="https://example.com/runlight or https://stats.example.com"<?php echo Settings::can_change_address() ? '' : ' readonly'; ?>>
 							<p class="description"><?php esc_html_e( 'The address Runlight answers at, where its dashboard opens. That Runlight must count this site, or its visits are ignored.', 'runlight' ); ?></p>
+							<?php if ( ! Settings::can_change_address() ) : ?>
+								<p class="description"><?php esc_html_e( 'On a network of sites, only a network administrator can change the address, since this server connects to it.', 'runlight' ); ?></p>
+							<?php endif; ?>
 						</td>
 					</tr>
 					<tr>
