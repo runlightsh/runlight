@@ -1776,7 +1776,14 @@ final class Routes
             if ($parsed === null || $parsed->origin() !== $origin) {
                 return self::coded("Send the admin page's origin, such as https://example.com", 'embed_origin', 400);
             }
-            $host = self::hostName($parsed->host());
+            // Only https and the default port, so a plain http page or another service on the same name cannot frame
+            // the dashboard; a page on this computer, for development, may use http and any port. The name must be
+            // one of the site's own, which are kept without www, so www. is the only difference allowed.
+            $local = $parsed->hostname === 'localhost' || $parsed->hostname === '127.0.0.1' || $parsed->hostname === '[::1]';
+            if (!$local && ($parsed->protocol !== 'https:' || $parsed->port !== '')) {
+                return self::coded("Send the admin page's origin, such as https://example.com", 'embed_origin', 400);
+            }
+            $host = (string) preg_replace('/^www\./', '', $parsed->hostname);
             $domains = array_map(self::hostName(...), $rl->remote($site['id'])['hostnames'] ?? $site['hostnames']);
             if (!in_array($host, $domains, true)) {
                 return self::coded("$host is not one of this site's domains. Add it to the site's domains in Runlight's settings.", 'embed_host', 400, ['host' => $host]);
