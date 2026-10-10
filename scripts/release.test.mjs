@@ -98,8 +98,11 @@ test("a file out of step is refused", () => {
 });
 
 // Dry runs on a temporary copy: the tracked files and new ones not ignored,
-// as they are in the working tree, committed to a fresh repository on main.
+// as they are in the working tree, committed to a fresh repository on main,
+// with a bare repository beside it as origin, so the remote checks need no
+// network.
 let copy;
+let origin;
 const git = (...args) => execFileSync("git", args, { cwd: copy, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" } });
 const release = (...args) => {
   const env = { ...process.env };
@@ -136,9 +139,16 @@ before(() => {
   git("init", "-q", "-b", "main");
   git("add", "-A");
   git("commit", "-q", "-m", "copy");
+  origin = mkdtempSync(path.join(os.tmpdir(), "runlight-release-origin-"));
+  execFileSync("git", ["init", "-q", "--bare", origin]);
+  git("remote", "add", "origin", origin);
+  git("push", "-q", "origin", "main");
 });
 
-after(() => rmSync(copy, { recursive: true, force: true }));
+after(() => {
+  rmSync(copy, { recursive: true, force: true });
+  rmSync(origin, { recursive: true, force: true });
+});
 
 test("a dry run shows every edit and command, and writes nothing", () => {
   const { status, out, err } = release("0.1.0", "--dry-run");
@@ -153,7 +163,7 @@ test("a dry run shows every edit and command, and writes nothing", () => {
   assert.match(out, /^ {2}Check: npm run check$/m);
   assert.match(out, /^ {2}Pack, install and load the npm packages: npm run check:packages$/m);
   assert.match(out, /^ {2}Tag: git tag -a v0\.1\.0 -m "Release 0\.1\.0"$/m);
-  assert.match(out, /^ {2}git push origin main v0\.1\.0$/m);
+  assert.match(out, /^ {2}git push --atomic origin main v0\.1\.0$/m);
   const sdk = out.indexOf("npm publish --workspace packages/sdk --access public");
   const server = out.indexOf("npm publish --workspace packages/server --access public");
   assert.ok(sdk > 0 && server > sdk, "the SDK is published before the server");
@@ -181,10 +191,13 @@ test("a release refuses another branch, a dirty tree, or a tag already there", (
   git("checkout", "-q", "-b", "other");
   try {
     assert.match(release("0.1.0", "--dry-run").err, /on other, not main/);
+    assert.match(release("0.1.0", "--dry-run", "--branch", "other").err, /could not fetch other from origin/);
+    git("push", "-q", "origin", "other");
     assert.equal(release("0.1.0", "--dry-run", "--branch", "other").status, 0);
   } finally {
     git("checkout", "-q", "main");
     git("branch", "-q", "-D", "other");
+    git("push", "-q", "origin", "--delete", "other");
   }
   writeFileSync(path.join(copy, "README.md"), "changed\n");
   try {
@@ -198,6 +211,34 @@ test("a release refuses another branch, a dirty tree, or a tag already there", (
   } finally {
     git("tag", "-d", "v0.1.0");
   }
+});
+
+test("a release refuses a branch that is not exactly origin's, or a tag already on origin", () => {
+  git("commit", "-q", "--allow-empty", "-m", "local");
+  try {
+    assert.match(release("0.1.0", "--dry-run").err, /main is 1 commit\(s\) ahead of and 0 behind origin\/main/);
+    git("push", "-q", "origin", "main");
+    git("reset", "-q", "--hard", "HEAD~1");
+    assert.match(release("0.1.0", "--dry-run").err, /main is 0 commit\(s\) ahead of and 1 behind origin\/main/);
+  } finally {
+    git("reset", "-q", "--hard");
+    git("push", "-q", "-f", "origin", "main");
+  }
+  git("tag", "v0.1.0");
+  git("push", "-q", "origin", "v0.1.0");
+  git("tag", "-d", "v0.1.0");
+  try {
+    assert.match(release("0.1.0", "--dry-run").err, /tag v0\.1\.0 is already on origin/);
+  } finally {
+    git("push", "-q", "origin", "--delete", "v0.1.0");
+  }
+  git("remote", "rename", "origin", "upstream");
+  try {
+    assert.match(release("0.1.0", "--dry-run").err, /there is no remote named origin/);
+  } finally {
+    git("remote", "rename", "upstream", "origin");
+  }
+  assert.equal(release("0.1.0", "--dry-run").status, 0);
 });
 
 test("a release refuses a new folder with no row in the tables", () => {
@@ -227,14 +268,16 @@ test("a version left behind outside the table is listed", () => {
   writeFileSync(path.join(copy, "packages/stray.md"), 'Install 0.0.0 now. Chrome/129.0.0.0 is not a version.\nrunlight = { version = "0.0" }\n');
   git("add", "-A");
   git("commit", "-q", "-m", "stray");
+  git("push", "-q", "origin", "main");
   try {
-    const { status, out } = release("0.1.0", "--dry-run");
-    assert.equal(status, 0);
+    const { status, out, err } = release("0.1.0", "--dry-run");
+    assert.equal(status, 0, err);
     assert.match(out, /Still mentioning 0\.0\.0/);
     assert.match(out, /^ {2}packages\/stray\.md:1:Install 0\.0\.0 now/m);
     assert.match(out, /^ {2}packages\/stray\.md:2:runlight = \{ version = "0\.0" \}/m);
     assert.equal(out.match(/^ {2}\S+:\d+:/gm).length, 2, "only the strays, not the user agent");
   } finally {
     git("reset", "-q", "--hard", "HEAD~1");
+    git("push", "-q", "-f", "origin", "main");
   }
 });
