@@ -26421,6 +26421,41 @@
         },
         {
           "method": "GET",
+          "path": "/api/account",
+          "jar": false,
+          "headers": {
+            "cookie": "runlight_session=%E0%A4%A"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Sign in first",
+              "code": "sign_in"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/",
+          "jar": false,
+          "headers": {
+            "cookie": "runlight_session=%"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/login"
+            }
+          }
+        },
+        {
+          "method": "GET",
           "path": "/login?next=/runlight/?site=default",
           "look": [
             "name=\"next\" value=\"/runlight/?site=default\""
