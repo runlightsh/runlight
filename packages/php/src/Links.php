@@ -31,7 +31,8 @@ final class Links
         return $slug;
     }
 
-    private static function cleanUrl(mixed $value): string
+    /** A link's destination as it is kept: a full http or https URL, up to 2,000 characters. */
+    public static function cleanUrl(mixed $value): string
     {
         $text = Js::trim(Js::string($value ?? ''));
         $url = Url::parse($text);

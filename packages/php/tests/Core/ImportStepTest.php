@@ -22,15 +22,22 @@ final class ImportStepTest extends TestCase
         return new Runlight(['store' => Stores::sqlite(':memory:'), 'fetcher' => $router, 'now' => static fn (): int => self::NOW]);
     }
 
-    /** @return array{Runlight, array{links: int, clicks: int, skipped: int, failed: list<array>}, int|float} */
-    private static function runAll(Router $router, string $source, array $credentials): array
+    /**
+     * Every domain passes here unless `$linkDomain` says otherwise; the routes check them as Settings does (see the
+     * conformance scenarios).
+     *
+     * @param (callable(string): ?string)|null $linkDomain
+     * @return array{Runlight, array{links: int, clicks: int, skipped: int, failed: list<array>}, int|float}
+     */
+    private static function runAll(Router $router, string $source, array $credentials, ?callable $linkDomain = null): array
     {
+        $linkDomain ??= static fn (string $domain): string => $domain;
         $rl = self::runlight($router);
         $cursor = null;
         $done = 0;
         $totals = ['links' => 0, 'clicks' => 0, 'skipped' => 0, 'failed' => []];
         do {
-            $step = Index::importStep($rl, 'default', $source, $credentials, $cursor, $done);
+            $step = Index::importStep($rl, 'default', $source, $credentials, $cursor, $done, $linkDomain);
             $cursor = $step['cursor'];
             $done = $step['done'];
             $totals['links'] += $step['links'];
@@ -87,6 +94,31 @@ final class ImportStepTest extends TestCase
         $times = array_map(static fn (array $r): int => (int) $r['ts'], $rl->store->db->all('SELECT ts FROM rl_events ORDER BY ts'));
         $day = gmmktime(0, 0, 0, 3, 1, 2026) * 1000;
         self::assertSame([$day + 14_400_000, $day + 43_200_000, $day + 72_000_000], $times, 'spread through the day');
+    }
+
+    public function testAnImportedLinksDestinationIsCheckedARefusedDomainIsLeftOffAndADaysCountIsCapped(): void
+    {
+        $router = new Router([
+            ['#api\.dub\.co/links\?#', static fn () => [
+                ['id' => 'l1', 'domain' => 'Go.Brand.com', 'key' => 'x', 'url' => 'https://a.com', 'title' => 'X', 'createdAt' => '2026-01-02T00:00:00Z'],
+                ['id' => 'l2', 'domain' => 'dub.sh', 'key' => 'y', 'url' => 'javascript:alert(1)', 'title' => 'Y', 'createdAt' => '2026-01-02T00:00:00Z'],
+                ['id' => 'l3', 'domain' => 'stats.example.com', 'key' => 'z', 'url' => 'https://a.com/z', 'title' => 'Z', 'createdAt' => '2026-01-02T00:00:00Z'],
+            ]],
+            ['#/events\?#', static fn () => [403, ['error' => ['message' => 'Business plan required']]]],
+            ['#/analytics\?.*linkId=l1#', static fn () => [['start' => '2026-03-01T00:00:00.000Z', 'clicks' => 5_000_000]]],
+            ['#/analytics\?#', static fn () => []],
+        ]);
+        $asked = [];
+        [$rl, $totals] = self::runAll($router, 'dub', ['apiKey' => 'dub_test'], static function (string $domain) use (&$asked): ?string {
+            $asked[] = $domain;
+            return $domain === 'stats.example.com' ? null : $domain;
+        });
+        self::assertSame(['go.brand.com', 'stats.example.com'], $asked, "shorteners' own domains are never asked about");
+        self::assertSame([['y', 'link_protocol']], array_map(static fn (array $f): array => [$f['slug'], $f['code']], $totals['failed']));
+        $pairs = array_map(static fn (array $l): array => [$l['slug'], $l['domain']], self::links($rl));
+        sort($pairs);
+        self::assertSame([['x', 'go.brand.com'], ['z', '']], $pairs);
+        self::assertSame(10_000, $totals['clicks']);
     }
 
     public function testBitlyEveryGroupCustomBackHalvesDailyCounts(): void
@@ -213,7 +245,7 @@ final class ImportStepTest extends TestCase
         self::assertSame(['status' => 'failed', 'clicks' => 0, 'reason' => '/taken is already used by "Other"', 'code' => 'import_slug_taken', 'params' => ['slug' => 'taken', 'name' => 'Other']], $taken);
         $bad = Write::writeLink($rl, 'default', 'dub', ['sourceId' => 'y', 'slug' => 'a/b', 'domain' => '', 'name' => '', 'url' => 'https://a.com', 'createdAt' => 0], []);
         self::assertSame('import_slug_bad', $bad['code']);
-        $made = Write::writeLink($rl, 'default', 'dub', ['sourceId' => 'z', 'slug' => 'fine', 'domain' => 'www.Go.Brand.com', 'name' => '', 'url' => 'https://a.com/z', 'createdAt' => 0], ['clicks' => [['ts' => 5_000, 'visit' => 'v', 'path' => '/fine', 'query' => '?utm_campaign=c']]]);
+        $made = Write::writeLink($rl, 'default', 'dub', ['sourceId' => 'z', 'slug' => 'fine', 'domain' => 'www.Go.Brand.com', 'name' => '', 'url' => 'https://a.com/z', 'createdAt' => 0], ['clicks' => [['ts' => 5_000, 'visit' => 'v', 'path' => '/fine', 'query' => '?utm_campaign=c']]], static fn (string $domain): string => $domain);
         self::assertSame(['status' => 'created', 'clicks' => 1], $made);
         $link = $rl->store->linkBySlug('fine');
         self::assertSame(['go.brand.com', 'fine', Write::importedLinkId('dub', 'z')], [$link['domain'], $link['name'], $link['id']]);
