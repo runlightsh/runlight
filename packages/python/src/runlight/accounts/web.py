@@ -399,6 +399,8 @@ class AccountsWeb:
                     self._existing = True
                     return _redirect(self.home_path, self._fresh(request, user))
                 except _js.RangeError as error:
+                    if isinstance(error, AccountError) and error.code == "invite_gone":
+                        return _html(invite_gone_page(base), 410)
                     return again_page(str(error))
         return None
 
