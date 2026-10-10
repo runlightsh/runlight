@@ -71,6 +71,8 @@ final class Web
     private Throttle $codeTries;
     private Throttle $confirmTries;
     private Throttle $rechecks;
+    // PHP's scrypt takes most of a second of CPU, so only a few password checks run at once on a machine.
+    private Slots $checks;
 
     /**
      * @param array{runlight: object, secret: string, base: string, now: callable(): int, firstAccount: 'open'|'locked'|array{code: string}|array{token: string}, home?: callable(): ?string, forgot: string, setupWhere?: string} $options
@@ -95,6 +97,19 @@ final class Web
         $this->codeTries = new Throttle($this->store, 'code', 5);
         $this->confirmTries = new Throttle($this->store, 'confirm', 5);
         $this->rechecks = new Throttle($this->store, 'recheck', 10);
+        $this->checks = new Slots($this->rl->dataDir ?? null);
+    }
+
+    /**
+     * The account for an email and password, checked in one of the few places password checks share, or false
+     * when none came free in time.
+     *
+     * @return User|null|false
+     */
+    private function checkPassword(string $email, string $password): array|null|false
+    {
+        [$ran, $user] = $this->checks->run(fn (): ?array => $this->accounts->signIn($email, $password));
+        return $ran ? $user : false;
     }
 
     /** A random one-time code, such as the one a server prints to unlock its first account. */
@@ -498,6 +513,7 @@ final class Web
         $pair = "$account\n" . ($ip !== '' ? $ip : 'unknown');
         $login = fn (array $opts): string => Pages::loginPage($base, $opts + ['next' => $next, 'forgot' => $this->forgot]);
         $tooMany = static fn (): Response => self::html($login(['error' => 'Too many tries. Wait fifteen minutes and try again.', 'email' => $email]), 429);
+        $busy = static fn (): Response => self::html($login(['error' => 'Too many sign-ins at once. Try again in a moment.', 'email' => $email]), 503, ['retry-after' => '5']);
         if (!$this->perAddress->take($pair, $this->now())) {
             return $tooMany();
         }
@@ -513,7 +529,11 @@ final class Web
             if (!$this->rl->mailSettings() || $home === null || $home === '') {
                 return $tooMany();
             }
-            $user = $this->accounts->signIn($email, $password);
+            $user = $this->checkPassword($email, $password);
+            if ($user === false) {
+                $this->perAddress->forgive($pair);
+                return $busy();
+            }
             if ($user !== null) {
                 // Sent once the answer is out, as TypeScript does, so a right password takes no longer to answer than a wrong one.
                 $this->rl->later(function () use ($user, $next): void {
@@ -526,7 +546,15 @@ final class Web
             }
             return self::html($login(['error' => 'Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.', 'email' => $email]), 429);
         }
-        $user = $this->accounts->signIn($email, $password);
+        $user = $this->checkPassword($email, $password);
+        if ($user === false) {
+            // Not checked, so not counted.
+            $this->perAddress->forgive($pair);
+            if (!$over && !$trusted) {
+                $this->perAccount->forgive($account);
+            }
+            return $busy();
+        }
         if ($user === null) {
             if ($over && $known !== null) {
                 return self::html(Pages::codePage($base, ['pending' => $this->accounts->decoyFor($known, $this->now()), 'next' => $next]));
@@ -564,7 +592,12 @@ final class Web
             if (!$this->rechecks->take($user['id'], $now)) {
                 return self::coded('Too many tries. Wait fifteen minutes and try again.', 'too_many_tries', 429);
             }
-            if ($this->accounts->signIn($user['email'], self::field($input, $field)) === null) {
+            $checked = $this->checkPassword($user['email'], self::field($input, $field));
+            if ($checked === false) {
+                $this->rechecks->forgive($user['id']);
+                return self::coded('Too many sign-ins at once. Try again in a moment.', 'busy', 503);
+            }
+            if ($checked === null) {
                 return self::coded($wrong[0], $wrong[1], 400);
             }
             $this->rechecks->forgive($user['id']);
