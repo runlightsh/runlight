@@ -1199,16 +1199,13 @@ class Routes:
                         return coded(f"{email} already gets the {frequency} report", "report_exists", 400, {"email": email})
                     if len(existing) >= 50:
                         return coded("A site can send to at most 50 addresses", "report_limit", 400)
-                    # Links in the email point back to the configured address, or else to this dashboard as the
-                    # browser sees it. A report made from a hub needs the configured address, where its unsubscribe
-                    # link answers, since the Host its request names is the hub's to choose.
+                    # Links in the email point back to the configured address, or else to this dashboard at the
+                    # address the request came to. An address in the body is never used, so whoever adds a report
+                    # cannot point its links somewhere else. A report made from a hub needs the configured address,
+                    # where its unsubscribe link answers, since the Host its request names is the hub's to choose.
                     if request in self.managed and not self.origin:
                         return self._origin_needed()
-                    given = "" if self.origin else _text(body, "origin")
-                    if re.match(f"https?://[^{_WS}]+\\Z", given):
-                        home = re.sub(r"/+\Z", "", given)
-                    else:
-                        home = f"{self.origin or url.origin}{self.base}"
+                    home = f"{self.origin or url.origin}{self.base}"
                     # A period already due counts as sent, so a report added mid-week first goes out on the next
                     # Monday, as the form says.
                     due = last_period(frequency, rl.now(), site["timezone"])
