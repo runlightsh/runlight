@@ -62,6 +62,7 @@ class CoreImportStepTest < Minitest::Test
     assert_equal 2, totals["clicks"]
     by_slug = links(rl).to_h { |l| [l["slug"], l] }
     assert_equal "", by_slug["launch"]["domain"], "dub.sh stays behind; the link moves to /go"
+    assert_equal "https://a.com/launch", by_slug["launch"]["url"], "a link with clicks keeps its own destination"
     assert_equal "go.brand.com", by_slug["sale"]["domain"], "branded domains come across"
     assert_equal({ "domain" => "go.brand.com", "site" => "default" }, rl.store.link_domains[0])
     session = rl.store.db.all("SELECT country, source, device FROM rl_sessions ORDER BY started_at LIMIT 1")[0]
