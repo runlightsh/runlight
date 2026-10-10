@@ -297,7 +297,7 @@ pub fn recovery_hash(code: &str) -> String {
 pub fn match_step(secret: &str, code: &str, now: i64, after: i64) -> Result<Option<i64>, CryptoError> {
     let current = js::floor_div(now, STEP_MS);
     for step in [current, current - 1, current + 1] {
-        if step > after && totp(secret, step)? == code {
+        if step > after && crate::routes::constant_time_equal(&totp(secret, step)?, code) {
             return Ok(Some(step));
         }
     }

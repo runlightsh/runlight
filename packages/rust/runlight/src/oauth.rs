@@ -550,7 +550,8 @@ async fn token(host: &dyn OAuthHost, request: &Request) -> Result<Response, Erro
     if !same(grant.get("client"), form.get("client_id")) || !same(grant.get("redirect"), form.get("redirect_uri")) {
         return Ok(oauth_error("invalid_grant", "The code was issued to another app", 400));
     }
-    if grant.get("challenge").and_then(Value::as_str) != Some(s256(form.get("code_verifier").unwrap_or("")).as_str()) {
+    let challenge = grant.get("challenge").and_then(Value::as_str).unwrap_or("");
+    if !constant_time_equal(challenge, &s256(form.get("code_verifier").unwrap_or(""))) {
         return Ok(oauth_error("invalid_grant", "The code verifier does not match", 400));
     }
     // The first row an app gets here: it has connected, so a request it gets wrong may go back to it.
