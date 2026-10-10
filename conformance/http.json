@@ -32516,6 +32516,36 @@
             "content-type": "application/json"
           },
           "body": {
+            "service": "smtp",
+            "host": "169.254.169.254",
+            "port": "25",
+            "security": "none",
+            "from": "r@example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to",
+              "code": "address_refused",
+              "params": {
+                "host": "169.254.169.254"
+              }
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
             "service": "webhook",
             "url": "https://",
             "from": "r@example.com"
@@ -41853,6 +41883,90 @@
               "error": "Enter the service's address, starting with https://",
               "code": "assistant_address_bad",
               "params": {}
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/assistant",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "provider": "custom",
+            "baseUrl": "http://169.254.169.254/latest",
+            "model": "m"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to",
+              "code": "address_refused",
+              "params": {
+                "host": "169.254.169.254"
+              }
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/assistant",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "provider": "custom",
+            "baseUrl": "http://[fd00:ec2::254]/v1",
+            "model": "m"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "[fd00:ec2::254] is a link-local or cloud metadata address, which Runlight never connects to",
+              "code": "address_refused",
+              "params": {
+                "host": "[fd00:ec2::254]"
+              }
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/assistant",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "provider": "custom",
+            "baseUrl": "http://metadata.google.internal/v1",
+            "model": "m"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "metadata.google.internal is a link-local or cloud metadata address, which Runlight never connects to",
+              "code": "address_refused",
+              "params": {
+                "host": "metadata.google.internal"
+              }
             }
           }
         },

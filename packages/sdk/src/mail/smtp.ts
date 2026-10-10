@@ -1,3 +1,5 @@
+import type { LookupFunction } from "node:net";
+import { metadataAddress } from "../safefetch.js";
 import type { MailConfig, Message } from "./transports.js";
 import { MailError } from "./transports.js";
 
@@ -120,18 +122,32 @@ export async function smtpSend(config: MailConfig, m: Message, from: string, dea
 async function converse(config: MailConfig, m: Message, from: string, host: string, port: number, security: string, track: (socket: Socket) => void): Promise<void> {
   const net = await import("node:net");
   const tls = await import("node:tls");
+  const dns = await import("node:dns");
   const timeout = 20_000;
+  // A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+  // address. The check runs on the addresses the connection uses, so a name cannot answer differently later.
+  const refused = () => new MailError(`SMTP: ${host} is a link-local or cloud metadata address, which Runlight never connects to`, "address_refused", { host });
+  if (metadataAddress(host.replace(/^\[|\]$/g, ""))) throw refused();
+  const lookup: LookupFunction = (name, options, callback) => {
+    dns.lookup(name, { ...options, all: true }, (error, addresses) => {
+      if (error) return callback(error, "");
+      if (addresses.some((a) => metadataAddress(a.address))) return callback(refused() as NodeJS.ErrnoException, "");
+      return options.all ? callback(null, addresses) : callback(null, addresses[0]!.address, addresses[0]!.family);
+    });
+  };
 
   let socket: Socket = await new Promise<Socket>((resolve, reject) => {
-    const s: Socket = security === "tls" ? tls.connect({ host, port, servername: host }, () => resolve(s)) : net.connect({ host, port }, () => resolve(s));
+    const s: Socket = security === "tls" ? tls.connect({ host, port, servername: host, lookup }, () => resolve(s)) : net.connect({ host, port, lookup }, () => resolve(s));
     track(s);
     s.setTimeout(timeout, () => s.destroy(new Error("timed out")));
-    s.once("error", (e) => reject(new MailError(`SMTP: could not connect to ${host}:${port}: ${e.message}`, "mail_unreachable", { host: `${host}:${port}`, detail: e.message })));
+    s.once("error", (e) => reject(e instanceof MailError ? e : new MailError(`SMTP: could not connect to ${host}:${port}: ${e.message}`, "mail_unreachable", { host: `${host}:${port}`, detail: e.message })));
   });
   let reader = smtpReplies(socket);
   const write = (line: string) => socket.write(`${line}\r\n`);
   const expect = async (codes: number[], what: string) => {
     const reply = await reader.next();
+    // Something that is not a mail server gets no more than that said, so its own words are never passed on.
+    if (!(reply.code >= 200 && reply.code <= 599)) throw new MailError(`SMTP ${what}: ${host}:${port} did not answer as a mail server does`);
     if (!codes.includes(reply.code)) throw new MailError(`SMTP ${what}: ${reply.code} ${reply.text}`.slice(0, 300));
     return reply;
   };

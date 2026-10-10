@@ -881,6 +881,7 @@
   "error.check_not_runlight": "algo respondeu, mas não o Runlight",
   "error.check_status": "respondeu {status}",
   "error.assistant_address": "Digite o endereço do serviço em Configurações, Assistente de IA.",
+  "error.address_refused": "{host} é um endereço link-local ou de metadados da nuvem, ao qual o Runlight nunca se conecta.",
   "error.assistant_address_bad": "Digite o endereço do serviço, começando com https://",
   "error.assistant_cancelled": "A pergunta foi cancelada.",
   "error.assistant_key": "Digite sua chave do {provider}.",

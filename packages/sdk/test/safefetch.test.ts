@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { PrivateAddressError, installAddress, installFetch, publicAddress, publicFetch, resolvesPrivately } from "../src/safefetch.js";
+import { PrivateAddressError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, resolvesPrivately } from "../src/safefetch.js";
+
+test("link-local and cloud metadata addresses are told apart from loopback and private ones", async () => {
+  for (const ip of ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe"]) {
+    assert.equal(metadataAddress(ip), true, ip);
+  }
+  for (const ip of ["127.0.0.1", "::1", "10.0.0.5", "192.168.1.20", "fd00::1", "fd00:ec2::253", "93.184.215.14", "not an address"]) assert.equal(metadataAddress(ip), false, ip);
+  assert.equal(await metadataHost("metadata.google.internal"), true);
+  assert.equal(await metadataHost("[fd00:ec2::254]"), true);
+  assert.equal(await metadataHost("169.254.169.254"), true);
+  assert.equal(await metadataHost("localhost"), false, "a model on this computer is fine");
+  assert.equal(await metadataHost("192.168.1.20"), false);
+});
 
 test("only addresses on the public internet count as public", () => {
   for (const ip of ["93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e"]) assert.equal(publicAddress(ip), true, ip);

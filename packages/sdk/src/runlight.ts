@@ -7,7 +7,7 @@ import { parsePayload, MAX_BODY, type Payload } from "./payload.js";
 import { Links } from "./links.js";
 import { PROVIDERS, type AssistantSettings } from "./assistant.js";
 import { readJsonCapped } from "./body.js";
-import { installAddress, installFetch, publicAddress } from "./safefetch.js";
+import { installAddress, installFetch, metadataHost, publicAddress } from "./safefetch.js";
 import { RateLimit } from "./limit.js";
 import { createRoutes, type Routes, type RoutesOptions } from "./routes.js";
 import { attribute, parsePage, stripWww, type Page } from "./sources.js";
@@ -264,6 +264,9 @@ export class Runlight {
     const fromName = String(input.fromName ?? "").trim().slice(0, 80);
     const config = { ...settings, from, ...(fromName ? { fromName } : {}) } as MailSettings;
     checkConfig(config);
+    if (config.service === "smtp" && config.host && (await metadataHost(config.host))) {
+      throw new MailError(`${config.host} is a link-local or cloud metadata address, which Runlight never connects to`, "address_refused", { host: config.host });
+    }
     await this.store.setSetting("mail", await seal(JSON.stringify(config), this.secret));
   }
 
@@ -675,6 +678,9 @@ export class Runlight {
         parsed = new URL(baseUrl);
       } catch {}
       if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) throw new SettingsError("Enter the service's address, starting with https://", "assistant_address_bad");
+      if (await metadataHost(parsed.hostname)) {
+        throw new SettingsError(`${parsed.hostname} is a link-local or cloud metadata address, which Runlight never connects to`, "address_refused", { host: parsed.hostname });
+      }
     }
     if (!baseUrl && !provider.baseUrl) throw new SettingsError("Enter the service's address", "assistant_address");
     const model = String(input.model ?? "").trim().slice(0, 200);

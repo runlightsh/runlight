@@ -1133,6 +1133,7 @@ const MAIL: Scenario[] = [
       put("/api/mail", { service: "resend", from: "r@example.com" }),
       put("/api/mail", { service: "smtp", host: "smtp.example.com", port: "587", security: "pigeon", from: "r@example.com" }),
       put("/api/mail", { service: "smtp", host: "smtp.example.com", port: "70000", security: "starttls", from: "r@example.com" }),
+      put("/api/mail", { service: "smtp", host: "169.254.169.254", port: "25", security: "none", from: "r@example.com" }),
       put("/api/mail", { service: "webhook", url: "https://", from: "r@example.com" }),
       put("/api/mail", { service: "webhook", url: "https://hooks.example.net/runlight", secret: "whsec", from: "reports@example.com", fromName: "Runlight" }),
       get("/api/mail"),
@@ -1487,6 +1488,10 @@ const ASSISTANT: Scenario[] = [
       put("/api/assistant", { provider: "nope" }),
       put("/api/assistant", { provider: "custom" }),
       put("/api/assistant", { provider: "custom", baseUrl: "ftp://llm.example.net" }),
+      // Never a link-local or cloud metadata address, by number or by name.
+      put("/api/assistant", { provider: "custom", baseUrl: "http://169.254.169.254/latest", model: "m" }),
+      put("/api/assistant", { provider: "custom", baseUrl: "http://[fd00:ec2::254]/v1", model: "m" }),
+      put("/api/assistant", { provider: "custom", baseUrl: "http://metadata.google.internal/v1", model: "m" }),
       put("/api/assistant", { provider: "custom", baseUrl: "https://llm.example.net/v1/" }),
       put("/api/assistant", { provider: "openai" }),
       put("/api/assistant", { provider: "custom", baseUrl: "https://llm.example.net/v1/", model: "zeta-model", key: "sk-test" }),
