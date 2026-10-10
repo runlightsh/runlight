@@ -39,6 +39,8 @@ final class Web
     private const MADE_BY = 'token-by:';
     /** When each account was last sent a sign-in link, at most one a minute; a setting, since PHP forgets between requests. */
     private const LINK_SENT = 'login-link-sent:';
+    /** What a password check that found no free place answers, at sign-in (503) and in the Account API. */
+    private const BUSY = 'Runlight is busy checking other sign-ins. Try again in a moment.';
 
     public readonly Accounts $accounts;
 
@@ -59,24 +61,28 @@ final class Web
     private bool $asksForToken;
     private bool $existing = false;
 
-    // Wrong passwords are counted twice. Per account and address, ten tries;
+    // Wrong passwords are counted three times. Per account and address, ten tries;
     // per account from anywhere, fifty, so a caller who invents a new address
     // for every try still cannot guess on and on. Addresses come from
-    // forwarding headers a client can write, so they never stand alone.
+    // forwarding headers a client can write, so they never stand alone. And per
+    // address across every account, thirty, so one caller trying made-up emails
+    // cannot keep the server hashing; a request with no known address skips that one,
+    // since it would hold up everyone at once.
     // Each try counts before the password is checked, and a right one is taken back.
     private Throttle $perAddress;
     private Throttle $perAccount;
+    private Throttle $perIp;
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
     private Throttle $codeTries;
+    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+    private Throttle $decoyTries;
     private Throttle $confirmTries;
     private Throttle $rechecks;
     // PHP's scrypt takes most of a second of CPU, so only a few password checks run at once on a machine.
     private Slots $checks;
 
     /**
-    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-    private Throttle $decoyTries;
      * @param array{runlight: object, secret: string, base: string, now: callable(): int, firstAccount: 'open'|'locked'|array{code: string}|array{token: string}, home?: callable(): ?string, forgot: string, setupWhere?: string} $options
      *     setupWhere says where to find the setup link with the one-time code, when it is not in a log (HTML)
      */
@@ -96,7 +102,9 @@ final class Web
         $this->asksForToken = is_array($this->first) && array_key_exists('token', $this->first);
         $this->perAddress = new Throttle($this->store, 'address', 10);
         $this->perAccount = new Throttle($this->store, 'account', 50);
+        $this->perIp = new Throttle($this->store, 'ip', 30);
         $this->codeTries = new Throttle($this->store, 'code', 5);
+        $this->decoyTries = new Throttle($this->store, 'decoy', 5);
         $this->confirmTries = new Throttle($this->store, 'confirm', 5);
         $this->rechecks = new Throttle($this->store, 'recheck', 10);
         $this->checks = new Slots($this->rl->dataDir ?? null);
@@ -104,7 +112,6 @@ final class Web
 
     /**
      * The account for an email and password, checked in one of the few places password checks share, or false
-        $this->decoyTries = new Throttle($this->store, 'decoy', 5);
      * when none came free in time.
      *
      * @return User|null|false
@@ -200,6 +207,7 @@ final class Web
         if ($value === '') {
             return null;
         }
+        // A cookie that is not valid percent-encoding is nobody's session, never an error.
         $decoded = Js::decodeURIComponent($value);
         if ($decoded === null) {
             return null;
@@ -209,7 +217,6 @@ final class Web
 
     private function dropTokensOf(string $id): void
     {
-        // A cookie that is not valid percent-encoding is nobody's session, never an error.
         foreach ($this->store->settingsStartingWith(self::MADE_BY) as ['key' => $key, 'value' => $value]) {
             if ($value !== $id) {
                 continue;
@@ -502,6 +509,9 @@ final class Web
                     $this->existing = true;
                     return self::redirect($this->homePath, ['set-cookie' => $this->sessionCookie($request, $this->accounts->sessionFor($user, $this->now()), intdiv(Accounts::SESSION_MS, 1000))]);
                 } catch (\RangeException $error) {
+                    if ($error instanceof AccountError && $error->code === 'invite_gone') {
+                        return self::html(Pages::inviteGonePage($base), 410);
+                    }
                     return $again($error->getMessage());
                 }
             }
@@ -509,12 +519,18 @@ final class Web
         return null;
     }
 
+    /** Takes back a sign-in's tries by account and address, and by address alone, for a password never checked. */
+    private function forgiveTry(string $pair, string $ip): void
+    {
+        $this->perAddress->forgive($pair);
+        if ($ip !== '') {
+            $this->perIp->forgive($ip);
+        }
+    }
+
     /** @param array{ip?: string} $context */
     private function login(Request $request, array $context): Response
     {
-                    if ($error instanceof AccountError && $error->code === 'invite_gone') {
-                        return self::html(Pages::inviteGonePage($base), 410);
-                    }
         $base = $this->base;
         $form = new SearchParams($request->text());
         $email = $form->get('email') ?? '';
@@ -525,7 +541,10 @@ final class Web
         $pair = "$account\n" . ($ip !== '' ? $ip : 'unknown');
         $login = fn (array $opts): string => Pages::loginPage($base, $opts + ['next' => $next, 'forgot' => $this->forgot]);
         $tooMany = static fn (): Response => self::html($login(['error' => 'Too many tries. Wait fifteen minutes and try again.', 'email' => $email]), 429);
-        $busy = static fn (): Response => self::html($login(['error' => 'Too many sign-ins at once. Try again in a moment.', 'email' => $email]), 503, ['retry-after' => '5']);
+        $busy = static fn (): Response => self::html($login(['error' => self::BUSY, 'email' => $email]), 503, ['retry-after' => '5']);
+        if ($ip !== '' && !$this->perIp->take($ip, $this->now())) {
+            return $tooMany();
+        }
         if (!$this->perAddress->take($pair, $this->now())) {
             return $tooMany();
         }
@@ -543,7 +562,7 @@ final class Web
             }
             $user = $this->checkPassword($email, $password);
             if ($user === false) {
-                $this->perAddress->forgive($pair);
+                $this->forgiveTry($pair, $ip);
                 return $busy();
             }
             if ($user !== null) {
@@ -561,7 +580,7 @@ final class Web
         $user = $this->checkPassword($email, $password);
         if ($user === false) {
             // Not checked, so not counted.
-            $this->perAddress->forgive($pair);
+            $this->forgiveTry($pair, $ip);
             if (!$over && !$trusted) {
                 $this->perAccount->forgive($account);
             }
@@ -574,6 +593,9 @@ final class Web
             return self::html($login(['error' => 'That email and password do not match an account.', 'email' => $email]), 401);
         }
         $this->perAddress->clear($pair);
+        if ($ip !== '') {
+            $this->perIp->forgive($ip);
+        }
         if (!$over && !$trusted) {
             $this->perAccount->forgive($account);
         }
@@ -607,7 +629,7 @@ final class Web
             $checked = $this->checkPassword($user['email'], self::field($input, $field));
             if ($checked === false) {
                 $this->rechecks->forgive($user['id']);
-                return self::coded('Too many sign-ins at once. Try again in a moment.', 'busy', 503);
+                return self::coded(self::BUSY, 'busy', 503);
             }
             if ($checked === null) {
                 return self::coded($wrong[0], $wrong[1], 400);
