@@ -57,6 +57,9 @@ func roleFrom(value any) string {
 	return "viewer"
 }
 
+// mayInvite is whether a role may invite people. The owner and admins invite as admin, member, or viewer.
+func mayInvite(role string) bool { return role == "owner" || role == "admin" }
+
 // User is an account.
 type User struct {
 	ID        string `json:"id"`
@@ -528,6 +531,12 @@ func (a *AccountStore) SetRole(ctx context.Context, id, role string) (User, erro
 		if err := a.store.db.Run(ctx, `UPDATE rl_users SET role = ? WHERE id = ?`, role, id); err != nil {
 			return err
 		}
+		// Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+		if !mayInvite(role) {
+			if err := a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE invited_by = ?`, user.Email); err != nil {
+				return err
+			}
+		}
 		out = *user
 		out.Role = role
 		return nil
@@ -580,6 +589,9 @@ func (a *AccountStore) Remove(ctx context.Context, id string) error {
 			return accountError("The owner cannot be removed", "owner_protected")
 		}
 		if err := a.store.db.Run(ctx, `DELETE FROM rl_users WHERE id = ?`, id); err != nil {
+			return err
+		}
+		if err := a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE invited_by = ?`, user.Email); err != nil {
 			return err
 		}
 		return a.store.SetSetting(ctx, "login-link-used:"+id, nil)
@@ -720,26 +732,49 @@ func (a *AccountStore) CancelInvite(ctx context.Context, id string) (bool, error
 }
 
 // AcceptInvite turns an invite into an account with the password its person chose. The link then stops working.
+// It takes a turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite.
 func (a *AccountStore) AcceptInvite(ctx context.Context, code, password string, now int64) (User, error) {
-	invite, err := a.InviteByCode(ctx, code, now)
-	if err != nil {
+	// The tables first: making them takes the same lock as a turn.
+	if err := a.init(ctx); err != nil {
 		return User{}, err
 	}
-	if invite == nil {
-		return User{}, accountError("This invite has expired or was already used. Ask for a new one.", "invite_gone")
-	}
-	existing, err := a.ByEmail(ctx, invite.Email)
-	if err != nil {
-		return User{}, err
-	}
-	if existing != nil {
-		return User{}, accountError(invite.Email+" already has an account", "account_exists", "email", invite.Email)
-	}
-	user, err := a.SetPassword(ctx, invite.Email, password, now, invite.Role)
-	if err != nil {
-		return User{}, err
-	}
-	return user, a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE id = ?`, invite.ID)
+	var out User
+	err := a.turn(ctx, func() error {
+		invite, err := a.InviteByCode(ctx, code, now)
+		if err != nil {
+			return err
+		}
+		gone := func() error {
+			return accountError("This invite has expired or was already used. Ask for a new one.", "invite_gone")
+		}
+		if invite == nil {
+			return gone()
+		}
+		sender, err := a.ByEmail(ctx, invite.InvitedBy)
+		if err != nil {
+			return err
+		}
+		if sender == nil || !mayInvite(sender.Role) {
+			if err := a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE id = ?`, invite.ID); err != nil {
+				return err
+			}
+			return gone()
+		}
+		existing, err := a.ByEmail(ctx, invite.Email)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			return accountError(invite.Email+" already has an account", "account_exists", "email", invite.Email)
+		}
+		user, err := a.SetPassword(ctx, invite.Email, password, now, invite.Role)
+		if err != nil {
+			return err
+		}
+		out = user
+		return a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE id = ?`, invite.ID)
+	})
+	return out, err
 }
 
 // SignIn is the account for an email and password, or nil. Takes the same time either way.
