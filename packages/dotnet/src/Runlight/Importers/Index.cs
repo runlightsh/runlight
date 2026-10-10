@@ -26,10 +26,12 @@ public static class Index
     /// </summary>
     /// <remarks>
     /// Each importer makes its requests through the Runlight's fetcher, and reads the Runlight's clock as its
-    /// <c>now</c>: the date of a link the source gives none for, and where Umami's history ends.
+    /// <c>now</c>: the date of a link the source gives none for, and where Umami's history ends. <c>linkDomain</c>
+    /// gives a link's branded domain as the site keeps it once it passes the checks a link domain added by hand
+    /// does, or null to bring the link over without it; with none, every domain is dropped.
     /// </remarks>
     /// <returns>{ cursor, done, total, links, clicks, skipped, failed: [{ slug, reason, code?, params? }] }.</returns>
-    public static async Task<JsObject> ImportStepAsync(Runlight runlight, string site, string source, JsObject credentials, string? cursor, double done, CancellationToken cancellationToken = default)
+    public static async Task<JsObject> ImportStepAsync(Runlight runlight, string site, string source, JsObject credentials, string? cursor, double done, Func<string, Task<string?>>? linkDomain = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(runlight);
         if (!Importers.TryGetValue(source, out var make))
@@ -55,6 +57,17 @@ public static class Index
         // A total that is not a number is as good as none.
         object? total = result.Get("total") is long or double && double.IsFinite(result.Num("total")) ? result.Get("total") : null;
         object? next = result.Get("cursor") is Undefined ? null : result.Get("cursor");
+        // Each domain is checked once a step, since the check may look it up in DNS.
+        var checkedDomains = new Dictionary<string, Task<string?>>(StringComparer.Ordinal);
+        Task<string?> DomainFor(string domain)
+        {
+            if (!checkedDomains.TryGetValue(domain, out var check))
+            {
+                check = linkDomain != null ? linkDomain(domain) : Task.FromResult<string?>(null);
+                checkedDomains[domain] = check;
+            }
+            return check;
+        }
         double stepDone = done;
         long links = 0;
         long clicks = 0;
@@ -69,7 +82,7 @@ public static class Index
                 continue;
             }
             var link = item.Obj("link")!;
-            var written = await Write.WriteLinkAsync(runlight, site, source, link, item, cancellationToken).ConfigureAwait(false);
+            var written = await Write.WriteLinkAsync(runlight, site, source, link, item, DomainFor, cancellationToken).ConfigureAwait(false);
             stepDone++;
             switch (written.Str("status"))
             {

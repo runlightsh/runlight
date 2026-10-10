@@ -14,6 +14,9 @@ public static partial class Write
     /// <summary>Domains run by the shorteners themselves. Links there stay on Runlight's own path.</summary>
     private static readonly string[] ShortenerDomains = ["bit.ly", "bitly.com", "j.mp", "dub.sh", "dub.co", "dub.link", "short.gy", "rebrand.ly", "rebrandly.com", "rb.gy"];
 
+    /// <summary>The most clicks a day one imported link gets from a daily count.</summary>
+    private const double MaxDaily = 10_000;
+
     /// <summary>Browser names as other tools write them, in Runlight's spelling.</summary>
     public static readonly IReadOnlyDictionary<string, string> Browsers = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -120,9 +123,10 @@ public static partial class Write
     /// <param name="source">The importer's name.</param>
     /// <param name="foreign">A ForeignLink: sourceId, slug, domain, name, url, createdAt.</param>
     /// <param name="history">{ clicks?: ForeignClick[], daily?: DailyClicks[] }.</param>
+    /// <param name="linkDomain">The domain as the site keeps it once it passes a link domain's checks, or null to bring the link over without it; none drops every domain.</param>
     /// <param name="cancellationToken">Stops the work.</param>
     /// <returns>{ status ("created", "skipped", or "failed"), clicks, reason?, code?, params? }.</returns>
-    public static async Task<JsObject> WriteLinkAsync(Runlight runlight, string site, string source, JsObject foreign, JsObject history, CancellationToken cancellationToken = default)
+    public static async Task<JsObject> WriteLinkAsync(Runlight runlight, string site, string source, JsObject foreign, JsObject history, Func<string, Task<string?>>? linkDomain = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(runlight);
         ArgumentNullException.ThrowIfNull(foreign);
@@ -163,11 +167,24 @@ public static partial class Write
             };
         }
 
-        string domain = Sources.StripWww(Js.Truthy(foreign.Get("domain")) ? Js.String(foreign.Get("domain")) : "");
-        if (ShortenerDomains.Contains(domain, StringComparer.Ordinal))
+        // The destination passes the checks a link made by hand does.
+        string url;
+        try
         {
-            domain = "";
+            url = Links.CleanUrl(foreign.Get("url"));
         }
+        catch (LinkError error)
+        {
+            return new JsObject { ["status"] = "failed", ["clicks"] = 0L, ["reason"] = error.Message, ["code"] = error.Code, ["params"] = error.Params };
+        }
+
+        string domain = Sources.StripWww(Js.Lower(Js.Truthy(foreign.Get("domain")) ? Js.String(foreign.Get("domain")) : ""));
+        // A branded domain must pass the checks one added in Settings does, so an import can never claim the
+        // dashboard's own host or a name inside a private network. One that fails is left off: the link is
+        // served from the app's own path instead.
+        domain = domain.Length == 0 || ShortenerDomains.Contains(domain, StringComparer.Ordinal) || linkDomain == null
+            ? ""
+            : await linkDomain(domain).ConfigureAwait(false) ?? "";
         long now = runlight.Now();
         long clicks = 0;
         // Nothing in the transaction is one link's own problem (those are checked above),
@@ -266,7 +283,8 @@ public static partial class Write
                 {
                     continue;
                 }
-                double n = Math.Min(count, 1_000_000);
+                // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+                double n = Math.Min(Math.Floor(count), MaxDaily);
                 for (long i = 0; i < n; i++)
                 {
                     await store.InsertEventAsync(new JsObject
@@ -302,7 +320,7 @@ public static partial class Write
                 ["domain"] = domain,
                 ["slug"] = slug,
                 ["name"] = Js.Slice(name, 0, 100),
-                ["url"] = foreign.Get("url"),
+                ["url"] = url,
                 ["createdAt"] = created,
                 ["updatedAt"] = created,
             }, cancellationToken).ConfigureAwait(false);

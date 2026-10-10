@@ -20,8 +20,10 @@ public sealed class ImportStepTests : CoreTestCase
     private static async Task<Runlight> RunlightAsync(Router router) =>
         new(new RunlightOptions { Store = await Databases.FreshAsync("sqlite"), Fetcher = router, Now = () => Now });
 
-    private static async Task<(Runlight Rl, long Links, long Clicks, long Skipped, List<object?> Failed)> RunAllAsync(Router router, string source, JsObject credentials)
+    /// <summary>Every domain passes here unless a check is given; the routes check them as Settings does (see the conformance scenarios).</summary>
+    private static async Task<(Runlight Rl, long Links, long Clicks, long Skipped, List<object?> Failed)> RunAllAsync(Router router, string source, JsObject credentials, Func<string, Task<string?>>? linkDomain = null)
     {
+        linkDomain ??= domain => Task.FromResult<string?>(domain);
         var rl = await RunlightAsync(router);
         string? cursor = null;
         double done = 0;
@@ -29,7 +31,7 @@ public sealed class ImportStepTests : CoreTestCase
         var failed = new List<object?>();
         do
         {
-            var step = await Index.ImportStepAsync(rl, "default", source, credentials, cursor, done);
+            var step = await Index.ImportStepAsync(rl, "default", source, credentials, cursor, done, linkDomain);
             cursor = step.Get("cursor") as string;
             done = step.Num("done");
             links += step.Long("links");
@@ -82,6 +84,31 @@ public sealed class ImportStepTests : CoreTestCase
         var times = (await rl.Store.Db.AllAsync("SELECT ts FROM rl_events ORDER BY ts")).Select(r => (long)Js.Number(r.Get("ts")));
         long day = Utc(2026, 3, 1);
         Assert.Equal([day + 14_400_000, day + 43_200_000, day + 72_000_000], times); // spread through the day
+    }
+
+    [Fact]
+    public async Task An_imported_links_destination_passes_the_checks_a_new_link_does_a_refused_domain_is_left_off_and_a_days_count_is_capped()
+    {
+        var router = new Router(
+            R("api\\.dub\\.co/links\\?.*startingAfter=l3", () => L()),
+            R("api\\.dub\\.co/links\\?", () => L(
+                new JsObject { ["id"] = "l1", ["domain"] = "Go.Brand.com", ["key"] = "x", ["url"] = "https://a.com", ["title"] = "X", ["createdAt"] = "2026-01-02T00:00:00Z" },
+                new JsObject { ["id"] = "l2", ["domain"] = "dub.sh", ["key"] = "y", ["url"] = "javascript:alert(1)", ["title"] = "Y", ["createdAt"] = "2026-01-02T00:00:00Z" },
+                new JsObject { ["id"] = "l3", ["domain"] = "stats.example.com", ["key"] = "z", ["url"] = "https://a.com/z", ["title"] = "Z", ["createdAt"] = "2026-01-02T00:00:00Z" })),
+            R("/events\\?", () => (403, (object?)new JsObject { ["error"] = new JsObject { ["message"] = "Business plan required" } })),
+            R("/analytics\\?.*linkId=l1", () => L(new JsObject { ["start"] = "2026-03-01T00:00:00.000Z", ["clicks"] = 5_000_000L })),
+            R("/analytics\\?", () => L()));
+        var asked = new List<string>();
+        var (rl, _, clicks, _, failed) = await RunAllAsync(router, "dub", new JsObject { ["apiKey"] = "dub_test" }, domain =>
+        {
+            asked.Add(domain);
+            return Task.FromResult(domain == "stats.example.com" ? null : (string?)domain);
+        });
+        Assert.Equal(["go.brand.com", "stats.example.com"], asked); // shorteners' own domains are never asked about
+        Assert.Equal(["y link_protocol"], failed.OfType<JsObject>().Select(f => f.Str("slug") + " " + f.Str("code")));
+        var pairs = (await LinksAsync(rl)).Select(l => l.Str("slug") + " " + l.Str("domain")).Order(StringComparer.Ordinal);
+        Assert.Equal(["x go.brand.com", "z "], pairs);
+        Assert.Equal(10_000, clicks);
     }
 
     [Fact]
@@ -204,7 +231,7 @@ public sealed class ImportStepTests : CoreTestCase
         Assert.Equal("{\"status\":\"failed\",\"clicks\":0,\"reason\":\"/taken is already used by \\\"Other\\\"\",\"code\":\"import_slug_taken\",\"params\":{\"slug\":\"taken\",\"name\":\"Other\"}}", J(taken));
         var bad = await Write.WriteLinkAsync(rl, "default", "dub", Foreign("y", "a/b", "", "", "https://a.com"), new JsObject());
         Assert.Equal("import_slug_bad", bad.Str("code"));
-        var made = await Write.WriteLinkAsync(rl, "default", "dub", Foreign("z", "fine", "www.Go.Brand.com", "", "https://a.com/z"), new JsObject { ["clicks"] = L(new JsObject { ["ts"] = 5_000L, ["visit"] = "v", ["path"] = "/fine", ["query"] = "?utm_campaign=c" }) });
+        var made = await Write.WriteLinkAsync(rl, "default", "dub", Foreign("z", "fine", "www.Go.Brand.com", "", "https://a.com/z"), new JsObject { ["clicks"] = L(new JsObject { ["ts"] = 5_000L, ["visit"] = "v", ["path"] = "/fine", ["query"] = "?utm_campaign=c" }) }, domain => Task.FromResult<string?>(domain));
         Assert.Equal("{\"status\":\"created\",\"clicks\":1}", J(made));
         var link = (await rl.Store.LinkBySlugAsync("fine"))!;
         Assert.Equal(["go.brand.com", "fine", Write.ImportedLinkId("dub", "z")], new[] { link.Str("domain"), link.Str("name"), link.Str("id") });
