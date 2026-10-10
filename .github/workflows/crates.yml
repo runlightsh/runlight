@@ -13,8 +13,9 @@
 # commit again with that Cargo.lock (--locked), checks the tarballs are
 # byte for byte the ones "package" built, and publishes them with
 # --no-verify --locked, so no dependency's build script or macro runs beside
-# the token. Cargo 1.90 or newer publishes a workspace's crates in
-# dependency order, so runlight goes up before runlight-sqlx.
+# the token. It publishes one crate at a time, runlight before runlight-sqlx,
+# and skips a crate whose version crates.io already has, so a rerun after a
+# publish that stopped halfway finishes the job.
 #
 # Stays off until the repository variable CRATES_ENABLED is "true". Trusted
 # publishing is set up per crate, and a crate must exist first, so the first
@@ -145,4 +146,20 @@ jobs:
         working-directory: packages/rust
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --workspace --no-verify --locked
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          # In dependency order: runlight-sqlx requires runlight at this version.
+          crates="runlight runlight-sqlx"
+          # Every tarball built is one of these.
+          [ "$(wc -l < target/crates.sha256)" = "$(echo $crates | wc -w)" ]
+          for crate in $crates; do
+            if [ ! -f "target/package/$crate-$version.crate" ]; then echo "no tarball for $crate $version"; exit 1; fi
+            # crates.io asks every API client for a User-Agent that names it.
+            status="$(curl -sS -o /dev/null -w '%{http_code}' -A 'runlight release (https://github.com/runlightsh/runlight)' "https://crates.io/api/v1/crates/$crate/$version")"
+            case "$status" in
+              200) echo "$crate $version is already on crates.io" ;;
+              404) cargo publish -p "$crate" --no-verify --locked ;;
+              *) echo "crates.io answered $status for $crate $version"; exit 1 ;;
+            esac
+          done
