@@ -4,7 +4,8 @@
 # owner/name). The split is `git subtree split`, which gives the same commits
 # for the same history every time, so each push only adds to the last.
 #
-# Every push to main pushes the split to that repository's main. A release
+# Every push to main waits for CI to pass on it (ci-passed.yml), then pushes
+# the split to that repository's main. A release
 # tag (v0.1.0) waits for CI to pass on the tagged commit (ci-passed.yml),
 # checks that packages/php/assets/build.json carries the tag's version, and
 # pushes the same tag on the split commit, which Packagist publishes. A tag
@@ -39,9 +40,19 @@ jobs:
         run: |
           if [ -n "$DEPLOY_KEY" ]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; else echo "PHP_SPLIT_DEPLOY_KEY is not set, so nothing is pushed."; fi
 
-  main:
+  # CI must pass on the pushed commit first (ci-passed.yml).
+  ci-main:
     needs: gate
     if: needs.gate.outputs.enabled == 'true' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-passed.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      main: true
+
+  main:
+    needs: ci-main
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -54,6 +65,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          ref: ${{ needs.ci-main.outputs.sha }}
           persist-credentials: false
       - name: Push packages/php to its own repository
         run: |
@@ -64,7 +76,13 @@ jobs:
           printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
           split="$(git subtree split --prefix=packages/php HEAD)"
-          git push "git@github.com:${SPLIT_REPO}.git" "$split:refs/heads/main"
+          remote="git@github.com:${SPLIT_REPO}.git"
+          # A run that waited on CI longer than a later one finds its split already there.
+          if git fetch -q "$remote" main && git merge-base --is-ancestor "$split" FETCH_HEAD; then
+            echo "the split's main already has $split"
+            exit 0
+          fi
+          git push "$remote" "$split:refs/heads/main"
 
   # CI must pass on the tagged commit first (ci-passed.yml).
   ci:
