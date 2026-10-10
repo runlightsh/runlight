@@ -121,14 +121,25 @@ pub(crate) async fn own_hosts(routes: &Routes) -> Vec<String> {
     }
 }
 
-pub(crate) async fn import_step(routes: &Routes, site: &str, source: &str, body: &Value) -> R {
+pub(crate) async fn import_step(
+    routes: &Routes,
+    request: &Request,
+    url: &Url,
+    call: &Call,
+    site: &str,
+    source: &str,
+    body: &Value,
+) -> R {
     let rl = routes.rl();
     let credentials = credentials_from(body.get("credentials"));
     let done = js::opt_number(body.get("done"));
     let done = if done.is_nan() { 0.0 } else { done };
-    let step =
-        crate::importers::import_step(rl, site, source, &credentials, body.get("cursor").and_then(Value::as_str), done)
-            .await;
+    // An imported link's domain passes the same checks as one added in Settings, or the link comes over without it.
+    let link_domain = |domain: String| -> crate::BoxFuture<'_, Result<Option<String>, ImportError>> {
+        Box::pin(async move { Ok(routes.check_link_domain(request, url, call, site, &domain).await?.ok()) })
+    };
+    let cursor = body.get("cursor").and_then(Value::as_str);
+    let step = crate::importers::import_step(rl, site, source, &credentials, cursor, done, &link_domain).await;
     match step {
         Ok(s) => Ok(json(&s.to_value(), 200, &[])),
         Err(ImportError::Coded { error, .. }) => Ok(refused(&error, 400)),

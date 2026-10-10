@@ -15,7 +15,9 @@ use runlight::http::{FetchError, FetchInit, Fetcher, Headers, Request, Response,
 use runlight::importers::csvvisits::{CsvFormat, csv_format, row_time};
 use runlight::importers::http::{Sleep, date_parse};
 use runlight::importers::visits::{import_csv_visits, import_umami_visits, umami_websites};
-use runlight::importers::{Credentials, Http, ImportError, Known, StepInput, import_step_with, importer};
+use runlight::importers::{
+    Credentials, Http, ImportError, Known, LinkDomain, StepInput, import_step_with, import_step_with_domains, importer,
+};
 use runlight::js::{self, Object, Value};
 use runlight::store::{Db, DbError, Dialect, Hold, Param, Row, SqlStore};
 use runlight::{
@@ -311,19 +313,33 @@ async fn importer_scenarios_match_typescript() {
 
 // importers.test.ts
 
-/// Runs an import to its end, adding up what each step did.
+/// Runs an import to its end, adding up what each step did. Every domain passes here; the routes check
+/// them as Settings does (see the conformance scenarios).
 async fn run_all(
     rl: &Runlight,
     http: &Http,
     source: &str,
     credentials: &Credentials,
 ) -> (f64, f64, f64, Vec<Value>, f64) {
+    run_all_checked(rl, http, source, credentials, &|domain| Box::pin(async move { Ok(Some(domain)) })).await
+}
+
+/// [`run_all`] with each branded domain checked by `link_domain`.
+async fn run_all_checked(
+    rl: &Runlight,
+    http: &Http,
+    source: &str,
+    credentials: &Credentials,
+    link_domain: &LinkDomain<'_>,
+) -> (f64, f64, f64, Vec<Value>, f64) {
     let (mut links, mut clicks, mut skipped, mut failed) = (0.0, 0.0, 0.0, vec![]);
     let mut cursor: Option<String> = None;
     let mut done = 0.0;
     loop {
         let step =
-            import_step_with(rl, http, "default", source, credentials, cursor.as_deref(), done).await.expect("a step");
+            import_step_with_domains(rl, http, "default", source, credentials, cursor.as_deref(), done, link_domain)
+                .await
+                .expect("a step");
         cursor = step.cursor;
         done = step.done;
         links += step.links;
@@ -420,6 +436,53 @@ async fn dub_daily_counts_when_the_plan_has_no_events_api() {
     let all = all_links(&rl).await;
     assert_eq!(all[0].1, 3.0);
     assert_eq!(all[0].2, 0.0, "daily counts add clicks, not made-up visitors");
+}
+
+#[tokio::test]
+async fn an_imported_links_destination_passes_the_checks_a_new_link_does_a_refused_domain_is_left_off_and_a_days_count_is_capped()
+ {
+    let fake = serve(vec![
+        (
+            r"api\.dub\.co\/links\?",
+            obj! { "body" => js::parse(r#"[
+                { "id": "l1", "domain": "Go.Brand.com", "key": "x", "url": "https://a.com", "title": "X", "createdAt": "2026-01-02T00:00:00Z" },
+                { "id": "l2", "domain": "dub.sh", "key": "y", "url": "javascript:alert(1)", "title": "Y", "createdAt": "2026-01-02T00:00:00Z" },
+                { "id": "l3", "domain": "stats.example.com", "key": "z", "url": "https://a.com/z", "title": "Z", "createdAt": "2026-01-02T00:00:00Z" }
+            ]"#).unwrap() },
+        ),
+        (
+            r"\/events\?",
+            obj! { "status" => 403, "body" => obj! { "error" => obj! { "message" => "Business plan required" } } },
+        ),
+        (
+            r"\/analytics\?.*linkId=l1",
+            obj! { "body" => js::parse(r#"[{ "start": "2026-03-01T00:00:00.000Z", "clicks": 5000000 }]"#).unwrap() },
+        ),
+        (r"\/analytics\?", obj! { "body" => arr![] }),
+    ]);
+    let (rl, _, _) = make(NOW, "UTC", Some(fake.clone())).await;
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let check = move |domain: String| -> BoxFuture<'static, Result<Option<String>, ImportError>> {
+        seen.lock().unwrap().push(domain.clone());
+        Box::pin(async move { Ok((domain != "stats.example.com").then_some(domain)) })
+    };
+    let (_, clicks, _, failed, _) =
+        run_all_checked(&rl, &importing(fake), "dub", &creds(&[("apiKey", "dub_test")]), &check).await;
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["go.brand.com", "stats.example.com"],
+        "shorteners' own domains are never asked about"
+    );
+    assert_eq!(
+        failed.iter().map(|f| (js::js_string(f.at("slug")), js::js_string(f.at("code")))).collect::<Vec<_>>(),
+        [("y".to_string(), "link_protocol".to_string())]
+    );
+    let mut links: Vec<(String, String)> =
+        all_links(&rl).await.into_iter().map(|l| (l.0.slug.clone(), l.0.domain.clone())).collect();
+    links.sort();
+    assert_eq!(links, [("x".to_string(), "go.brand.com".to_string()), ("z".to_string(), String::new())]);
+    assert_eq!(clicks, 10_000.0);
 }
 
 #[tokio::test]

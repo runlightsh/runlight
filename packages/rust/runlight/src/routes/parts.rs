@@ -114,6 +114,81 @@ impl Routes {
         }
     }
 
+    /// The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
+    /// is kept, or the refusal to send.
+    pub(crate) async fn check_link_domain(
+        &self,
+        request: &Request,
+        url: &Url,
+        call: &Call,
+        site: &str,
+        value: &str,
+    ) -> Result<Result<String, Response>, Error> {
+        let rl = self.rl();
+        let store = rl.store();
+        let raw = js::trim(value).to_lowercase();
+        let domain = crate::re::replace_first(js_re!(r"^https?://"), &raw, "");
+        let domain = crate::re::replace_first(js_re!(r"/[^\n\r]*$"), &domain, "");
+        let domain = domain.trim_end_matches('.').to_string();
+        let domain = domain.strip_prefix("www.").map(str::to_string).unwrap_or(domain);
+        if !crate::runlight::is_domain(&domain) {
+            return Ok(Err(coded("That is not a domain name", "domain_invalid", 400, None)));
+        }
+        if private_name(&domain) || glue::resolves_privately(rl, &domain).await {
+            return Ok(Err(coded(
+                &format!("{domain} is not a public domain name. Use one that browsers anywhere can reach."),
+                "domain_not_public",
+                400,
+                Some(&[("domain", &domain)]),
+            )));
+        }
+        // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
+        if call.is_managed() && self.0.origin.is_none() {
+            return Ok(Err(self.origin_needed()));
+        }
+        let mut own: Vec<String> = Vec::new();
+        if let Some(o) = &self.0.origin {
+            own.push(Url::parse(o).map(|u| u.host()).unwrap_or_default());
+        }
+        for h in [request.headers.get("host"), request.headers.get("x-forwarded-host"), Some(url.host())]
+            .into_iter()
+            .flatten()
+        {
+            if !h.is_empty() {
+                own.push(h);
+            }
+        }
+        own.extend(glue::own_hosts(self).await);
+        let mut taken: Vec<String> = own.iter().map(|h| host_name(h)).collect();
+        for s in rl.sites() {
+            taken.extend(s.hostnames.clone());
+            if let Some(r) = rl.remote(&s.id) {
+                taken.extend(r.hostnames);
+            }
+        }
+        if taken.contains(&domain) {
+            return Ok(Err(coded(
+                &format!(
+                    "{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.{domain}."
+                ),
+                "domain_in_use",
+                400,
+                Some(&[("domain", &domain)]),
+            )));
+        }
+        if let Some((_, owner)) = store.link_domains().await?.into_iter().find(|(d, _)| *d == domain)
+            && owner != site
+        {
+            return Ok(Err(coded(
+                &format!("{domain} already belongs to another site"),
+                "domain_taken",
+                409,
+                Some(&[("domain", &domain)]),
+            )));
+        }
+        Ok(Ok(domain))
+    }
+
     async fn links_inner(&self, request: &Request, path: &str, url: &Url, call: &Call, site: &SiteRow) -> R {
         let rl = self.rl();
         let store = rl.store();
@@ -134,66 +209,13 @@ impl Routes {
                     Ok(b) => Value::Object(b),
                     Err(r) => return Ok(r),
                 };
-                let raw = js::trim(&js::str_or_empty(body.get("domain"))).to_lowercase();
-                let domain = crate::re::replace_first(js_re!(r"^https?://"), &raw, "");
-                let domain = crate::re::replace_first(js_re!(r"/[^\n\r]*$"), &domain, "");
-                let domain = domain.trim_end_matches('.').to_string();
-                let domain = domain.strip_prefix("www.").map(str::to_string).unwrap_or(domain);
-                if !crate::runlight::is_domain(&domain) {
-                    return Ok(coded("That is not a domain name", "domain_invalid", 400, None));
-                }
-                if private_name(&domain) || glue::resolves_privately(rl, &domain).await {
-                    return Ok(coded(
-                        &format!("{domain} is not a public domain name. Use one that browsers anywhere can reach."),
-                        "domain_not_public",
-                        400,
-                        Some(&[("domain", &domain)]),
-                    ));
-                }
-                // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
-                if call.is_managed() && self.0.origin.is_none() {
-                    return Ok(self.origin_needed());
-                }
-                let mut own: Vec<String> = Vec::new();
-                if let Some(o) = &self.0.origin {
-                    own.push(Url::parse(o).map(|u| u.host()).unwrap_or_default());
-                }
-                for h in [request.headers.get("host"), request.headers.get("x-forwarded-host"), Some(url.host())]
-                    .into_iter()
-                    .flatten()
+                let domain = match self
+                    .check_link_domain(request, url, call, &site.id, &js::str_or_empty(body.get("domain")))
+                    .await?
                 {
-                    if !h.is_empty() {
-                        own.push(h);
-                    }
-                }
-                own.extend(glue::own_hosts(self).await);
-                let mut taken: Vec<String> = own.iter().map(|h| host_name(h)).collect();
-                for s in rl.sites() {
-                    taken.extend(s.hostnames.clone());
-                    if let Some(r) = rl.remote(&s.id) {
-                        taken.extend(r.hostnames);
-                    }
-                }
-                if taken.contains(&domain) {
-                    return Ok(coded(
-                        &format!(
-                            "{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.{domain}."
-                        ),
-                        "domain_in_use",
-                        400,
-                        Some(&[("domain", &domain)]),
-                    ));
-                }
-                if let Some((_, owner)) = store.link_domains().await?.into_iter().find(|(d, _)| *d == domain)
-                    && owner != site.id
-                {
-                    return Ok(coded(
-                        &format!("{domain} already belongs to another site"),
-                        "domain_taken",
-                        409,
-                        Some(&[("domain", &domain)]),
-                    ));
-                }
+                    Ok(domain) => domain,
+                    Err(refused) => return Ok(refused),
+                };
                 store.add_link_domain(&domain, &site.id, rl.now()).await?;
                 rl.forget_link_domains();
                 return Ok(json(&obj! { "domain" => domain }, 201, &[]));
@@ -331,7 +353,7 @@ impl Routes {
                 Ok(b) => Value::Object(b),
                 Err(r) => return Ok(r),
             };
-            return glue::import_step(self, &site.id, &source, &body).await;
+            return glue::import_step(self, request, url, call, &site.id, &source, &body).await;
         }
         if path == "/api/links/import" && method == "POST" {
             let body = match read_json(request) {
