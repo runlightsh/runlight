@@ -251,4 +251,16 @@ public sealed class AccountsTests : IAsyncLifetime
         await throttle.FailAsync("zed@example.com", Now + 2000);
         Assert.Single(await store.SettingsStartingWithAsync("throttle:test:"));
     }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task A_burst_of_tries_at_once_gets_no_more_than_the_limit(string kind)
+    {
+        var store = await StoreAsync(kind);
+        // Separate throttles, as separate requests have, all trying the same key at once.
+        var tries = await Task.WhenAll(Enumerable.Range(0, 40).Select(_ => Task.Run(() => new Throttle(store, "burst", 5, 60_000).TakeAsync("jon@example.com", Now))));
+        Assert.Equal(5, tries.Count(t => t));
+        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => Task.Run(() => new Throttle(store, "burst", 5, 60_000).ForgiveAsync("jon@example.com"))));
+        Assert.False(await new Throttle(store, "burst", 5, 60_000).BlockedAsync("jon@example.com", Now));
+    }
 }

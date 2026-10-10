@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -14,10 +15,15 @@ namespace Runlight.Accounts;
 /// TypeScript keeps the counts in its process. Here, as in PHP, they live in the database's settings, as
 /// "throttle:&lt;name&gt;:&lt;id&gt;" holding {count, until}, and the hashing key as "throttle-key", so every
 /// process of an install shares the same counts and both implementations can serve one database.
+/// Reading a count and writing it back take turns: in this process through a lock for the key, and
+/// across processes through the database's lock, so a burst of tries cannot all read the same count.
 /// </remarks>
 public sealed class Throttle
 {
     private const string Key = "throttle-key";
+
+    /// <summary>Locks for keys, shared out by a hash of the key so there are only ever this many.</summary>
+    private static readonly SemaphoreSlim[] Turns = [.. Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1))];
 
     private readonly SqlStore _store;
     private readonly string _name;
@@ -39,9 +45,28 @@ public sealed class Throttle
         {
             return saved;
         }
-        string made = Hash.RandomId(16);
-        await _store.SetSettingAsync(Key, made, cancellationToken).ConfigureAwait(false);
-        return made;
+        // Made in turn, so tries arriving together on a new install all hash with the same key.
+        await Turns[0].WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await _store.Db.ExclusiveAsync(
+                async _ =>
+                {
+                    string? again = await _store.SettingAsync(Key, cancellationToken).ConfigureAwait(false);
+                    if (!string.IsNullOrEmpty(again))
+                    {
+                        return again;
+                    }
+                    string made = Hash.RandomId(16);
+                    await _store.SetSettingAsync(Key, made, cancellationToken).ConfigureAwait(false);
+                    return made;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Turns[0].Release();
+        }
     }
 
     private async Task<string> IdAsync(string key, CancellationToken cancellationToken)
@@ -67,6 +92,21 @@ public sealed class Throttle
     private Task SaveAsync(string id, (long Count, long Until) entry, CancellationToken cancellationToken) =>
         _store.SetSettingAsync(Prefix + id, Json.Stringify(new JsObject { ["count"] = entry.Count, ["until"] = entry.Until }), cancellationToken);
 
+    /// <summary>Runs <paramref name="fn"/> while no other try under the same key reads or writes its count.</summary>
+    private async Task<T> TurnAsync<T>(string id, Func<Task<T>> fn, CancellationToken cancellationToken)
+    {
+        var turn = Turns[(int)((uint)StringComparer.Ordinal.GetHashCode(Prefix + id) % (uint)Turns.Length)];
+        await turn.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await _store.Db.ExclusiveAsync(_ => fn(), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            turn.Release();
+        }
+    }
+
     public async Task<bool> BlockedAsync(string key, long now, CancellationToken cancellationToken = default) =>
         await IsBlockedAsync(await IdAsync(key, cancellationToken).ConfigureAwait(false), now, cancellationToken).ConfigureAwait(false);
 
@@ -88,27 +128,50 @@ public sealed class Throttle
     public async Task<bool> TakeAsync(string key, long now, CancellationToken cancellationToken = default)
     {
         string id = await IdAsync(key, cancellationToken).ConfigureAwait(false);
-        if (await IsBlockedAsync(id, now, cancellationToken).ConfigureAwait(false))
-        {
-            return false;
-        }
-        await CountAsync(id, now, cancellationToken).ConfigureAwait(false);
-        return true;
+        return await TurnAsync(
+            id,
+            async () =>
+            {
+                if (await IsBlockedAsync(id, now, cancellationToken).ConfigureAwait(false))
+                {
+                    return false;
+                }
+                await CountAsync(id, now, cancellationToken).ConfigureAwait(false);
+                return true;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Takes back one counted try, for one that turned out right.</summary>
     public async Task ForgiveAsync(string key, CancellationToken cancellationToken = default)
     {
         string id = await IdAsync(key, cancellationToken).ConfigureAwait(false);
-        var entry = await EntryAsync(id, cancellationToken).ConfigureAwait(false);
-        if (entry != null && entry.Value.Count > 0)
-        {
-            await SaveAsync(id, (entry.Value.Count - 1, entry.Value.Until), cancellationToken).ConfigureAwait(false);
-        }
+        await TurnAsync(
+            id,
+            async () =>
+            {
+                var entry = await EntryAsync(id, cancellationToken).ConfigureAwait(false);
+                if (entry != null && entry.Value.Count > 0)
+                {
+                    await SaveAsync(id, (entry.Value.Count - 1, entry.Value.Until), cancellationToken).ConfigureAwait(false);
+                }
+                return true;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task FailAsync(string key, long now, CancellationToken cancellationToken = default) =>
-        await CountAsync(await IdAsync(key, cancellationToken).ConfigureAwait(false), now, cancellationToken).ConfigureAwait(false);
+    public async Task FailAsync(string key, long now, CancellationToken cancellationToken = default)
+    {
+        string id = await IdAsync(key, cancellationToken).ConfigureAwait(false);
+        await TurnAsync(
+            id,
+            async () =>
+            {
+                await CountAsync(id, now, cancellationToken).ConfigureAwait(false);
+                return true;
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
 
     private async Task CountAsync(string id, long now, CancellationToken cancellationToken)
     {
