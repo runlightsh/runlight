@@ -80,6 +80,11 @@ def role_from(value: Any) -> str:
     return value if isinstance(value, str) and value in ROLES else "viewer"
 
 
+def may_invite(role: str) -> bool:
+    """Whether a role may invite people. The owner and admins invite as admin, member, or viewer."""
+    return role in ("owner", "admin")
+
+
 # Two-factor: TOTP as authenticator apps expect it (RFC 6238): SHA-1, six digits, 30 seconds.
 STEP_MS = 30_000
 BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
@@ -438,6 +443,9 @@ class Accounts:
             if role == "owner":
                 raise AccountError("Ownership is handed over by the owner", "owner_hand_over")
             self.store.db.run("UPDATE rl_users SET role = ? WHERE id = ?", [role, id])
+            # Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+            if not may_invite(role):
+                self.store.db.run("DELETE FROM rl_invites WHERE invited_by = ?", [user["email"]])
             return {**user, "role": role}
 
         return self._turn(change)
@@ -472,6 +480,7 @@ class Accounts:
             if user["role"] == "owner":
                 raise AccountError("The owner cannot be removed", "owner_protected")
             self.store.db.run("DELETE FROM rl_users WHERE id = ?", [id])
+            self.store.db.run("DELETE FROM rl_invites WHERE invited_by = ?", [user["email"]])
             self.store.set_setting(f"login-link-used:{id}", None)
 
         self._turn(change)
@@ -560,14 +569,30 @@ class Accounts:
         return before > 0
 
     def accept_invite(self, code: str, password: str, now: int) -> dict[str, Any]:
-        """Turns an invite into an account with the password its person chose. The link then stops working."""
-        invite = self.invite_by_code(code, now)
-        if invite is None:
+        """Turns an invite into an account with the password its person chose. The link then stops working. It takes a
+        turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite."""
+        # The tables first: making them takes the same lock as a turn.
+        self._init()
+
+        # None for an invite that is gone. A turn that raises is rolled back here, so it returns instead, and an
+        # invite whose sender may no longer invite stays deleted.
+        def accept() -> dict[str, Any] | None:
+            invite = self.invite_by_code(code, now)
+            if invite is None:
+                return None
+            sender = self.by_email(invite["invitedBy"])
+            if sender is None or not may_invite(sender["role"]):
+                self.store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+                return None
+            if self.by_email(invite["email"]) is not None:
+                raise AccountError(f"{invite['email']} already has an account", "account_exists", {"email": invite["email"]})
+            user = self.set_password(invite["email"], password, now, invite["role"])
+            self.store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+            return user
+
+        user = self._turn(accept)
+        if user is None:
             raise AccountError("This invite has expired or was already used. Ask for a new one.", "invite_gone")
-        if self.by_email(invite["email"]) is not None:
-            raise AccountError(f"{invite['email']} already has an account", "account_exists", {"email": invite["email"]})
-        user = self.set_password(invite["email"], password, now, invite["role"])
-        self.store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
         return user
 
     def sign_in(self, email: str, password: str) -> dict[str, Any] | None:
