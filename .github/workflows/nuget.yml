@@ -2,7 +2,7 @@
 # Runlight.AspNetCore, and the runlight tool Runlight.Server) packed and
 # published to nuget.org, with nuget.org's trusted publishing: nuget.org
 # trusts this workflow's OIDC token and hands back an API key that lives one
-# hour, so no API key is stored anywhere. Can also be started by hand for a
+# hour, so no API key is stored anywhere. Can also be started by hand on a
 # tag.
 #
 # Three jobs. "ci" waits for CI to pass on the tagged commit (ci-passed.yml).
@@ -28,10 +28,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to publish (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -53,7 +49,6 @@ jobs:
       actions: read
       contents: read
     with:
-      tag: ${{ inputs.tag }}
       workflows: ci.yml dotnet.yml
 
   pack:
@@ -70,7 +65,7 @@ jobs:
       - name: Check the tag is the solution's version
         working-directory: packages/dotnet
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
           # The packages' version must be the tag's, or nuget.org would list
@@ -90,7 +85,7 @@ jobs:
       - name: The packages
         working-directory: packages/dotnet
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
           ls -l artifacts/packages
@@ -135,7 +130,7 @@ jobs:
       # started again after a partial failure push only what is missing.
       - name: Publish
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac

@@ -4,7 +4,7 @@
 # highest stable release, latest. A prerelease (0.2.0-beta.1) is never latest,
 # and neither is a rerun for an older tag. The amd64 image is started and
 # must answer /healthz before anything is pushed. Pushing the same tags again
-# replaces them, so a rerun is safe. Can also be started by hand for a tag.
+# replaces them, so a rerun is safe. Can also be started by hand on a tag.
 #
 # Stays off until the repository variable DOCKER_ENABLED is "true". It needs
 # no secret: the workflow's own token may write this repository's packages.
@@ -16,10 +16,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to build (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -36,8 +32,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-    with:
-      tag: ${{ inputs.tag }}
 
   image:
     needs: ci
@@ -54,7 +48,7 @@ jobs:
       - name: Check the tag against the server's version
         id: version
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |

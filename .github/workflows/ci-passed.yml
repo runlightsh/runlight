@@ -12,20 +12,20 @@
 # paths filter), or a release commit that leaves its package alone would
 # have no run to wait for.
 #
-# Started by the tag's push, the commit is the tag's (github.sha); started by
-# hand with a tag, it is the commit that tag names now. Either way it is the
-# job's output "sha", which the publish jobs check out, so what is published
-# is exactly what CI tested. A CI run that failed and was then run again
-# counts by its latest attempt.
+# The run must be on the release tag itself: started by the tag's push, or
+# by hand with the tag picked under "Use workflow from". A run by hand from a
+# branch fails here, before anything else, so a publish job only ever runs
+# with github.ref the tag, which is what an environment's tag rule checks.
+#
+# The commit is the one the tag names (github.sha), the job's output "sha",
+# which the publish jobs check out, so what is published is exactly what CI
+# tested. A CI run that failed and was then run again counts by its latest
+# attempt.
 name: CI passed
 
 on:
   workflow_call:
     inputs:
-      tag:
-        description: The release tag, for a run started by hand; empty for a tag's push
-        type: string
-        default: ""
       workflows:
         description: The workflow files that must pass on the tagged commit, separated by spaces
         type: string
@@ -53,19 +53,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          EVENT: ${{ github.event_name }}
-          PUSHED_SHA: ${{ github.sha }}
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
           WORKFLOWS: ${{ inputs.workflows }}
         run: |
-          if ! [[ "$TAG" =~ ^v[0-9][0-9A-Za-z.-]*$ ]]; then echo "not a release tag: $TAG"; exit 1; fi
-          if [ "$EVENT" = "push" ]; then
-            sha="$PUSHED_SHA"
-          else
-            sha="$(gh api "repos/$REPO/commits/$TAG" --jq .sha)"
+          if ! [[ "$REF" =~ ^refs/tags/v[0-9][0-9A-Za-z.-]*$ ]]; then
+            echo "not a release tag: $REF. Start this from the tag (Run workflow, then the tag under Use workflow from), not a branch."
+            exit 1
           fi
-          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then echo "could not find the commit $TAG names"; exit 1; fi
-          echo "$TAG is $sha"
+          sha="$SHA"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then echo "could not find the commit $REF names"; exit 1; fi
+          echo "$REF is $sha"
           # A run shows up a few seconds after its push; give each ten minutes.
           appear=$((SECONDS + 600))
           if [ -z "${WORKFLOWS// /}" ]; then echo "no workflows to wait for"; exit 1; fi
