@@ -1010,6 +1010,12 @@ const ACCOUNTS: Scenario[] = [
       { method: "GET", path: `/oauth/authorize?response_type=code&client_id={{client}}&redirect_uri=${encodeURIComponent(CALLBACK)}&code_challenge=${CHALLENGE}&code_challenge_method=S256`, jar: "viewer", look: ["Ask an owner to connect this"] },
       // Changing roles and removing people.
       patch("/api/people/{{memberId}}", { role: "admin" }, { "content-type": "application/json" }),
+      // An admin made a member again takes back the invites they sent.
+      { ...post("/api/people", { email: "guest@example.com", role: "viewer" }, { "content-type": "application/json" }), jar: "member", capture: { guestCode: "link~code=([^&]+)" } },
+      patch("/api/people/{{memberId}}", { role: "member" }, { "content-type": "application/json" }),
+      { method: "GET", path: "/invite?code={{guestCode}}", jar: "guest", look: ["This invite no longer works"] },
+      { method: "POST", path: "/invite", jar: "guest", form: { code: "{{guestCode}}", password: "guest password 1", again: "guest password 1" } },
+      patch("/api/people/{{memberId}}", { role: "admin" }, { "content-type": "application/json" }),
       patch("/api/people/{{memberId}}", { role: "owner" }, { "content-type": "application/json" }),
       patch("/api/people/{{ownerId}}", { role: "admin" }, { "content-type": "application/json" }),
       del("/api/people/{{ownerId}}", {}),

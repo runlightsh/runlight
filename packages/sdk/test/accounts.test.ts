@@ -122,6 +122,41 @@ for (const kind of STORES) {
   });
 }
 
+test("invites go with whoever sent them: removed, made a member, or no longer allowed when the link is used", async () => {
+  const rl = runlight({ store: freshStore("sqlite"), secret: "k".repeat(64) });
+  const { handler } = rl.routes({ token: "app-token", accounts: true });
+  const json = (cookie: string, method: string, path: string, body?: unknown) =>
+    handler(req(`/runlight${path}`, { method, headers: { cookie, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+  const owner = cookieOf(await handler(req("/runlight/setup", form({ code: "app-token", email: "jon@example.com", password: "a long password", again: "a long password" }))));
+  const join = async (email: string, role: string, by = owner) => {
+    const link = new URL(((await (await json(by, "POST", "/api/people", { email, role })).json()) as any).link);
+    return link.searchParams.get("code")!;
+  };
+  const accept = (code: string) => handler(req("/runlight/invite", form({ code, password: "a long password", again: "a long password" })));
+  const admin = cookieOf(await accept(await join("ada@example.com", "admin")));
+  const adminId = ((await (await json(admin, "GET", "/api/account")).json()) as any).account.id;
+
+  // Made a member: what they sent stops working.
+  const fromAda = await join("eve@example.com", "admin", admin);
+  assert.equal((await json(owner, "PATCH", `/api/people/${adminId}`, { role: "member" })).status, 200);
+  assert.equal((await handler(req(`/runlight/invite?code=${fromAda}`))).status, 410);
+  assert.equal((await accept(fromAda)).status, 410);
+
+  // Removed: the same.
+  await json(owner, "PATCH", `/api/people/${adminId}`, { role: "admin" });
+  const again = await join("eve@example.com", "admin", admin);
+  assert.equal((await json(owner, "DELETE", `/api/people/${adminId}`)).status, 200);
+  assert.equal((await accept(again)).status, 410);
+  assert.deepEqual(((await (await json(owner, "GET", "/api/people")).json()) as any).invites, []);
+
+  // An invite left from before, whose sender is no longer an admin, is refused when used.
+  const second = cookieOf(await accept(await join("bo@example.com", "admin")));
+  const fromBo = await join("zed@example.com", "admin", second);
+  await rl.store.db.run(`UPDATE rl_users SET role = 'viewer' WHERE email = ?`, ["bo@example.com"]);
+  assert.equal((await accept(fromBo)).status, 410);
+  assert.equal((await handler(req(`/runlight/invite?code=${fromBo}`))).status, 410, "and it is gone afterwards");
+});
+
 test("in development, or left open on purpose, the first account needs no proof; in production without a token, setup stays shut", async () => {
   const before = process.env.NODE_ENV;
   const token = process.env.RUNLIGHT_TOKEN;
