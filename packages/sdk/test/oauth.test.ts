@@ -68,7 +68,11 @@ test("an app connects to the MCP server over OAuth: discovery, registration, con
   // Again, properly this time.
   const second = await POST(new Request(`${origin}/runlight/oauth/authorize`, { method: "POST", headers: { ...owner, origin, "content-type": "application/x-www-form-urlencoded" }, body: `${params}&decision=allow&site=b` }));
   const code2 = new URL(second.headers.get("location")!).searchParams.get("code")!;
-  const issued = await POST(new Request(`${origin}/runlight/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: code2, client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_verifier: verifier }).toString() }));
+  // The same code swapped twice at once makes one token, not two.
+  const swap = () => POST(new Request(`${origin}/runlight/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: code2, client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_verifier: verifier }).toString() }));
+  const both = await Promise.all([swap(), swap()]);
+  assert.deepEqual(both.map((r) => r.status).sort(), [200, 400]);
+  const issued = both.find((r) => r.status === 200)!;
   const { access_token, token_type } = (await issued.json()) as any;
   assert.equal(token_type, "Bearer");
 
