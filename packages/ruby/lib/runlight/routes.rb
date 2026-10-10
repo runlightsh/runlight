@@ -1544,7 +1544,15 @@ module Runlight
         parsed = origin?(origin) && Js.length(origin) <= 200 ? Http::Url.parse(origin) : nil
         return coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400) if parsed.nil? || parsed.origin != origin
 
-        host = host_name(parsed.host)
+        # Only https and the default port, so a plain http page or another service on the same name cannot frame
+        # the dashboard; a page on this computer, for development, may use http and any port. The name must be
+        # one of the site's own, which are kept without www, so www. is the only difference allowed.
+        local = ["localhost", "127.0.0.1", "[::1]"].include?(parsed.hostname)
+        if !local && (parsed.protocol != "https:" || parsed.port != "")
+          return coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400)
+        end
+
+        host = parsed.hostname.sub(/\Awww\./, "")
         domains = ((rl.remote(site["id"]) || {})["hostnames"] || site["hostnames"] || []).map { |h| host_name(h) }
         unless domains.include?(host)
           return coded("#{host} is not one of this site's domains. Add it to the site's domains in Runlight's settings.", "embed_host", 400, { "host" => host })
