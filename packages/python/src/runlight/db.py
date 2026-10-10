@@ -161,6 +161,9 @@ class SqliteDb(_BaseDb):
                 conn.execute("PRAGMA journal_mode = WAL")
                 conn.execute("PRAGMA synchronous = NORMAL")
                 conn.execute("PRAGMA busy_timeout = 5000")
+                # Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra
+                # writes, so they do not linger in the file's free space.
+                conn.execute("PRAGMA secure_delete = FAST")
             conn.isolation_level = None
             self._conn = conn
         return self._conn
