@@ -111,9 +111,9 @@ class RoutesManageTest < RoutesTestCase
     # A hub's reports link to the configured address, never to the Host it names, and its samples share one wait.
     rl.save_mail_settings({ "service" => "webhook", "url" => "https://hooks.example.net/mail", "from" => "reports@example.com" })
     manage = RoutesMake.body(call.call("POST", "/api/tokens", "owner", { "name" => "Hub", "scope" => "manage", "site" => "blog" }))["secret"]
-    first = RoutesMake.body(call.call("POST", "/api/reports?site=blog", manage, { "email" => "a@example.com" }))["report"]
+    first = RoutesMake.body(call.call("POST", "/api/reports?site=blog", manage, { "email" => "a@example.com", "origin" => "https://evil.example/phish" }))["report"]
     second = RoutesMake.body(call.call("POST", "/api/reports?site=blog", manage, { "email" => "b@example.com" }))["report"]
-    assert_equal ["https://stats.example.com/runlight", "https://stats.example.com/runlight"], rl.store.reports("blog").map { |r| r["origin"] }
+    assert_equal ["https://stats.example.com/runlight", "https://stats.example.com/runlight"], rl.store.reports("blog").map { |r| r["origin"] }, "an address in the body is ignored"
     assert_equal 200, call.call("POST", "/api/reports/#{first["id"]}/send?site=blog", manage).status, "the first sample goes out"
     assert_equal 1, sent.mail.length
     assert_equal "a@example.com", sent.mail[0]["to"]

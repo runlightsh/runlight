@@ -76,9 +76,7 @@ module Runlight
     EMAIL = /\A[^#{Js::SPACE}@<>"]+@[^#{Js::SPACE}@<>"]+\.[^#{Js::SPACE}@<>"]+\z/
     # A dashboard's origin, which a picker ticket names.
     ORIGIN = %r{\Ahttps?://[^/?\##{Js::SPACE}]+\z}
-    # An address a report's links may point back to.
-    HOME = %r{\Ahttps?://[^#{Js::SPACE}]+\z}
-    private_constant :EMAIL, :ORIGIN, :HOME
+    private_constant :EMAIL, :ORIGIN
 
     # The files in assets/, read once per process.
     @assets = {}
@@ -1234,13 +1232,13 @@ module Runlight
             end
             return coded("A site can send to at most 50 addresses", "report_limit", 400) if existing.length >= 50
 
-            # Links in the email point back to the configured address, or else to this dashboard as the
-            # browser sees it. A report made from a hub needs the configured address, where its unsubscribe
-            # link answers, since the Host its request names is the hub's to choose.
+            # Links in the email point back to the configured address, or else to this dashboard at the address
+            # the request came to. An address in the body is never used, so whoever adds a report cannot point
+            # its links somewhere else. A report made from a hub needs the configured address, where its
+            # unsubscribe link answers, since the Host its request names is the hub's to choose.
             return origin_needed if @managed.key?(request) && @origin.nil?
 
-            given = @origin.nil? ? text(body, "origin") : ""
-            home = Js.scrub(given).match?(HOME) ? given.sub(%r{/+\z}, "") : "#{@origin || url.origin}#{@base}"
+            home = "#{@origin || url.origin}#{@base}"
             # A period already due counts as sent, so a report added mid-week first goes out on the next Monday, as the form says.
             now = @rl.now
             due = Reports.last_period(frequency, now, site["timezone"])
