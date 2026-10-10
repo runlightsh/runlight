@@ -244,6 +244,32 @@ class AccountsAccountsTest < Minitest::Test
     end
   end
 
+  def test_the_throttle_lets_no_more_tries_through_at_once_than_its_limit
+    skip "no fork here" unless Process.respond_to?(:fork)
+
+    sqlite_file do |path|
+      Throttle.new(Runlight::Stores.sqlite(path), "code", 5).blocked("acct", NOW) # the hashing key, made once
+      results = in_processes(path, 4) do |store|
+        throttle = Throttle.new(store, "code", 5)
+        sleep 0.2
+        passed = Queue.new
+        Array.new(3) { Thread.new { 5.times { passed << 1 if throttle.take("acct", NOW) } } }.each(&:join)
+        passed.size
+      end
+      assert_equal 5, results.sum
+    end
+    each_kind do |kind|
+      next if kind == "sqlite"
+
+      store = store(kind)
+      passed = Queue.new
+      Array.new(4) { Thread.new { throttle = Throttle.new(store, "code", 5); 5.times { passed << 1 if throttle.take("acct", NOW) } } }.each(&:join)
+      assert_equal 5, passed.size
+    ensure
+      Databases.cleanup
+    end
+  end
+
   def test_the_throttle_counts_before_the_check_and_forgives_a_right_try
     store = store("sqlite")
     throttle = Throttle.new(store, "test", 3, 1000)
