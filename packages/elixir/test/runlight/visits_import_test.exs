@@ -7,6 +7,7 @@ defmodule Runlight.VisitsImportTest do
   alias Runlight.ImportError
   alias Runlight.Importers.Visits
   alias Runlight.JS
+  alias Runlight.JS.Object
   alias Runlight.SearchParams
   alias Runlight.Store
   alias Runlight.Test.FakeFetcher
@@ -377,7 +378,9 @@ defmodule Runlight.VisitsImportTest do
 
   test "CSV in Runlight's format: rows become visits with sources, places, devices, and events" do
     rl = csv()
-    assert Visits.import_csv_visits(rl, "default", rows()) == o(pageviews: 3, events: 1, visits: 2, skipped: 1)
+    step = Visits.import_csv_visits(rl, "default", rows())
+    assert Object.delete(step, "secret") == o(pageviews: 3, events: 1, visits: 2, skipped: 1)
+    assert Regex.match?(~r/\A[A-Za-z0-9_-]{32}\z/, step["secret"])
     q = query(rl, "2026-03-01", "2026-03-03")
     stats = Store.stats(rl.store, q)
     assert {stats["pageviews"], stats["visits"], stats["visitors"]} == {3, 2, 2}
@@ -397,7 +400,7 @@ defmodule Runlight.VisitsImportTest do
     assert Visits.import_csv_visits(rl, "default", list)["visits"] == 2
     Visits.import_csv_visits(rl, "default", list)
     q = query(rl, "2026-03-01", "2026-03-03")
-    assert Store.stats(rl.store, q)["visits"] == 2, "the same rows get the same ids the second time"
+    assert Store.stats(rl.store, q)["visits"] == 2, "the second import replaces the first"
     assert Enum.sort(values(rl, q, "page")) == ["/a", "/b"]
   end
 
@@ -455,11 +458,43 @@ defmodule Runlight.VisitsImportTest do
       )
     ]
 
-    assert Visits.import_csv_visits(rl, "default", list) == o(pageviews: 2, events: 1, visits: 2, skipped: 1)
+    step = Visits.import_csv_visits(rl, "default", list)
+    assert Object.delete(step, "secret") == o(pageviews: 2, events: 1, visits: 2, skipped: 1)
     q = query(rl, "2026-03-01", "2026-03-03")
     assert values(rl, q, "source") == ["Hacker News"]
     assert values(rl, q, "region") == ["CA-ON"]
     assert Enum.sort(values(rl, q, "browser")) == ["Chrome", "Safari"]
+  end
+
+  test "a CSV visitor column is keyed with a secret only the import holds, which later batches of the file send back" do
+    rl = csv()
+
+    people = [
+      o(time: "2026-03-01T10:00:00Z", path: "/a", visitor: "203.0.113.7"),
+      o(time: "2026-03-01T10:10:00Z", path: "/b", visitor: "203.0.113.7"),
+      o(time: "2026-03-01T10:20:00Z", path: "/c", visitor: "jon@example.com")
+    ]
+
+    # A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+    plain = fn key -> Runlight.Importers.hex_id("csv:#{key}:2026-03-01", 16) end
+    first = Visits.import_csv_visits(rl, "default", Enum.take(people, 1))
+    second = Visits.import_csv_visits(rl, "default", Enum.drop(people, 1), first["secret"])
+    assert second["secret"] == first["secret"]
+    assert second["visits"] == 1, "the second batch's visitor continues the first batch's visit"
+    visitors = Enum.map(Store.all_rows(rl.store, "SELECT DISTINCT visitor FROM rl_sessions", []), & &1["visitor"])
+    assert length(visitors) == 2
+    for key <- ["203.0.113.7", "jon@example.com"], do: refute(plain.(key) in visitors, key)
+    q = query(rl, "2026-03-01", "2026-03-03")
+    assert Store.stats(rl.store, q)["visits"] == 2
+
+    # The same file again, with a new secret and so new ids, leaves no visit of the old import behind, even one
+    # that ran across its two batches.
+    again = Visits.import_csv_visits(rl, "default", Enum.take(people, 1))
+    assert again["secret"] != first["secret"]
+    Visits.import_csv_visits(rl, "default", Enum.drop(people, 1), again["secret"])
+    stats = Store.stats(rl.store, q)
+    assert {stats["visits"], stats["pageviews"]} == {2, 3}
+    assert length(Store.all_rows(rl.store, "SELECT id FROM rl_sessions", [])) == 2
   end
 
   test "CSV rows from after Runlight's own first visit are left to Runlight" do

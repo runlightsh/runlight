@@ -12,6 +12,7 @@ defmodule Runlight.Importers.Visits do
 
   import Runlight.Importers.Http, only: [get: 2]
 
+  alias Runlight.Crypto
   alias Runlight.ImportError
   alias Runlight.Importers
   alias Runlight.Importers.Http
@@ -235,14 +236,16 @@ defmodule Runlight.Importers.Visits do
         [site_id, from, to, site_id]
       )
 
-      # Visits of these days that kept no rows go too.
+      # Visits of these days that kept no rows go too. That reaches back EVENT_TAIL_MS too, for a visit an earlier
+      # import began before this step whose rows were all in it: a CSV imported again has new ids, so its new visit
+      # does not take that one's place.
       Store.run_sql(
         store,
         """
         DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
                  AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)\
         """,
-        [site_id, from, to, site_id, from, to + Sql.event_tail_ms()]
+        [site_id, from - Sql.event_tail_ms(), to, site_id, from - Sql.event_tail_ms(), to + Sql.event_tail_ms()]
       )
 
       counts =
@@ -433,9 +436,18 @@ defmodule Runlight.Importers.Visits do
   One batch of a CSV file, sorted oldest first by the dashboard. Only rows
   from before Runlight's own first visit, and within what the site keeps, are
   written. A batch can run again: its time span is cleared first.
+
+  A CSV's visitor column can hold anything, an email or an IP address among
+  them, and a plain hash of one is easily undone by trying every address. So
+  each key is an HMAC under a random secret made for the import and never
+  stored: the first batch gets one, the answer carries it, and the caller
+  sends it with every later batch of the same file, so a visit that runs
+  across two batches stays one. A file imported again gets a new secret and
+  new ids; its time span is cleared first, as always, so nothing is counted
+  twice.
   """
-  @spec import_csv_visits(Runlight.t(), String.t(), term()) :: Object.t()
-  def import_csv_visits(rl, site_id, rows) do
+  @spec import_csv_visits(Runlight.t(), String.t(), term(), term()) :: Object.t()
+  def import_csv_visits(rl, site_id, rows, secret \\ nil) do
     Runlight.init(rl)
     if Runlight.site(rl, site_id) == nil, do: raise(ImportError, message: "Unknown site", code: "unknown_site")
 
@@ -466,6 +478,11 @@ defmodule Runlight.Importers.Visits do
           code: "import_csv_format"
         )
 
+    key =
+      if is_binary(secret) and Regex.match?(~r/\A[A-Za-z0-9_-]{22,128}\z/, secret),
+        do: secret,
+        else: Crypto.base64url(Crypto.random_bytes(24))
+
     cutoff = Runlight.retention_cutoff(rl, site_id) || 0
     own = Store.first_own_visit(rl.store, site_id)
     finish = if own, do: min(own, Runlight.now(rl)), else: Runlight.now(rl)
@@ -479,12 +496,15 @@ defmodule Runlight.Importers.Visits do
     skipped = length(clean) - length(hits)
 
     if hits == [] do
-      JS.obj(pageviews: 0, events: 0, visits: 0, skipped: skipped)
+      JS.obj(pageviews: 0, events: 0, visits: 0, skipped: skipped, secret: key)
     else
+      hits =
+        Enum.map(hits, fn {ns, hit} -> {ns, %{hit | key: Crypto.base64url(Crypto.hmac(:sha256, key, hit.key))}} end)
+
       first = elem(hd(hits), 1).ts
       last = elem(List.last(hits), 1).ts
       counts = write_step(rl, site_id, first, last + 1, hits, nil)
-      JS.obj(pageviews: counts.pageviews, events: counts.events, visits: counts.visits, skipped: skipped)
+      JS.obj(pageviews: counts.pageviews, events: counts.events, visits: counts.visits, skipped: skipped, secret: key)
     end
   end
 
@@ -538,7 +558,7 @@ defmodule Runlight.Importers.Visits do
     end)
   end
 
-  # A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids.
+  # A row with no visitor is its own visit, keyed by its whole content.
   defp own_key(r) do
     pairs =
       case r do
