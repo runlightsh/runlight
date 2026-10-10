@@ -18,7 +18,10 @@ module Runlight
   # - cronSecret: also accepted as a bearer token on POST /api/check. Defaults to CRON_SECRET.
   # - observeKey: lets another site report AI agent fetches to POST /api/observe. Defaults to RUNLIGHT_OBSERVE_KEY.
   # - signOut, signIn: links the dashboard shows. The standalone server sets them.
-  # - accounts: true for sign-in accounts, or a Runlight::Accounts::Web of your own.
+  # - accounts: true for sign-in accounts, or a Runlight::Accounts::Web of your own. Sessions are signed with the
+  #   Core's secret (RUNLIGHT_SECRET, else RUNLIGHT_TOKEN). With the token left nil and no secret, only
+  #   development makes one up (a restart signs everyone out); anywhere else that raises ArgumentError, since
+  #   each process of an app would make its own and sign the others' sessions out.
   # - geoCredit: credits DB-IP in the dashboard's footer.
   # - origin: the address people open the app at, such as https://example.com.
   # - ownHosts: a callable returning more names the dashboard is reached at.
@@ -118,11 +121,17 @@ module Runlight
 
       # Accounts: the standalone server passes its own, and an app turns them on with true. Sessions need a secret
       # that outlives the process; in development without one, a made-up one does, so a restart signs everyone out.
-      # An app left open on purpose (token: nil) is treated like development here.
+      # An app left open on purpose (token: nil) is treated like development for the first account, but outside
+      # development it still needs a real secret: TypeScript runs as one process, where a made-up one only lasts
+      # until a restart, but a Ruby app usually runs several, and each would sign the others' sessions out.
       token = @token
       open_setup = token.nil? || (token == "" && development?)
-      account_secret = runlight.secret || (open_setup ? Hashing.random_id(32) : nil)
       accounts = options["accounts"]
+      if accounts == true && token.nil? && runlight.secret.to_s.empty? && !development?
+        raise ArgumentError, "Runlight: accounts need a secret every process shares; set RUNLIGHT_SECRET (or pass secret:) to a long random string"
+      end
+
+      account_secret = runlight.secret || (open_setup ? Hashing.random_id(32) : nil)
       @web = if accounts.is_a?(Accounts::Web)
                accounts
              elsif accounts == true && !account_secret.nil? && account_secret != ""
