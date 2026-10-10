@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.3
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.0
+Stable tag: 0.1.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,7 +64,7 @@ The plugin talks to one service, the Runlight whose address you enter under Sett
 
 == Changelog ==
 
-= Unreleased =
+= 0.1.1 =
 * AI agents are reported after the page has been sent, so they never wait on Runlight, and sites in a subfolder report the right address.
 * The settings page checks the Runlight address after it loads.
 * On a network, only network admins can change the Runlight address.
