@@ -168,23 +168,33 @@ class UrllibFetcher:
             elif encoding == "deflate":
                 decoder = zlib.decompressobj()
             received = bytearray()
+
+            def over() -> bool:
+                """Whether the body ran past the cap: cut at it with `truncate`, and otherwise refused."""
+                if max_bytes is None or len(received) <= max_bytes:
+                    return False
+                if truncate:
+                    del received[max_bytes:]
+                    return True
+                raise BodyTooLong(f"Body over {max_bytes} bytes")
+
             if method != "HEAD":
-                while True:
+                cut = False
+                while not cut:
                     if time.monotonic() > deadline:
                         raise FetchError("The operation was aborted due to timeout", True)
                     chunk = response.read1(65536) if hasattr(response, "read1") else response.read(65536)
                     if not chunk:
                         break
                     if decoder is not None:
-                        chunk = decoder.decompress(chunk)
+                        # Inflated no further than one byte past the cap, so a small body that inflates without end
+                        # stops where a plain one would. Short of that, the whole chunk went in.
+                        chunk = decoder.decompress(chunk) if max_bytes is None else decoder.decompress(chunk, max_bytes - len(received) + 1)
                     received += chunk
-                    if max_bytes is not None and len(received) > max_bytes:
-                        if truncate:
-                            del received[max_bytes:]
-                            break
-                        raise BodyTooLong(f"Body over {max_bytes} bytes")
-                if decoder is not None:
+                    cut = over()
+                if decoder is not None and not cut:
                     received += decoder.flush()
+                    over()
             conn.close()
             if decoder is not None:
                 answer.delete("content-encoding")

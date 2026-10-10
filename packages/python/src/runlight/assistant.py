@@ -54,6 +54,8 @@ MAX_ROUNDS = 8
 # However many rounds a question takes, the answer comes within this long or the assistant stops.
 DEADLINE_MS = 120_000
 MAX_TOKENS = 1500
+# The most of a provider's answer read: a reply of MAX_TOKENS, or a list of models, is far smaller.
+ANSWER_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _system(context: dict[str, Any]) -> str:
@@ -128,6 +130,7 @@ def _post(
                 "headers": {"content-type": "application/json", **headers},
                 "body": _js.dumps(body),
                 "timeoutMs": min(90_000, left),
+                "maxBytes": ANSWER_MAX_BYTES,
             },
         )
     except Exception as error:
@@ -408,7 +411,7 @@ def list_models(settings: dict[str, Any], fetcher: Fetcher | None = None) -> lis
     else:
         headers = {"authorization": f"Bearer {key}"} if key else {}
     try:
-        answer = fetcher.fetch(f"{base}/models{'?limit=100' if provider['protocol'] == 'anthropic' else ''}", {"headers": headers, "timeoutMs": 20_000})
+        answer = fetcher.fetch(f"{base}/models{'?limit=100' if provider['protocol'] == 'anthropic' else ''}", {"headers": headers, "timeoutMs": 20_000, "maxBytes": ANSWER_MAX_BYTES})
     except Exception:
         host = _host(base)
         raise AssistantError(f"Could not reach {host}", "unreachable", {"host": host}) from None

@@ -69,6 +69,7 @@ class Http:
             if "body" in init:
                 options["body"] = init["body"]
             options["timeoutMs"] = 20_000
+            options["maxBytes"] = MAX_BYTES
             try:
                 response = public_fetch(url, options, self.fetcher)
             except (FetchError, PrivateAddressError) as error:

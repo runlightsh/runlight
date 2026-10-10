@@ -22,6 +22,9 @@ from .safefetch import install_address, install_fetch
 PENDING_MS = 15 * 60_000
 # The most an install's answer while connecting may weigh; a real one is under a kilobyte.
 MAX_BYTES = 64 * 1024
+# What the Fetcher is asked for: the start of a longer body, which then reads as no JSON, as a body over the cap
+# does in TypeScript.
+_CAPPED = {"maxBytes": MAX_BYTES, "truncate": True}
 
 _STATE = re.compile(r"[a-f0-9]{32}\Z")
 
@@ -90,7 +93,7 @@ def start_connect(runlight: Any, input: Any, back: str, site: str = "") -> str: 
     url = install_url(input, local)
     host = Url(url).host
     try:
-        answer = install_fetch(f"{url}/.well-known/oauth-authorization-server", {"timeoutMs": 10_000, "local": local}, runlight.fetcher)
+        answer = install_fetch(f"{url}/.well-known/oauth-authorization-server", {"timeoutMs": 10_000, "local": local, **_CAPPED}, runlight.fetcher)
     except Exception:  # noqa: BLE001
         raise ConnectError(f"Could not reach {url}", "unreachable", {"host": host}) from None
     meta = _json(answer) if answer.ok else None
@@ -113,6 +116,7 @@ def start_connect(runlight: Any, input: Any, back: str, site: str = "") -> str: 
             "body": _js.dumps({"client_name": f"Runlight at {Url(back).host}", "redirect_uris": [back]}),
             "timeoutMs": 10_000,
             "local": local,
+            **_CAPPED,
         }, runlight.fetcher)  # fmt: skip
     except Exception:  # noqa: BLE001
         raise ConnectError(f"Could not reach {url}", "unreachable", {"host": host}) from None
@@ -190,6 +194,7 @@ def finish_connect(runlight: Any, params: SearchParams) -> str:
             }).to_string(),
             "timeoutMs": 10_000,
             "local": runlight.local_installs,
+            **_CAPPED,
         }, runlight.fetcher)  # fmt: skip
     except Exception:  # noqa: BLE001
         answer = None

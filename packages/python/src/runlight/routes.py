@@ -236,6 +236,8 @@ def _pass_through(runlight: Any, remote: Mapping[str, Any], path: str, url: Url,
         "headers": headers,
         # A long report or an export is worked out in full before the install sends a byte, so reads get two minutes.
         "timeoutMs": 30_000 if write else 120_000,
+        # TypeScript streams the answer on; here it is read whole first, so no further than this.
+        "maxBytes": PASS_THROUGH_MAX_BYTES,
         "local": runlight.local_installs,
     }
     if write and request is not None:
@@ -469,6 +471,8 @@ ASK_AT_ONCE = 2
 # Questions each viewer may ask a day, until an owner sets another number.
 VIEWER_DAILY = 50
 _SHARE_ID = re.compile(r"[a-f0-9]{32}\Z")
+# The most of an answer from a connected install passed on to the dashboard: an export of a big site fits.
+PASS_THROUGH_MAX_BYTES = 256 * 1024 * 1024
 # How long an embed ticket works: long enough for the admin page to load its frame, never to be kept.
 EMBED_TICKET_MS = 5 * 60_000
 # How long an embedded dashboard reads before the admin page has to be loaded again for a new ticket.
@@ -816,7 +820,7 @@ class Routes:
                 try:
                     # Only a public address is fetched, whatever the name resolves to now, so the check cannot be
                     # pointed into a private network.
-                    answer = public_fetch(f"https://{domain}{LINK_DOMAIN_CHECK}", {"timeoutMs": 5000}, rl.fetcher)
+                    answer = public_fetch(f"https://{domain}{LINK_DOMAIN_CHECK}", {"timeoutMs": 5000, "maxBytes": 65_536, "truncate": True}, rl.fetcher)
                     try:
                         ok, found = _js.try_loads(answer.content())
                     except Exception:  # noqa: BLE001
