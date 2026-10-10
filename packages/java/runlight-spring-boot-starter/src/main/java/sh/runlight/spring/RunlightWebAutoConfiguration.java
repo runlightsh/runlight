@@ -38,7 +38,7 @@ public class RunlightWebAutoConfiguration {
   public Routes runlightRoutes(
       Runlight runlight, RunlightProperties properties, Environment environment) {
     Routes.Options options = new Routes.Options();
-    options.basePath(contextPath(environment) + Routes.normaliseBase(properties.getBasePath()));
+    options.basePath(contextPath(environment) + basePath(properties));
     if (properties.isOpen()) {
       options.token(null);
     } else if (properties.getToken() != null && !properties.getToken().isBlank()) {
@@ -71,7 +71,7 @@ public class RunlightWebAutoConfiguration {
             : properties.isOpen()
                 ? RunlightProperties.OPEN_ORDER
                 : RunlightProperties.DEFAULT_ORDER;
-    return new RunlightRoutesFilter(runlight, routes, properties.getBasePath(), at);
+    return new RunlightRoutesFilter(runlight, routes, basePath(properties), at);
   }
 
   /** The link filter. */
@@ -81,6 +81,21 @@ public class RunlightWebAutoConfiguration {
     Integer order = properties.getWeb().getOrder();
     return new RunlightLinksFilter(
         runlight, properties.isObserve(), order != null ? order : RunlightProperties.DEFAULT_ORDER);
+  }
+
+  /**
+   * {@code runlight.base-path}, normalised. Empty or "/" is refused: the routes' filter would then
+   * answer every request, and the app's own pages would be gone.
+   */
+  static String basePath(RunlightProperties properties) {
+    String given = properties.getBasePath();
+    String path = given == null ? "" : Routes.normaliseBase(given);
+    if (path.isEmpty()) {
+      throw new IllegalStateException(
+          "Runlight: runlight.base-path cannot be empty or /, since the routes would answer every"
+              + " request in place of the app. Set it to a path of its own, such as /runlight.");
+    }
+    return path;
   }
 
   /** The app's servlet context path, such as {@code /app}, or empty. */

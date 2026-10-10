@@ -202,6 +202,25 @@ class StarterTest {
   }
 
   @Test
+  void anEmptyBasePathIsRefusedRatherThanHidingTheApp() {
+    for (String path : List.of("/", "")) {
+      RuntimeException failed =
+          assertThrows(
+              RuntimeException.class,
+              () ->
+                  start(database(), "runlight.base-path=" + path, "runlight.check.enabled=false")
+                      .close());
+      Throwable cause = failed;
+      while (cause.getCause() != null) {
+        cause = cause.getCause();
+      }
+      assertTrue(
+          String.valueOf(cause.getMessage()).contains("runlight.base-path cannot be empty or /"),
+          String.valueOf(cause.getMessage()));
+    }
+  }
+
+  @Test
   void theAppsOwnStoreAndRoutesWin() throws Exception {
     SqlStore store = sh.runlight.store.Stores.sqlite(dir.resolve("own.db").toString());
     try (ConfigurableApplicationContext context =
