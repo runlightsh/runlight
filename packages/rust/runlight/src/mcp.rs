@@ -530,6 +530,9 @@ fn json_headers() -> Headers {
     Headers::new().with("content-type", "application/json; charset=utf-8").with("cache-control", "no-store")
 }
 
+/// The most messages one batch may hold.
+pub const MAX_BATCH: usize = 20;
+
 /// Answers one POST to the MCP endpoint, already authorised.
 pub async fn mcp_response(request: &Request, read_api: &dyn ApiRead) -> Result<Response, BoxError> {
     let body = match request.json() {
@@ -539,8 +542,13 @@ pub async fn mcp_response(request: &Request, read_api: &dyn ApiRead) -> Result<R
             return Ok(Response::new(js::stringify(&error), 400, json_headers()));
         }
     };
-    // Batches were in the 2025-03-26 protocol; answering them costs nothing.
+    // Batches were in the 2025-03-26 protocol. They run one message at a time, from a short list, so one
+    // request cannot start hundreds of reports at once.
     if let Value::Array(messages) = &body {
+        if messages.len() > MAX_BATCH {
+            let error = rpc_error(None, -32600, &format!("Send at most {MAX_BATCH} messages in a batch"));
+            return Ok(Response::new(js::stringify(&error), 400, json_headers()));
+        }
         let mut answers = Vec::new();
         for message in messages {
             answers.extend(answer(message, read_api).await);
