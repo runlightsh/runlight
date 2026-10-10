@@ -142,26 +142,30 @@ const README_CHANGELOG = "plugins/wordpress/readme.txt";
 const MARKDOWN_CHANGELOGS = ["plugins/craft/CHANGELOG.md"];
 const ROOT_CHANGELOG = "CHANGELOG.md";
 
-/** How each folder ships, printed after the release commit, in order. */
+/**
+ * How each folder ships, printed after the release commit, in order:
+ * `workflows`, what the pushed tag's workflows do on their own once CI has
+ * passed, and `byHand`, the commands to run, which the script prints only
+ * behind a wait for CI to pass on the release commit.
+ */
 export const PUBLISH = [
-  { dir: "packages/sdk", commands: () => ["npm publish --workspace packages/sdk --access public"] },
+  { dir: "packages/sdk", byHand: () => ["npm publish --workspace packages/sdk --access public"] },
   // The server requires the SDK at exactly this release, so the SDK goes first.
-  { dir: "packages/server", commands: (v) => [
-    "npm publish --workspace packages/server --access public",
+  { dir: "packages/server", byHand: () => ["npm publish --workspace packages/server --access public"], workflows: (v) => [
     `# packages/server: the pushed tag v${v} also builds the Docker image for linux/amd64 and linux/arm64 and pushes it to ghcr.io/runlightsh/runlight as ${v}${v.includes("-") ? "" : " and latest"}, by .github/workflows/docker.yml (once DOCKER_ENABLED is true)`,
   ] },
   // Packagist reads composer.json from a repository's root and versions from
   // its tags, so packages/php goes to a read-only repository of its own.
-  { dir: "packages/php", commands: (v) => [`# packages/php: the pushed tag v${v} is split to runlightsh/runlight-php, which Packagist watches, by .github/workflows/php-split.yml (once PHP_SPLIT_DEPLOY_KEY is set)`] },
-  { dir: "packages/python", commands: (v) => [`# packages/python: the pushed tag v${v} is built and published to PyPI as runlight by .github/workflows/pypi.yml, with trusted publishing (once PYPI_ENABLED is true)`] },
-  { dir: "packages/ruby", commands: (v) => [`(cd packages/ruby && gem build runlight.gemspec && gem push runlight-${v}.gem)`] },
+  { dir: "packages/php", workflows: (v) => [`# packages/php: the pushed tag v${v} is split to runlightsh/runlight-php, which Packagist watches, by .github/workflows/php-split.yml (once PHP_SPLIT_DEPLOY_KEY is set)`] },
+  { dir: "packages/python", workflows: (v) => [`# packages/python: the pushed tag v${v} is built and published to PyPI as runlight by .github/workflows/pypi.yml, with trusted publishing (once PYPI_ENABLED is true)`] },
+  { dir: "packages/ruby", byHand: (v) => [`(cd packages/ruby && gem build runlight.gemspec && gem push runlight-${v}.gem)`] },
   // Go modules publish by tag: a module in a subdirectory is versioned by a
   // tag with that prefix, so the release commit also gets packages/go/vX.Y.Z,
   // and the Go proxy serves it once anyone asks. The chi and Echo adapters
   // and the command are modules of their own, each tagged with its directory
   // at the same version. packages/go/dbtest holds tests only and is never
   // tagged. runlight.sh answers the go command's lookups (runlightsh/runlight-website).
-  { dir: "packages/go", commands: (v) => [
+  { dir: "packages/go", byHand: (v) => [
     ...["", "chi/", "echo/", "cmd/runlight/"].map((sub) =>
       `git tag -a packages/go/${sub}v${v} -m "Release ${v} (Go${sub ? `, ${sub.slice(0, -1)}` : ""})" v${v}^{} && git push origin packages/go/${sub}v${v}`),
     `# packages/go: then GOPROXY=https://proxy.golang.org go list -m runlight.sh/go@v${v} runlight.sh/go/chi@v${v} runlight.sh/go/echo@v${v} runlight.sh/go/cmd/runlight@v${v} makes the proxy fetch them (once runlight.sh serves the go-import tags)`,
@@ -169,21 +173,21 @@ export const PUBLISH = [
   // Hex reads a package from the tarball `mix hex.publish` uploads, so the
   // package needs no tag of its own. .github/workflows/hex.yml publishes it
   // from the release tag.
-  { dir: "packages/elixir", commands: (v) => [`# packages/elixir: the pushed tag v${v} is published to Hex as runlight, with its docs, by .github/workflows/hex.yml (once HEX_ENABLED is true); by hand, (cd packages/elixir && mix hex.publish)`] },
+  { dir: "packages/elixir", workflows: (v) => [`# packages/elixir: the pushed tag v${v} is published to Hex as runlight, with its docs, by .github/workflows/hex.yml (once HEX_ENABLED is true); by hand, (cd packages/elixir && mix hex.publish)`] },
   // Maven Central, nuget.org, and crates.io each read a release from what
   // their tools upload, so these need no tags of their own.
-  { dir: "packages/java", commands: (v) => [`# packages/java: the pushed tag v${v} is built, signed, and published to Maven Central as sh.runlight:runlight, runlight-servlet, and runlight-spring-boot-starter by .github/workflows/maven.yml (once MAVEN_ENABLED is true)`] },
-  { dir: "packages/dotnet", commands: (v) => [`# packages/dotnet: the pushed tag v${v} is packed and published to nuget.org as Runlight, Runlight.AspNetCore, and Runlight.Server, in that order, by .github/workflows/nuget.yml, with trusted publishing (once NUGET_ENABLED is true)`] },
-  { dir: "packages/rust", commands: (v) => [`# packages/rust: the pushed tag v${v} is published to crates.io as runlight, then runlight-sqlx, by .github/workflows/crates.yml, with trusted publishing (once CRATES_ENABLED is true); the first release by hand, (cd packages/rust && cargo publish --workspace)`] },
-  { dir: "plugins/wordpress", commands: (v) => [`# plugins/wordpress: the pushed tag v${v} gets a GitHub release with its CHANGELOG.md section as notes and the plugin's zip attached as runlight-${v}.zip and runlight.zip, by .github/workflows/release.yml (once RELEASE_ENABLED is true)`] },
+  { dir: "packages/java", workflows: (v) => [`# packages/java: the pushed tag v${v} is built, signed, and published to Maven Central as sh.runlight:runlight, runlight-servlet, and runlight-spring-boot-starter by .github/workflows/maven.yml (once MAVEN_ENABLED is true)`] },
+  { dir: "packages/dotnet", workflows: (v) => [`# packages/dotnet: the pushed tag v${v} is packed and published to nuget.org as Runlight, Runlight.AspNetCore, and Runlight.Server, in that order, by .github/workflows/nuget.yml, with trusted publishing (once NUGET_ENABLED is true)`] },
+  { dir: "packages/rust", workflows: (v) => [`# packages/rust: the pushed tag v${v} is published to crates.io as runlight, then runlight-sqlx, by .github/workflows/crates.yml, with trusted publishing (once CRATES_ENABLED is true); the first release by hand, (cd packages/rust && cargo publish --workspace)`] },
+  { dir: "plugins/wordpress", workflows: (v) => [`# plugins/wordpress: the pushed tag v${v} gets a GitHub release with its CHANGELOG.md section as notes and the plugin's zip attached as runlight-${v}.zip and runlight.zip, by .github/workflows/release.yml (once RELEASE_ENABLED is true)`] },
   // drupal.org writes an alpha, beta, or rc prerelease with no dot before
   // its number (1.2.0-beta1), and has no form for any other.
-  { dir: "plugins/drupal", commands: (v) => {
+  { dir: "plugins/drupal", workflows: (v) => {
     const drupal = drupalVersion(v);
     if (drupal === null) return [`# plugins/drupal: drupal.org takes only alpha, beta, and rc prereleases, so .github/workflows/php-plugins-split.yml skips ${v}`];
     return [`# plugins/drupal: the pushed tag is split to drupal.org's repository as the tag ${drupal} on the branch ${v.split(".").slice(0, 2).join(".")}.x by .github/workflows/php-plugins-split.yml (once DRUPAL_SPLIT_ENABLED is true); then make the drupal.org release from the ${drupal} tag`];
   } },
-  { dir: "plugins/craft", commands: (v) => [`# plugins/craft: the pushed tag v${v} is split to runlightsh/runlight-craft, which Packagist and the Craft Plugin Store read, by .github/workflows/php-plugins-split.yml (once CRAFT_SPLIT_ENABLED is true)`] },
+  { dir: "plugins/craft", workflows: (v) => [`# plugins/craft: the pushed tag v${v} is split to runlightsh/runlight-craft, which Packagist and the Craft Plugin Store read, by .github/workflows/php-plugins-split.yml (once CRAFT_SPLIT_ENABLED is true)`] },
 ];
 
 /** Folders that do not ship on their own, and why. */
@@ -506,8 +510,16 @@ function main() {
     console.log(`\nCommitted "Release ${next}" and tagged ${tag}. Nothing is pushed or published.`);
   }
 
-  console.log(`\nNext, by hand:\n  git push --atomic origin ${branch} ${tag}\n  # The commit and the tag go up together, or neither does. The tag's workflows wait for CI to pass on this commit (.github/workflows/ci-passed.yml); publish to npm once it has.`);
-  for (const { commands } of PUBLISH) for (const command of commands(next)) console.log(`  ${command}`);
+  // The release commit: known once it is made, and named through its tag in a dry run.
+  const sha = options.dryRun ? `$(git rev-parse ${tag}^{commit})` : git("rev-parse", "HEAD");
+  console.log(`\nNext, by hand:\n  git push --atomic origin ${branch} ${tag}\n  # The commit and the tag go up together, or neither does.`);
+  console.log("\nThe tag starts these workflows, and each waits for CI to pass on the release commit (.github/workflows/ci-passed.yml) before it publishes:");
+  for (const { workflows } of PUBLISH) for (const line of workflows?.(next) ?? []) console.log(`  ${line}`);
+  console.log(`\nThe rest is by hand, and only after CI passes on ${sha}: CI (ci.yml), Ruby (ruby.yml) for the gem, and Go (go.yml) for the Go tags. Wait for every run on the commit to pass:`);
+  console.log(`  gh run list --commit ${sha} --event push`);
+  console.log("  gh run watch --exit-status <run id>   # for each run still going; stop if one fails");
+  console.log("Then:");
+  for (const { byHand } of PUBLISH) for (const command of byHand?.(next) ?? []) console.log(`  ${command}`);
   console.log("  # Once both packages exist on npm, a later release can publish them from a workflow with npm's trusted publishing instead of by hand.");
   console.log(`  # Then move the docs' install lines in runlightsh/runlight-website: npm run versions -- ${next}`);
   if (!options.dryRun) rmSync(zipDir, { recursive: true, force: true });

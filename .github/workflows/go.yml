@@ -1,3 +1,7 @@
+# The Go module (packages/go). Runs only when a push or pull request touches
+# the paths below. A release commit always does (it moves the version in
+# packages/go/version.go and the go.mod files), so it always has a run here,
+# which `npm run release` tells you to wait for before pushing the Go tags.
 name: Go
 
 on:
