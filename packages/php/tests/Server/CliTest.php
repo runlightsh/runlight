@@ -78,6 +78,20 @@ final class CliTest extends TestCase
         (new Config($this->root))->url();
     }
 
+    public function testADataFolderTheWebServerCouldServeIsFound(): void
+    {
+        $this->configure(['RUNLIGHT_GEO' => 'off']);
+        $config = new Config($this->root);
+        $this->assertSame('/runlight-data/', $config->exposedData(['DOCUMENT_ROOT' => $this->root]), 'beside index.php, as nginx would serve it');
+        $this->assertSame('/', $config->exposedData(['DOCUMENT_ROOT' => "{$this->root}/runlight-data"]));
+        $this->assertNull($config->exposedData(['DOCUMENT_ROOT' => $this->root, 'REDIRECT_RUNLIGHT_HTACCESS' => '1']), 'Apache read the .htaccess');
+        mkdir("{$this->root}/public");
+        $this->assertNull($config->exposedData(['DOCUMENT_ROOT' => "{$this->root}/public"]), 'outside the web root');
+        $this->assertNull($config->exposedData([]), 'no web root, as on the command line');
+        $this->configure(['RUNLIGHT_GEO' => 'off', 'DATA_DIR_DENIED' => 'true']);
+        $this->assertNull((new Config($this->root))->exposedData(['DOCUMENT_ROOT' => $this->root]), "the web server's own config denies it");
+    }
+
     public function testTheSetupCodeIsWrittenDownOnceAndUnlocksTheFirstAccount(): void
     {
         $this->configure(['RUNLIGHT_URL' => 'https://stats.example.com', 'RUNLIGHT_GEO' => 'off']);

@@ -16,6 +16,8 @@ use Runlight\Store\Stores;
  * vendor/) that returns the same names as an array.
  *
  *   DATA_DIR              the SQLite file, the secret, the setup code, and location data (./runlight-data)
+ *   DATA_DIR_DENIED       "true" once the web server's own config turns away requests for a DATA_DIR inside
+ *                         the web root, as nginx and Caddy need; without it the drop-in refuses to start
  *   DATABASE_URL          a postgres://, mysql://, or mariadb:// URL, to use that database instead of SQLite
  *   RUNLIGHT_SECRET       signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
  *   RUNLIGHT_TOKEN        also accepted as a bearer token on the API, and makes the first account
@@ -91,6 +93,35 @@ final class Config
             @file_put_contents("$dir/.htaccess", "Require all denied\n");
         }
         return $dir;
+    }
+
+    /**
+     * Where the data folder could be fetched over HTTP, as a path under the web root, or null when it cannot be:
+     * it is outside the web root, or Apache read the .htaccess beside index.php (which says so in
+     * RUNLIGHT_HTACCESS), so its rules and the data folder's own turn requests for it away, or DATA_DIR_DENIED
+     * says the web server's config does.
+     *
+     * @param array<string, mixed> $server the request's server variables, $_SERVER
+     */
+    public function exposedData(array $server): ?string
+    {
+        if (strtolower($this->get('DATA_DIR_DENIED') ?? '') === 'true') {
+            return null;
+        }
+        if (isset($server['RUNLIGHT_HTACCESS']) || isset($server['REDIRECT_RUNLIGHT_HTACCESS'])) {
+            return null;
+        }
+        $docRoot = $server['DOCUMENT_ROOT'] ?? null;
+        $root = is_string($docRoot) && $docRoot !== '' ? realpath($docRoot) : false;
+        $data = realpath($this->dataDir());
+        if ($root === false || $data === false) {
+            return null;
+        }
+        $root = rtrim($root, '/\\');
+        if ($data !== $root && !str_starts_with($data, $root . DIRECTORY_SEPARATOR)) {
+            return null;
+        }
+        return rtrim(str_replace('\\', '/', substr($data, strlen($root))), '/') . '/';
     }
 
     private function dataPath(): string
@@ -245,6 +276,10 @@ final class Config
      */
     public function standalone(array $options = [], bool $setup = true): Standalone
     {
+        $exposed = in_array(PHP_SAPI, ['cli', 'cli-server', 'phpdbg'], true) ? null : $this->exposedData($_SERVER);
+        if ($exposed !== null) {
+            throw new \RuntimeException("Runlight: the data folder, which holds the database and the secret, is inside the web root at $exposed, and nothing says the web server turns requests for it away, so anyone could download it. Set DATA_DIR to a folder outside the web root, or deny $exposed in the web server's config (the PHP package's README shows how for nginx and Caddy) and set DATA_DIR_DENIED=true.");
+        }
         $dbIp = $this->dbIp();
         $geo = $this->geo();
         $code = $setup ? $this->setupCode() : null;

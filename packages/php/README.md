@@ -48,6 +48,29 @@ Set `RUNLIGHT_TOKEN` to a long random string, then open `/runlight/?token=` foll
 
 The [PHP guide](https://runlight.sh/docs/php/) has the code for Laravel and Symfony, the MySQL, MariaDB, and Postgres stores, the scheduled check, and the drop-in that runs Runlight on a domain of its own with sign-in accounts.
 
+## Keep the drop-in's data private
+
+The drop-in keeps its SQLite database, its secret, and its setup code in `runlight-data` in the project folder, or wherever `DATA_DIR` points. Best of all, point `DATA_DIR` at a folder outside the web root. On Apache, the `.htaccess` files the drop-in ships turn requests for it away. Other web servers do not read them, so when the data folder sits inside the web root the drop-in refuses to start until the server denies it too. Deny the project's code and settings as well, then set `DATA_DIR_DENIED=true`.
+
+For nginx, inside the `server` block:
+
+```nginx
+location ~ ^/(runlight-data|vendor|config\.php|composer\.(json|lock))(/|$) {
+    return 403;
+}
+location / {
+    try_files $uri /index.php$is_args$args;
+}
+```
+
+For Caddy, in the site block:
+
+```caddy
+@private path /runlight-data /runlight-data/* /vendor /vendor/* /config.php /composer.json /composer.lock
+respond @private 403
+php_fastcgi unix//run/php/php-fpm.sock
+```
+
 ## License
 
 Runlight is MIT licensed.

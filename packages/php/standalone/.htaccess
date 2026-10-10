@@ -11,6 +11,8 @@ DirectoryIndex index.php
 
 <IfModule mod_rewrite.c>
     RewriteEngine On
+    # Tells Runlight this file is read, so the rules here and the data folder's own keep its data private.
+    RewriteRule ^ - [E=RUNLIGHT_HTACCESS:1]
     # Sign-in and the API read the Authorization header, which some setups drop.
     RewriteCond %{HTTP:Authorization} .
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
