@@ -383,6 +383,21 @@ public sealed class RoutesTests : RoutesTestCase
         Assert.Equal("{\"code\":\"assistant_provider\",\"params\":{}}", await Send("PUT", "/api/assistant", new JsObject { ["provider"] = "nope" }));
     }
 
+    [Fact]
+    public async Task Questions_to_the_assistant_asked_all_at_once_are_counted_one_at_a_time()
+    {
+        var rl = await RunlightAsync();
+        await rl.InitAsync();
+        var routes = rl.Routes(new RoutesOptions { Token = "secret" });
+        var turns = await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => Task.Run(() => routes.AskTurnAsync("viewer@example.com", false))));
+        Assert.Equal(global::Runlight.Routes.AskAtOnce, turns.Count(t => t is Action));
+        foreach (var done in turns.OfType<Action>())
+        {
+            done();
+        }
+        Assert.IsType<Action>(await routes.AskTurnAsync("viewer@example.com", false));
+    }
+
     // The routes' own helpers.
 
     [Fact]
