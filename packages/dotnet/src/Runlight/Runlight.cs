@@ -1889,6 +1889,8 @@ public sealed partial class Runlight
             await CurrentSaltsAsync(Now(), timezone, cancellationToken).ConfigureAwait(false);
         }
         await DropOldSaltsAsync(Now(), cancellationToken).ConfigureAwait(false);
+        // Sign-in counts worked out from an address go once their window ends, and their hashing keys after a day.
+        await Accounts.Throttle.SweepAsync(Store, Now(), cancellationToken).ConfigureAwait(false);
         // Every site's retention covers any one site's that is still waiting.
         _pruning.Clear();
         try

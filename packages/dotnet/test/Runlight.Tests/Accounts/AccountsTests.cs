@@ -230,12 +230,12 @@ public sealed class AccountsTests : IAsyncLifetime
         Assert.True(await throttle.BlockedAsync("jon@example.com", Now));
         Assert.False(await throttle.TakeAsync("jon@example.com", Now));
         Assert.False(await throttle.BlockedAsync("ada@example.com", Now));
-        await throttle.ForgiveAsync("jon@example.com");
+        await throttle.ForgiveAsync("jon@example.com", Now);
         Assert.False(await throttle.BlockedAsync("jon@example.com", Now));
         await throttle.FailAsync("jon@example.com", Now);
         Assert.True(await throttle.BlockedAsync("jon@example.com", Now));
         Assert.False(await throttle.BlockedAsync("jon@example.com", Now + 1000));
-        await throttle.ClearAsync("jon@example.com");
+        await throttle.ClearAsync("jon@example.com", Now);
         Assert.False(await throttle.BlockedAsync("jon@example.com", Now));
         foreach (var row in await store.SettingsStartingWithAsync("throttle:"))
         {
@@ -254,13 +254,64 @@ public sealed class AccountsTests : IAsyncLifetime
 
     [Theory]
     [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task The_hashing_key_turns_over_each_day_and_nothing_from_an_address_lasts_past_one(string kind)
+    {
+        var store = await StoreAsync(kind);
+        const long Day = 86_400_000;
+        long midnight = Now - (Now % Day) + Day;
+        static string Utc(long t) => "throttle-key:" + DateTimeOffset.FromUnixTimeMilliseconds(t).UtcDateTime.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        async Task<string[]> KeysAsync() => [.. (await store.SettingsStartingWithAsync("throttle-key")).Select(r => r.Str("key")!).Order(StringComparer.Ordinal)];
+        async Task<int> CountsAsync() => (await store.SettingsStartingWithAsync("throttle:")).Count;
+
+        // The single key kept before, and one from last week, go when the day's key is made.
+        await store.SetSettingAsync("throttle-key", "old");
+        await store.SetSettingAsync(Utc(Now - 7 * Day), "older");
+        var address = new Throttle(store, "address", 3);
+        const string Pair = "jon@example.com|203.0.113.7";
+        for (int i = 0; i < 3; i++)
+        {
+            await address.FailAsync(Pair, midnight - 60_000);
+        }
+        Assert.Equal([Utc(midnight - 60_000)], await KeysAsync());
+
+        // Midnight does not lift a block: yesterday's count is still found until its window ends.
+        Assert.True(await address.BlockedAsync(Pair, midnight + 60_000));
+        Assert.False(await address.TakeAsync(Pair, midnight + 60_000));
+        Assert.Equal([Utc(midnight - 60_000), Utc(midnight)], await KeysAsync());
+        Assert.Equal(1, await CountsAsync());
+
+        // An ended window is deleted when read, not only when a new count is made.
+        Assert.False(await address.BlockedAsync(Pair, midnight + 15 * 60_000));
+        Assert.Equal(0, await CountsAsync());
+
+        // A count under today's key, and one cleared under either day's key.
+        await address.FailAsync(Pair, midnight + 20 * 60_000);
+        await address.ClearAsync(Pair, midnight + 21 * 60_000);
+        Assert.Equal(0, await CountsAsync());
+
+        // Two days on, the first day's key is gone, and with it any way to tell whose count was whose.
+        await new Throttle(store, "ip", 30).FailAsync("203.0.113.7", midnight + Day + 60_000);
+        Assert.Equal([Utc(midnight), Utc(midnight + Day)], await KeysAsync());
+
+        // The scheduled sweep drops every ended count and old key, even with no one signing in.
+        await Throttle.SweepAsync(store, midnight + 2 * Day + 60_000);
+        Assert.Equal(0, await CountsAsync());
+        Assert.Equal([Utc(midnight + Day)], await KeysAsync());
+        // A count whose window is still running is kept.
+        await new Throttle(store, "account", 50).FailAsync("jon@example.com", midnight + 2 * Day);
+        await Throttle.SweepAsync(store, midnight + 2 * Day + 60_000);
+        Assert.Equal(1, await CountsAsync());
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
     public async Task A_burst_of_tries_at_once_gets_no_more_than_the_limit(string kind)
     {
         var store = await StoreAsync(kind);
         // Separate throttles, as separate requests have, all trying the same key at once.
         var tries = await Task.WhenAll(Enumerable.Range(0, 40).Select(_ => Task.Run(() => new Throttle(store, "burst", 5, 60_000).TakeAsync("jon@example.com", Now))));
         Assert.Equal(5, tries.Count(t => t));
-        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => Task.Run(() => new Throttle(store, "burst", 5, 60_000).ForgiveAsync("jon@example.com"))));
+        await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => Task.Run(() => new Throttle(store, "burst", 5, 60_000).ForgiveAsync("jon@example.com", Now))));
         Assert.False(await new Throttle(store, "burst", 5, 60_000).BlockedAsync("jon@example.com", Now));
     }
 }
