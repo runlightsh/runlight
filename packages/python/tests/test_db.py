@@ -40,6 +40,13 @@ def test_round_trip(databases, kind: str) -> None:
     assert db.exclusive(lambda d: 7) == 7
 
 
+def test_deleted_rows_salts_among_them_are_overwritten_in_a_sqlite_file_rather_than_left_in_its_free_space(tmp_path) -> None:
+    db = dbs.sqlite(str(tmp_path / "secure.db"))
+    # 2 is FAST: overwritten wherever that costs no extra writes.
+    assert db.all("PRAGMA secure_delete") == [{"secure_delete": 2}]
+    db.close()
+
+
 def test_mysql_text() -> None:
     assert dbs.mysql_text('SELECT "a" FROM t WHERE x = ? AND y = \'\\\'', ["it's"]) == (
         "SELECT `a` FROM t WHERE x = 'it\\'s' AND y = '\\\\'".replace("x = 'it\\'s'", "x = 'it\\'s'")
