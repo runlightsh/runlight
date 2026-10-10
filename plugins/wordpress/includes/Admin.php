@@ -19,6 +19,8 @@ final class Admin {
 		add_action( 'admin_menu', array( self::class, 'menu' ) );
 		add_action( 'admin_init', array( self::class, 'register' ) );
 		add_action( 'admin_enqueue_scripts', array( Dashboard::class, 'scripts' ) );
+		add_action( 'admin_enqueue_scripts', array( self::class, 'scripts' ) );
+		add_action( 'wp_ajax_runlight_check', array( self::class, 'ajax_check' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( RUNLIGHT_PLUGIN_FILE ), array( self::class, 'action_links' ) );
 	}
 
@@ -69,22 +71,88 @@ final class Admin {
 		return array( true, sprintf( /* translators: %s: the version */ __( 'Connected to Runlight %s.', 'runlight' ), (string) ( $body['version'] ?? '' ) ) );
 	}
 
+	/**
+	 * The check, asked for by the settings page once it has loaded, so a slow
+	 * or missing Runlight never holds the page up. Only the saved address is
+	 * checked, never one the request names.
+	 */
+	public static function ajax_check(): void {
+		check_ajax_referer( 'runlight_check' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( null, 403 );
+		}
+		$address = Settings::get()['address'];
+		if ( '' === $address ) {
+			wp_send_json_success( null );
+		}
+		list( $ok, $message ) = self::check( $address );
+		wp_send_json_success(
+			array(
+				'ok'      => $ok,
+				'message' => $message,
+			)
+		);
+	}
+
+	/** The settings page's script, which asks for the check and shows its answer. */
+	public static function scripts( string $hook ): void {
+		if ( 'settings_page_' . self::PAGE !== $hook ) {
+			return;
+		}
+		$config = array(
+			'url'       => admin_url( 'admin-ajax.php' ),
+			'nonce'     => wp_create_nonce( 'runlight_check' ),
+			'dashboard' => Settings::get()['address'] . '/',
+			'open'      => __( 'Open the dashboard', 'runlight' ),
+			'failed'    => __( 'Could not check your Runlight from here.', 'runlight' ),
+		);
+		wp_register_script( 'runlight-settings', false, array(), RUNLIGHT_PLUGIN_VERSION, true );
+		wp_enqueue_script( 'runlight-settings' );
+		wp_add_inline_script( 'runlight-settings', 'var runlightCheck = ' . wp_json_encode( $config ) . ';' . self::SCRIPT );
+	}
+
+	private const SCRIPT = <<<'JS'
+(function () {
+  var status = document.getElementById("runlight-status");
+  if (!status) return;
+  var line = status.firstElementChild;
+  function failed() {
+    status.className = "notice notice-error inline";
+    line.textContent = runlightCheck.failed;
+  }
+  var body = new URLSearchParams({ action: "runlight_check", _ajax_nonce: runlightCheck.nonce });
+  fetch(runlightCheck.url, { method: "POST", credentials: "same-origin", body: body })
+    .then(function (response) { return response.json(); })
+    .then(function (answer) {
+      if (!answer || !answer.success) return failed();
+      var result = answer.data;
+      if (!result) { status.remove(); return; }
+      status.className = "notice inline " + (result.ok ? "notice-success" : "notice-error");
+      line.textContent = result.message + " ";
+      if (result.ok) {
+        var link = document.createElement("a");
+        link.href = runlightCheck.dashboard;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = runlightCheck.open;
+        line.appendChild(link);
+      }
+    })
+    .catch(failed);
+})();
+JS;
+
 	public static function page(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
 		$settings = Settings::get();
-		$status   = '' !== $settings['address'] ? self::check( $settings['address'] ) : null;
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Runlight', 'runlight' ); ?></h1>
 			<p><?php esc_html_e( 'Runlight counts visitors without cookies and keeps the numbers in your own database. This plugin adds its script to every page and reports AI agents that read your pages. The numbers live in your Runlight, wherever you run it.', 'runlight' ); ?></p>
-			<?php if ( $status ) : ?>
-				<div class="notice <?php echo $status[0] ? 'notice-success' : 'notice-error'; ?> inline"><p><?php echo esc_html( $status[1] ); ?>
-				<?php if ( $status[0] ) : ?>
-					<a href="<?php echo esc_url( $settings['address'] . '/' ); ?>" target="_blank" rel="noopener"><?php esc_html_e( 'Open the dashboard', 'runlight' ); ?></a>
-				<?php endif; ?>
-				</p></div>
+			<?php if ( '' !== $settings['address'] ) : ?>
+				<div id="runlight-status" class="notice notice-info inline"><p><?php esc_html_e( 'Checking that your Runlight answers…', 'runlight' ); ?></p></div>
 			<?php endif; ?>
 			<form method="post" action="options.php">
 				<?php settings_fields( 'runlight' ); ?>
