@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "monitor"
+
 module Runlight
   # Runlight in an app: the sites it counts, the tracker endpoint's work, short links, email reports, and the
   # scheduled upkeep. A port of the TypeScript SDK's runlight.ts; `Runlight.new(options)` makes one.
@@ -132,6 +134,8 @@ module Runlight
       @remote_seen = {}
       @overrides = {}
       @ready = false
+      # init runs once however many threads ask at once; reentrant, as init may ask for itself.
+      @init_lock = Monitor.new
       @checking = false
       # When planner statistics were last gathered.
       @optimized_at = 0
@@ -275,6 +279,15 @@ module Runlight
     def init
       return if @ready
 
+      @init_lock.synchronize { init_now unless @ready }
+    end
+
+    # Whether init has run, so middleware can leave the app's own requests alone until it has.
+    def ready?
+      @ready
+    end
+
+    private def init_now
       @store.migrate
       # A database that never had its statistics gathered gets them now, before any report is read, rather
       # than at the first scheduled check, which an app may never run.

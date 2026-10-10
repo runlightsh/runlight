@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "monitor"
+
 module Runlight
   module Accounts
     # Accounts: who may sign in, their password hashes, two-factor, invites, and the signed cookie that keeps them
@@ -40,6 +42,7 @@ module Runlight
         @store = store
         @secret = secret
         @ready = false
+        @init_lock = Monitor.new
       end
 
       # A stored role read back; anything unknown reads as a viewer, the least it could be.
@@ -359,6 +362,10 @@ module Runlight
       def init
         return if @ready
 
+        @init_lock.synchronize { init_now unless @ready }
+      end
+
+      def init_now
         # Several processes starting at once create the tables one at a time.
         @store.db.exclusive do
           db = @store.db

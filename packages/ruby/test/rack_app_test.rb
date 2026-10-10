@@ -63,6 +63,18 @@ class RackAppTest < Minitest::Test
     assert_equal "app saw GET /launch ", @app.get("/launch", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI).body
   end
 
+  def test_init_runs_once_however_many_threads_ask_at_once
+    migrations = Queue.new
+    @store.define_singleton_method(:migrate) do |*args|
+      migrations << 1
+      sleep 0.05
+      super(*args)
+    end
+    Array.new(6) { Thread.new { @rl.init } }.each(&:join)
+    assert_equal 1, migrations.size
+    assert @rl.ready?
+  end
+
   # Behind Rack::MethodOverride a form on another page could send POST with _method=DELETE, and a DELETE needs
   # no JSON. It is answered as the POST the browser sent.
   def test_a_method_override_is_answered_as_the_post_the_browser_sent
