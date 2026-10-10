@@ -54,23 +54,32 @@
   errors: settings.getErrors('site'),
 }) }}
 
-{{ forms.autosuggestField({
+{# A key typed in is hidden like a password; one named by an environment variable shows the variable, with suggestions. #}
+{% set observeKey = {
   label: 'Observe key'|t('runlight'),
   instructions: 'Optional. With this site’s key from Runlight’s Settings, Install, Key for CMS plugins, the plugin reports AI agents such as ChatGPT and Claude reading your pages. They run no JavaScript, so the script cannot see them. Use an environment variable, such as `$RUNLIGHT_OBSERVE_KEY`, to keep it out of project config.'|t('runlight'),
   id: 'observeKey',
   name: 'observeKey',
   value: settings.observeKey,
-  suggestEnvVars: true,
-}) }}
+} %}
+{% if settings.observeKey starts with '$' %}
+  {{ forms.autosuggestField(observeKey|merge({ suggestEnvVars: true })) }}
+{% else %}
+  {{ forms.passwordField(observeKey|merge({ autocomplete: 'off' })) }}
+{% endif %}
 
-{{ forms.autosuggestField({
+{% set dashboardKey = {
   label: 'Dashboard key'|t('runlight'),
   instructions: 'Optional. With this site’s key from Runlight’s Settings, Install, Key for the dashboard in your CMS, the Runlight item in the Control Panel shows this site’s numbers right there. The key opens the same read-only view a share link shows, framed only by this Control Panel, and cannot read anything itself. Use an environment variable, such as `$RUNLIGHT_DASHBOARD_KEY`, to keep it out of project config.'|t('runlight'),
   id: 'dashboardKey',
   name: 'dashboardKey',
   value: settings.dashboardKey,
-  suggestEnvVars: true,
-}) }}
+} %}
+{% if settings.dashboardKey starts with '$' %}
+  {{ forms.autosuggestField(dashboardKey|merge({ suggestEnvVars: true })) }}
+{% else %}
+  {{ forms.passwordField(dashboardKey|merge({ autocomplete: 'off' })) }}
+{% endif %}
 
 {{ forms.lightswitchField({
   label: 'Leave out Control Panel users’ visits'|t('runlight'),
