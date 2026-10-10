@@ -149,7 +149,8 @@ class AccountsWeb:
         # for every try still cannot guess on and on. Addresses come from
         # forwarding headers a client can write, so they never stand alone.
         # Each try counts before the password is checked, and a right one is taken back.
-        self.per_address = Throttle(self.store, "address", 10)
+        # Counts by address stay in the process, as TypeScript keeps them, so no address reaches the database.
+        self.per_address = Throttle(self.store, "address", 10, memory=True)
         self.per_account = Throttle(self.store, "account", 50)
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.

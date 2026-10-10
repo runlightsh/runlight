@@ -627,23 +627,32 @@ class Accounts:
 
 class Throttle:
     """Counts failed sign-ins under a key and refuses more than a few in a while.
-    Keys are hashed with a key made on first use, so the counts never hold an
-    address or an email as it was given.
+    Keys are hashed, so the counts never hold an address or an email as it was
+    given.
 
     TypeScript keeps the counts in its process. A Python app often runs several
     worker processes, so here they live in the database's settings, as the PHP
     port keeps them: "throttle:<name>:<id>" holding {count, until}, and the
     hashing key as "throttle-key". Every process of an install then shares the
-    same counts, and the two ports read each other's."""
+    same counts, and the two ports read each other's.
+
+    With `memory`, the counts stay in the process instead, hashed with a key
+    made at start, as TypeScript keeps them. That is for keys holding a client's
+    address: the database never sees them, so a copy of it cannot be used to
+    work out who tried to sign in from where."""
 
     _KEY = "throttle-key"
 
-    def __init__(self, store: SqlStore, name: str, limit: int = 10, window_ms: int = 15 * 60_000) -> None:
+    def __init__(self, store: SqlStore, name: str, limit: int = 10, window_ms: int = 15 * 60_000, memory: bool = False) -> None:
         self.store = store
         self.name = name
         self.limit = limit
         self.window_ms = window_ms
         self._lock = threading.Lock()
+        self._memory: dict[str, dict[str, int]] | None = {} if memory else None
+        self._memory_salt = random_bytes(16)
+        # Counts kept in the settings before they moved into the process are deleted on first use.
+        self._swept = not memory
 
     def _salt(self) -> str:
         saved = self.store.setting(self._KEY)
@@ -656,12 +665,22 @@ class Throttle:
         return made
 
     def _id(self, key: str) -> str:
-        return base64url(hmac("SHA-256", self._salt(), key))[:22]
+        salt: str | bytes = self._memory_salt if self._memory is not None else self._salt()
+        return base64url(hmac("SHA-256", salt, key))[:22]
+
+    def _sweep(self) -> None:
+        if self._swept:
+            return
+        self._swept = True
+        for setting in self.store.settings_starting_with(self._prefix()):
+            self.store.set_setting(setting["key"], None)
 
     def _prefix(self) -> str:
         return f"throttle:{self.name}:"
 
     def _entry(self, id_: str) -> dict[str, int] | None:
+        if self._memory is not None:
+            return self._memory.get(id_)
         saved = self.store.setting(self._prefix() + id_)
         ok, entry = _js.try_loads(saved) if saved is not None else (False, None)
         if not ok or not isinstance(entry, dict):
@@ -669,6 +688,11 @@ class Throttle:
         return {"count": int(_js.number(entry.get("count", 0))), "until": int(_js.number(entry.get("until", 0)))}
 
     def _save(self, id_: str, entry: dict[str, int]) -> None:
+        if self._memory is not None:
+            # Newest last, so the map's order is the order entries were made, as a JavaScript Map keeps it.
+            self._memory.pop(id_, None)
+            self._memory[id_] = entry
+            return
         self.store.set_setting(self._prefix() + id_, _js.dumps(entry))
 
     def _turn(self, id_: str, make: bool, fn: Callable[[], T]) -> T:
@@ -676,6 +700,10 @@ class Throttle:
         room under the limit: one thread at a time in this process, and a transaction holding the entry's row
         against other processes. SQLite's transaction holds the whole file; on Postgres and MySQL the row is
         locked, made first (empty, which reads as expired) when `make` asks and it is not there yet."""
+        if self._memory is not None:
+            self._sweep()
+            with self._lock:
+                return fn()
         db = self.store.db
 
         def step(_db: Any) -> T:
@@ -694,6 +722,12 @@ class Throttle:
         return self._is_blocked(self._id(key), now)
 
     def _is_blocked(self, id_: str, now: int) -> bool:
+        if self._memory is not None:
+            with self._lock:
+                return self._blocked_now(id_, now)
+        return self._blocked_now(id_, now)
+
+    def _blocked_now(self, id_: str, now: int) -> bool:
         entry = self._entry(id_)
         if entry is None or entry["until"] <= now:
             return False
@@ -708,7 +742,7 @@ class Throttle:
         id_ = self._id(key)
 
         def step() -> tuple[bool, bool]:
-            if self._is_blocked(id_, now):
+            if self._blocked_now(id_, now):
                 return False, False
             return True, self._count(id_, now)
 
@@ -725,7 +759,8 @@ class Throttle:
             entry = self._entry(id_)
             if entry is not None and entry["count"] > 0:
                 entry["count"] -= 1
-                self._save(id_, entry)
+                if self._memory is None:
+                    self._save(id_, entry)
 
         self._turn(id_, False, step)
 
@@ -741,7 +776,8 @@ class Throttle:
             self._save(id_, {"count": 1, "until": now + self.window_ms})
             return True
         entry["count"] += 1
-        self._save(id_, entry)
+        if self._memory is None:
+            self._save(id_, entry)
         return False
 
     def _drop(self, key: str, value: str) -> None:
@@ -752,6 +788,10 @@ class Throttle:
         """Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
         have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when a new entry is
         made, since only then can there be more."""
+        if self._memory is not None:
+            with self._lock:
+                self._prune_memory(now)
+            return
         entries = []
         for setting in self.store.settings_starting_with(self._prefix()):
             ok, entry = _js.try_loads(setting["value"])
@@ -774,5 +814,25 @@ class Throttle:
                     self._drop(entry["key"], entry["value"])
                     size -= 1
 
+    def _prune_memory(self, now: int) -> None:
+        failures = self._memory
+        assert failures is not None
+        if len(failures) <= MAX_THROTTLED:
+            return
+        for k in [k for k, v in failures.items() if v["until"] <= now]:
+            del failures[k]
+        for k in [k for k, v in failures.items() if v["count"] < self.limit]:
+            if len(failures) <= MAX_THROTTLED:
+                break
+            del failures[k]
+        for k in list(failures):
+            if len(failures) <= MAX_THROTTLED:
+                break
+            del failures[k]
+
     def clear(self, key: str) -> None:
+        if self._memory is not None:
+            with self._lock:
+                self._memory.pop(self._id(key), None)
+            return
         self.store.set_setting(self._prefix() + self._id(key), None)
