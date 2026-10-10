@@ -28,6 +28,7 @@ public sealed class DbIp
     private readonly Lock _lock = new();
     private string? _loaded;
     private Func<string, JsObject?>? _lookup;
+    private Mmdb? _reader;
 
     /// <param name="dir">The folder the releases live in.</param>
     /// <param name="mode">"city" or "country".</param>
@@ -110,8 +111,16 @@ public sealed class DbIp
             {
                 try
                 {
-                    _lookup = Geo.LookupFrom(Mmdb.Open(file));
+                    var reader = Mmdb.Open(file);
+                    var old = _reader;
+                    _lookup = Geo.LookupFrom(reader);
+                    _reader = reader;
                     _loaded = file;
+                    if (old != null)
+                    {
+                        // Closed once lookups already under way on it have had time to finish.
+                        _ = Task.Delay(TimeSpan.FromSeconds(30)).ContinueWith(_ => old.Dispose(), TaskScheduler.Default);
+                    }
                 }
                 catch (Exception error)
                 {

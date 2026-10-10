@@ -119,42 +119,48 @@ public sealed class Mmdb : IDisposable
         }
         var output = new byte[end - at];
         int filled = 0;
-        lock (_lock)
+        while (at < end)
         {
-            while (at < end)
+            long number = at / Page;
+            byte[]? page;
+            // The lock covers only the kept pages; a page is read from the file outside it, at its own
+            // offset, so lookups on other threads do not wait on each other's reads.
+            lock (_lock)
             {
-                long number = at / Page;
-                if (!_pages.TryGetValue(number, out var page))
+                _pages.TryGetValue(number, out page);
+            }
+            if (page == null)
+            {
+                var buffer = new byte[Page];
+                int read = 0;
+                while (read < Page)
+                {
+                    int n = RandomAccess.Read(_file!.SafeFileHandle, buffer.AsSpan(read), number * Page + read);
+                    if (n == 0)
+                    {
+                        break;
+                    }
+                    read += n;
+                }
+                page = read == Page ? buffer : buffer[..read];
+                lock (_lock)
                 {
                     if (_pages.Count >= PagesKept)
                     {
                         _pages.Clear();
                     }
-                    _file!.Seek(number * Page, SeekOrigin.Begin);
-                    var buffer = new byte[Page];
-                    int read = 0;
-                    while (read < Page)
-                    {
-                        int n = _file.Read(buffer, read, Page - read);
-                        if (n == 0)
-                        {
-                            break;
-                        }
-                        read += n;
-                    }
-                    page = buffer.AsSpan(0, read).ToArray();
                     _pages[number] = page;
                 }
-                int offset = (int)(at - number * Page);
-                int take = (int)Math.Min(page.Length - offset, end - at);
-                if (take <= 0)
-                {
-                    break;
-                }
-                page.AsSpan(offset, take).CopyTo(output.AsSpan(filled));
-                filled += take;
-                at += take;
             }
+            int offset = (int)(at - number * Page);
+            int take = (int)Math.Min(page.Length - offset, end - at);
+            if (take <= 0)
+            {
+                break;
+            }
+            page.AsSpan(offset, take).CopyTo(output.AsSpan(filled));
+            filled += take;
+            at += take;
         }
         return filled == output.Length ? output : output[..filled];
     }
