@@ -568,8 +568,28 @@ impl Routes {
         let Some(site) = site.filter(|s| only.as_ref().is_none_or(|o| &s.id == o)) else {
             return Ok(coded("Unknown site", "unknown_site", 404, None));
         };
+        // A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+        // each visit, with its time and city, since anyone with the link could watch one person's way through the site.
+        let unfeed = |mut live: Value| {
+            if shared.is_some()
+                && let Value::Object(fields) = &mut live
+            {
+                fields.set("recent", Value::Array(vec![]));
+            }
+            live
+        };
         if let Some(remote) = rl.remote(&site.id) {
-            return self.pass_through(&remote, path, url, Some(request)).await;
+            let answer = self.pass_through(&remote, path, url, Some(request)).await?;
+            if path != "/api/realtime" || shared.is_none() || !answer.ok() {
+                return Ok(answer);
+            }
+            return Ok(match answer.json_body() {
+                Ok(live @ Value::Object(_)) => json(&unfeed(live), 200, &[]),
+                _ => {
+                    let host = Url::parse(&remote.url).map(|u| u.host()).unwrap_or_default();
+                    coded(&format!("Could not reach {host}"), "unreachable", 502, Some(&[("host", &host)]))
+                }
+            });
         }
 
         if path == "/api/icon" {
@@ -600,7 +620,7 @@ impl Routes {
         }
 
         if path == "/api/realtime" {
-            return Ok(json(&rl.store().realtime(&site.id, rl.now()).await?, 200, &[]));
+            return Ok(json(&unfeed(rl.store().realtime(&site.id, rl.now()).await?), 200, &[]));
         }
 
         let read = match self.read_query(url, &site).await? {
