@@ -154,6 +154,12 @@ module Runlight
         @now.call
       end
 
+      # The store's tables, settings among them, which the throttles keep their counts in (TypeScript keeps them
+      # in memory), so a fresh install's first sign-in or two-factor change finds them there.
+      def ready
+        @rl.init if @rl.respond_to?(:init)
+      end
+
       def home_origin
         @home&.call
       end
@@ -389,6 +395,7 @@ module Runlight
         end
 
         if path == "/login/code" && method == "POST"
+          ready
           form = Http::SearchParams.new(request.text)
           next_path = safe_next(form.get("next"))
           pending = @accounts.from_pending(form.get("pending") || "", now)
@@ -445,6 +452,7 @@ module Runlight
       end
 
       def login(request, context)
+        ready
         base = @base
         form = Http::SearchParams.new(request.text)
         email = form.get("email") || ""
@@ -507,6 +515,7 @@ module Runlight
         user = signed_in(request)
         return coded("Sign in first", "sign_in", 401) if user.nil?
 
+        ready
         now = self.now
         method = request.method
         # Writes must be JSON, which a form on another page cannot send, even those with no body.
