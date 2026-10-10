@@ -186,8 +186,8 @@ async fn viewer_daily(rl: &Runlight) -> Result<f64, Error> {
 }
 
 /// Counts a question to the assistant, or refuses it: past thirty an hour or two at once for anyone,
-/// and past the owner's daily number for a viewer. Gives the refusal, or None to go ahead.
-async fn ask_turn(routes: &Routes, who: &str, owner: bool) -> Result<Option<Response>, Error> {
+/// and past the owner's daily number for a viewer. Gives the refusal, or the turn to go ahead with.
+async fn ask_turn<'a>(routes: &'a Routes, who: &str, owner: bool) -> Result<Result<Asking<'a>, Response>, Error> {
     let rl = routes.rl();
     let now = rl.now();
     {
@@ -195,7 +195,7 @@ async fn ask_turn(routes: &Routes, who: &str, owner: bool) -> Result<Option<Resp
         let mine = asked.entry(who.to_string()).or_default();
         mine.0.retain(|at| now - at < 3_600_000);
         if mine.0.len() >= 30 || mine.1 >= 2 {
-            return Ok(Some(coded(
+            return Ok(Err(coded(
                 "You have asked a lot in a short time. Wait a little and ask again.",
                 "assistant_soon",
                 429,
@@ -213,7 +213,7 @@ async fn ask_turn(routes: &Routes, who: &str, owner: bool) -> Result<Option<Resp
         let mine = counts.get(who).and_then(Value::as_f64).unwrap_or(0.0);
         if mine >= limit {
             let l = js::format_number(limit);
-            return Ok(Some(coded(
+            return Ok(Err(coded(
                 &format!("Viewers can ask {l} questions a day. Ask again tomorrow."),
                 "assistant_daily",
                 429,
@@ -236,12 +236,21 @@ async fn ask_turn(routes: &Routes, who: &str, owner: bool) -> Result<Option<Resp
     if asked.len() > 1000 {
         asked.retain(|_, v| v.1 > 0 || v.0.iter().any(|at| now - at < 3_600_000));
     }
-    Ok(None)
+    Ok(Ok(Asking { routes, who: who.to_string() }))
 }
 
-fn ask_done(routes: &Routes, who: &str) {
-    if let Some(mine) = routes.0.asked.lock().unwrap_or_else(|e| e.into_inner()).get_mut(who) {
-        mine.1 -= 1;
+/// A question being answered. Let go of, however the answer ends (a request cancelled part way too), it
+/// stops counting against the asker's two at once.
+struct Asking<'a> {
+    routes: &'a Routes,
+    who: String,
+}
+
+impl Drop for Asking<'_> {
+    fn drop(&mut self) {
+        if let Some(mine) = self.routes.0.asked.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&self.who) {
+            mine.1 -= 1;
+        }
     }
 }
 
@@ -439,9 +448,10 @@ pub(crate) async fn assistant_api(
             None => (if owner { "owner" } else { "viewer" }).to_string(),
         };
         let who = who.as_str();
-        if let Some(refusal) = ask_turn(routes, who, owner).await? {
-            return Ok(Some(refusal));
-        }
+        let asking = match ask_turn(routes, who, owner).await? {
+            Ok(asking) => asking,
+            Err(refusal) => return Ok(Some(refusal)),
+        };
         let reader = ApiReader::new(routes, request, url, Some(site.id.clone()));
         let language = body.get("language").map_or_else(|| "undefined".to_string(), js::js_string);
         let context = ChatContext {
@@ -462,7 +472,7 @@ pub(crate) async fn assistant_api(
         };
         let clock = || rl.now();
         let answer = chat(&settings, &messages, &context, &reader, rl.fetcher(), &clock, None).await;
-        ask_done(routes, who);
+        drop(asking);
         return Ok(Some(match answer {
             Ok(a) => json(&a.to_value(), 200, &[]),
             Err(f) => assistant_refused(f, 502)?,
