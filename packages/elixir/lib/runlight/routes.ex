@@ -654,6 +654,10 @@ defmodule Runlight.Routes do
 
   ## Pass-through to a connected install
 
+  # The most a connected install's answer may weigh: a report, and an export or a CSV.
+  @pass_max_bytes 16 * 1024 * 1024
+  @pass_download_max_bytes 256 * 1024 * 1024
+
   # Answers a read for a site counted by another install by asking that install, with its token and its own id for
   # the site, and handing back what it says.
   defp pass_through(routes, remote, path, url, request \\ nil) do
@@ -670,6 +674,7 @@ defmodule Runlight.Routes do
         else: headers
 
     host = Url.host(Url.new(remote["url"]))
+    download = path == "/api/export" or (path == "/api/breakdown" and param(url, "format") == "csv")
 
     fetched =
       Runlight.Safefetch.install_fetch(routes.rl, Url.href(target),
@@ -679,7 +684,9 @@ defmodule Runlight.Routes do
         # An install that answers with a redirect gets no fetch of somewhere else on its behalf.
         redirect: :manual,
         # A long report or an export is worked out in full before the install sends a byte, so reads get two minutes.
-        timeout: if(write, do: 30_000, else: 120_000)
+        timeout: if(write, do: 30_000, else: 120_000),
+        # The answer is held whole before it is passed on, so it has a ceiling, an export's the higher.
+        max_bytes: if(download, do: @pass_download_max_bytes, else: @pass_max_bytes)
       )
 
     case fetched do
@@ -691,8 +698,6 @@ defmodule Runlight.Routes do
 
       {:ok, answer} ->
         # What comes back is shown from this server's origin, so it is never taken as a page.
-        download = path == "/api/export" or (path == "/api/breakdown" and param(url, "format") == "csv")
-
         type =
           cond do
             not download -> "application/json; charset=utf-8"
@@ -1066,7 +1071,11 @@ defmodule Runlight.Routes do
         result.("check_not_public", "is not a public domain name", nil)
       else
         # Only a public address is fetched, whatever the name resolves to now.
-        case Runlight.Safefetch.public_fetch(rl, "https://#{domain}#{Runlight.link_domain_check()}", timeout: 5000) do
+        case Runlight.Safefetch.public_fetch(rl, "https://#{domain}#{Runlight.link_domain_check()}",
+               timeout: 5000,
+               max_bytes: 65_536,
+               truncate: true
+             ) do
           {:ok, answer} ->
             body =
               case Response.json(answer),

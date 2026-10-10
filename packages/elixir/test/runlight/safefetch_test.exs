@@ -136,6 +136,62 @@ defmodule Runlight.SafefetchTest do
     assert hd(FakeFetcher.inits(agent))[:public] == true
   end
 
+  # A server on this machine that answers every request with `head` and then a body without end.
+  defp endless(head, chunked) do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listen)
+    part = :binary.copy("x", 65_536)
+    part = if chunked, do: "10000\r\n" <> part <> "\r\n", else: part
+
+    serve = fn serve ->
+      case :gen_tcp.accept(listen) do
+        {:ok, socket} ->
+          spawn(fn ->
+            {:ok, _} = :gen_tcp.recv(socket, 0, 5000)
+            :ok = :gen_tcp.send(socket, head)
+            Stream.repeatedly(fn -> :gen_tcp.send(socket, part) end) |> Enum.find(&(&1 != :ok))
+          end)
+
+          serve.(serve)
+
+        {:error, _} ->
+          :ok
+      end
+    end
+
+    server = spawn(fn -> serve.(serve) end)
+    :ok = :gen_tcp.controlling_process(listen, server)
+
+    on_exit(fn ->
+      :gen_tcp.close(listen)
+      Process.exit(server, :kill)
+    end)
+
+    "http://127.0.0.1:#{port}/"
+  end
+
+  test "the default fetcher stops reading past max_bytes whatever the status" do
+    for {head, chunked} <- [
+          {"HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\n\r\n", false},
+          {"HTTP/1.1 404 Not Found\r\ntransfer-encoding: chunked\r\n\r\n", true},
+          {"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100000000000\r\n\r\n", false},
+          {"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", false}
+        ],
+        truncate <- [false, true] do
+      url = endless(head, chunked)
+      started = System.monotonic_time(:millisecond)
+      answer = Runlight.Fetch.httpc(url, max_bytes: 100_000, truncate: truncate, timeout: 20_000)
+      took = System.monotonic_time(:millisecond) - started
+      assert took < 10_000, "#{head} took #{took}ms"
+
+      case answer do
+        {:error, :too_long} -> :ok
+        {:ok, %Response{body: body}} -> assert truncate and byte_size(body) <= 100_000, head
+        other -> flunk("#{inspect(head)} answered #{inspect(other)}")
+      end
+    end
+  end
+
   test "an install is fetched only on the public internet with no redirect, or on this machine when code allows it" do
     {fetcher, agent} =
       FakeFetcher.new(fn _, _ -> {:ok, Response.new(nil, 302, [{"location", "https://1.1.1.1/x"}])} end)

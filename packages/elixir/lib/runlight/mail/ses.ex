@@ -118,7 +118,8 @@ defmodule Runlight.Mail.Ses do
       })
       |> Enum.reject(fn {k, _} -> k == "host" end)
 
-    case fetch.(url, method: "POST", headers: headers, body: body, timeout: 20_000) do
+    # Only a refusal's message is read, so no more than one could need.
+    case fetch.(url, method: "POST", headers: headers, body: body, timeout: 20_000, max_bytes: 65_536, truncate: true) do
       {:error, reason} ->
         detail = Runlight.Mail.fetch_message(reason)
 
