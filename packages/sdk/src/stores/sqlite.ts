@@ -18,6 +18,9 @@ export function sqlite(options: SqliteOptions): SqlStore {
       handle.pragma("journal_mode = WAL");
       handle.pragma("synchronous = NORMAL");
       handle.pragma("busy_timeout = 5000");
+      // Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes,
+      // so they do not linger in the file's free space.
+      handle.pragma("secure_delete = FAST");
     }
     return handle;
   };

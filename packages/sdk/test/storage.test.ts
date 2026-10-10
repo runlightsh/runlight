@@ -23,6 +23,13 @@ test("an upgrade that stopped after adding a column but before recording its ver
   await store.close();
 });
 
+test("deleted rows, salts among them, are overwritten in a SQLite file rather than left in its free space", async () => {
+  const store = sqlite({ path: path.join(dir, "secure.db") });
+  // 2 is FAST: overwritten wherever that costs no extra writes.
+  assert.deepEqual(await store.db.all("PRAGMA secure_delete"), [{ secure_delete: 2 }]);
+  await store.db.close?.();
+});
+
 test("a database that can only be read still answers reports", async () => {
   const file = path.join(dir, "readonly.db");
   const now = Date.UTC(2026, 9, 6, 12);
