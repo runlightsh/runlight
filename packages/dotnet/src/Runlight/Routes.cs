@@ -3228,12 +3228,13 @@ public sealed class Routes
             }
             var keys = await store.EventPropKeysAsync(query, evt, cancellationToken).ConfigureAwait(false);
             string? asked = parameters.Get("key");
-            // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
+            // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+            // one asked for, the most used name that has none is shown.
             if (asked != null && !PropertyName.IsMatch(asked))
             {
                 return Coded("Bad property name", "property_bad", 400);
             }
-            string? key = asked ?? (keys.Count > 0 ? keys[0].Str("key") : null);
+            string? key = asked ?? keys.Select(k => k.Str("key")).FirstOrDefault(k => k != null && PropertyName.IsMatch(k));
             double limit = Limit(parameters.Get("limit"), 100);
             var rows = !string.IsNullOrEmpty(key) ? await store.EventPropValuesAsync(query, evt, key, Whole(limit), cancellationToken).ConfigureAwait(false) : [];
             return JsonResponse(new JsObject { ["site"] = siteId, ["range"] = rangeOut, ["event"] = evt, ["keys"] = ToList(keys), ["key"] = key, ["rows"] = ToList(rows) });
