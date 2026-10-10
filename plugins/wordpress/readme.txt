@@ -64,5 +64,10 @@ The plugin talks to one service, the Runlight whose address you enter under Sett
 
 == Changelog ==
 
+= Unreleased =
+* AI agents are reported after the page has been sent, so they never wait on Runlight, and sites in a subfolder report the right address.
+* The settings page checks the Runlight address after it loads.
+* On a network, only network admins can change the Runlight address.
+
 = 0.1.0 =
 * First release: the script, administrators left out, 404s marked, AI agents reported, and the dashboard in wp-admin.

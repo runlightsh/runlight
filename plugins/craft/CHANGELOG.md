@@ -1,5 +1,11 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Typed keys are hidden like passwords in the settings, while keys that name an environment variable still show.
+- The dashboard is framed for the Control Panel's own address, so it works behind a proxy that ends HTTPS.
+
 ## 0.1.0 - 2026-10-10
 
 ### Added
