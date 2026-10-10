@@ -3384,7 +3384,15 @@ defmodule Runlight.Routes do
           route(routes, request, path, url)
         rescue
           error ->
-            Logger.error("Runlight: " <> Exception.format(:error, error, __STACKTRACE__))
+            # What went wrong and where, but never the arguments of the calls on the way there, which hold the
+            # request: its headers and tokens, and the visitor's address.
+            stack =
+              Enum.map(__STACKTRACE__, fn
+                {module, fun, args, location} when is_list(args) -> {module, fun, length(args), location}
+                entry -> entry
+              end)
+
+            Logger.error("Runlight: " <> Exception.format(:error, error, stack))
             coded("Internal error", "internal", 500)
         end
     end

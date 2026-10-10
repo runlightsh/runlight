@@ -151,6 +151,20 @@ defmodule Runlight.Http.Request do
   end
 end
 
+defimpl Inspect, for: Runlight.Http.Request do
+  # Headers carry tokens and cookies, the body a password, the query a token, and remote_address the visitor's
+  # address, so a request inspected into a log line or an error's message shows only its method and path.
+  def inspect(%{method: method, url: url}, _opts) do
+    path =
+      case URI.parse(to_string(url)) do
+        %URI{path: path} when is_binary(path) -> path
+        _ -> "/"
+      end
+
+    "#Runlight.Http.Request<#{method} #{path}>"
+  end
+end
+
 defmodule Runlight.Http.Response do
   @moduledoc """
   An answer, shaped like the Fetch API's Response: a status, headers (a list

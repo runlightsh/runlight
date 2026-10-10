@@ -251,4 +251,18 @@ defmodule Runlight.EdgesTest do
 
     assert length(String.split(said, "trust_proxy: false")) == 2, "said once"
   end
+
+  test "a request inspected into a log line or an error shows only its method and path" do
+    request =
+      Request.new("https://example.com/runlight/api/stats?token=rl_secret",
+        method: "POST",
+        headers: [{"authorization", "Bearer rl_secret"}, {"cookie", "runlight_token=rl_secret"}],
+        body: "password=a+long+passphrase",
+        remote_address: "203.0.113.9"
+      )
+
+    assert inspect(request) == "#Runlight.Http.Request<POST /runlight/api/stats>"
+    said = Exception.message(%MatchError{term: {:ok, request}})
+    refute said =~ "rl_secret" or said =~ "passphrase" or said =~ "203.0.113.9"
+  end
 end
