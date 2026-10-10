@@ -288,8 +288,13 @@ public final class Runlight
 
   /**
    * Locks taken per visitor, so one visitor's pageview and the event right after find one session.
+   * These and the sites lock are ReentrantLocks rather than monitors, since they are held across
+   * database calls, and a virtual thread blocked inside synchronized pins its carrier on JDK 21.
    */
-  private final Object[] turns = new Object[64];
+  private final ReentrantLock[] turns = new ReentrantLock[64];
+
+  /** Taken while the sites, remotes, and overrides are read from the database and replaced. */
+  private final ReentrantLock sitesLock = new ReentrantLock();
 
   public Runlight(Options options) {
     if (options == null || options.store == null) {
@@ -347,7 +352,7 @@ public final class Runlight
             ? options.secret
             : secretFromEnv != null ? secretFromEnv : Env.get("RUNLIGHT_TOKEN");
     for (int i = 0; i < turns.length; i++) {
-      turns[i] = new Object();
+      turns[i] = new ReentrantLock();
     }
   }
 
@@ -635,7 +640,8 @@ public final class Runlight
     if (ready) {
       return;
     }
-    synchronized (this) {
+    sitesLock.lock();
+    try {
       if (ready) {
         return;
       }
@@ -670,6 +676,8 @@ public final class Runlight
         }
       }
       ready = true;
+    } finally {
+      sitesLock.unlock();
     }
   }
 
@@ -993,7 +1001,8 @@ public final class Runlight
       }
     }
     Object thereId = there.get("id");
-    synchronized (this) {
+    sitesLock.lock();
+    try {
       // Connecting the same site again (to allow changes, or with a new token) updates it in
       // place.
       for (Map.Entry<String, Map<String, Object>> e : remotes.entrySet()) {
@@ -1070,6 +1079,8 @@ public final class Runlight
       all.add(site);
       configured = byName(all);
       return site;
+    } finally {
+      sitesLock.unlock();
     }
   }
 
@@ -1108,7 +1119,8 @@ public final class Runlight
       }
       return addRemoteSite(remote);
     }
-    synchronized (this) {
+    sitesLock.lock();
+    try {
       List<String> hostnames = hostnamesFor(input.get("hostnames"), null);
       String name = Js.trim(Js.string(orEmpty(input.get("name"))));
       if (name.isEmpty()) {
@@ -1145,6 +1157,8 @@ public final class Runlight
       all.add(site);
       configured = byName(all);
       return site;
+    } finally {
+      sitesLock.unlock();
     }
   }
 
@@ -1166,7 +1180,8 @@ public final class Runlight
     for (Map<String, Object> row : store.settingsStartingWith("import:umami-visits:" + id + ":")) {
       store.setSetting((String) row.get("key"), null);
     }
-    synchronized (this) {
+    sitesLock.lock();
+    try {
       // A connected install keeps its own data; only the connection goes, and its token there
       // with it.
       Map<String, Object> remote = remotes.get(id);
@@ -1187,6 +1202,8 @@ public final class Runlight
       Map<String, Map<String, Object>> over = new LinkedHashMap<>(overrides);
       over.remove(id);
       overrides = over;
+    } finally {
+      sitesLock.unlock();
     }
   }
 
@@ -1196,59 +1213,64 @@ public final class Runlight
    * changes, hostnames too, go to its row. A key left out of the patch is left alone, as TS's
    * undefined is.
    */
-  public synchronized Map<String, Object> updateSite(String id, Map<String, Object> patch) {
-    init();
-    Map<String, Object> current = null;
-    for (Map<String, Object> site : configured) {
-      if (id(site).equals(id)) {
-        current = site;
-      }
-    }
-    if (current == null) {
-      throw new SettingsError("Unknown site", "unknown_site");
-    }
-    Map<String, Object> next =
-        new LinkedHashMap<>(managedSites ? current : overrides.getOrDefault(id, Map.of()));
-    if (patch.containsKey("name") && patch.get("name") != Json.UNDEFINED) {
-      String name = Js.trim(Js.string(patch.get("name")));
-      if (name.isEmpty() || name.length() > 80) {
-        throw new SettingsError("A site name is 1 to 80 characters", "site_name");
-      }
-      next.put("name", name);
-    }
-    if (patch.containsKey("timezone") && patch.get("timezone") != Json.UNDEFINED) {
-      String timezone = Js.string(patch.get("timezone"));
-      if (!Time.isTimezone(timezone)) {
-        throw new SettingsError(
-            "Unknown timezone \"" + timezone + "\"",
-            "unknown_timezone",
-            Json.object("timezone", timezone));
-      }
-      next.put("timezone", timezone);
-      Map<String, Object> now = site(id);
-      if (now == null || !timezone.equals(now.get("timezone"))) {
-        zoneChanged(id, timezone);
-      }
-    }
-    if (managedSites) {
-      if (patch.containsKey("hostnames")
-          && patch.get("hostnames") != Json.UNDEFINED
-          && !remotes.containsKey(id)) {
-        next.put("hostnames", new ArrayList<Object>(hostnamesFor(patch.get("hostnames"), id)));
-      }
-      store.upsertSite(next, now());
-      List<Map<String, Object>> all = new ArrayList<>();
+  public Map<String, Object> updateSite(String id, Map<String, Object> patch) {
+    sitesLock.lock();
+    try {
+      init();
+      Map<String, Object> current = null;
       for (Map<String, Object> site : configured) {
-        all.add(id(site).equals(id) ? next : site);
+        if (id(site).equals(id)) {
+          current = site;
+        }
       }
-      configured = List.copyOf(all);
+      if (current == null) {
+        throw new SettingsError("Unknown site", "unknown_site");
+      }
+      Map<String, Object> next =
+          new LinkedHashMap<>(managedSites ? current : overrides.getOrDefault(id, Map.of()));
+      if (patch.containsKey("name") && patch.get("name") != Json.UNDEFINED) {
+        String name = Js.trim(Js.string(patch.get("name")));
+        if (name.isEmpty() || name.length() > 80) {
+          throw new SettingsError("A site name is 1 to 80 characters", "site_name");
+        }
+        next.put("name", name);
+      }
+      if (patch.containsKey("timezone") && patch.get("timezone") != Json.UNDEFINED) {
+        String timezone = Js.string(patch.get("timezone"));
+        if (!Time.isTimezone(timezone)) {
+          throw new SettingsError(
+              "Unknown timezone \"" + timezone + "\"",
+              "unknown_timezone",
+              Json.object("timezone", timezone));
+        }
+        next.put("timezone", timezone);
+        Map<String, Object> now = site(id);
+        if (now == null || !timezone.equals(now.get("timezone"))) {
+          zoneChanged(id, timezone);
+        }
+      }
+      if (managedSites) {
+        if (patch.containsKey("hostnames")
+            && patch.get("hostnames") != Json.UNDEFINED
+            && !remotes.containsKey(id)) {
+          next.put("hostnames", new ArrayList<Object>(hostnamesFor(patch.get("hostnames"), id)));
+        }
+        store.upsertSite(next, now());
+        List<Map<String, Object>> all = new ArrayList<>();
+        for (Map<String, Object> site : configured) {
+          all.add(id(site).equals(id) ? next : site);
+        }
+        configured = List.copyOf(all);
+        return site(id);
+      }
+      store.setSiteOverrides(id, next);
+      Map<String, Map<String, Object>> over = new LinkedHashMap<>(overrides);
+      over.put(id, next);
+      overrides = over;
       return site(id);
+    } finally {
+      sitesLock.unlock();
     }
-    store.setSiteOverrides(id, next);
-    Map<String, Map<String, Object>> over = new LinkedHashMap<>(overrides);
-    over.put(id, next);
-    overrides = over;
-    return site(id);
   }
 
   /** How many months of visits a site keeps, or null to keep everything (the default). */
@@ -1896,7 +1918,9 @@ public final class Runlight
       candidates.add(Hash.visitorHash(current.yesterday(), id(site), address, ua));
     }
     String key = id(site) + ":" + today;
-    synchronized (turns[Math.floorMod(key.hashCode(), turns.length)]) {
+    ReentrantLock turn = turns[Math.floorMod(key.hashCode(), turns.length)];
+    turn.lock();
+    try {
       Map<String, Object> open = store.openSession(id(site), candidates, now - SESSION_IDLE_MS);
       if (open != null) {
         return open;
@@ -1933,6 +1957,8 @@ public final class Runlight
       row.put("language", language);
       store.insertSession(row);
       return session;
+    } finally {
+      turn.unlock();
     }
   }
 
@@ -2316,13 +2342,16 @@ public final class Runlight
     // Requests take a current schema version on trust; the scheduled check goes over every table
     // and index.
     store.migrate(true);
-    synchronized (this) {
+    sitesLock.lock();
+    try {
       if (managedSites) {
         configured = List.copyOf(store.sites());
         loadRemotes();
       }
       // A name or timezone changed in the dashboard by another process reaches this one too.
       overrides = store.siteOverrides();
+    } finally {
+      sitesLock.unlock();
     }
     salts.clear();
     Set<String> zones = new LinkedHashSet<>();
