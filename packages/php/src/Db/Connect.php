@@ -28,6 +28,9 @@ final class Connect
             $pdo->exec('PRAGMA journal_mode = WAL');
             $pdo->exec('PRAGMA synchronous = NORMAL');
             $pdo->exec('PRAGMA busy_timeout = 5000');
+            // Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes,
+            // so they do not linger in the file's free space.
+            $pdo->exec('PRAGMA secure_delete = FAST');
             // A database this made is readable by this user alone, and so are the files SQLite keeps beside it.
             if ($new && DIRECTORY_SEPARATOR === '/') {
                 foreach (['', '-wal', '-shm'] as $suffix) {

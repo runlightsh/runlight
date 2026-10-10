@@ -153,6 +153,14 @@ final class MigrateTest extends TestCase
         @rmdir($dir);
     }
 
+    public function testDeletedRowsSaltsAmongThemAreOverwrittenInASqliteFileRatherThanLeftInItsFreeSpace(): void
+    {
+        $store = Stores::sqlite($this->file());
+        // 2 is FAST: overwritten wherever that costs no extra writes.
+        $this->assertSame(2, (int) $store->db->all('PRAGMA secure_delete')[0]['secure_delete']);
+        $store->close();
+    }
+
     public function testADatabaseThatCanOnlyBeReadStillAnswersReports(): void
     {
         $file = $this->file();
