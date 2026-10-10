@@ -173,7 +173,9 @@ final class Web
      * Only a path on this install, so a sign-in can never send someone elsewhere.
      * Browsers drop tabs and newlines from a URL and read a backslash as a slash,
      * so "/\t/evil.example" would leave; anything with those is refused outright,
-     * and what is left must resolve to this origin.
+     * and what is left must resolve to this origin. A path that resolves to one
+     * starting "//", as "/..//evil.example" does, would leave from the Location
+     * header, so that goes home too.
      */
     public function safeNext(?string $value): string
     {
@@ -181,7 +183,11 @@ final class Web
             return $this->homePath;
         }
         $url = Url::parse($value, 'http://runlight.invalid');
-        return $url !== null && $url->origin() === 'http://runlight.invalid' ? $url->pathname . $url->search . $url->hash : $this->homePath;
+        if ($url === null || $url->origin() !== 'http://runlight.invalid') {
+            return $this->homePath;
+        }
+        $path = $url->pathname . $url->search . $url->hash;
+        return !str_starts_with($path, '//') && !str_starts_with($path, '/\\') ? $path : $this->homePath;
     }
 
     /** @return User|null */
