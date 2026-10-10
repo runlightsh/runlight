@@ -34,6 +34,9 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     # Arbitrary but fixed, so every Runlight process takes the same lock to create tables.
     @migration_lock 7_331_906
 
+    # The session's sql_mode as it was, less NO_BACKSLASH_ESCAPES, wherever it sits in the list.
+    @no_backslash_escapes_off "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))"
+
     @doc "A `Runlight.Db` over the repo."
     @spec new(keyword()) :: Db.t()
     def new(opts) do
@@ -69,9 +72,14 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       with_repo(db, fn repo ->
         result =
           case dialect do
-            :sqlite -> repo.query(sql, Enum.map(params, &sqlite_value/1), log: false)
-            :postgres -> repo.query(Db.postgres_text(sql, params), [], log: false)
-            :mysql -> repo.query(Db.mysql_text(sql, params), [], log: false, query_type: :text)
+            :sqlite ->
+              repo.query(sql, Enum.map(params, &sqlite_value/1), log: false)
+
+            :postgres ->
+              repo.query(Db.postgres_text(sql, params), [], log: false)
+
+            :mysql ->
+              mysql_checkout(repo, fn -> repo.query(Db.mysql_text(sql, params), [], log: false, query_type: :text) end)
           end
 
         case result do
@@ -79,6 +87,36 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
           {:error, error} -> raise error
         end
       end)
+    end
+
+    # Values are escaped with backslashes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a quote could
+    # end the value early. Every connection drops that one mode before Runlight's statements run on it, an app's own
+    # repo's too. A pooled connection cannot be told from the next one before a statement runs on it, so the mode is
+    # dropped once for each checkout, which a transaction holds for all of its statements.
+    defp mysql_checkout(repo, fun) do
+      key = {__MODULE__, :mysql_checkout, repo.get_dynamic_repo()}
+
+      if Process.get(key) do
+        fun.()
+      else
+        repo.checkout(
+          fn ->
+            case repo.query(@no_backslash_escapes_off, [], log: false, query_type: :text) do
+              {:ok, _} -> :ok
+              {:error, error} -> raise error
+            end
+
+            Process.put(key, true)
+
+            try do
+              fun.()
+            after
+              Process.delete(key)
+            end
+          end,
+          timeout: :infinity
+        )
+      end
     end
 
     # SQLite keeps a whole number as INTEGER and anything else as REAL, as better-sqlite3 binds them once the
@@ -129,15 +167,12 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
         end
 
         if dialect == :mysql and not repo.in_transaction?() do
-          repo.checkout(
-            fn ->
-              # As Postgres does by default: each statement sees what was committed before it began, and
-              # InnoDB takes no gap locks, so two writers to neighbouring rows do not deadlock.
-              {:ok, _} = repo.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [], log: false, query_type: :text)
-              run_in.()
-            end,
-            timeout: :infinity
-          )
+          mysql_checkout(repo, fn ->
+            # As Postgres does by default: each statement sees what was committed before it began, and
+            # InnoDB takes no gap locks, so two writers to neighbouring rows do not deadlock.
+            {:ok, _} = repo.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [], log: false, query_type: :text)
+            run_in.()
+          end)
         else
           run_in.()
         end
@@ -183,7 +218,8 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
 
     def exclusive(%Db{dialect: :mysql} = db, fun) do
       with_repo(db, fn repo ->
-        repo.checkout(
+        mysql_checkout(
+          repo,
           fn ->
             # One lock per database, so installs sharing a server do not wait on each other. Lock names are 64
             # characters at most.
@@ -206,8 +242,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
             after
               _ = repo.query("DO RELEASE_LOCK(#{name})", [], log: false, query_type: :text)
             end
-          end,
-          timeout: :infinity
+          end
         )
       end)
     end

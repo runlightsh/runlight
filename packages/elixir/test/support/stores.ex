@@ -45,18 +45,19 @@ defmodule Runlight.Test.Stores do
 
   @doc """
   A fresh store of a kind, and a function that drops what it made. The repo
-  is started under the calling process.
+  is started under the calling process, with any options given added to its
+  own (MySQL and MariaDB only).
   """
-  def store(kind, url \\ nil)
+  def store(kind, url \\ nil, repo_opts \\ [])
 
-  def store(:sqlite, _url) do
+  def store(:sqlite, _url, _repo_opts) do
     {:ok, pid} = SqliteRepo.start_link(name: nil, database: ":memory:", pool_size: 1, log: false)
     Process.unlink(pid)
     store = Runlight.Store.ecto(repo: SqliteRepo, dynamic_repo: pid)
     {store, fn -> stop(pid) end}
   end
 
-  def store(:postgres, url) do
+  def store(:postgres, url, _repo_opts) do
     name = "rl_test_" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
     config = parse(url)
     {:ok, admin} = Postgrex.start_link(config)
@@ -75,9 +76,9 @@ defmodule Runlight.Test.Stores do
      end}
   end
 
-  def store(kind, url) when kind in [:mysql, :mariadb] do
+  def store(kind, url, repo_opts) when kind in [:mysql, :mariadb] do
     config = parse(url)
-    {:ok, pid} = MyRepo.start_link([name: nil, pool_size: 2, log: false] ++ config)
+    {:ok, pid} = MyRepo.start_link([name: nil, pool_size: 2, log: false] ++ repo_opts ++ config)
     Process.unlink(pid)
     previous = MyRepo.put_dynamic_repo(pid)
     empty_mysql()
@@ -96,7 +97,7 @@ defmodule Runlight.Test.Stores do
   defp empty_mysql do
     %{rows: rows} =
       MyRepo.query!(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'rl\\\\_%'",
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'rl!_%' ESCAPE '!'",
         [],
         log: false
       )
