@@ -52,13 +52,16 @@ defmodule Runlight.Accounts.Web do
     id = :erlang.unique_integer([:positive])
     table = rl.table
 
-    # Wrong passwords are counted twice. Per account and address, ten tries; per account from anywhere, fifty, so a
-    # caller who invents a new address for every try still cannot guess on and on. Six-digit codes: five wrong tries
-    # an account every fifteen minutes, and five to confirm the first one. A decoy ticket's tries count apart, the
-    # same way, so someone guessing passwords cannot use up the owner's five. Password re-checks in Account: ten.
+    # Wrong passwords are counted three times. Per account and address, ten tries; per account from anywhere, fifty, so
+    # a caller who invents a new address for every try still cannot guess on and on. And per address across every
+    # account, thirty, so one caller trying made-up emails cannot keep the server hashing; a request with no known
+    # address skips that one, since it would hold up everyone at once. Six-digit codes: five wrong tries an account
+    # every fifteen minutes, and five to confirm the first one. A decoy ticket's tries count apart, the same way, so
+    # someone guessing passwords cannot use up the owner's five. Password re-checks in Account: ten.
     throttles = %{
       per_address: Throttle.new(table, {:web, id, :per_address}, 10),
       per_account: Throttle.new(table, {:web, id, :per_account}, 50),
+      per_ip: Throttle.new(table, {:web, id, :per_ip}, 30),
       code_tries: Throttle.new(table, {:web, id, :code_tries}, 5),
       decoy_tries: Throttle.new(table, {:web, id, :decoy_tries}, 5),
       confirm_tries: Throttle.new(table, {:web, id, :confirm_tries}, 5),
@@ -553,60 +556,71 @@ defmodule Runlight.Accounts.Web do
           html(login_page.(%{error: "Too many tries. Wait fifteen minutes and try again.", email: email}), 429)
         end
 
-        if not Throttle.take(web.throttles.per_address, pair, now(web)) do
+        if (ip != "" and not Throttle.take(web.throttles.per_ip, ip, now(web))) or
+             not Throttle.take(web.throttles.per_address, pair, now(web)) do
           too_many.()
         else
-          # A browser that signed in to the account before is never held up by others' failures.
-          known = Accounts.by_email(acc, account)
-          trusted = known != nil and Accounts.trusts_device(acc, read_cookie(request, @device_cookie), known)
-          over = not trusted and not Throttle.take(web.throttles.per_account, account, now(web))
+          try do
+            # A browser that signed in to the account before is never held up by others' failures.
+            known = Accounts.by_email(acc, account)
+            trusted = known != nil and Accounts.trusts_device(acc, read_cookie(request, @device_cookie), known)
+            over = not trusted and not Throttle.take(web.throttles.per_account, account, now(web))
 
-          # Past the account's limit, a right password and a wrong one get the same answer. With two-factor on, both
-          # reach the code step, where a wrong password's ticket never passes. Without it, a right password emails a
-          # sign-in link.
-          if over and not (known != nil and known["twoFactor"]) do
-            if Runlight.mail_settings(web.rl) == nil or home_origin(web) == nil do
-              too_many.()
-            else
-              user = Accounts.sign_in(acc, email, password)
+            # Past the account's limit, a right password and a wrong one get the same answer. With two-factor on, both
+            # reach the code step, where a wrong password's ticket never passes. Without it, a right password emails a
+            # sign-in link.
+            if over and not (known != nil and known["twoFactor"]) do
+              if Runlight.mail_settings(web.rl) == nil or home_origin(web) == nil do
+                too_many.()
+              else
+                user = Accounts.sign_in(acc, email, password)
 
-              if user do
-                # Sent after the answer, so a right password is no slower than a wrong one.
-                State.later(table(web), fn ->
-                  try do
-                    send_link(web, user, next)
-                  rescue
-                    error -> Logger.error("Runlight: could not send a sign-in link #{Exception.message(error)}")
-                  end
-                end)
+                if user do
+                  # Sent after the answer, so a right password is no slower than a wrong one.
+                  State.later(table(web), fn ->
+                    try do
+                      send_link(web, user, next)
+                    rescue
+                      error -> Logger.error("Runlight: could not send a sign-in link #{Exception.message(error)}")
+                    end
+                  end)
+                end
+
+                html(
+                  login_page.(%{
+                    error:
+                      "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
+                    email: email
+                  }),
+                  429
+                )
               end
+            else
+              case Accounts.sign_in(acc, email, password) do
+                nil ->
+                  if over and known,
+                    do: html(Pages.code_page(base, %{pending: Accounts.decoy_for(acc, known, now(web)), next: next})),
+                    else:
+                      html(login_page.(%{error: "That email and password do not match an account.", email: email}), 401)
 
-              html(
-                login_page.(%{
-                  error:
-                    "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
-                  email: email
-                }),
-                429
-              )
+                user ->
+                  Throttle.clear(web.throttles.per_address, pair)
+                  if ip != "", do: Throttle.forgive(web.throttles.per_ip, ip)
+                  if not over and not trusted, do: Throttle.forgive(web.throttles.per_account, account)
+
+                  # With two-factor on, the password only earns the second step.
+                  if user["twoFactor"],
+                    do: html(Pages.code_page(base, %{pending: Accounts.pending_for(acc, user, now(web)), next: next})),
+                    else: signed_in_to(web, request, user, next)
+              end
             end
-          else
-            case Accounts.sign_in(acc, email, password) do
-              nil ->
-                if over and known,
-                  do: html(Pages.code_page(base, %{pending: Accounts.decoy_for(acc, known, now(web)), next: next})),
-                  else:
-                    html(login_page.(%{error: "That email and password do not match an account.", email: email}), 401)
-
-              user ->
-                Throttle.clear(web.throttles.per_address, pair)
-                if not over and not trusted, do: Throttle.forgive(web.throttles.per_account, account)
-
-                # With two-factor on, the password only earns the second step.
-                if user["twoFactor"],
-                  do: html(Pages.code_page(base, %{pending: Accounts.pending_for(acc, user, now(web)), next: next})),
-                  else: signed_in_to(web, request, user, next)
-            end
+          rescue
+            # Too many password checks already waiting, so this one was never run: try again in a moment.
+            error in AccountError ->
+              if error.code == "busy",
+                do:
+                  Response.new(login_page.(%{error: error.message, email: email}), 503, @html ++ [{"retry-after", "5"}]),
+                else: reraise(error, __STACKTRACE__)
           end
         end
 
@@ -703,12 +717,22 @@ defmodule Runlight.Accounts.Web do
         not Throttle.take(web.throttles.rechecks, user["id"], now(web)) ->
           coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429)
 
-        Accounts.sign_in(acc, user["email"], input |> JS.prop(name) |> JS.nullish("") |> JS.string()) == nil ->
-          coded(message, code, 400)
-
         true ->
-          Throttle.forgive(web.throttles.rechecks, user["id"])
-          nil
+          password = input |> JS.prop(name) |> JS.nullish("") |> JS.string()
+
+          try do
+            if Accounts.sign_in(acc, user["email"], password) == nil do
+              coded(message, code, 400)
+            else
+              Throttle.forgive(web.throttles.rechecks, user["id"])
+              nil
+            end
+          rescue
+            error in AccountError ->
+              if error.code == "busy",
+                do: coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503),
+                else: reraise(error, __STACKTRACE__)
+          end
       end
     end
 
