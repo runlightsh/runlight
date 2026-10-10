@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from runlight import Runlight, _js
+from runlight import OPEN, Runlight, _js
 from runlight.http import Request, Response, SearchParams, Url
 from runlight.store import Stores
 from support.databases import kinds
@@ -102,7 +102,7 @@ def test_in_development_or_left_open_the_first_account_needs_no_proof_in_product
     assert dev.handle(form("/runlight/setup", signup)).status == 303
 
     os.environ["NODE_ENV"] = "production"
-    opened = Runlight({"store": fresh(databases, "sqlite")}).routes({"token": None, "accounts": True})
+    opened = Runlight({"store": fresh(databases, "sqlite")}).routes({"token": OPEN, "accounts": True})
     assert opened.handle(req("/runlight/setup")).status == 200, "token: None leaves setup open, as it leaves everything"
     prod = Runlight({"store": fresh(databases, "sqlite"), "secret": "k" * 64}).routes({"accounts": True})
     shut = prod.handle(req("/runlight/setup"))
