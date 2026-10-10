@@ -199,14 +199,14 @@ final class Web
         }
         $decoded = Js::decodeURIComponent($value);
         if ($decoded === null) {
-            // decodeURIComponent throws a URIError here in TypeScript.
-            throw new \InvalidArgumentException('URI malformed');
+            return null;
         }
         return $this->accounts->fromSession($decoded, $this->now());
     }
 
     private function dropTokensOf(string $id): void
     {
+        // A cookie that is not valid percent-encoding is nobody's session, never an error.
         foreach ($this->store->settingsStartingWith(self::MADE_BY) as ['key' => $key, 'value' => $value]) {
             if ($value !== $id) {
                 continue;
