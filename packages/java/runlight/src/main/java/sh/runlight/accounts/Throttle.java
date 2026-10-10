@@ -41,6 +41,7 @@ public final class Throttle {
   private final String name;
   private final long limit;
   private final long windowMs;
+  private volatile boolean migrated;
 
   /** Ten tries in fifteen minutes. */
   public Throttle(SqlStore store, String name) {
@@ -59,6 +60,12 @@ public final class Throttle {
   }
 
   private String salt() {
+    // The counts live in the settings table, which a request that reached no other route has not
+    // made yet.
+    if (!migrated) {
+      store.migrate();
+      migrated = true;
+    }
     String saved = store.setting(KEY);
     if (saved != null && !saved.isEmpty()) {
       return saved;
