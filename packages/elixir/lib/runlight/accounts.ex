@@ -41,6 +41,9 @@ defmodule Runlight.Accounts do
 
   @roles ["owner", "admin", "member", "viewer"]
   @step_ms 30_000
+  # Password checks run at once, per instance, and the most that may wait for one.
+  @checking 4
+  @waiting 64
 
   @doc "Accounts in an instance's database, signing with `secret`."
   @spec new(Runlight.t(), String.t()) :: t()
@@ -593,16 +596,86 @@ defmodule Runlight.Accounts do
     end)
   end
 
-  @doc "The account for an email and password, or nil. Takes the same time either way."
+  @doc """
+  The account for an email and password, or nil. Takes the same time either
+  way. Only a few checks run at once; with too many waiting it raises an
+  AccountError coded "busy".
+  """
   def sign_in(acc, email, password) do
     case by_email(acc, email) do
       nil ->
-        Crypto.check_password(password, decoy(acc))
+        hash = decoy(acc)
+        slot(acc, fn -> Crypto.check_password(password, hash) end)
         nil
 
       user ->
-        if Crypto.check_password(password, user["hash"]), do: user
+        if slot(acc, fn -> Crypto.check_password(password, user["hash"]) end), do: user
     end
+  end
+
+  # Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core. Past the
+  # queue's length it refuses at once. A slot or a place in the queue is held under the process's pid, so one that
+  # dies holding it gives it back.
+  defp slot(acc, fun) do
+    table = acc.rl.table
+    me = self()
+
+    key =
+      free_slot(table, me) ||
+        (
+          if waiting(table) >= @waiting,
+            do: refuse("Runlight is busy checking other sign-ins. Try again in a moment.", "busy")
+
+          ticket = {:accounts_waiting, make_ref()}
+          State.put(table, ticket, me)
+
+          try do
+            wait_slot(table, me)
+          after
+            State.delete(table, ticket)
+          end
+        )
+
+    try do
+      fun.()
+    after
+      :ets.delete_object(table, {key, me})
+    end
+  end
+
+  defp wait_slot(table, me) do
+    case free_slot(table, me) do
+      nil ->
+        Process.sleep(1)
+        wait_slot(table, me)
+
+      key ->
+        key
+    end
+  end
+
+  defp free_slot(table, me) do
+    Enum.find_value(1..@checking, fn n ->
+      key = {:accounts_checking, n}
+
+      if :ets.insert_new(table, {key, me}) do
+        key
+      else
+        # A check whose process died without letting go leaves its slot to the next.
+        case State.get(table, key) do
+          holder when is_pid(holder) -> unless Process.alive?(holder), do: :ets.delete_object(table, {key, holder})
+          _ -> :ok
+        end
+
+        nil
+      end
+    end)
+  end
+
+  defp waiting(table) do
+    {live, dead} = table |> State.entries(:accounts_waiting) |> Enum.split_with(fn {_, pid} -> Process.alive?(pid) end)
+    Enum.each(dead, &:ets.delete_object(table, &1))
+    length(live)
   end
 
   # A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed.

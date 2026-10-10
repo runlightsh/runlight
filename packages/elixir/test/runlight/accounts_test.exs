@@ -79,6 +79,22 @@ defmodule Runlight.AccountsTest do
     assert Accounts.invite_by_code(acc, from_bo, 17) == nil
   end
 
+  test "only a few password checks run at once, and past a full queue sign-in is busy", %{rl: rl, acc: acc} do
+    Accounts.set_password(acc, "owner@example.com", "a long password", 1)
+    holder = spawn(fn -> Process.sleep(:infinity) end)
+    for n <- 1..4, do: :ets.insert(rl.table, {{:accounts_checking, n}, holder})
+    for _ <- 1..64, do: :ets.insert(rl.table, {{:accounts_waiting, make_ref()}, holder})
+
+    assert_raise AccountError, ~r/busy/, fn -> Accounts.sign_in(acc, "owner@example.com", "a long password") end
+    assert_raise AccountError, ~r/busy/, fn -> Accounts.sign_in(acc, "nobody@example.com", "a long password") end
+
+    # Whatever a process held when it died is given back.
+    ref = Process.monitor(holder)
+    Process.exit(holder, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^holder, :killed}
+    assert Accounts.sign_in(acc, "owner@example.com", "a long password")["email"] == "owner@example.com"
+  end
+
   test "sessions follow the password and two-factor", %{acc: acc} do
     user = Accounts.set_password(acc, "owner@example.com", "a long password", 1)
     now = 1_791_288_000_000
