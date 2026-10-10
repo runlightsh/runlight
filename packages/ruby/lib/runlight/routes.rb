@@ -2185,7 +2185,19 @@ module Runlight
       return coded("Unknown site", "unknown_site", 404) if site.nil? || (!only.nil? && site["id"] != only)
 
       remote = rl.remote(site["id"])
-      return pass_through(remote, path, url, request) unless remote.nil?
+      # A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+      # each visit, with its time and city, since anyone with the link could watch one person's way through the site.
+      unfeed = ->(live) { shared.nil? ? live : live.merge("recent" => []) }
+      unless remote.nil?
+        answer = pass_through(remote, path, url, request)
+        return answer if path != "/api/realtime" || shared.nil? || !answer.ok?
+
+        parsed, live = Js.parse_json(answer.text)
+        return json(unfeed.call(live)) if parsed && live.is_a?(Hash)
+
+        host = Http::Url.new(remote["url"].to_s).host
+        return coded("Could not reach #{host}", "unreachable", 502, { "host" => host })
+      end
 
       if path == "/api/icon"
         host = site["hostnames"][0]
@@ -2202,7 +2214,7 @@ module Runlight
         })
       end
 
-      return json(store.realtime(site["id"], rl.now)) if path == "/api/realtime"
+      return json(unfeed.call(store.realtime(site["id"], rl.now))) if path == "/api/realtime"
 
       read = read_query(url, site)
       return read if read.is_a?(Http::Response)
