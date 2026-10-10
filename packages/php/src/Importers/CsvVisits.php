@@ -72,7 +72,7 @@ final class CsvVisits
     }
 
     /**
-     * A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids.
+     * A row with no visitor is its own visit, keyed by its whole content.
      *
      * @param array<string, string> $row
      */
