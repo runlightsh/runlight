@@ -90,4 +90,20 @@ defmodule Runlight.AccountsTest do
     Throttle.clear(t, "k")
     refute Throttle.blocked?(t, "k", 15 * 60_000)
   end
+
+  test "the throttle keeps at most 10,000 keys, and a flood of new ones leaves a real block", %{rl: rl} do
+    t = Throttle.new(rl.table, :flood, 3)
+    keys = fn -> length(:ets.match_object(rl.table, {{:throttle, :flood, :_}, :_})) end
+    for _ <- 1..3, do: Throttle.fail(t, "real", 0)
+    assert Throttle.blocked?(t, "real", 0)
+    Throttle.fail(t, "gone", 0)
+    Throttle.clear(t, "gone")
+    for n <- 1..10_050, do: Throttle.fail(t, "made-up #{n}", 0)
+    assert keys.() == 10_000
+    assert Throttle.blocked?(t, "real", 0)
+    refute Throttle.blocked?(t, "made-up 1", 0) or Throttle.blocked?(t, "made-up 50", 0)
+    # Expired keys go first, and the count starts again from what is left.
+    for n <- 1..11, do: Throttle.fail(t, "later #{n}", 15 * 60_000)
+    assert keys.() == 11
+  end
 end
