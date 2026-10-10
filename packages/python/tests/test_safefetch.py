@@ -12,7 +12,7 @@ from support.fake_fetcher import FakeFetcher
 
 from runlight.http import FetchError, Response
 from runlight.safefetch import PrivateAddressError, public_address, public_addresses, public_fetch
-from runlight.safefetch import install_address, install_fetch, resolves_privately
+from runlight.safefetch import install_address, install_fetch, metadata_address, metadata_host, resolves_privately
 
 
 def urls(fetcher: FakeFetcher) -> list[str]:
@@ -22,6 +22,20 @@ def urls(fetcher: FakeFetcher) -> list[str]:
 def dns(names: dict[str, list[str]]) -> Callable[[str], list[str]]:
     """A DNS stand-in."""
     return lambda name: names.get(name, [])
+
+
+def test_link_local_and_cloud_metadata_addresses_are_told_apart_from_loopback_and_private_ones():
+    for ip in ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe"]:
+        assert metadata_address(ip) is True, ip
+    for ip in ["127.0.0.1", "::1", "10.0.0.5", "192.168.1.20", "fd00::1", "fd00:ec2::253", "93.184.215.14", "not an address"]:
+        assert metadata_address(ip) is False, ip
+    assert metadata_host("metadata.google.internal") is True
+    assert metadata_host("[fd00:ec2::254]") is True
+    assert metadata_host("169.254.169.254") is True
+    assert metadata_host("localhost") is False, "a model on this computer is fine"
+    assert metadata_host("192.168.1.20") is False
+    assert metadata_host("models.example.com", dns({"models.example.com": ["93.184.215.14", "169.254.169.254"]})) is True, "any address it resolves to"
+    assert metadata_host("nowhere.example.com", dns({})) is False, "a name that does not resolve is let through"
 
 
 def hops(answers: list[Response]) -> FakeFetcher:

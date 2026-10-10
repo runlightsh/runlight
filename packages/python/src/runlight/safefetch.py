@@ -120,6 +120,48 @@ def public_address(ip: str) -> bool:
     return True
 
 
+# Names clouds give their metadata services.
+METADATA_NAMES = {"metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal"}
+
+
+def metadata_address(ip: str) -> bool:
+    """Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service (fd00:ec2::254,
+    Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail server is never there,
+    though it may well be on this computer or a private network, so those stay allowed where this is checked."""
+    four = _v4(ip)
+    g = None if four is not None else _v6(ip)
+    inner = four
+    # IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+    if inner is None and g is not None:
+        mapped = all(x == 0 for x in g[:5]) and g[5] in (0xFFFF, 0)
+        nat64 = g[0] == 0x64 and g[1] == 0xFF9B and all(x == 0 for x in g[2:6])
+        if mapped or nat64:
+            inner = [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255]
+    if inner is not None:
+        return (inner[0] == 169 and inner[1] == 254) or inner == [100, 100, 100, 200]
+    if g is None:
+        return False
+    if (g[0] & 0xFFC0) == 0xFE80:
+        return True
+    return g[0] == 0xFD00 and g[1] == 0xEC2 and all(x == 0 for x in g[2:7]) and g[7] == 0x254
+
+
+def metadata_host(host: str, lookup: Lookup | None = None) -> bool:
+    """Whether a host, by its name, its address, or any address its name resolves to now, is link-local or a
+    metadata service. A name that does not resolve here is let through, since the connection then goes nowhere
+    such a check could have stopped. `lookup` stands in for DNS in tests."""
+    name = re.sub(r"\.+\Z", "", _BRACKETS.sub("", host.strip().lower()))
+    if name in METADATA_NAMES or metadata_address(name):
+        return True
+    if _v4(name) is not None or _v6(name) is not None:
+        return False
+    try:
+        addresses = (lookup or _default_lookup)(name)
+    except Exception:
+        return False
+    return any(metadata_address(address) for address in addresses)
+
+
 def lookup(name: str) -> list[str]:
     """Every address a name resolves to, v4 and v6, as getaddrinfo() gives them (the hosts file included). Empty
     when it does not resolve."""
