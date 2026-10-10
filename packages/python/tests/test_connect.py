@@ -109,6 +109,8 @@ def test_a_hub_connects_an_app_through_its_consent_page_for_the_one_site_the_own
     assert [form.get("grant_type"), form.get("code"), form.get("client_id"), form.get("redirect_uri"), form.get("code_verifier")] == [
         "authorization_code", "the-code", "c1", back, pending["verifier"],
     ]  # fmt: skip
+    # Every answer is read no further than a cap, so an install that answers without end never fills memory.
+    assert all(isinstance(r["init"].get("maxBytes"), int) for r in router.requests)
 
     # A code works once.
     refused(lambda: finish_connect(hub, SearchParams({"state": q.get("state") or "", "code": "the-code"})), "expired")

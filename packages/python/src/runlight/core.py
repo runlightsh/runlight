@@ -498,7 +498,14 @@ class Runlight:
         try:
             install_fetch(
                 f"{remote['url']}/api/token",
-                {"method": "DELETE", "headers": {"authorization": f"Bearer {remote['token']}"}, "timeoutMs": 5_000, "local": self.local_installs},
+                {
+                    "method": "DELETE",
+                    "headers": {"authorization": f"Bearer {remote['token']}"},
+                    "timeoutMs": 5_000,
+                    "maxBytes": 65_536,
+                    "truncate": True,
+                    "local": self.local_installs,
+                },
                 self.fetcher,
             )
         except Exception:

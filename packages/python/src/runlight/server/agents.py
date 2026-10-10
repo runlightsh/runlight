@@ -185,6 +185,8 @@ def _send(options: dict[str, Any], fetcher: Fetcher, fetches: list[dict[str, Any
                 "headers": {"authorization": f"Bearer {options['key']}", "content-type": "application/json"},
                 "body": _js.dumps({"fetches": fetches}),
                 "timeoutMs": 30_000,
+                "maxBytes": 65_536,
+                "truncate": True,
             },
         )
     except Exception as error:

@@ -99,7 +99,7 @@ def ses_send(config: dict[str, Any], m: dict[str, Any], from_: str, fetcher: Fet
     })  # fmt: skip
     del headers["host"]
     try:
-        response = (fetcher or UrllibFetcher()).fetch(url.href, {"method": "POST", "headers": headers, "body": body, "timeoutMs": 20_000})
+        response = (fetcher or UrllibFetcher()).fetch(url.href, {"method": "POST", "headers": headers, "body": body, "timeoutMs": 20_000, "maxBytes": 65_536, "truncate": True})
     except FetchError as error:
         raise MailError(f"Could not reach Amazon SES: {error}", "mail_unreachable", {"host": "Amazon SES", "detail": str(error)}) from None
     if not response.ok:

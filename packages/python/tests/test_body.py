@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import threading
+import tracemalloc
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -13,9 +15,23 @@ from runlight.body import BodyTooLong, read_json_capped, read_text_capped
 from runlight.http import Response, UrllibFetcher
 
 
+# Fifty megabytes of zeros, sent as about fifty kilobytes of gzip.
+_BOMB = gzip.compress(bytes(50_000_000))
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
+        if parts.path == "/bomb":
+            self.send_response(200)
+            self.send_header("content-encoding", "gzip")
+            self.send_header("content-length", str(len(_BOMB)))
+            self.end_headers()
+            try:
+                self.wfile.write(_BOMB)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         if parts.path == "/bytes":
             n = int(parse_qs(parts.query)["n"][0])
             body = b"a" * n
@@ -87,6 +103,21 @@ def test_the_fetcher_stops_reading_past_max_bytes(port: int) -> None:
     # With truncate, the start comes back.
     assert start.text() == "a" * 100_000
     assert (start.headers.get("content-type") or "").split(";")[0] == "text/html"
+
+
+def test_a_gzip_body_is_inflated_no_further_than_max_bytes(port: int) -> None:
+    fetcher = UrllibFetcher()
+    url = f"http://127.0.0.1:{port}/bomb"
+    tracemalloc.start()
+    try:
+        with pytest.raises(BodyTooLong, match="Body over 100000 bytes"):
+            fetcher.fetch(url, {"maxBytes": 100_000})
+        start = fetcher.fetch(url, {"maxBytes": 100_000, "truncate": True})
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert start.content() == bytes(100_000)
+    assert peak < 5_000_000, "the rest is never inflated"
 
 
 def test_the_fetcher_connects_to_the_pinned_address(port: int) -> None:
