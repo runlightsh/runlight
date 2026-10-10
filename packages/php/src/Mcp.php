@@ -383,6 +383,9 @@ TEXT;
         }
     }
 
+    /** The most messages one batch may hold. PHP answers them one after another, so none run at once. */
+    public const MAX_BATCH = 20;
+
     /**
      * Answers one POST to the MCP endpoint, already authorised.
      *
@@ -395,8 +398,12 @@ TEXT;
         if (!$parsed || !Js::isObject($body)) {
             return new Response(Json::encode(self::rpcError(null, -32700, 'Send a JSON-RPC message')), 400, $headers);
         }
-        // Batches were in the 2025-03-26 protocol; answering them costs nothing.
+        // Batches were in the 2025-03-26 protocol. They come from a short list, so one request cannot start
+        // hundreds of reports.
         if (is_array($body)) {
+            if (count($body) > self::MAX_BATCH) {
+                return new Response(Json::encode(self::rpcError(null, -32600, 'Send at most ' . self::MAX_BATCH . ' messages in a batch')), 400, $headers);
+            }
             $answers = [];
             foreach ($body as $message) {
                 $one = self::answer($message, $readApi);
