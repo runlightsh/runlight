@@ -196,15 +196,16 @@ defmodule Runlight.Routes do
     }
   end
 
-  @doc "Whether the app runs in development: NODE_ENV or RUNLIGHT_ENV is \"development\", or Mix runs in :dev."
+  @doc """
+  Whether the app says it runs in development: NODE_ENV or RUNLIGHT_ENV is
+  "development". Mix's environment is not asked, since `mix phx.server` on a
+  server with MIX_ENV unset runs in :dev too, and would leave the dashboard
+  open.
+  """
   @spec development?() :: boolean()
   def development? do
-    Runlight.env("NODE_ENV") == "development" or Runlight.env("RUNLIGHT_ENV") == "development" or mix_dev?()
+    Runlight.env("NODE_ENV") == "development" or Runlight.env("RUNLIGHT_ENV") == "development"
   end
-
-  # Mix is not loaded in a release, so it is called through apply.
-  # credo:disable-for-next-line Credo.Check.Refactor.Apply
-  defp mix_dev?, do: Code.ensure_loaded?(Mix) and apply(Mix, :env, []) == :dev
 
   defp normalise_base(path) do
     trimmed = "/" <> String.replace(path, ~r/^\/+|\/+$/, "")
