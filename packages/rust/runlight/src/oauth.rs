@@ -532,11 +532,8 @@ async fn token(host: &dyn OAuthHost, request: &Request) -> Result<Response, Erro
         return Ok(oauth_error("unsupported_grant_type", "Only authorization_code is supported", 400));
     }
     let key = format!("oauth-code:{}", sha256(form.get("code").unwrap_or("")));
-    let stored = store.setting(&key).await?;
-    // A code works once: it is gone before anything else is checked.
-    if stored.as_deref().is_some_and(|s| !s.is_empty()) {
-        store.set_setting(&key, None).await?;
-    }
+    // A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+    let stored = store.take_setting(&key).await?;
     let grant = match stored.filter(|s| !s.is_empty()) {
         Some(text) => Some(parse(&text)?),
         None => None,

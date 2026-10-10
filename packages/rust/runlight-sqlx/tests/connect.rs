@@ -164,6 +164,19 @@ async fn a_hub_connects_an_app_through_its_consent_page_for_the_one_site_the_own
 }
 
 #[tokio::test]
+async fn a_consent_that_comes_back_twice_at_once_connects_once() {
+    let now = Arc::new(AtomicI64::new(START));
+    let hub = hub(default_install(), now, true).await;
+    let back = "http://localhost:4900/runlight/api/sites/connect/done";
+    let consent = Url::parse(&start_connect(&hub, Some(&Value::from(APP)), back, "").await.unwrap()).unwrap();
+    let state = consent.search_params().get("state").unwrap().to_string();
+    let form = params(&[("state", &state), ("code", "the-code")]);
+    let (a, b) = tokio::join!(finish_connect(&hub, &form), finish_connect(&hub, &form));
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1, "{a:?} {b:?}");
+    refused(if a.is_ok() { b } else { a }, "expired");
+}
+
+#[tokio::test]
 async fn what_went_wrong_comes_back_as_a_code() {
     let now = Arc::new(AtomicI64::new(START));
     let hub = hub(default_install(), now.clone(), true).await;

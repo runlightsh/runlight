@@ -239,15 +239,12 @@ pub async fn finish_connect(runlight: &Runlight, params: &SearchParams) -> Resul
     let store = runlight.store();
     let state = params.get("state").unwrap_or("");
     let key = format!("connect:{state}");
+    // Each attempt works once, even when it comes back twice at once.
     let stored = if test(js_re!(r"^[a-f0-9]{32}$"), state) {
-        store.setting(&key).await?.filter(|s| !s.is_empty())
+        store.take_setting(&key).await?.filter(|s| !s.is_empty())
     } else {
         None
     };
-    // Each attempt works once.
-    if stored.is_some() {
-        store.set_setting(&key, None).await?;
-    }
     let Some(pending) = stored.and_then(|text| pending_from(&text, runlight.now())) else {
         return Err(refuse("That connection took too long or was already used. Start again.", "expired", &[]));
     };
