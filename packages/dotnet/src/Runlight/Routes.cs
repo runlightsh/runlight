@@ -152,6 +152,9 @@ public sealed class Routes
     /// <summary>Questions to the assistant being answered now, per person, in this process.</summary>
     private readonly Dictionary<string, int> _open = new(StringComparer.Ordinal);
 
+    /// <summary>Questions to the assistant are counted one at a time, so a burst cannot all read the same counts.</summary>
+    private readonly SemaphoreSlim _asking = new(1, 1);
+
     /// <summary>The tracker per site, rebuilt when goals change.</summary>
     private readonly Dictionary<string, TrackerScript> _trackers = new(StringComparer.Ordinal);
 
@@ -1782,7 +1785,20 @@ public sealed class Routes
     /// The hour's questions are kept in the install's settings, so every process counts them;
     /// how many are being answered at once is counted in this process, where a request runs to its end.
     /// </summary>
-    private async Task<object> AskTurnAsync(string who, bool owner, CancellationToken cancellationToken)
+    internal async Task<object> AskTurnAsync(string who, bool owner, CancellationToken cancellationToken = default)
+    {
+        await _asking.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await CountTurnAsync(who, owner, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _asking.Release();
+        }
+    }
+
+    private async Task<object> CountTurnAsync(string who, bool owner, CancellationToken cancellationToken)
     {
         long now = _rl.Now();
         string hourKey = "assistant-hour:" + who;
