@@ -2316,10 +2316,12 @@ module Runlight
 
         keys = store.event_prop_keys(query, event)
         asked = params.get("key")
-        # A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-        return coded("Bad property name", "property_bad", 400) if !asked.nil? && !asked.match?(/\A[^"\\]{1,64}\z/)
+        # A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+        # one asked for, the most used name that has none is shown.
+        safe = ->(name) { name.match?(/\A[^"\\]{1,64}\z/) }
+        return coded("Bad property name", "property_bad", 400) if !asked.nil? && !safe.call(asked)
 
-        key = asked || keys.first&.[]("key")
+        key = asked || keys.find { |k| safe.call(k["key"].to_s) }&.[]("key")
         count = limit(params.get("limit"), 100)
         rows = !key.nil? && key != "" ? store.event_prop_values(query, event, key, whole(count)) : []
         return json({ "site" => site["id"], "range" => range_out, "event" => event, "keys" => keys, "key" => key, "rows" => rows })
