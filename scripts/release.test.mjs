@@ -8,7 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
-import { drupalVersion, minorOf, planEdits, PUBLISH, tableProblems, UNPUBLISHED, UNVERSIONED, VERSIONED } from "./release.mjs";
+import { drupalVersion, minorOf, planEdits, PUBLISH, tableProblems, UNPUBLISHED, untrackedGenerated, UNVERSIONED, VERSIONED } from "./release.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const readRepo = (file) => readFileSync(path.join(ROOT, file), "utf8");
@@ -89,6 +89,12 @@ test("drupal.org's version drops a prerelease's dot, and has none for other prer
   assert.equal(drupalVersion("1.2.0-alpha.10"), "1.2.0-alpha10");
   assert.equal(drupalVersion("1.2.0-preview.1"), null);
   assert.equal(drupalVersion("1.2.0-beta"), null);
+});
+
+test("new files under a regenerated folder are caught, and other untracked files are not", () => {
+  const folders = ["packages/php/assets", "packages/go/internal/assets"];
+  const untracked = ["packages/php/assets/new.js", "packages/go/internal/assets/x/y.json", "packages/php/assets-old/z", "notes.txt"];
+  assert.deepEqual(untrackedGenerated(untracked, folders), ["packages/php/assets/new.js", "packages/go/internal/assets/x/y.json"]);
 });
 
 test("a file out of step is refused", () => {
