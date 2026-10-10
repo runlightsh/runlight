@@ -202,14 +202,15 @@ defmodule Runlight do
   @doc "The instance started under `name` in a supervision tree."
   @spec instance(atom()) :: t()
   def instance(name \\ __MODULE__) do
-    case :persistent_term.get({__MODULE__, name}, nil) do
-      nil ->
-        raise ArgumentError,
-              "Runlight: no instance named #{inspect(name)} is running; start {Runlight, opts} in your supervision tree"
+    rl = :persistent_term.get({__MODULE__, name}, nil)
 
-      rl ->
-        rl
+    # One whose process was killed outright, which left it no time to forget the instance, is not running either.
+    if rl == nil or :ets.info(rl.table, :owner) == :undefined do
+      raise ArgumentError,
+            "Runlight: no instance named #{inspect(name)} is running; start {Runlight, opts} in your supervision tree"
     end
+
+    rl
   end
 
   defp site_row(options, index) do
