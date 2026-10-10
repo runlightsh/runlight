@@ -34,6 +34,43 @@ class SafefetchTest {
   }
 
   @Test
+  void linkLocalAndCloudMetadataAddressesAreToldApartFromLoopbackAndPrivateOnes() {
+    for (String ip :
+        List.of(
+            "169.254.169.254",
+            "169.254.0.1",
+            "100.100.100.200",
+            "fe80::1",
+            "fe80::a9fe:a9fe",
+            "fd00:ec2::254",
+            "::ffff:169.254.169.254",
+            "::ffff:a9fe:a9fe",
+            "64:ff9b::a9fe:a9fe")) {
+      assertTrue(Safefetch.metadataAddress(ip), ip);
+    }
+    for (String ip :
+        List.of(
+            "127.0.0.1",
+            "::1",
+            "10.0.0.5",
+            "192.168.1.20",
+            "fd00::1",
+            "fd00:ec2::253",
+            "93.184.215.14",
+            "not an address")) {
+      assertFalse(Safefetch.metadataAddress(ip), ip);
+    }
+    assertTrue(Safefetch.metadataHost("metadata.google.internal", null));
+    assertTrue(Safefetch.metadataHost("[fd00:ec2::254]", null));
+    assertTrue(Safefetch.metadataHost("169.254.169.254", null));
+    assertFalse(Safefetch.metadataHost("localhost", null), "a model on this computer is fine");
+    assertFalse(Safefetch.metadataHost("192.168.1.20", null));
+    assertTrue(
+        Safefetch.metadataHost("sneaky.example", name -> List.of("93.184.215.14", "169.254.1.1")),
+        "any address the name gives");
+  }
+
+  @Test
   void onlyAddressesOnThePublicInternetCountAsPublic() {
     for (String ip :
         List.of("93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e")) {

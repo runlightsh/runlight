@@ -1,6 +1,7 @@
 package sh.runlight.mail;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -422,6 +423,42 @@ class MailTest {
     thread.setDaemon(true);
     thread.start();
     return server;
+  }
+
+  @Test
+  void smtpNeverALinkLocalOrMetadataAddressAndSomethingNotAMailServerIsNotQuoted()
+      throws Exception {
+    for (String host : List.of("169.254.169.254", "[fd00:ec2::254]")) {
+      MailError refused =
+          assertThrows(
+              MailError.class,
+              () ->
+                  Smtp.send(
+                      config("service", "smtp", "host", host, "port", "25", "security", "none"),
+                      message(),
+                      "reports@example.com"));
+      assertEquals("address_refused", refused.code(), host);
+    }
+    try (ServerSocket server =
+        sayAndHangUp(
+            "HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n"
+                .getBytes(StandardCharsets.US_ASCII))) {
+      MailError odd =
+          assertThrows(
+              MailError.class,
+              () ->
+                  Smtp.send(
+                      config(
+                          "service", "smtp",
+                          "host", "127.0.0.1",
+                          "port", Integer.toString(server.getLocalPort()),
+                          "security", "none"),
+                      message(),
+                      "reports@example.com"));
+      assertTrue(
+          odd.getMessage().contains("did not answer as a mail server does"), odd.getMessage());
+      assertFalse(odd.getMessage().matches("(?s).*(internal|HTTP).*"), odd.getMessage());
+    }
   }
 
   @Test

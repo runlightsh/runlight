@@ -511,6 +511,16 @@ public final class Runlight
       config.put("fromName", fromName);
     }
     Transports.checkConfig(config);
+    Object host = config.get("host");
+    if ("smtp".equals(config.get("service"))
+        && host instanceof String h
+        && !h.isEmpty()
+        && Safefetch.metadataHost(h, fetcher::lookup)) {
+      throw new MailError(
+          h + " is a link-local or cloud metadata address, which Runlight never connects to",
+          "address_refused",
+          Json.object("host", h));
+    }
     store.setSetting("mail", Secret.seal(Json.stringify(config), secret));
   }
 
@@ -1479,6 +1489,13 @@ public final class Runlight
           || (!parsed.protocol.equals("https:") && !parsed.protocol.equals("http:"))) {
         throw new SettingsError(
             "Enter the service's address, starting with https://", "assistant_address_bad");
+      }
+      if (Safefetch.metadataHost(parsed.hostname, fetcher::lookup)) {
+        throw new SettingsError(
+            parsed.hostname
+                + " is a link-local or cloud metadata address, which Runlight never connects to",
+            "address_refused",
+            Json.object("host", parsed.hostname));
       }
     }
     String providerBase = (String) provider.get("baseUrl");

@@ -2,6 +2,7 @@ package sh.runlight.mail;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -20,6 +21,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import sh.runlight.Js;
 import sh.runlight.Json;
+import sh.runlight.Safefetch;
 
 /**
  * One SMTP connection for {@link Smtp#send}: the socket, the replies read from it (multi-line
@@ -82,26 +84,59 @@ public final class SmtpSession {
     return (int) Math.max(1, Math.min(ms, Integer.MAX_VALUE));
   }
 
+  /** The server as host:port. */
+  public String address() {
+    return host + ":" + port;
+  }
+
+  private MailError refused() {
+    return new MailError(
+        "SMTP: "
+            + host
+            + " is a link-local or cloud metadata address, which Runlight never connects to",
+        "address_refused",
+        Json.object("host", host));
+  }
+
+  /**
+   * Connects to the server. It may be on this computer or a private network, but never at a
+   * link-local or cloud metadata address. The check runs on the address the connection uses, so a
+   * name cannot answer differently later.
+   */
   public void connect(boolean secure, long timeoutMs) {
     long wait = Math.min(timeoutMs, left());
     if (wait <= 0) {
       throw late();
     }
+    if (Safefetch.metadataAddress(host.replaceAll("^\\[|\\]\\z", ""))) {
+      throw refused();
+    }
     Socket candidate = new Socket();
     try {
-      candidate.connect(new InetSocketAddress(host, port), millis(wait));
+      InetAddress[] addresses = InetAddress.getAllByName(host);
+      for (InetAddress address : addresses) {
+        String text = address.getHostAddress();
+        int scope = text.indexOf('%');
+        if (Safefetch.metadataAddress(scope < 0 ? text : text.substring(0, scope))) {
+          throw refused();
+        }
+      }
+      candidate.connect(new InetSocketAddress(addresses[0], port), millis(wait));
       socket = candidate;
       if (secure) {
         socket = secure(socket);
       }
       in = socket.getInputStream();
-    } catch (IOException e) {
+    } catch (IOException | MailError e) {
       try {
         candidate.close();
       } catch (IOException ignored) {
         // Already gone.
       }
       socket = null;
+      if (e instanceof MailError refusal) {
+        throw refusal;
+      }
       if (left() <= 0) {
         throw late();
       }

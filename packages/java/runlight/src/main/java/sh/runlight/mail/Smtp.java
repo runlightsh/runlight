@@ -173,6 +173,13 @@ public final class Smtp {
 
   private static Map<String, Object> expect(SmtpSession s, List<Long> codes, String what) {
     Map<String, Object> reply = s.next(REPLY_TIMEOUT_MS, false);
+    // Something that is not a mail server gets no more than that said, so its own words are never
+    // passed on.
+    double number = Js.toNumber(reply.get("code"));
+    if (!(number >= 200 && number <= 599)) {
+      throw new MailError(
+          "SMTP " + what + ": " + s.address() + " did not answer as a mail server does");
+    }
     if (!(reply.get("code") instanceof Long code && codes.contains(code))) {
       throw new MailError(
           Js.slice(
