@@ -7,6 +7,7 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -38,6 +39,15 @@ public final class Safefetch {
       Pattern.compile("^http://(localhost|127\\.0\\.0\\.1)(:\\d+)?(/|\\z)");
 
   private static final Pattern HTTPS_ADDRESS = Pattern.compile("^https://[^/]+");
+
+  /** Names clouds give their metadata services. */
+  private static final Set<String> METADATA_NAMES =
+      Set.of(
+          "metadata",
+          "metadata.google.internal",
+          "metadata.goog",
+          "instance-data",
+          "instance-data.ec2.internal");
 
   private static int[] v4(String text) {
     String[] parts = text.split("\\.", -1);
@@ -173,6 +183,80 @@ public final class Safefetch {
       return false;
     }
     return !(g[0] == 0x100 && zero(g, 1, 4));
+  }
+
+  /**
+   * Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service
+   * (fd00:ec2::254, Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a
+   * mail server is never there, though it may well be on this computer or a private network, so
+   * those stay allowed where this is checked.
+   */
+  public static boolean metadataAddress(String ip) {
+    int[] four = v4(ip);
+    int[] g = four != null ? null : v6(ip);
+    // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is
+    // read as IPv4.
+    int[] inner = four;
+    if (inner == null
+        && g != null
+        && ((zero(g, 0, 5) && (g[5] == 0xffff || g[5] == 0))
+            || (g[0] == 0x64 && g[1] == 0xff9b && zero(g, 2, 6)))) {
+      inner = embedded(g[6], g[7]);
+    }
+    if (inner != null) {
+      return (inner[0] == 169 && inner[1] == 254)
+          || (inner[0] == 100 && inner[1] == 100 && inner[2] == 100 && inner[3] == 200);
+    }
+    if (g == null) {
+      return false;
+    }
+    if ((g[0] & 0xffc0) == 0xfe80) {
+      return true;
+    }
+    return g[0] == 0xfd00 && g[1] == 0xec2 && zero(g, 2, 7) && g[7] == 0x254;
+  }
+
+  /**
+   * Whether a host, by its name, its address, or any address its name resolves to now, is
+   * link-local or a metadata service. A name that does not resolve here is let through, since the
+   * connection then goes nowhere such a check could have stopped.
+   *
+   * @param lookup stands in for DNS in tests; null for {@link #lookup}
+   */
+  public static boolean metadataHost(String host, Function<String, List<String>> lookup) {
+    return metadataChecked(host, lookup) == null;
+  }
+
+  /**
+   * The addresses a host's name resolves to now, once none of them is link-local or a metadata
+   * service, so a connection can be pinned to the ones checked; null when the host is refused. An
+   * address, or a name that does not resolve, gives none.
+   *
+   * @param lookup stands in for DNS in tests; null for {@link #lookup}
+   */
+  public static List<String> metadataChecked(String host, Function<String, List<String>> lookup) {
+    String name =
+        BRACKETS.matcher(Js.lower(Js.trim(host))).replaceAll("").replaceFirst("\\.+\\z", "");
+    if (METADATA_NAMES.contains(name) || metadataAddress(name)) {
+      return null;
+    }
+    if (v4(name) != null || v6(name) != null) {
+      return List.of();
+    }
+    List<String> addresses;
+    try {
+      addresses =
+          (lookup != null ? lookup : (Function<String, List<String>>) Safefetch::lookup)
+              .apply(name);
+    } catch (RuntimeException e) {
+      return List.of();
+    }
+    for (String address : addresses) {
+      if (metadataAddress(address)) {
+        return null;
+      }
+    }
+    return addresses;
   }
 
   /**

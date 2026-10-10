@@ -220,6 +220,58 @@ final class AssistantTest {
   }
 
   @Test
+  void theAssistantNeverCallsALinkLocalOrCloudMetadataAddressThoughOneOnThisComputerIsFine() {
+    RecordingFetcher fetcher =
+        new RecordingFetcher(new Response("{\"data\":[{\"id\":\"a\"}]}", 200));
+    Runlight rl =
+        new Runlight(
+            new Runlight.Options()
+                .store(sh.runlight.store.Stores.sqlite(":memory:"))
+                .secret("s".repeat(64))
+                .fetcher(fetcher));
+    rl.init();
+    for (String baseUrl :
+        List.of(
+            "http://169.254.169.254/latest",
+            "http://[fd00:ec2::254]/v1",
+            "http://metadata.google.internal/v1")) {
+      try {
+        rl.saveAssistantSettings(
+            Json.object("provider", "custom", "model", "m", "baseUrl", baseUrl, "key", ""));
+        fail(baseUrl);
+      } catch (CodedError error) {
+        assertEquals("address_refused", error.code(), baseUrl);
+      }
+    }
+    rl.saveAssistantSettings(
+        Json.object("provider", "ollama", "model", "llama3", "baseUrl", "", "key", ""));
+    try {
+      Assistant.listModels(
+          Json.object("provider", "custom", "baseUrl", "http://169.254.169.254/v1", "key", ""),
+          fetcher);
+      fail("refused");
+    } catch (AssistantError error) {
+      assertEquals("address_refused", error.code());
+    }
+    // A name is checked by what it resolves to, and the request goes to the addresses checked.
+    fetcher.dns = name -> List.of("169.254.169.254");
+    try {
+      Assistant.listModels(
+          Json.object("provider", "custom", "baseUrl", "http://models.example/v1", "key", ""),
+          fetcher);
+      fail("refused by its address");
+    } catch (AssistantError error) {
+      assertEquals("address_refused", error.code());
+    }
+    assertEquals(List.of(), fetcher.requests);
+    fetcher.dns = name -> List.of("192.168.1.20");
+    Assistant.listModels(
+        Json.object("provider", "custom", "baseUrl", "http://models.example/v1", "key", ""),
+        fetcher);
+    assertEquals(List.of("models.example:80:192.168.1.20"), fetcher.inits.get(0).resolve);
+  }
+
+  @Test
   void modelsAreListedWithinTwentySeconds() {
     RecordingFetcher fetcher =
         new RecordingFetcher(new Response("{\"data\":[{\"id\":\"b\"},{\"id\":\"a\"}]}", 200));
