@@ -3206,18 +3206,17 @@ defmodule Runlight.Routes do
           keys = Store.event_prop_keys(store, query, event)
           asked = SearchParams.get(q, "key")
 
-          # A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-          if asked != nil and not Regex.match?(~r/\A[^"\\]{1,64}\z/u, asked) and true do
+          # A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without one
+          # asked for, the most used name that has none is shown. Up to 64 UTF-16 units, as JavaScript counts.
+          safe? = fn name -> Regex.match?(~r/\A[^"\\]+\z/u, name) and JS.len16(name) <= 64 end
+
+          if asked != nil and not safe?.(asked) do
             coded("Bad property name", "property_bad", 400)
           else
-            if asked != nil and JS.len16(asked) > 64 do
-              coded("Bad property name", "property_bad", 400)
-            else
-              key = asked || (List.first(keys) && List.first(keys)["key"])
-              limit = page_number(SearchParams.get(q, "limit"), 100, 1000)
-              rows = if key, do: Store.event_prop_values(store, query, event, key, limit), else: []
-              json(JS.obj(site: site["id"], range: range_out, event: event, keys: keys, key: key, rows: rows))
-            end
+            key = asked || Enum.find_value(keys, &if(safe?.(&1["key"]), do: &1["key"]))
+            limit = page_number(SearchParams.get(q, "limit"), 100, 1000)
+            rows = if key, do: Store.event_prop_values(store, query, event, key, limit), else: []
+            json(JS.obj(site: site["id"], range: range_out, event: event, keys: keys, key: key, rows: rows))
           end
         end
 
