@@ -348,10 +348,12 @@ module Runlight
 
       private
 
-      # Changes to who has an account take turns: on Postgres and MySQL across processes, through the database's
-      # lock, so two owners demoting each other at once cannot leave none, and a double-clicked invite makes one.
+      # Changes to who has an account take turns across threads and processes (the database's lock, or on SQLite a
+      # transaction that takes the write lock first), so two owners demoting each other at once cannot leave none,
+      # a double-clicked invite makes one, and a code or a sign-in link works once.
       def turn(&fn)
-        @store.db.exclusive { fn.call }
+        db = @store.db
+        db.respond_to?(:turn) ? db.turn { fn.call } : db.exclusive { fn.call }
       end
 
       def init
