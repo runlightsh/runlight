@@ -200,6 +200,20 @@ public sealed class OAuthTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Deeply_nested_or_odd_json_bodies_are_turned_away_without_harm()
+    {
+        var ctx = await ContextAsync();
+        string deep = new string('[', 100_000) + new string(']', 100_000);
+        string deepField = "{\"grant_type\":" + deep + ",\"redirect_uris\":" + deep + "}";
+        Assert.Equal(400, (await H(ctx, At("https://x.com/runlight/oauth/token", "POST", JsonType, deepField))).Status);
+        Assert.Equal(400, (await H(ctx, At("https://x.com/runlight/oauth/register", "POST", JsonType, deepField), "1.2.3.4")).Status);
+        // Values that are not strings are left out.
+        string nested = "{\"grant_type\":[\"authorization_code\"],\"redirect_uris\":[[\"https://claude.ai/cb\"],5]}";
+        Assert.Equal("unsupported_grant_type", Body(await H(ctx, At("https://x.com/runlight/oauth/token", "POST", JsonType, nested))).Str("error"));
+        Assert.Equal("invalid_redirect_uri", Body(await H(ctx, At("https://x.com/runlight/oauth/register", "POST", JsonType, nested), "1.2.3.5")).Str("error"));
+    }
+
+    [Fact]
     public async Task Before_an_owner_has_allowed_an_app_once_a_request_it_got_wrong_ends_on_a_page()
     {
         var ctx = await ContextAsync(["a"], signIn: "/login");

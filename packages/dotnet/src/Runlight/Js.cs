@@ -662,20 +662,49 @@ public static class Js
             case JsObject:
                 return "[object Object]";
             case IList list:
-                {
-                    var parts = new List<string>();
-                    foreach (var v in list)
-                    {
-                        parts.Add(v is null or Undefined ? "" : String(v));
-                    }
-                    return string.Join(',', parts);
-                }
+                return Joined(list);
         }
         if (Json.TryNumberOf(value, out double n))
         {
             return FormatNumber(n);
         }
         return value.ToString() ?? "";
+    }
+
+    /// <summary>
+    /// Array.prototype.join(",") of a list, nested lists joined in place: walked with a stack, so
+    /// a list nested thousands deep never runs out of stack.
+    /// </summary>
+    private static string Joined(IList list)
+    {
+        var b = new StringBuilder();
+        var stack = new Stack<(IList List, int Next)>();
+        stack.Push((list, 0));
+        while (stack.Count > 0)
+        {
+            var (at, next) = stack.Pop();
+            if (next >= at.Count)
+            {
+                continue;
+            }
+            stack.Push((at, next + 1));
+            if (next > 0)
+            {
+                b.Append(',');
+            }
+            switch (at[next])
+            {
+                case null or Undefined:
+                    break;
+                case IList inner:
+                    stack.Push((inner, 0));
+                    break;
+                case var v:
+                    b.Append(String(v));
+                    break;
+            }
+        }
+        return b.ToString();
     }
 
     /// <summary>Whether JavaScript reads a value as true.</summary>

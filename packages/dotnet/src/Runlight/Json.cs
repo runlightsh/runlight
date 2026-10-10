@@ -51,8 +51,17 @@ public static class Json
     /// <summary>How deep arrays and objects may nest when written.</summary>
     public const int MaxDepth = 512;
 
-    /// <summary>How deep arrays and objects may nest when read: past anything a body of a few megabytes holds.</summary>
-    public const int MaxParseDepth = 10_000_000;
+    /// <summary>
+    /// How deep arrays and objects may nest when read: as deep as they may be written (PHP's
+    /// json_decode stops at the same place), so nothing that walks a parsed value runs out of stack.
+    /// </summary>
+    public const int MaxParseDepth = MaxDepth;
+
+    /// <summary>
+    /// How deep a tracker body may nest, read only for its top level fields: as JSON.parse reads
+    /// one, the way PHP's port reads it too.
+    /// </summary>
+    public const int MaxPayloadDepth = 100_000;
 
     /// <summary><c>JSON.stringify(value)</c>, or with <paramref name="pretty"/> <c>JSON.stringify(value, null, 2)</c>.</summary>
     public static string Stringify(object? value, bool pretty = false)
@@ -290,12 +299,12 @@ public static class Json
     /// JavaScript's key order (a key given twice keeps its first place and its last value), arrays
     /// as <c>List&lt;object?&gt;</c>.
     /// </summary>
-    /// <exception cref="JsonParseException">When the text is not JSON.</exception>
-    public static object? Parse(string text)
+    /// <exception cref="JsonParseException">When the text is not JSON, or nests deeper than <paramref name="maxDepth"/>.</exception>
+    public static object? Parse(string text, int maxDepth = MaxParseDepth)
     {
-        var p = new Parser(text);
+        var p = new Parser(text, maxDepth);
         p.Space();
-        object? v = p.Value(0);
+        object? v = p.Value();
         p.Space();
         if (p.I < text.Length)
         {
@@ -305,11 +314,11 @@ public static class Json
     }
 
     /// <summary>Whether the text parsed, and the value: <see cref="Parse"/> without the throw.</summary>
-    public static bool TryParse(string text, out object? value)
+    public static bool TryParse(string text, out object? value, int maxDepth = MaxParseDepth)
     {
         try
         {
-            value = Parse(text);
+            value = Parse(text, maxDepth);
             return true;
         }
         catch (JsonParseException)
@@ -368,7 +377,7 @@ public static class Json
         }
     }
 
-    private sealed class Parser(string s)
+    private sealed class Parser(string s, int maxDepth)
     {
         public int I;
 
@@ -392,10 +401,10 @@ public static class Json
 
         private bool StartsHere(string word) => string.CompareOrdinal(s, I, word, 0, word.Length) == 0;
 
-        public object? Value(int depth)
+        public object? Value()
         {
-            // Iterative, so text nested thousands deep (a tracker body may be) reads as JSON.parse
-            // reads it without running out of stack.
+            // Iterative, so reading never runs out of stack; text nested past maxDepth is not JSON
+            // here.
             var stack = new Stack<object>();
             var keys = new Stack<string>();
             object? done;
@@ -408,7 +417,7 @@ public static class Json
                 char c = s[I];
                 if (c == '{' || c == '[')
                 {
-                    if (stack.Count + depth >= MaxParseDepth)
+                    if (stack.Count >= maxDepth)
                     {
                         throw new JsonParseException("JSON nested too deeply");
                     }
