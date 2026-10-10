@@ -232,7 +232,14 @@ function App() {
     setFailure(e instanceof ApiError && e.status === 401 ? "signed-out" : share && e instanceof ApiError && e.status === 404 ? t("share.gone") : e.message);
 
   useEffect(() => {
-    api.sites().then((r) => setSites(r.sites)).catch(fail);
+    api
+      .sites()
+      .then((r) => {
+        setSites(r.sites);
+        // A ?site= that names no site, such as one deleted since the link was made, gives way to the first.
+        setView((v) => (v.site && !r.sites.some((s) => s.id === v.site) ? { ...v, site: r.sites[0]?.id ?? "" } : v));
+      })
+      .catch(fail);
   }, []);
 
   useEffect(() => {
