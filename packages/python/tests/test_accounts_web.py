@@ -221,6 +221,9 @@ def test_signing_in_and_out_never_leaves_the_app(h):
     for nxt in ["//evil.example/", "/\\evil.example", "/\t/evil.example", "https://evil.example/", "", "runlight"]:
         assert web.safe_next(nxt) == "/runlight/", f"never sent off the app: {nxt}"
     assert web.safe_next(None) == "/runlight/"
+    # Dot segments that resolve to a path starting "//" would leave from the Location header too.
+    for nxt in ["/..//evil.example/", "/runlight/..//evil.example", "/./../..//evil.example/x"]:
+        assert web.safe_next(nxt) == "/runlight/", nxt
     assert web.safe_next("/runlight/a/../x?y=1#z") == "/runlight/x?y=1#z"
     assert web.safe_next("/ a") == "/%20a"
 

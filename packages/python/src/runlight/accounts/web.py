@@ -172,11 +172,16 @@ class AccountsWeb:
         """Only a path on this install, so a sign-in can never send someone elsewhere.
         Browsers drop tabs and newlines from a URL and read a backslash as a slash,
         so "/\\t/evil.example" would leave; anything with those is refused outright,
-        and what is left must resolve to this origin."""
+        and what is left must resolve to this origin. A path that resolves to one
+        starting "//", as "/..//evil.example" does, would leave from the Location
+        header, so that goes home too."""
         if not value or not value.startswith("/") or _CONTROL.search(value):
             return self.home_path
         url = Url.parse(value, "http://runlight.invalid")
-        return f"{url.pathname}{url.search}{url.hash}" if url is not None and url.origin == "http://runlight.invalid" else self.home_path
+        if url is None or url.origin != "http://runlight.invalid":
+            return self.home_path
+        path = f"{url.pathname}{url.search}{url.hash}"
+        return self.home_path if path.startswith(("//", "/\\")) else path
 
     def signed_in(self, request: Request) -> dict[str, Any] | None:
         value = _read_cookie(request, SESSION_COOKIE)
