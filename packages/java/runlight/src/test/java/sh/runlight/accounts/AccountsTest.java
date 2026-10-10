@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -302,12 +303,12 @@ class AccountsTest {
     assertTrue(throttle.blocked("jon@example.com", NOW));
     assertFalse(throttle.take("jon@example.com", NOW), "at its limit, nothing more is counted");
     assertFalse(throttle.blocked("ada@example.com", NOW));
-    throttle.forgive("jon@example.com");
+    throttle.forgive("jon@example.com", NOW);
     assertFalse(throttle.blocked("jon@example.com", NOW));
     throttle.fail("jon@example.com", NOW);
     assertTrue(throttle.blocked("jon@example.com", NOW));
     assertFalse(throttle.blocked("jon@example.com", NOW + 1000), "a window ends");
-    throttle.clear("jon@example.com");
+    throttle.clear("jon@example.com", NOW);
     assertFalse(throttle.blocked("jon@example.com", NOW));
     for (Map<String, Object> setting : store.settingsStartingWith("throttle:")) {
       assertFalse(
@@ -324,6 +325,47 @@ class AccountsTest {
     // A new entry clears expired ones.
     throttle.fail("zed@example.com", NOW + 2000);
     assertEquals(1, store.settingsStartingWith("throttle:test:").size());
+    // Reading one whose window has ended clears it too.
+    assertFalse(throttle.blocked("zed@example.com", NOW + 4000));
+    assertEquals(0, store.settingsStartingWith("throttle:test:").size());
+  }
+
+  @Test
+  void throttleIdsMadeFromAnAddressCannotBeTracedBackAfterADay() {
+    SqlStore store = store("sqlite");
+    long day = 86_400_000L;
+    // An install from before keys rotated kept one key for good; it goes with the first new one.
+    store.setSetting("throttle-key", "old");
+    Throttle ips = new Throttle(store, "ip", 30);
+    assertTrue(ips.take("203.0.113.7", NOW));
+    String today = "throttle-key:2026-10-06";
+    assertEquals(List.of(today), keys(store, "throttle-key"));
+    String idToday = keys(store, "throttle:ip:").get(0);
+
+    // The next day hashes with a new key, so the same address gets an id unlike yesterday's.
+    assertTrue(ips.take("203.0.113.7", NOW + day));
+    assertEquals(
+        List.of(today, "throttle-key:2026-10-07"),
+        keys(store, "throttle-key"),
+        "yesterday's stays");
+    assertFalse(keys(store, "throttle:ip:").contains(idToday), "yesterday's count has gone");
+
+    // Two days on, the first key is gone, and the scheduled sweep clears every ended count.
+    assertTrue(ips.take("203.0.113.7", NOW + 2 * day));
+    assertFalse(keys(store, "throttle-key").contains(today));
+    new Throttle(store, "address", 10).take("jon@example.com\n203.0.113.7", NOW + 2 * day);
+    Throttle.sweep(store, NOW + 3 * day);
+    assertEquals(List.of(), keys(store, "throttle:"));
+    assertEquals(List.of("throttle-key:2026-10-08"), keys(store, "throttle-key"));
+  }
+
+  private static List<String> keys(SqlStore store, String prefix) {
+    List<String> out = new ArrayList<>();
+    for (Map<String, Object> setting : store.settingsStartingWith(prefix)) {
+      out.add((String) setting.get("key"));
+    }
+    Collections.sort(out);
+    return out;
   }
 
   @ParameterizedTest

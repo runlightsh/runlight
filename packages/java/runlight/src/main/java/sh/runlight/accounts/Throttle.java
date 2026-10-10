@@ -1,5 +1,8 @@
 package sh.runlight.accounts;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -14,12 +17,15 @@ import sh.runlight.store.SqlStore;
 
 /**
  * Counts failed sign-ins under a key and refuses more than a few in a while. Keys are hashed with a
- * key made on first use, so the counts never hold an address or an email as it was given.
+ * key made each UTC day, so the counts never hold an address or an email as it was given, and an id
+ * made from an address cannot be traced back to it once its day's key is gone.
  *
  * <p>TypeScript keeps the counts in its process. Here they live in the database's settings, as the
- * PHP port keeps them, "throttle:&lt;name&gt;:&lt;id&gt;" holding {count, until}, and the hashing
- * key as "throttle-key". Every process of an install, in any of the ports, then shares the same
- * counts.
+ * PHP port keeps them, "throttle:&lt;name&gt;:&lt;id&gt;" holding {count, until}, and the day's
+ * hashing key as "throttle-key:&lt;YYYY-MM-DD&gt;". Every process of an install, in any of the
+ * ports, then shares the same counts. Keys from before yesterday are deleted, and so are counts
+ * whose window has ended, when read, when a new count is made, and in the scheduled check, so
+ * nothing made from an address lasts longer than a day.
  *
  * <p>A count is written back only if it is still the one read, so a burst of tries at once cannot
  * each read the same count and all get past the limit, in one process or across several. Tries
@@ -27,6 +33,7 @@ import sh.runlight.store.SqlStore;
  */
 public final class Throttle {
   private static final String KEY = "throttle-key";
+  private static final String DAY_KEY = KEY + ":";
 
   /** Locks shared by every throttle in the process, a key taking the one its hash picks. */
   private static final ReentrantLock[] STRIPES = new ReentrantLock[64];
@@ -59,21 +66,58 @@ public final class Throttle {
     this.windowMs = windowMs;
   }
 
-  private String salt() {
+  private String salt(long now) {
     // The counts live in the settings table, which a request that reached no other route has not
     // made yet.
     if (!migrated) {
       store.migrate();
       migrated = true;
     }
-    String saved = store.setting(KEY);
+    String key = DAY_KEY + day(now);
+    String saved = store.setting(key);
     if (saved != null && !saved.isEmpty()) {
       return saved;
     }
-    // Made once: of two processes making one at once, the first written is the one both use, or
-    // they would count the same key apart.
+    // Made once a day: of two processes making one at once, the first written is the one both
+    // use, or they would count the same key apart. A new day's key is when the old ones go.
     String made = Hash.randomId(16);
-    return store.swapSetting(KEY, saved, made) ? made : store.setting(KEY);
+    String salt = store.swapSetting(key, saved, made) ? made : store.setting(key);
+    dropOldKeys(store, now);
+    return salt;
+  }
+
+  private static String day(long now) {
+    return Instant.ofEpochMilli(now).atOffset(ZoneOffset.UTC).toLocalDate().toString();
+  }
+
+  /**
+   * Deletes the hashing keys of days before yesterday, and the one key kept before keys rotated.
+   */
+  private static void dropOldKeys(SqlStore store, long now) {
+    String yesterday = LocalDate.parse(day(now)).minusDays(1).toString();
+    for (Map<String, Object> setting : store.settingsStartingWith(KEY)) {
+      String key = (String) setting.get("key");
+      if (key.equals(KEY)
+          || (key.startsWith(DAY_KEY)
+              && key.substring(DAY_KEY.length()).compareTo(yesterday) < 0)) {
+        store.setSetting(key, null);
+      }
+    }
+  }
+
+  /**
+   * For the scheduled check: deletes every throttle's counts whose window has ended, and the
+   * hashing keys of days before yesterday.
+   */
+  public static void sweep(SqlStore store, long now) {
+    store.migrate();
+    for (Map<String, Object> setting : store.settingsStartingWith("throttle:")) {
+      Map<String, Object> entry = Js.map(Json.tryParse((String) setting.get("value")).value());
+      if (entry == null || field(entry, "until") <= now) {
+        store.setSetting((String) setting.get("key"), null);
+      }
+    }
+    dropOldKeys(store, now);
   }
 
   /** Runs fn while no other try under the same id in this process reads or counts. */
@@ -87,8 +131,8 @@ public final class Throttle {
     }
   }
 
-  private String id(String key) {
-    return Crypto.base64url(Crypto.hmac("SHA-256", salt(), key)).substring(0, 22);
+  private String id(String key, long now) {
+    return Crypto.base64url(Crypto.hmac("SHA-256", salt(now), key)).substring(0, 22);
   }
 
   private String prefix() {
@@ -127,7 +171,17 @@ public final class Throttle {
             if (next == null) {
               return null;
             }
-            String value = Json.stringify(Json.object("count", next[0], "until", next[1]));
+            // An empty entry is one to delete.
+            String value =
+                next.length == 0
+                    ? null
+                    : Json.stringify(Json.object("count", next[0], "until", next[1]));
+            if (value == null) {
+              if (saved != null) {
+                store.setSetting(key, null);
+              }
+              return next;
+            }
             if (store.swapSetting(key, saved, value)) {
               return next;
             }
@@ -143,12 +197,17 @@ public final class Throttle {
   }
 
   public boolean blocked(String key, long now) {
-    return isBlocked(id(key), now);
+    return isBlocked(id(key, now), now);
   }
 
   private boolean isBlocked(String id, long now) {
     long[] entry = entry(id);
-    if (entry == null || entry[1] <= now) {
+    if (entry == null) {
+      return false;
+    }
+    if (entry[1] <= now) {
+      // A window that has ended leaves nothing behind.
+      update(id, kept -> kept != null && kept[1] <= now ? new long[0] : null);
       return false;
     }
     return entry[0] >= limit;
@@ -162,7 +221,7 @@ public final class Throttle {
   public boolean take(String key, long now) {
     long[] made =
         update(
-            id(key),
+            id(key, now),
             entry ->
                 entry != null && entry[1] > now && entry[0] >= limit ? null : counted(entry, now));
     if (made == null) {
@@ -175,14 +234,14 @@ public final class Throttle {
   }
 
   /** Takes back one counted try, for one that turned out right. */
-  public void forgive(String key) {
+  public void forgive(String key, long now) {
     update(
-        id(key),
+        id(key, now),
         entry -> entry != null && entry[0] > 0 ? new long[] {entry[0] - 1, entry[1]} : null);
   }
 
   public void fail(String key, long now) {
-    long[] made = update(id(key), entry -> counted(entry, now));
+    long[] made = update(id(key, now), entry -> counted(entry, now));
     if (made[0] == 1) {
       prune(now);
     }
@@ -226,7 +285,7 @@ public final class Throttle {
     }
   }
 
-  public void clear(String key) {
-    store.setSetting(prefix() + id(key), null);
+  public void clear(String key, long now) {
+    store.setSetting(prefix() + id(key, now), null);
   }
 }
