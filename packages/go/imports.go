@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"runlight.sh/go/internal/accounts"
 	"runlight.sh/go/internal/importers"
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/web"
@@ -747,9 +748,11 @@ func (r *Runlight) writeStep(ctx context.Context, siteID string, from, to float6
 			return err
 		}
 		// Visits of these days that kept no rows go too. Their rows would come within EventTailMs of the step,
-		// so the time bounds let the (site, ts) index find them, with no scan of every event.
+		// so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+		// EventTailMs too, for a visit an earlier import began before this step whose rows were all in it: a
+		// CSV imported again has new ids, so its new visit does not take that one's place.
 		if err := db.Run(ctx, `DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
-         AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`, siteID, f, t, siteID, f, t+EventTailMs); err != nil {
+         AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`, siteID, f-EventTailMs, t, siteID, f-EventTailMs, t+EventTailMs); err != nil {
 			return err
 		}
 		for _, h := range hits {
@@ -985,7 +988,7 @@ func cell(row map[string]string, names ...string) string {
 	return ""
 }
 
-// ownKey: a row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids.
+// ownKey: a row with no visitor is its own visit, keyed by its whole content.
 func ownKey(row map[string]string, keys []string) string {
 	sorted := append([]string(nil), keys...)
 	sort.SliceStable(sorted, func(i, j int) bool { return compare16(sorted[i], sorted[j]) < 0 })
@@ -1083,14 +1086,28 @@ type CsvVisits struct {
 	Events    int64 `json:"events"`
 	Visits    int64 `json:"visits"`
 	Skipped   int64 `json:"skipped"`
+	// Secret keys the batch's visitors; send it with the file's later batches.
+	Secret string `json:"secret"`
 }
+
+// csvSecret is what a caller may send back as a CSV import's secret.
+var csvSecret = regexp.MustCompile(`^[A-Za-z0-9_-]{22,128}$`)
 
 // ImportCsvVisits imports one batch of a CSV file, sorted oldest first by the
 // dashboard. As with Umami, only rows from before Runlight's own first visit,
 // and within what the site keeps, are written. A batch can run again: its
 // time span is cleared first, so batches must not share a moment, which the
 // dashboard sees to.
-func ImportCsvVisits(ctx context.Context, r *Runlight, siteID string, rows any) (*CsvVisits, error) {
+//
+// A CSV's visitor column can hold anything, an email or an IP address among
+// them, and a plain hash of one is easily undone by trying every address. So
+// each key is an HMAC under a random secret made for the import and never
+// stored: the first batch gets one, the answer carries it, and the caller
+// sends it with every later batch of the same file, so a visit that runs
+// across two batches stays one. A file imported again gets a new secret and
+// new ids; its time span is cleared first, as always, so nothing is counted
+// twice.
+func ImportCsvVisits(ctx context.Context, r *Runlight, siteID string, rows, secret any) (*CsvVisits, error) {
 	if err := r.Init(ctx); err != nil {
 		return nil, err
 	}
@@ -1132,6 +1149,10 @@ func ImportCsvVisits(ctx context.Context, r *Runlight, siteID string, rows any) 
 	if format == "" {
 		return nil, importError("This CSV is not an Umami export or Runlight's visit format", "import_csv_format")
 	}
+	key, ok := secret.(string)
+	if !ok || !csvSecret.MatchString(key) {
+		key = accounts.Base64url(accounts.RandomBytes(24))
+	}
 	cutoff := 0.0
 	if c, err := r.RetentionCutoff(ctx, siteID); err != nil {
 		return nil, err
@@ -1153,11 +1174,18 @@ func ImportCsvVisits(ctx context.Context, r *Runlight, siteID string, rows any) 
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].hit.ts < hits[j].hit.ts })
 	skipped := int64(len(clean) - len(hits))
 	if len(hits) == 0 {
-		return &CsvVisits{Skipped: skipped}, nil
+		return &CsvVisits{Skipped: skipped, Secret: key}, nil
+	}
+	for i := range hits {
+		mac, err := accounts.HMAC("SHA-256", []byte(key), []byte(hits[i].hit.key))
+		if err != nil {
+			return nil, err
+		}
+		hits[i].hit.key = accounts.Base64url(mac)
 	}
 	counts, err := r.writeStep(ctx, siteID, hits[0].hit.ts, hits[len(hits)-1].hit.ts+1, hits, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &CsvVisits{Pageviews: counts.pageviews, Events: counts.events, Visits: counts.visits, Skipped: skipped}, nil
+	return &CsvVisits{Pageviews: counts.pageviews, Events: counts.events, Visits: counts.visits, Skipped: skipped, Secret: key}, nil
 }

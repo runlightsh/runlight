@@ -351,7 +351,7 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 		if refusedSite != nil {
 			return refusedSite, nil
 		}
-		result, err := ImportCsvVisits(ctx, r, site.ID, undefinedIfMissing(body, "rows", body.Value("rows")))
+		result, err := ImportCsvVisits(ctx, r, site.ID, undefinedIfMissing(body, "rows", body.Value("rows")), body.Value("secret"))
 		if err != nil {
 			if isImportError(err) {
 				return refusedAnswer(err, "import_failed", 400), nil
