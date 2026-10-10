@@ -38,6 +38,8 @@ export type Role = "owner" | "admin" | "member" | "viewer";
 const ROLES: readonly Role[] = ["owner", "admin", "member", "viewer"];
 /** A stored role read back; anything unknown reads as a viewer, the least it could be. */
 const roleFrom = (value: unknown): Role => (ROLES.includes(value as Role) ? (value as Role) : "viewer");
+/** Whether a role may invite people. The owner and admins invite as admin, member, or viewer. */
+const mayInvite = (role: Role) => role === "owner" || role === "admin";
 
 export interface User {
   id: string;
@@ -387,6 +389,8 @@ export class Accounts {
       if (user.role === "owner") throw new AccountError("Only the owner can change their own role, by handing ownership to an admin", "owner_protected");
       if (role === "owner") throw new AccountError("Ownership is handed over by the owner", "owner_hand_over");
       await this.store.db.run(`UPDATE rl_users SET role = ? WHERE id = ?`, [role, id]);
+      // Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+      if (!mayInvite(role)) await this.store.db.run(`DELETE FROM rl_invites WHERE invited_by = ?`, [user.email]);
       return { ...user, role };
     });
   }
@@ -415,6 +419,7 @@ export class Accounts {
       if (!user) throw new AccountError("Unknown account", "unknown_account");
       if (user.role === "owner") throw new AccountError("The owner cannot be removed", "owner_protected");
       await this.store.db.run(`DELETE FROM rl_users WHERE id = ?`, [id]);
+      await this.store.db.run(`DELETE FROM rl_invites WHERE invited_by = ?`, [user.email]);
       await this.store.setSetting(`login-link-used:${id}`, null);
     });
   }
@@ -495,14 +500,27 @@ export class Accounts {
     return before > 0;
   }
 
-  /** Turns an invite into an account with the password its person chose. The link then stops working. */
+  /**
+   * Turns an invite into an account with the password its person chose. The link then stops working. It takes a
+   * turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite.
+   */
   async acceptInvite(code: string, password: string, now: number): Promise<User> {
-    const invite = await this.inviteByCode(code, now);
-    if (!invite) throw new AccountError("This invite has expired or was already used. Ask for a new one.", "invite_gone");
-    if (await this.byEmail(invite.email)) throw new AccountError(`${invite.email} already has an account`, "account_exists", { email: invite.email });
-    const user = await this.setPassword(invite.email, password, now, invite.role);
-    await this.store.db.run(`DELETE FROM rl_invites WHERE id = ?`, [invite.id]);
-    return user;
+    // The tables first: making them takes the same lock as a turn.
+    await this.init();
+    return this.turn(async () => {
+      const invite = await this.inviteByCode(code, now);
+      const gone = () => new AccountError("This invite has expired or was already used. Ask for a new one.", "invite_gone");
+      if (!invite) throw gone();
+      const sender = await this.byEmail(invite.invitedBy);
+      if (!sender || !mayInvite(sender.role)) {
+        await this.store.db.run(`DELETE FROM rl_invites WHERE id = ?`, [invite.id]);
+        throw gone();
+      }
+      if (await this.byEmail(invite.email)) throw new AccountError(`${invite.email} already has an account`, "account_exists", { email: invite.email });
+      const user = await this.setPassword(invite.email, password, now, invite.role);
+      await this.store.db.run(`DELETE FROM rl_invites WHERE id = ?`, [invite.id]);
+      return user;
+    });
   }
 
   /** The account for an email and password, or null. Takes the same time either way. */

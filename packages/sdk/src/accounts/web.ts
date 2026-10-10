@@ -322,6 +322,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
           existing = true;
           return redirect(home, { "set-cookie": sessionCookie(request, await accounts.sessionFor(user, now()), SESSION_MS / 1000) });
         } catch (error) {
+          if (error instanceof AccountError && error.code === "invite_gone") return html(inviteGonePage(base), 410);
           if (error instanceof RangeError) return again(error.message);
           throw error;
         }
