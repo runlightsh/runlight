@@ -16,7 +16,7 @@ import (
 // internet. Only https is fetched, never a private, loopback, link-local,
 // or metadata address, and redirects are followed by hand under the same
 // rules. The real Fetcher checks the address the connection uses
-// (FetchInit.PublicOnly).
+// (FetchInit.PublicOnly); for any other, the name is looked up first.
 
 var dottedQuad = regexp.MustCompile(`^\d{1,3}$`)
 
@@ -196,6 +196,16 @@ func ResolvesPrivately(ctx context.Context, name string) bool {
 	return false
 }
 
+// checksAtDial reports whether a Fetcher is the built-in one, which with
+// PublicOnly refuses to connect to an address off the public internet.
+func checksAtDial(fetcher Fetcher) bool {
+	switch fetcher.(type) {
+	case HTTPFetcher, *HTTPFetcher:
+		return true
+	}
+	return false
+}
+
 // PublicFetch fetches an https URL on the public internet as init says,
 // following up to redirects redirects that stay on it, within init.Timeout
 // in all (30 seconds when zero). Only a GET follows redirects; anything else
@@ -230,6 +240,12 @@ func PublicFetch(ctx context.Context, fetcher Fetcher, target string, init Fetch
 			return nil, &PrivateAddressError{host}
 		}
 		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return nil, &PrivateAddressError{host}
+		}
+		// The built-in Fetcher checks the address it connects to. Another may
+		// not honour PublicOnly, so the name is looked up first, and one that
+		// answers with an address off the public internet is never fetched.
+		if !checksAtDial(fetcher) && v4(host) == nil && v6(host) == nil && ResolvesPrivately(ctx, host) {
 			return nil, &PrivateAddressError{host}
 		}
 		answer, err := fetcher.Fetch(ctx, u.Href(), init)
