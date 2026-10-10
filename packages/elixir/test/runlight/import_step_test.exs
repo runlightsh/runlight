@@ -43,13 +43,14 @@ defmodule Runlight.ImportStepTest do
     Runlight.new(store: store, fetcher: fetcher, now: fn -> @now end)
   end
 
-  defp run_all(fetcher, source, credentials) do
+  # Every domain passes here; the routes check them as Settings does (see the conformance scenarios).
+  defp run_all(fetcher, source, credentials, link_domain \\ & &1) do
     rl = runlight(fetcher)
 
     totals =
       Stream.iterate(0, & &1)
       |> Enum.reduce_while({nil, 0, %{links: 0, clicks: 0, skipped: 0, failed: []}}, fn _, {cursor, done, totals} ->
-        step = Importers.import_step(rl, "default", source, credentials, cursor, done)
+        step = Importers.import_step(rl, "default", source, credentials, cursor, done, link_domain)
 
         totals = %{
           links: totals.links + step["links"],
@@ -130,6 +131,59 @@ defmodule Runlight.ImportStepTest do
     [session] = rows(rl, "SELECT country, source, device FROM rl_sessions ORDER BY started_at LIMIT 1")
     assert session == o(country: "CA", source: "Instagram", device: "mobile")
     assert hd(rows(rl, "SELECT imported FROM rl_sessions LIMIT 1"))["imported"] == 1
+  end
+
+  test "an imported link's destination passes the checks a new link does, a refused domain is left off, and a day's count is capped" do
+    {fetcher, _} =
+      router([
+        {~r/api\.dub\.co\/links\?/,
+         fn _, _ ->
+           [
+             o(
+               id: "l1",
+               domain: "Go.Brand.com",
+               key: "x",
+               url: "https://a.com",
+               title: "X",
+               createdAt: "2026-01-02T00:00:00Z"
+             ),
+             o(
+               id: "l2",
+               domain: "dub.sh",
+               key: "y",
+               url: "javascript:alert(1)",
+               title: "Y",
+               createdAt: "2026-01-02T00:00:00Z"
+             ),
+             o(
+               id: "l3",
+               domain: "stats.example.com",
+               key: "z",
+               url: "https://a.com/z",
+               title: "Z",
+               createdAt: "2026-01-02T00:00:00Z"
+             )
+           ]
+         end},
+        {~r/\/events\?/, fn _, _ -> {403, o(error: o(message: "Business plan required"))} end},
+        {~r/\/analytics\?.*linkId=l1/, fn _, _ -> [o(start: "2026-03-01T00:00:00.000Z", clicks: 5_000_000)] end},
+        {~r/\/analytics\?/, fn _, _ -> [] end}
+      ])
+
+    me = self()
+
+    {rl, totals} =
+      run_all(fetcher, "dub", %{"apiKey" => "dub_test"}, fn domain ->
+        send(me, {:asked, domain})
+        if domain == "stats.example.com", do: nil, else: domain
+      end)
+
+    assert_received {:asked, "go.brand.com"}
+    assert_received {:asked, "stats.example.com"}
+    refute_received {:asked, _}, "shorteners' own domains are never asked about"
+    assert Enum.map(totals.failed, &{&1["slug"], &1["code"]}) == [{"y", "link_protocol"}]
+    assert links(rl) |> Enum.map(&{&1["slug"], &1["domain"]}) |> Enum.sort() == [{"x", "go.brand.com"}, {"z", ""}]
+    assert totals.clicks == 10_000
   end
 
   test "Dub: daily counts when the plan has no events API" do
@@ -457,7 +511,8 @@ defmodule Runlight.ImportStepTest do
         "default",
         "dub",
         foreign.(sourceId: "z", slug: "fine", domain: "www.Go.Brand.com", url: "https://a.com/z"),
-        o(clicks: [o(ts: 5_000, visit: "v", path: "/fine", query: "?utm_campaign=c")])
+        o(clicks: [o(ts: 5_000, visit: "v", path: "/fine", query: "?utm_campaign=c")]),
+        & &1
       )
 
     assert made == %{status: "created", clicks: 1}

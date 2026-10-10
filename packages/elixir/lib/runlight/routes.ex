@@ -874,7 +874,26 @@ defmodule Runlight.Routes do
           done = if JS.finite?(done), do: done, else: 0
 
           try do
-            json(Runlight.Importers.import_step(rl, site["id"], Enum.at(import_match, 1), credentials, cursor, done))
+            # An imported link's domain passes the same checks as one added in Settings, or the link comes over
+            # without it.
+            link_domain = fn domain ->
+              case vet_link_domain(routes, request, url, site["id"], domain) do
+                {:ok, domain} -> domain
+                {:error, _} -> nil
+              end
+            end
+
+            json(
+              Runlight.Importers.import_step(
+                rl,
+                site["id"],
+                Enum.at(import_match, 1),
+                credentials,
+                cursor,
+                done,
+                link_domain
+              )
+            )
           rescue
             error in Runlight.ImportError -> refused(error, "import_failed")
           end
@@ -976,9 +995,24 @@ defmodule Runlight.Routes do
   defp add_link_domain(routes, request, url, site, body) do
     rl = routes.rl
 
+    case vet_link_domain(routes, request, url, site["id"], JS.prop(body, "domain")) do
+      {:ok, domain} ->
+        Store.add_link_domain(rl.store, domain, site["id"], Runlight.now(rl))
+        Runlight.forget_link_domains(rl)
+        json(JS.obj(domain: domain), 201)
+
+      {:error, response} ->
+        response
+    end
+  end
+
+  # The checks a link domain passes before a site gets it, from Settings or from an import: the name as it is kept,
+  # or the refusal to send.
+  defp vet_link_domain(routes, request, url, site, value) do
+    rl = routes.rl
+
     domain =
-      body
-      |> JS.prop("domain")
+      value
       |> JS.nullish("")
       |> JS.string()
       |> JS.trim()
@@ -990,19 +1024,20 @@ defmodule Runlight.Routes do
 
     cond do
       not domain_name?(domain) ->
-        coded("That is not a domain name", "domain_invalid", 400)
+        {:error, coded("That is not a domain name", "domain_invalid", 400)}
 
       private_name?(domain) or Runlight.Safefetch.resolves_privately?(domain) ->
-        coded(
-          "#{domain} is not a public domain name. Use one that browsers anywhere can reach.",
-          "domain_not_public",
-          400,
-          %{"domain" => domain}
-        )
+        {:error,
+         coded(
+           "#{domain} is not a public domain name. Use one that browsers anywhere can reach.",
+           "domain_not_public",
+           400,
+           %{"domain" => domain}
+         )}
 
       # A hub cannot know every name this app answers on, so it adds none until the app knows its own address.
       managed(request) != nil and routes.origin == nil ->
-        origin_needed()
+        {:error, origin_needed()}
 
       true ->
         here =
@@ -1035,20 +1070,19 @@ defmodule Runlight.Routes do
 
         cond do
           MapSet.member?(taken, domain) ->
-            coded(
-              "#{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.#{domain}.",
-              "domain_in_use",
-              400,
-              %{"domain" => domain}
-            )
+            {:error,
+             coded(
+               "#{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.#{domain}.",
+               "domain_in_use",
+               400,
+               %{"domain" => domain}
+             )}
 
-          owner && owner["site"] != site["id"] ->
-            coded("#{domain} already belongs to another site", "domain_taken", 409, %{"domain" => domain})
+          owner && owner["site"] != site ->
+            {:error, coded("#{domain} already belongs to another site", "domain_taken", 409, %{"domain" => domain})}
 
           true ->
-            Store.add_link_domain(rl.store, domain, site["id"], Runlight.now(rl))
-            Runlight.forget_link_domains(rl)
-            json(JS.obj(domain: domain), 201)
+            {:ok, domain}
         end
     end
   end

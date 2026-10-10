@@ -23,7 +23,9 @@ defmodule Runlight.Links do
     for <<b <- :crypto.strong_rand_bytes(6)>>, into: "", do: <<Enum.at(@alphabet, rem(b, length(@alphabet)))>>
   end
 
-  defp clean_url(value) do
+  @doc "A link's destination as it is kept: a full http or https URL, up to 2,000 characters. Raises a LinkError."
+  @spec clean_url(term()) :: String.t()
+  def clean_url(value) do
     text = value |> JS.nullish("") |> JS.string() |> JS.trim()
 
     url =
