@@ -291,12 +291,12 @@ class AccountsAccountsTest < Minitest::Test
     assert throttle.blocked("jon@example.com", NOW)
     refute throttle.take("jon@example.com", NOW), "at its limit, nothing more is counted"
     refute throttle.blocked("ada@example.com", NOW)
-    throttle.forgive("jon@example.com")
+    throttle.forgive("jon@example.com", NOW)
     refute throttle.blocked("jon@example.com", NOW)
     throttle.record_failure("jon@example.com", NOW)
     assert throttle.blocked("jon@example.com", NOW)
     refute throttle.blocked("jon@example.com", NOW + 1000), "a window ends"
-    throttle.clear("jon@example.com")
+    throttle.clear("jon@example.com", NOW)
     refute throttle.blocked("jon@example.com", NOW)
     store.settings_starting_with("throttle:").each do |row|
       refute_includes row["key"], "jon", "keys are hashed, never kept as given"
@@ -308,6 +308,38 @@ class AccountsAccountsTest < Minitest::Test
     # A new entry clears expired ones.
     throttle.record_failure("zed@example.com", NOW + 2000)
     assert_equal 1, store.settings_starting_with("throttle:test:").length
+  end
+
+  def test_nothing_the_throttle_keeps_from_an_address_lasts_past_a_day
+    store = store("sqlite")
+    store.set_setting("throttle-key", "a key from before keys were made per day")
+    midnight = NOW + 12 * 3_600_000
+    throttle = Throttle.new(store, "ip", 3)
+    keys = -> { store.settings_starting_with("throttle-key").map { |r| r["key"] }.sort }
+    3.times { throttle.record_failure("203.0.113.7", midnight - 60_000) }
+    assert_equal ["throttle-key:2026-10-06"], keys.call, "one hashing key a UTC day, and the old one goes"
+    before = store.settings_starting_with("throttle:ip:").map { |r| r["key"] }
+    # A window that crosses midnight goes on, under the new day's key.
+    assert throttle.take("203.0.113.8", midnight + 60_000)
+    assert throttle.blocked("203.0.113.7", midnight + 60_000)
+    refute throttle.take("203.0.113.7", midnight + 60_000)
+    assert_equal ["throttle-key:2026-10-06", "throttle-key:2026-10-07"], keys.call
+    refute_includes store.settings_starting_with("throttle:ip:").map { |r| r["key"] }, before[0], "a count moves to the new day's id"
+    # Once the windows are over, the scheduled check leaves nothing behind but today's key.
+    Throttle.sweep(store, midnight + 16 * 60_000)
+    assert_equal [], store.settings_starting_with("throttle:")
+    assert_equal ["throttle-key:2026-10-07"], keys.call
+    refute throttle.blocked("203.0.113.7", midnight + 16 * 60_000)
+    # A count that has run out is gone as soon as it is read.
+    throttle.record_failure("203.0.113.9", midnight + 20 * 60_000)
+    refute throttle.blocked("203.0.113.9", midnight + 40 * 60_000)
+    assert_equal [], store.settings_starting_with("throttle:")
+    # The scheduled check sweeps them too.
+    rl = Runlight::Core.new({ "store" => store, "now" => -> { midnight + (3 * 86_400_000) + 3_600_000 } })
+    throttle.record_failure("203.0.113.10", midnight + 2 * 86_400_000)
+    rl.check
+    assert_equal [], store.settings_starting_with("throttle:")
+    assert_equal [], keys.call
   end
 
   def test_only_a_few_passwords_are_checked_at_once_and_past_a_queue_the_rest_are_told_to_wait

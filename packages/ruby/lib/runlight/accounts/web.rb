@@ -412,7 +412,7 @@ module Runlight
                                                 "error" => "That code is not right. Check the time on your phone, or use a recovery code." }), 401)
           end
 
-          @code_tries.clear(user["id"])
+          @code_tries.clear(user["id"], now)
           return signed_in_to(request, user, next_path)
         end
 
@@ -496,9 +496,9 @@ module Runlight
 
           return html(login_page.call({ "error" => "That email and password do not match an account.", "email" => email }), 401)
         end
-        @per_address.clear(pair)
-        @per_ip.forgive(ip) if ip != ""
-        @per_account.forgive(account) if !over && !trusted
+        @per_address.clear(pair, now)
+        @per_ip.forgive(ip, now) if ip != ""
+        @per_account.forgive(account, now) if !over && !trusted
         # With two-factor on, the password only earns the second step.
         return html(Pages.code_page(base, { "pending" => @accounts.pending_for(user, now), "next" => next_path })) if user["twoFactor"]
 
@@ -533,7 +533,7 @@ module Runlight
           end
           return coded(wrong[0], wrong[1], 400) if right.nil?
 
-          @rechecks.forgive(user["id"])
+          @rechecks.forgive(user["id"], now)
           nil
         end
         fresh = ->(updated) { { "set-cookie" => session_cookie(request, @accounts.session_for(updated, now), Accounts::SESSION_MS / 1000) } }
@@ -568,7 +568,7 @@ module Runlight
             codes = @accounts.confirm_two_factor(user["id"], field(input, "code").gsub(/[#{Js::SPACE}]/o, ""), now)
             return coded("That code is not right. Check the time on your phone and try the next one.", "code_wrong", 400) if codes.nil?
 
-            @confirm_tries.clear(user["id"])
+            @confirm_tries.clear(user["id"], now)
             # Turning it on signs out every other browser; this one gets a new session.
             updated = @accounts.by_id(user["id"])
             return reply({ "recovery" => codes }, 200, fresh.call(updated))
@@ -577,7 +577,7 @@ module Runlight
           return refused unless refused.nil?
 
           if action == "/start"
-            @confirm_tries.clear(user["id"])
+            @confirm_tries.clear(user["id"], now)
             secret = @accounts.start_two_factor(user["id"])
             return reply({ "secret" => secret, "uri" => Crypto.otpauth_uri(secret, user["email"], Http::Url.new(request.url).host) })
           end

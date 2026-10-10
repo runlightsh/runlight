@@ -1356,6 +1356,8 @@ module Runlight
       @salts = {}
       sites.map { |site| site["timezone"] }.uniq.each { |timezone| current_salts(now, timezone) }
       drop_old_salts(now)
+      # Sign-in counts that have run out, some keyed by an address, and the hashing keys of days gone.
+      Accounts::Throttle.sweep(@store, now)
       # Every site's retention covers any one site's that is still waiting.
       @pruning = []
       begin
