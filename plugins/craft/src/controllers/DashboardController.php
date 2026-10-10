@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Craft\controllers;
 
 use Craft;
+use craft\helpers\UrlHelper;
 use craft\web\Controller;
 use Runlight\Craft\Plugin;
 use yii\web\Response;
@@ -63,7 +64,9 @@ final class DashboardController extends Controller
     /**
      * Asks the Runlight for a ticket that opens the dashboard once, framed by
      * this Control Panel. Each ticket works for a few minutes and only once, so
-     * one is asked for on every visit to the page and never kept.
+     * one is asked for on every visit to the page and never kept. The frame's
+     * origin is the Control Panel's, from baseCpUrl when it is set, so a
+     * proxy that ends HTTPS in front of Craft does not turn it into http.
      *
      * @return array{url: string, site: string}|string The page to frame and its site, or why there is none.
      */
@@ -72,7 +75,7 @@ final class DashboardController extends Controller
         try {
             $response = Craft::createGuzzleClient(['timeout' => 5, 'http_errors' => false, 'allow_redirects' => false])->post($address . '/api/embed', [
                 'headers' => ['Authorization' => 'Bearer ' . $key],
-                'json' => ['origin' => self::originOf(Craft::$app->getRequest()->getHostInfo())],
+                'json' => ['origin' => self::originOf(UrlHelper::cpUrl())],
             ]);
         } catch (\Throwable $e) {
             return Craft::t('runlight', 'Could not reach your Runlight: {error}', ['error' => $e->getMessage()]);

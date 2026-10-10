@@ -17,3 +17,18 @@ Drupal exports the module's settings, keys included, with the rest of the site's
 $config['runlight.settings']['observe_key'] = getenv('RUNLIGHT_OBSERVE_KEY');
 $config['runlight.settings']['dashboard_key'] = getenv('RUNLIGHT_DASHBOARD_KEY');
 ```
+
+## Behind a proxy that ends HTTPS
+
+Only the admin's own origin may frame the dashboard, and the module reads it from the request. When a load balancer or proxy in front of Drupal ends HTTPS, tell Drupal about it in `settings.php`, so the origin stays https:
+
+```php
+$settings['reverse_proxy'] = TRUE;
+$settings['reverse_proxy_addresses'] = ['10.0.0.2'];
+```
+
+Or name the admin's origin outright:
+
+```php
+$settings['runlight_admin_origin'] = 'https://www.example.com';
+```
