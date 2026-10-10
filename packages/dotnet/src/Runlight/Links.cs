@@ -37,7 +37,9 @@ public sealed class Links(SqlStore store, Func<long> now, Func<CancellationToken
         return new string(chars);
     }
 
-    private static string CleanUrl(object? value)
+    /// <summary>A link's destination as it is kept: a full http or https URL, up to 2,000 characters.</summary>
+    /// <exception cref="LinkError">Coded link_url, link_protocol, or link_long.</exception>
+    public static string CleanUrl(object? value)
     {
         string text = Js.Trim(Js.String(value ?? ""));
         var url = Url.Parse(text) ?? throw new LinkError("The destination must be a full URL, starting with https://", "link_url");

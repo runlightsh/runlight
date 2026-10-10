@@ -931,6 +931,73 @@ public sealed class Routes
     private async Task<List<string>> OwnDomainsAsync(string siteId, CancellationToken cancellationToken) =>
         [.. (await Store.LinkDomainsAsync(cancellationToken).ConfigureAwait(false)).Where(d => d.Str("site") == siteId).Select(d => d.Str("domain")!)];
 
+    /// <summary>
+    /// The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
+    /// is kept, or the refusal to send.
+    /// </summary>
+    private async Task<object> CheckLinkDomainAsync(Request request, Url url, string site, string value, CancellationToken cancellationToken)
+    {
+        string domain = Js.Lower(Js.Trim(value));
+        domain = HttpPrefix.Replace(domain, "");
+        domain = PathAfter.Replace(domain, "", 1);
+        domain = DotsEnd.Replace(domain, "");
+        domain = Www.Replace(domain, "");
+        if (!DomainName.IsMatch(domain))
+        {
+            return Coded("That is not a domain name", "domain_invalid", 400);
+        }
+        if (PrivateName(domain) || await Safefetch.ResolvesPrivatelyAsync(domain).ConfigureAwait(false))
+        {
+            return Coded(domain + " is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, new JsObject { ["domain"] = domain });
+        }
+        // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
+        // The request's own Host is the caller's to choose, so the configured address and the names people
+        // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
+        // the app knows its own address.
+        if (_managed.TryGetValue(request, out _) && _origin == null)
+        {
+            return OriginNeeded();
+        }
+        var own = new List<string>();
+        if (_origin != null)
+        {
+            own.Add(new Url(_origin).Host);
+        }
+        foreach (string? h in new[] { request.Headers.Get("host"), request.Headers.Get("x-forwarded-host"), url.Host })
+        {
+            if (!string.IsNullOrEmpty(h))
+            {
+                own.Add(h);
+            }
+        }
+        if (_options.OwnHosts != null)
+        {
+            own.AddRange(_options.OwnHosts());
+        }
+        var taken = own.Select(HostName).ToList();
+        foreach (var s in Sites())
+        {
+            taken.AddRange(s.Arr("hostnames")?.Select(Js.String) ?? []);
+            taken.AddRange(_rl.Remote(s.Str("id")!)?.Arr("hostnames")?.Select(Js.String) ?? []);
+        }
+        if (taken.Contains(domain))
+        {
+            return Coded(domain + " is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go." + domain + ".", "domain_in_use", 400, new JsObject { ["domain"] = domain });
+        }
+        foreach (var d in await Store.LinkDomainsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (d.Str("domain") == domain)
+            {
+                if (d.Str("site") != site)
+                {
+                    return Coded(domain + " already belongs to another site", "domain_taken", 409, new JsObject { ["domain"] = domain });
+                }
+                break;
+            }
+        }
+        return domain;
+    }
+
     private async Task<Response> LinksApiAsync(Request request, string path, Url url, CancellationToken cancellationToken)
     {
         await _rl.InitAsync(cancellationToken).ConfigureAwait(false);
@@ -956,63 +1023,10 @@ public sealed class Routes
                     {
                         return (Response)parsedBody;
                     }
-                    string domain = Js.Lower(Js.Trim(Text(body, "domain")));
-                    domain = HttpPrefix.Replace(domain, "");
-                    domain = PathAfter.Replace(domain, "", 1);
-                    domain = DotsEnd.Replace(domain, "");
-                    domain = Www.Replace(domain, "");
-                    if (!DomainName.IsMatch(domain))
+                    object checkedDomain = await CheckLinkDomainAsync(request, url, siteId, Text(body, "domain"), cancellationToken).ConfigureAwait(false);
+                    if (checkedDomain is not string domain)
                     {
-                        return Coded("That is not a domain name", "domain_invalid", 400);
-                    }
-                    if (PrivateName(domain) || await Safefetch.ResolvesPrivatelyAsync(domain).ConfigureAwait(false))
-                    {
-                        return Coded(domain + " is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, new JsObject { ["domain"] = domain });
-                    }
-                    // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
-                    // The request's own Host is the caller's to choose, so the configured address and the names people
-                    // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-                    // the app knows its own address.
-                    if (_managed.TryGetValue(request, out _) && _origin == null)
-                    {
-                        return OriginNeeded();
-                    }
-                    var own = new List<string>();
-                    if (_origin != null)
-                    {
-                        own.Add(new Url(_origin).Host);
-                    }
-                    foreach (string? h in new[] { request.Headers.Get("host"), request.Headers.Get("x-forwarded-host"), url.Host })
-                    {
-                        if (!string.IsNullOrEmpty(h))
-                        {
-                            own.Add(h);
-                        }
-                    }
-                    if (_options.OwnHosts != null)
-                    {
-                        own.AddRange(_options.OwnHosts());
-                    }
-                    var taken = own.Select(HostName).ToList();
-                    foreach (var s in Sites())
-                    {
-                        taken.AddRange(s.Arr("hostnames")?.Select(Js.String) ?? []);
-                        taken.AddRange(_rl.Remote(s.Str("id")!)?.Arr("hostnames")?.Select(Js.String) ?? []);
-                    }
-                    if (taken.Contains(domain))
-                    {
-                        return Coded(domain + " is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go." + domain + ".", "domain_in_use", 400, new JsObject { ["domain"] = domain });
-                    }
-                    foreach (var d in await store.LinkDomainsAsync(cancellationToken).ConfigureAwait(false))
-                    {
-                        if (d.Str("domain") == domain)
-                        {
-                            if (d.Str("site") != siteId)
-                            {
-                                return Coded(domain + " already belongs to another site", "domain_taken", 409, new JsObject { ["domain"] = domain });
-                            }
-                            break;
-                        }
+                        return (Response)checkedDomain;
                     }
                     await store.AddLinkDomainAsync(domain, siteId, _rl.Now(), cancellationToken).ConfigureAwait(false);
                     _rl.ForgetLinkDomains();
@@ -1139,7 +1153,16 @@ public sealed class Routes
                 double done = Js.Number(body.Prop("done"));
                 try
                 {
-                    var step = await Importers.Index.ImportStepAsync(_rl, siteId, importMatch.Groups[1].Value, Credentials(body.Prop("credentials")), cursor as string, double.IsNaN(done) ? 0 : done, cancellationToken).ConfigureAwait(false);
+                    var step = await Importers.Index.ImportStepAsync(
+                        _rl,
+                        siteId,
+                        importMatch.Groups[1].Value,
+                        Credentials(body.Prop("credentials")),
+                        cursor as string,
+                        double.IsNaN(done) ? 0 : done,
+                        // An imported link's domain passes the same checks as one added in Settings, or the link comes over without it.
+                        async domain => await CheckLinkDomainAsync(request, url, siteId, domain, cancellationToken).ConfigureAwait(false) as string,
+                        cancellationToken).ConfigureAwait(false);
                     return JsonResponse(step);
                 }
                 catch (ImportError error)
