@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import sh.runlight.Js;
@@ -22,7 +23,16 @@ class ImportStepTest {
 
   private record Run(TestHost host, long links, long clicks, long skipped, List<Object> failed) {}
 
+  /** Every domain passes here; the routes check them as Settings does (see the conformance). */
   private static Run runAll(FakeService router, String source, Map<String, String> credentials) {
+    return runAll(router, source, credentials, domain -> domain);
+  }
+
+  private static Run runAll(
+      FakeService router,
+      String source,
+      Map<String, String> credentials,
+      UnaryOperator<String> linkDomain) {
     TestHost rl = new TestHost(router, NOW);
     String cursor = null;
     double done = 0;
@@ -31,7 +41,8 @@ class ImportStepTest {
     long skipped = 0;
     List<Object> failed = new ArrayList<>();
     do {
-      Map<String, Object> step = Index.importStep(rl, "default", source, credentials, cursor, done);
+      Map<String, Object> step =
+          Index.importStep(rl, "default", source, credentials, cursor, done, linkDomain);
       cursor = (String) step.get("cursor");
       done = Js.asDouble(step.get("done"));
       links += Js.asLong(step.get("links"));
@@ -53,6 +64,83 @@ class ImportStepTest {
       }
     }
     return null;
+  }
+
+  @Test
+  void anImportedLinksDestinationIsCheckedARefusedDomainIsLeftOffAndADaysCountIsCapped() {
+    FakeService router =
+        new FakeService()
+            .route(
+                "api\\.dub\\.co/links\\?",
+                Json.array(
+                    Json.object(
+                        "id",
+                        "l1",
+                        "domain",
+                        "Go.Brand.com",
+                        "key",
+                        "x",
+                        "url",
+                        "https://a.com",
+                        "title",
+                        "X",
+                        "createdAt",
+                        "2026-01-02T00:00:00Z"),
+                    Json.object(
+                        "id",
+                        "l2",
+                        "domain",
+                        "dub.sh",
+                        "key",
+                        "y",
+                        "url",
+                        "javascript:alert(1)",
+                        "title",
+                        "Y",
+                        "createdAt",
+                        "2026-01-02T00:00:00Z"),
+                    Json.object(
+                        "id",
+                        "l3",
+                        "domain",
+                        "stats.example.com",
+                        "key",
+                        "z",
+                        "url",
+                        "https://a.com/z",
+                        "title",
+                        "Z",
+                        "createdAt",
+                        "2026-01-02T00:00:00Z")))
+            .route(
+                "/events\\?",
+                new FakeService.Status(
+                    403, Json.object("error", Json.object("message", "Business plan required"))))
+            .route(
+                "/analytics\\?.*linkId=l1",
+                Json.array(Json.object("start", "2026-03-01T00:00:00.000Z", "clicks", 5_000_000L)))
+            .route("/analytics\\?", Json.array());
+    List<String> asked = new ArrayList<>();
+    Run run =
+        runAll(
+            router,
+            "dub",
+            Map.of("apiKey", "dub_test"),
+            domain -> {
+              asked.add(domain);
+              return domain.equals("stats.example.com") ? null : domain;
+            });
+    assertEquals(
+        List.of("go.brand.com", "stats.example.com"),
+        asked,
+        "shorteners' own domains are never asked about");
+    assertEquals(1, run.failed().size());
+    assertEquals("y", Js.get(run.failed().get(0), "slug"));
+    assertEquals("link_protocol", Js.get(run.failed().get(0), "code"));
+    assertEquals("go.brand.com", bySlug(run.host(), "x").get("domain"));
+    assertEquals("", bySlug(run.host(), "z").get("domain"));
+    assertEquals(2, links(run.host()).size());
+    assertEquals(10_000, run.clicks());
   }
 
   @Test
@@ -644,7 +732,8 @@ class ImportStepTest {
                 "clicks",
                 Json.array(
                     Json.object(
-                        "ts", 5_000L, "visit", "v", "path", "/fine", "query", "?utm_campaign=c"))));
+                        "ts", 5_000L, "visit", "v", "path", "/fine", "query", "?utm_campaign=c"))),
+            domain -> domain);
     assertEquals(
         Json.stringify(Json.object("status", "created", "clicks", 1L)), Json.stringify(made));
     Map<String, Object> link = rl.store.linkBySlug("fine");

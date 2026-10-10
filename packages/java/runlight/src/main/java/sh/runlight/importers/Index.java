@@ -2,11 +2,14 @@ package sh.runlight.importers;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.LongSupplier;
+import java.util.function.UnaryOperator;
 import sh.runlight.Js;
 import sh.runlight.Json;
 
@@ -28,6 +31,20 @@ public final class Index {
   }
 
   /**
+   * As {@link #importStep(Host, String, String, Map, String, double, UnaryOperator)}, leaving every
+   * branded domain off.
+   */
+  public static Map<String, Object> importStep(
+      Host runlight,
+      String site,
+      String source,
+      Map<String, String> credentials,
+      String cursor,
+      double done) {
+    return importStep(runlight, site, source, credentials, cursor, done, domain -> null);
+  }
+
+  /**
    * One step of an import: fetch the next few links from the source, write each with its history,
    * and report progress. The cursor carries where to pick up, so the page calls this until the
    * cursor comes back null.
@@ -36,6 +53,8 @@ public final class Index {
    * clock as its {@code now}: the date of a link the source gives none for, and where Umami's
    * history ends.
    *
+   * @param linkDomain the domain as a site keeps it once it passes the checks a link domain added
+   *     by hand does, or null to drop it
    * @return an ImportStep: {@code cursor}, {@code done}, {@code total}, {@code links}, {@code
    *     clicks}, {@code skipped}, and {@code failed} (each {@code {slug, reason, code?, params?}})
    */
@@ -45,7 +64,8 @@ public final class Index {
       String source,
       Map<String, String> credentials,
       String cursor,
-      double done) {
+      double done,
+      UnaryOperator<String> linkDomain) {
     BiFunction<Http, LongSupplier, Importer> make = IMPORTERS.get(source);
     if (make == null) {
       throw new ImportError(
@@ -66,6 +86,13 @@ public final class Index {
           return taken != null && Write.sameUrl((String) taken.get("url"), Js.string(url));
         };
     Map<String, Object> result = importer.step(credentials, cursor, known);
+    // Each domain is checked once a step, since the check may look it up in DNS.
+    Map<String, Optional<String>> checked = new HashMap<>();
+    UnaryOperator<String> domainFor =
+        domain ->
+            checked
+                .computeIfAbsent(domain, d -> Optional.ofNullable(linkDomain.apply(d)))
+                .orElse(null);
     double stepDone = done;
     long links = 0;
     long clicks = 0;
@@ -79,7 +106,7 @@ public final class Index {
         continue;
       }
       Map<String, Object> written =
-          Write.writeLink(runlight, site, source, Js.map(item.get("link")), item);
+          Write.writeLink(runlight, site, source, Js.map(item.get("link")), item, domainFor);
       stepDone++;
       Object status = written.get("status");
       if ("created".equals(status)) {

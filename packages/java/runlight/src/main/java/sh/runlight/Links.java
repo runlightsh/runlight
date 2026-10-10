@@ -54,7 +54,8 @@ public final class Links {
     return Js.trim(value == null || value == Json.UNDEFINED ? "" : Js.string(value));
   }
 
-  private static String cleanUrl(Object value) {
+  /** A link's destination as it is kept: a full http or https URL, up to 2,000 characters. */
+  public static String cleanUrl(Object value) {
     String text = text(value);
     Url url = Url.parse(text);
     if (url == null) {

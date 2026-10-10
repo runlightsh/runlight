@@ -1288,6 +1288,87 @@ public final class Routes {
     return out;
   }
 
+  /**
+   * The checks a link domain passes before a site gets it, from Settings or from an import: the
+   * name as it is kept, or the refusal to send.
+   */
+  private Object checkLinkDomain(Request request, Url url, String site, Object value) {
+    String domain =
+        Js.lower(Js.trim(value == null || value == Json.UNDEFINED ? "" : Js.string(value)));
+    domain = domain.replaceFirst("^https?://", "");
+    domain = domain.replaceFirst("/" + Js.DOT + "*\\z", "");
+    domain = domain.replaceFirst("\\.+\\z", "");
+    domain = domain.replaceFirst("^www\\.", "");
+    if (!DOMAIN_NAME.matcher(domain).find()) {
+      return coded("That is not a domain name", "domain_invalid", 400);
+    }
+    if (privateName(domain) || Safefetch.resolvesPrivately(domain)) {
+      return coded(
+          domain + " is not a public domain name. Use one that browsers anywhere can reach.",
+          "domain_not_public",
+          400,
+          Json.object("domain", domain));
+    }
+    // A link domain answers every path on it, so it must never be where the dashboard or a
+    // counted site lives. The request's own Host is the caller's to choose, so the configured
+    // address and the names people signed in from count too. A hub cannot know every name
+    // this app answers on, so it adds none until the app knows its own address.
+    if (managed.containsKey(request) && origin == null) {
+      return originNeeded();
+    }
+    List<String> own = new ArrayList<>();
+    if (origin != null) {
+      own.add(new Url(origin).host());
+    }
+    for (String h :
+        new String[] {
+          request.headers().get("host"), request.headers().get("x-forwarded-host"), url.host()
+        }) {
+      if (Js.truthy(h)) {
+        own.add(h);
+      }
+    }
+    if (options.ownHosts != null) {
+      for (String host : options.ownHosts.get()) {
+        own.add(host);
+      }
+    }
+    List<Object> taken = new ArrayList<>();
+    for (String h : own) {
+      taken.add(hostName(h));
+    }
+    for (Map<String, Object> s : sites()) {
+      taken.addAll(Js.list(s.get("hostnames")));
+      Map<String, Object> remote = rl.remote((String) s.get("id"));
+      if (remote != null && remote.get("hostnames") instanceof List<?> l) {
+        taken.addAll(l);
+      }
+    }
+    if (taken.contains(domain)) {
+      return coded(
+          domain
+              + " is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go."
+              + domain
+              + ".",
+          "domain_in_use",
+          400,
+          Json.object("domain", domain));
+    }
+    for (Map<String, Object> d : store().linkDomains()) {
+      if (domain.equals(d.get("domain"))) {
+        if (!site.equals(d.get("site"))) {
+          return coded(
+              domain + " already belongs to another site",
+              "domain_taken",
+              409,
+              Json.object("domain", domain));
+        }
+        break;
+      }
+    }
+    return domain;
+  }
+
   private Response linksApi(Request request, String path, Url url) {
     rl.init();
     Object found = querySite(url);
@@ -1308,79 +1389,11 @@ public final class Routes {
           if (read instanceof Response r) {
             return r;
           }
-          Map<String, Object> body = asMap(read);
-          String domain = Js.lower(Js.trim(text(body, "domain")));
-          domain = domain.replaceFirst("^https?://", "");
-          domain = domain.replaceFirst("/" + Js.DOT + "*\\z", "");
-          domain = domain.replaceFirst("\\.+\\z", "");
-          domain = domain.replaceFirst("^www\\.", "");
-          if (!DOMAIN_NAME.matcher(domain).find()) {
-            return coded("That is not a domain name", "domain_invalid", 400);
+          Object checked = checkLinkDomain(request, url, siteId, asMap(read).get("domain"));
+          if (checked instanceof Response r) {
+            return r;
           }
-          if (privateName(domain) || Safefetch.resolvesPrivately(domain)) {
-            return coded(
-                domain + " is not a public domain name. Use one that browsers anywhere can reach.",
-                "domain_not_public",
-                400,
-                Json.object("domain", domain));
-          }
-          // A link domain answers every path on it, so it must never be where the dashboard or a
-          // counted site lives. The request's own Host is the caller's to choose, so the configured
-          // address and the names people signed in from count too. A hub cannot know every name
-          // this app answers on, so it adds none until the app knows its own address.
-          if (managed.containsKey(request) && origin == null) {
-            return originNeeded();
-          }
-          List<String> own = new ArrayList<>();
-          if (origin != null) {
-            own.add(new Url(origin).host());
-          }
-          for (String h :
-              new String[] {
-                request.headers().get("host"), request.headers().get("x-forwarded-host"), url.host()
-              }) {
-            if (Js.truthy(h)) {
-              own.add(h);
-            }
-          }
-          if (options.ownHosts != null) {
-            for (String host : options.ownHosts.get()) {
-              own.add(host);
-            }
-          }
-          List<Object> taken = new ArrayList<>();
-          for (String h : own) {
-            taken.add(hostName(h));
-          }
-          for (Map<String, Object> s : sites()) {
-            taken.addAll(Js.list(s.get("hostnames")));
-            Map<String, Object> remote = rl.remote((String) s.get("id"));
-            if (remote != null && remote.get("hostnames") instanceof List<?> l) {
-              taken.addAll(l);
-            }
-          }
-          if (taken.contains(domain)) {
-            return coded(
-                domain
-                    + " is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go."
-                    + domain
-                    + ".",
-                "domain_in_use",
-                400,
-                Json.object("domain", domain));
-          }
-          for (Map<String, Object> d : store.linkDomains()) {
-            if (domain.equals(d.get("domain"))) {
-              if (!siteId.equals(d.get("site"))) {
-                return coded(
-                    domain + " already belongs to another site",
-                    "domain_taken",
-                    409,
-                    Json.object("domain", domain));
-              }
-              break;
-            }
-          }
+          String domain = (String) checked;
           store.addLinkDomain(domain, siteId, rl.now());
           rl.forgetLinkDomains();
           return json(Json.object("domain", domain), 201);
@@ -1512,7 +1525,13 @@ public final class Routes {
                   importMatch.group(1),
                   credentials(Js.get(body, "credentials")),
                   cursor instanceof String c ? c : null,
-                  Double.isNaN(done) ? 0 : done);
+                  Double.isNaN(done) ? 0 : done,
+                  // An imported link's domain passes the same checks as one added in Settings, or
+                  // the link comes over without it.
+                  domain ->
+                      checkLinkDomain(request, url, siteId, domain) instanceof String kept
+                          ? kept
+                          : null);
           return json(step);
         } catch (ImportError error) {
           return refused(error, "import_failed");
