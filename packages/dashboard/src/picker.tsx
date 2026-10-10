@@ -36,13 +36,19 @@ function Month({ y, m, start, end, hoverDay, today, onDay, onHover }: {
   const hi = start && lastEnd ? (start < lastEnd ? lastEnd : start) : start;
   return (
     <div class="month">
-      <div class="month-title">{monthTitle(y, m)}</div>
-      <div class="month-grid" role="grid">
+      <div class="month-title" aria-hidden="true">
+        {monthTitle(y, m)}
+      </div>
+      {/* A group of day buttons, each named with its whole date, rather than a grid, which needs rows and cells
+          and arrow keys to move between them. The weekday letters are only for the eye. */}
+      <div class="month-grid" role="group" aria-label={monthTitle(y, m)}>
         {weekdays("short").map((w) => (
-          <span class="weekday">{w.slice(0, 2)}</span>
+          <span class="weekday" aria-hidden="true">
+            {w.slice(0, 2)}
+          </span>
         ))}
         {Array.from({ length: lead }, () => (
-          <span />
+          <span aria-hidden="true" />
         ))}
         {Array.from({ length: days }, (_, i) => {
           const day = iso(y, m, i + 1);
