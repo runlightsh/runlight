@@ -71,13 +71,13 @@ final class SettingsForm extends ConfigFormBase {
       '#type' => 'password',
       '#title' => $this->t('Observe key'),
       '#attributes' => ['placeholder' => (string) $config->get('observe_key') !== '' ? $this->t('Saved. Leave blank to keep it for this address.') : ''],
-      '#description' => $this->t('Optional. With this site’s key from Runlight’s Settings, Install, Key for CMS plugins, the module reports AI agents such as ChatGPT and Claude reading your pages. They run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else.'),
+      '#description' => $this->t('Optional. With this site’s key from Runlight’s Settings, Install, Key for CMS plugins, the module reports AI agents such as ChatGPT and Claude reading your pages. They run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else. To keep it out of exported configuration, set it in settings.php instead: <code>$config[\'runlight.settings\'][\'observe_key\'] = getenv(\'RUNLIGHT_OBSERVE_KEY\');</code>'),
     ];
     $form['dashboard_key'] = [
       '#type' => 'password',
       '#title' => $this->t('Dashboard key'),
       '#attributes' => ['placeholder' => (string) $config->get('dashboard_key') !== '' ? $this->t('Saved. Leave blank to keep it for this address.') : ''],
-      '#description' => $this->t('Optional. With this site’s key from Runlight’s Settings, Install, Key for the dashboard in your CMS, Reports, Runlight shows this site’s numbers right here. The key opens the same read-only view a share link shows, framed only by this admin, and cannot read anything itself.'),
+      '#description' => $this->t('Optional. With this site’s key from Runlight’s Settings, Install, Key for the dashboard in your CMS, Reports, Runlight shows this site’s numbers right here. The key opens the same read-only view a share link shows, framed only by this admin, and cannot read anything itself. To keep it out of exported configuration, set it in settings.php instead: <code>$config[\'runlight.settings\'][\'dashboard_key\'] = getenv(\'RUNLIGHT_DASHBOARD_KEY\');</code>'),
     ];
     $form['skip_admins'] = [
       '#type' => 'checkbox',
