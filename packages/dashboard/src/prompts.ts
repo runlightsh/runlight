@@ -16,7 +16,7 @@ Please do these steps, and tell me anything I have to do by hand:
 
 2. Hosting. Make this app accept requests for ${domain} over HTTPS. On Vercel or Netlify, that means adding ${domain} to the project's domains. On my own server, add it to the web server config (for nginx: a server_name and a certificate, for example with certbot) and proxy it to the app the same way as the main domain.
 
-3. App. In the app's middleware (proxy.ts in Next.js 16, middleware.ts before it), answer requests for link domains before anything else:
+3. App. In the app's middleware, answer requests for link domains before anything else. In Next.js 16 and later that is proxy.ts:
 
    import { rl } from "@/lib/runlight";
 
@@ -25,6 +25,8 @@ Please do these steps, and tell me anything I have to do by hand:
      if (link) return link;
      // ...whatever the middleware already does
    }
+
+   In Next.js 15 and earlier it is middleware.ts, with the same body in export async function middleware(request: Request) instead. From 15.5, also add export const config = { runtime: "nodejs" }; so it can reach a SQLite or Postgres store. Before 15.5, middleware only runs on the edge, where only an edge store (Turso, D1) works.
 
    Keep any middleware that is already there; this goes first. It returns null for every other host, so the rest of the site is unaffected.
 
@@ -79,7 +81,7 @@ The dashboard should live at ${base} on this site (it is at ${origin}${base} her
 
 6. Set RUNLIGHT_TOKEN to a long random string in the environment; open ${base}?token=<that string> once to sign in to the dashboard.
 
-7. Optional, to see AI agents like ChatGPT and Claude reading pages: in the middleware (proxy.ts in Next.js 16), call void rl.observe(request) for every request.
+7. Optional, to see AI agents like ChatGPT and Claude reading pages: call void rl.observe(request) for every request in the middleware: export function proxy in proxy.ts in Next.js 16 and later, or export async function middleware in middleware.ts in Next.js 15 and earlier, with export const config = { runtime: "nodejs" }; from 15.5.
 
 Keep the site's existing behaviour unchanged otherwise.
 `;

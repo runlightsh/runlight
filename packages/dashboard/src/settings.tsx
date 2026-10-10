@@ -547,11 +547,18 @@ export function Install({ site, sites }: { site: Site; sites: Site[] }) {
         {install.managed ? null : (
           <>
             <p class="settings-text">{t("install.agents")}</p>
-            <Code>{`// proxy.ts (middleware.ts before Next.js 16)
+            <Code>{`// proxy.ts, in Next.js 16 and later
 import { rl } from "@/lib/runlight";
 export function proxy(request: Request) {
   void rl.observe(request);
 }`}</Code>
+            <Code>{`// middleware.ts, in Next.js 15 and earlier
+import { rl } from "@/lib/runlight";
+export async function middleware(request: Request) {
+  void rl.observe(request);
+}
+// From Next.js 15.5, so it can reach a SQLite or Postgres store; before that, middleware only runs on the edge.
+export const config = { runtime: "nodejs" };`}</Code>
           </>
         )}
       </div>
