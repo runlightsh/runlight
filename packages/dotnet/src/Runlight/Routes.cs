@@ -2108,7 +2108,15 @@ public sealed class Routes
             {
                 return Coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400);
             }
-            string host = HostName(parsed.Host);
+            // Only https and the default port, so a plain http page or another service on the same name cannot frame
+            // the dashboard; a page on this computer, for development, may use http and any port. The name must be
+            // one of the site's own, which are kept without www, so www. is the only difference allowed.
+            bool local = parsed.Hostname is "localhost" or "127.0.0.1" or "[::1]";
+            if (!local && (parsed.Protocol != "https:" || parsed.Port.Length > 0))
+            {
+                return Coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400);
+            }
+            string host = Www.Replace(parsed.Hostname, "", 1);
             var domains = (rl.Remote(embedSite.Str("id")!)?.Arr("hostnames") ?? embedSite.Arr("hostnames") ?? []).Select(h => HostName(Js.String(h)));
             if (!domains.Contains(host))
             {
