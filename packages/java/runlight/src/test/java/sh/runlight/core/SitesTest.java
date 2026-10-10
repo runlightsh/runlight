@@ -25,9 +25,11 @@ import sh.runlight.Fixtures;
 import sh.runlight.Js;
 import sh.runlight.Json;
 import sh.runlight.RecordingFetcher;
+import sh.runlight.Routes;
 import sh.runlight.Runlight;
 import sh.runlight.http.FetchError;
 import sh.runlight.http.Headers;
+import sh.runlight.http.Request;
 import sh.runlight.http.Response;
 import sh.runlight.store.Databases;
 import sh.runlight.store.SqlStore;
@@ -364,6 +366,23 @@ class SitesTest {
         Json.stringify(info),
         "retention unknown, as TS leaves it undefined");
     t.rl.forgetRemoteInfo(id);
+
+    // A share link reads the install's here-now count, but not its feed of single visits.
+    String share = "a".repeat(32);
+    t.store().insertShare(Json.object("id", share, "site", id, "name", "Client", "createdAt", 0L));
+    Routes routes = t.rl.routes(new Routes.Options().token("app"));
+    Request shared =
+        new Request(
+            "https://stats.example.com/runlight/api/realtime",
+            "GET",
+            Headers.of("x-runlight-share", share),
+            "");
+    answers.clear();
+    answers.add(json(Json.object("visitors", 2L, "recent", List.of(Json.object("path", "/")))));
+    assertEquals("{\"visitors\":2,\"recent\":[]}", routes.handle(shared).text());
+    answers.add(new Response("<!doctype html>", 200));
+    assertEquals(
+        "unreachable", Js.get(Json.parse(routes.handle(shared).text()), "code"), "not JSON");
 
     // Hits never land on a site counted elsewhere, even when they name it.
     t.rl.collect(

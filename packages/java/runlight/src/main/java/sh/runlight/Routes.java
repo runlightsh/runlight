@@ -3516,8 +3516,23 @@ public final class Routes {
     String siteId = (String) site.get("id");
     String timezone = (String) site.get("timezone");
     Map<String, Object> remote = rl.remote(siteId);
+    // A share link or an embedded dashboard sees how many are here now and what they read, but not
+    // the feed of each visit, with its time and city, since anyone with the link could watch one
+    // person's way through the site.
+    boolean unfeed = shared != null;
     if (remote != null) {
-      return passThrough(remote, path, url, request);
+      Response answer = passThrough(remote, path, url, request);
+      if (!path.equals("/api/realtime") || !unfeed || !answer.ok()) {
+        return answer;
+      }
+      Json.Parsed live = Json.tryParse(answer.text());
+      if (!live.ok() || !(live.value() instanceof Map<?, ?>)) {
+        String host = new Url(Js.string(remote.get("url"))).host();
+        return coded("Could not reach " + host, "unreachable", 502, Json.object("host", host));
+      }
+      Map<String, Object> out = new LinkedHashMap<>(asMap(live.value()));
+      out.put("recent", new ArrayList<>());
+      return json(out);
     }
 
     if (path.equals("/api/icon")) {
@@ -3548,7 +3563,11 @@ public final class Routes {
     }
 
     if (path.equals("/api/realtime")) {
-      return json(store.realtime(siteId, rl.now()));
+      Map<String, Object> live = new LinkedHashMap<>(store.realtime(siteId, rl.now()));
+      if (unfeed) {
+        live.put("recent", new ArrayList<>());
+      }
+      return json(live);
     }
 
     Object read = readQuery(url, site);
