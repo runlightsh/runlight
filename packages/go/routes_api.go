@@ -955,8 +955,21 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 	if !found || (only != "" && site.ID != only) {
 		return Coded("Unknown site", "unknown_site", 404, nil), nil
 	}
+	// A share link or an embedded dashboard sees how many are here now and what they read, but not the feed of
+	// each visit, with its time and city, since anyone with the link could watch one person's way through the site.
 	if remote, isRemote := r.Remote(site.ID); isRemote {
-		return passThrough(ctx, r, remote, path, u, request), nil
+		answer := passThrough(ctx, r, remote, path, u, request)
+		if path != "/api/realtime" || shared == nil || answer.Status < 200 || answer.Status > 299 {
+			return answer, nil
+		}
+		parsed, _ := js.Parse(string(answer.Body))
+		live := js.Obj(parsed)
+		if live == nil {
+			host := whatwg.MustParse(remote.URL).Host()
+			return Coded("Could not reach "+host, "unreachable", 502, params("host", host)), nil
+		}
+		live.Set("recent", []any{})
+		return jsonAnswer(live, 200), nil
 	}
 
 	if path == "/api/icon" {
@@ -977,6 +990,9 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		realtime, err := r.Store.Realtime(ctx, site.ID, r.now())
 		if err != nil {
 			return nil, err
+		}
+		if shared != nil {
+			realtime.Recent = []RecentRow{}
 		}
 		return jsonAnswer(realtime, 200), nil
 	}
