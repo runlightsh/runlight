@@ -2353,6 +2353,8 @@ class Routes:
             return coded("Only an owner or admin can change this", "admin_only", 403)
         # Sign-in, setup, invites, and the Account and People APIs, and the dashboard sends anyone signed out to sign in.
         if self.web is not None:
+            # Tries at signing in are counted in the store's settings, so its tables come first.
+            rl.init()
             answered = self.web.handle(request, path, context)
             if answered:
                 return answered

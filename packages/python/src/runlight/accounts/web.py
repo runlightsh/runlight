@@ -155,6 +155,8 @@ class AccountsWeb:
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
         self.code_tries = Throttle(self.store, "code", 5)
+        # A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+        self.decoy_tries = Throttle(self.store, "decoy", 5)
         self.confirm_tries = Throttle(self.store, "confirm", 5)
         self.rechecks = Throttle(self.store, "recheck", 10)
 
@@ -362,7 +364,7 @@ class AccountsWeb:
                 return _redirect(f"{base}/login?next={_js.encode_uri_component(next_)}")
             user, real = pending["user"], pending["real"]
             # Counted before the check, so a burst cannot get past five.
-            if not self.code_tries.take(user["id"], self.now()):
+            if not (self.code_tries if real else self.decoy_tries).take(user["id"], self.now()):
                 return _html(code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": "Too many tries. Wait fifteen minutes and try again."}), 429)
             if not real or not self.accounts.check_second_factor(user["id"], form.get("code") or "", self.now()):
                 return _html(
