@@ -93,8 +93,12 @@ class AccountsRoutesAccountsTest < RoutesTestCase
     assert_equal 303, made.status
 
     ENV["NODE_ENV"] = "production"
-    open = Runlight::Core.new({ "store" => Databases.fresh("sqlite") }).routes({ "token" => nil, "accounts" => true })
+    open = Runlight::Core.new({ "store" => Databases.fresh("sqlite"), "secret" => "k" * 64 }).routes({ "token" => nil, "accounts" => true })
     assert_equal 200, open.handle(req("/runlight/setup")).status, "token: nil leaves setup open, as it leaves everything"
+    unsigned = assert_raises(ArgumentError, "without a secret every process shares, sessions would not outlive a process") do
+      Runlight::Core.new({ "store" => Databases.fresh("sqlite") }).routes({ "token" => nil, "accounts" => true })
+    end
+    assert_match(/RUNLIGHT_SECRET/, unsigned.message)
     prod = Runlight::Core.new({ "store" => Databases.fresh("sqlite"), "secret" => "k" * 64 }).routes({ "accounts" => true })
     shut = prod.handle(req("/runlight/setup"))
     assert_equal 403, shut.status
