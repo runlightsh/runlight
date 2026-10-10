@@ -47,8 +47,8 @@ final class Tracker {
 
 	/**
 	 * Reports a page served to an AI agent. Agents run no JavaScript, so the
-	 * script never sees them. The request does not wait for an answer, so
-	 * the page is not slowed down, and it only goes out for known agents.
+	 * script never sees them. The report goes once the page has been sent, so
+	 * the agent never waits for it, and only for known agents.
 	 */
 	public static function observe(): void {
 		$settings = Settings::get();
@@ -61,18 +61,60 @@ final class Tracker {
 			return;
 		}
 		$path = isset( $_SERVER['REQUEST_URI'] ) ? esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '/';
+		$url  = self::page_url( $path );
+		// Last of all at shutdown, once nothing else will write to the page.
+		add_action(
+			'shutdown',
+			static function () use ( $settings, $url, $agent ): void {
+				self::report( $settings, $url, $agent );
+			},
+			PHP_INT_MAX
+		);
+	}
+
+	/**
+	 * The page's full address. The request's path already holds the folder
+	 * WordPress lives in, so it goes after home_url's scheme and host alone,
+	 * not after home_url itself, which would name that folder twice.
+	 */
+	private static function page_url( string $path ): string {
+		$home = wp_parse_url( home_url() );
+		if ( ! is_array( $home ) || empty( $home['host'] ) ) {
+			return home_url( $path );
+		}
+		$scheme = isset( $home['scheme'] ) ? $home['scheme'] : 'https';
+		$port   = isset( $home['port'] ) ? ':' . $home['port'] : '';
+		return $scheme . '://' . $home['host'] . $port . '/' . ltrim( $path, '/' );
+	}
+
+	/**
+	 * Sends the report. Under PHP-FPM or LiteSpeed the agent waits until PHP
+	 * finishes, even after the page is out, so the connection is closed first.
+	 *
+	 * @param array{address:string,observe_key:string} $settings The plugin's settings.
+	 * @param string                                   $url      The page the agent fetched.
+	 * @param string                                   $agent    The agent's user agent.
+	 */
+	private static function report( array $settings, string $url, string $agent ): void {
+		if ( session_status() === PHP_SESSION_ACTIVE ) {
+			session_write_close();
+		}
+		if ( function_exists( 'fastcgi_finish_request' ) ) {
+			fastcgi_finish_request();
+		} elseif ( function_exists( 'litespeed_finish_request' ) ) {
+			litespeed_finish_request();
+		}
 		wp_remote_post(
 			$settings['address'] . '/api/observe',
 			array(
-				'blocking' => false,
-				'timeout'  => 1,
-				'headers'  => array(
+				'timeout' => 3,
+				'headers' => array(
 					'authorization' => 'Bearer ' . $settings['observe_key'],
 					'content-type'  => 'application/json',
 				),
-				'body'     => wp_json_encode(
+				'body'    => wp_json_encode(
 					array(
-						'url'       => home_url( $path ),
+						'url'       => $url,
 						'userAgent' => $agent,
 					)
 				),
