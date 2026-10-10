@@ -32,7 +32,8 @@ export class LinkError extends Error {
   }
 }
 
-function cleanUrl(value: unknown): string {
+/** A link's destination as it is kept: a full http or https URL, up to 2,000 characters. */
+export function cleanUrl(value: unknown): string {
   const text = String(value ?? "").trim();
   let url: URL;
   try {

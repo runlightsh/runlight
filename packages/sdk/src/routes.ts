@@ -583,6 +583,28 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : coded("Send a JSON object", "send_object", 400);
   }
 
+  /**
+   * The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
+   * is kept, or the refusal to send.
+   */
+  async function checkLinkDomain(request: Request, url: URL, site: string, value: unknown): Promise<string | Response> {
+    const domain = String(value ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.+$/, "").replace(/^www\./, "");
+    if (!DOMAIN_NAME.test(domain)) return coded("That is not a domain name", "domain_invalid", 400);
+    if (privateName(domain) || (await resolvesPrivately(domain))) return coded(`${domain} is not a public domain name. Use one that browsers anywhere can reach.`, "domain_not_public", 400, { domain });
+    // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
+    // The request's own Host is the caller's to choose, so the configured address and the names people
+    // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
+    // the app knows its own address.
+    if (managed.has(request) && !origin) return originNeeded();
+    const here = [request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host].filter((h): h is string => Boolean(h));
+    const own = [...(origin ? [new URL(origin).host] : []), ...here, ...((await options.ownHosts?.()) ?? [])].map(hostName);
+    const taken = new Set([...own, ...runlight.sites.flatMap((s) => s.hostnames), ...runlight.sites.flatMap((s) => runlight.remote(s.id)?.hostnames ?? [])]);
+    if (taken.has(domain)) return coded(`${domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.${domain}.`, "domain_in_use", 400, { domain });
+    const owner = (await runlight.store.linkDomains()).find((d) => d.domain === domain);
+    if (owner && owner.site !== site) return coded(`${domain} already belongs to another site`, "domain_taken", 409, { domain });
+    return domain;
+  }
+
   async function linksApi(request: Request, path: string, url: URL): Promise<Response> {
     await runlight.init();
     const site = await querySite(url);
@@ -593,20 +615,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (request.method === "POST") {
           const body = await readJson(request);
           if (body instanceof Response) return body;
-          const domain = String(body.domain ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.+$/, "").replace(/^www\./, "");
-          if (!DOMAIN_NAME.test(domain)) return coded("That is not a domain name", "domain_invalid", 400);
-          if (privateName(domain) || (await resolvesPrivately(domain))) return coded(`${domain} is not a public domain name. Use one that browsers anywhere can reach.`, "domain_not_public", 400, { domain });
-          // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
-          // The request's own Host is the caller's to choose, so the configured address and the names people
-          // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-          // the app knows its own address.
-          if (managed.has(request) && !origin) return originNeeded();
-          const here = [request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host].filter((h): h is string => Boolean(h));
-          const own = [...(origin ? [new URL(origin).host] : []), ...here, ...((await options.ownHosts?.()) ?? [])].map(hostName);
-          const taken = new Set([...own, ...runlight.sites.flatMap((s) => s.hostnames), ...runlight.sites.flatMap((s) => runlight.remote(s.id)?.hostnames ?? [])]);
-          if (taken.has(domain)) return coded(`${domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.${domain}.`, "domain_in_use", 400, { domain });
-          const owner = (await runlight.store.linkDomains()).find((d) => d.domain === domain);
-          if (owner && owner.site !== site.id) return coded(`${domain} already belongs to another site`, "domain_taken", 409, { domain });
+          const domain = await checkLinkDomain(request, url, site.id, body.domain);
+          if (domain instanceof Response) return domain;
           await runlight.store.addLinkDomain(domain, site.id, runlight.now());
           runlight.forgetLinkDomains();
           return json({ domain }, 201);
@@ -683,6 +693,11 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
             Object.fromEntries(Object.entries(credentials).map(([k, v]) => [k, String(v)])),
             typeof body.cursor === "string" ? body.cursor : null,
             Number(body.done) || 0,
+            // An imported link's domain passes the same checks as one added in Settings, or the link comes over without it.
+            async (domain) => {
+              const checked = await checkLinkDomain(request, url, site.id, domain);
+              return checked instanceof Response ? null : checked;
+            },
           );
           return json(step);
         } catch (error) {

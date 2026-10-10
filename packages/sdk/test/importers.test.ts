@@ -31,13 +31,14 @@ function serve(routes: Array<[RegExp, (url: URL, init: RequestInit) => { status?
   return calls;
 }
 
-async function runAll(source: string, credentials: Record<string, string>) {
+/** Every domain passes here; the routes check them as Settings does (see the conformance scenarios). */
+async function runAll(source: string, credentials: Record<string, string>, linkDomain = async (domain: string): Promise<string | null> => domain) {
   const rl = runlight({ store: sqlite({ path: ":memory:" }) });
   let cursor: string | null = null;
   let done = 0;
   const totals = { links: 0, clicks: 0, skipped: 0, failed: [] as Array<{ slug: string; reason: string }> };
   do {
-    const step = await importStep(rl, "default", source, credentials, cursor, done);
+    const step = await importStep(rl, "default", source, credentials, cursor, done, linkDomain);
     cursor = step.cursor;
     done = step.done;
     totals.links += step.links;
@@ -82,6 +83,29 @@ test("Dub: daily counts when the plan has no events API", async () => {
   const [row] = await rl.store.links("default", 0, Date.now() + 1);
   assert.equal(row!.clicks, 3);
   assert.equal(row!.visitors, 0, "daily counts add clicks, not made-up visitors");
+});
+
+test("an imported link's destination passes the checks a new link does, a refused domain is left off, and a day's count is capped", async () => {
+  serve([
+    [/api\.dub\.co\/links\?/, () => ({ body: [
+      { id: "l1", domain: "Go.Brand.com", key: "x", url: "https://a.com", title: "X", createdAt: "2026-01-02T00:00:00Z" },
+      { id: "l2", domain: "dub.sh", key: "y", url: "javascript:alert(1)", title: "Y", createdAt: "2026-01-02T00:00:00Z" },
+      { id: "l3", domain: "stats.example.com", key: "z", url: "https://a.com/z", title: "Z", createdAt: "2026-01-02T00:00:00Z" },
+    ] })],
+    [/\/events\?/, () => ({ status: 403, body: { error: { message: "Business plan required" } } })],
+    [/\/analytics\?.*linkId=l1/, () => ({ body: [{ start: "2026-03-01T00:00:00.000Z", clicks: 5_000_000 }] })],
+    [/\/analytics\?/, () => ({ body: [] })],
+  ]);
+  const asked: string[] = [];
+  const { rl, totals } = await runAll("dub", { apiKey: "dub_test" }, async (domain) => {
+    asked.push(domain);
+    return domain === "stats.example.com" ? null : domain;
+  });
+  assert.deepEqual(asked, ["go.brand.com", "stats.example.com"], "shorteners' own domains are never asked about");
+  assert.deepEqual(totals.failed.map((f: any) => [f.slug, f.code]), [["y", "link_protocol"]]);
+  const links = await rl.store.links("default", 0, Date.now() + 1);
+  assert.deepEqual(links.map((l) => [l.slug, l.domain]).sort(), [["x", "go.brand.com"], ["z", ""]]);
+  assert.equal(totals.clicks, 10_000);
 });
 
 test("Bitly: every group, custom back-halves, daily counts", async () => {
