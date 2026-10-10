@@ -83,6 +83,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
   // Password re-checks in Account: ten.
   const codeTries = new Throttle(5);
+  // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+  const decoyTries = new Throttle(5);
   const confirmTries = new Throttle(5);
   const rechecks = new Throttle(10);
   // When each account was last sent a sign-in link, at most one a minute.
@@ -294,7 +296,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (!pending) return redirect(`${base}/login?next=${encodeURIComponent(next)}`);
       const { user, real } = pending;
       // Counted before the check, so a burst cannot get past five.
-      if (!(await codeTries.take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "Too many tries. Wait fifteen minutes and try again." }), 429);
+      if (!(await (real ? codeTries : decoyTries).take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "Too many tries. Wait fifteen minutes and try again." }), 429);
       if (!real || !(await accounts.checkSecondFactor(user.id, form.get("code") ?? "", now()))) {
         return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "That code is not right. Check the time on your phone, or use a recovery code." }), 401);
       }

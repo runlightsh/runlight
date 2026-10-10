@@ -29101,6 +29101,1429 @@
       ]
     },
     {
+      "name": "accounts: a decoy code step has tries of its own",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "accounts": true,
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "owner@example.com",
+            "password": "correct horse battery",
+            "again": "correct horse battery"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/account/2fa/start",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "password": "correct horse battery"
+          },
+          "capture": {
+            "totp": "secret"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "secret": "<secret>",
+              "uri": "otpauth://totp/Runlight%20(example.com)%3Aowner%40example.com?secret=<value>&issuer=Runlight%20(example.com)&algorithm=SHA1&digits=6&period=30"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/account/2fa/confirm",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "code": "{{totp:totp}}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            },
+            "body": {
+              "recovery": [
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/logout",
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/login",
+              "set-cookie": [
+                "runlight_session=; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.0"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.2"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.3"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.4"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.5"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.6"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.7"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.8"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.9"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.10"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.11"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.12"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.13"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.14"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.15"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.16"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.17"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.18"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.19"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.20"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.21"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.22"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.23"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.24"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.25"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.26"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.27"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.28"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.29"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.30"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.31"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.32"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.33"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.34"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.35"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.36"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.37"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.38"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.39"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.40"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.41"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.42"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.43"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.44"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.45"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.46"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.47"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.48"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.49"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "wrong password"
+          },
+          "jar": "guesser",
+          "headers": {
+            "x-forwarded-for": "203.0.113.200"
+          },
+          "capture": {
+            "decoy": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guesser",
+          "form": {
+            "pending": "{{decoy}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guesser",
+          "form": {
+            "pending": "{{decoy}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guesser",
+          "form": {
+            "pending": "{{decoy}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guesser",
+          "form": {
+            "pending": "{{decoy}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guesser",
+          "form": {
+            "pending": "{{decoy}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guesser",
+          "form": {
+            "pending": "{{decoy}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 429,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "owner",
+          "headers": {
+            "x-forwarded-for": "192.0.2.77"
+          },
+          "capture": {
+            "pending": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "advance": 30000,
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "owner",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure",
+                "runlight_device=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=31536000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/account",
+          "jar": "owner",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "account": {
+                "id": "<id>",
+                "email": "owner@example.com",
+                "role": "owner",
+                "createdAt": 1791288000000,
+                "twoFactor": true,
+                "recoveryLeft": 10
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "accounts: the first account on an install with no token",
       "site": {
         "hostnames": [
