@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Runlight.Accounts;
 using Xunit;
 using static Runlight.Tests.Fixtures;
@@ -68,6 +69,16 @@ public sealed class CryptoTests
         Assert.Matches(new Regex("^scrypt\\$[A-Za-z0-9_-]{22}\\$[A-Za-z0-9_-]{43}\\z"), hash);
         Assert.True(Crypto.CheckPassword("a long password", hash));
         Assert.NotEqual(hash, Crypto.HashPassword("a long password"));
+    }
+
+    [Fact]
+    public async Task Many_passwords_checked_at_once_take_turns_and_all_answer_right()
+    {
+        string hash = await Crypto.HashPasswordAsync("a long password");
+        var checks = await Task.WhenAll(Enumerable.Range(0, 24).Select(i => Crypto.CheckPasswordAsync(i % 2 == 0 ? "a long password" : "wrong", hash)));
+        Assert.Equal(Enumerable.Range(0, 24).Select(i => i % 2 == 0), checks);
+        // A pooled table that was wiped gives the same key the next time.
+        Assert.True(Crypto.CheckPassword("a long password", hash));
     }
 
     [Fact]

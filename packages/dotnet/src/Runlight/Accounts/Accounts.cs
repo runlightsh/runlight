@@ -445,7 +445,7 @@ public sealed class Accounts
                 "password_short",
                 new Dictionary<string, string>(StringComparer.Ordinal) { ["min"] = Js.Str(MinPassword) });
         }
-        string hash = Crypto.HashPassword(password);
+        string hash = await Crypto.HashPasswordAsync(password, cancellationToken).ConfigureAwait(false);
         var existing = await ByEmailAsync(address, cancellationToken).ConfigureAwait(false);
         if (existing != null)
         {
@@ -572,10 +572,11 @@ public sealed class Accounts
         var user = await ByEmailAsync(email, cancellationToken).ConfigureAwait(false);
         if (user == null)
         {
-            Crypto.CheckPassword(password, _decoy ??= Crypto.HashPassword(Crypto.Hex(Crypto.RandomBytes(16))));
+            _decoy ??= await Crypto.HashPasswordAsync(Crypto.Hex(Crypto.RandomBytes(16)), cancellationToken).ConfigureAwait(false);
+            await Crypto.CheckPasswordAsync(password, _decoy, cancellationToken).ConfigureAwait(false);
             return null;
         }
-        return Crypto.CheckPassword(password, UserHash(user)) ? user : null;
+        return await Crypto.CheckPasswordAsync(password, UserHash(user), cancellationToken).ConfigureAwait(false) ? user : null;
     }
 
     /// <summary>

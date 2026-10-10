@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 
@@ -41,23 +42,37 @@ public static class Scrypt
         {
             x[i] = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset + i * 4, 4));
         }
-        var v = new uint[(long)words * n];
-        for (int i = 0; i < n; i++)
+        // The big table (16 MB at the cost passwords use) is borrowed from the shared pool rather than made
+        // for each password, and wiped before it goes back.
+        long size = (long)words * n;
+        if (size > Array.MaxLength)
         {
-            Array.Copy(x, 0, v, (long)i * words, words);
-            BlockMix(x, y, r);
+            throw new ArgumentException("N and r ask for more memory than an array can hold");
         }
-        int last = (2 * r - 1) * 16;
-        int mask = n - 1;
-        for (int i = 0; i < n; i++)
+        var v = ArrayPool<uint>.Shared.Rent((int)size);
+        try
         {
-            // Integerify: the first word of the last 64-byte part, which is the low bits of a little-endian number.
-            long j = (long)(x[last] & (uint)mask) * words;
-            for (int k = 0; k < words; k++)
+            for (int i = 0; i < n; i++)
             {
-                x[k] ^= v[j + k];
+                Array.Copy(x, 0, v, (long)i * words, words);
+                BlockMix(x, y, r);
             }
-            BlockMix(x, y, r);
+            int last = (2 * r - 1) * 16;
+            int mask = n - 1;
+            for (int i = 0; i < n; i++)
+            {
+                // Integerify: the first word of the last 64-byte part, which is the low bits of a little-endian number.
+                long j = (long)(x[last] & (uint)mask) * words;
+                for (int k = 0; k < words; k++)
+                {
+                    x[k] ^= v[j + k];
+                }
+                BlockMix(x, y, r);
+            }
+        }
+        finally
+        {
+            ArrayPool<uint>.Shared.Return(v, clearArray: true);
         }
         for (int i = 0; i < words; i++)
         {
