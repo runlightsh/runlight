@@ -21,6 +21,8 @@ export async function importStep(
   credentials: Credentials,
   cursor: string | null,
   done: number,
+  /** The domain as a site keeps it once it passes the checks a link domain added by hand does, or null to drop it. */
+  linkDomain: (domain: string) => Promise<string | null> = async () => null,
 ): Promise<ImportStep> {
   // Own keys only: a source named "constructor" is not an importer.
   const importer = Object.hasOwn(IMPORTERS, source) ? IMPORTERS[source] : undefined;
@@ -35,6 +37,12 @@ export async function importStep(
   const result = await importer.step({ credentials, cursor, known, now: runlight.now() });
   // A total that is not a number is as good as none.
   const total = typeof result.total === "number" && Number.isFinite(result.total) ? result.total : null;
+  // Each domain is checked once a step, since the check may look it up in DNS.
+  const checked = new Map<string, Promise<string | null>>();
+  const domainFor = (domain: string) => {
+    if (!checked.has(domain)) checked.set(domain, linkDomain(domain));
+    return checked.get(domain)!;
+  };
   const step: ImportStep = { cursor: result.cursor, done, total, links: 0, clicks: 0, skipped: 0, failed: [] };
   for (const item of result.links) {
     if (item.known) {
@@ -42,7 +50,7 @@ export async function importStep(
       step.skipped++;
       continue;
     }
-    const written = await writeLink(runlight, site, source, item.link, item);
+    const written = await writeLink(runlight, site, source, item.link, item, domainFor);
     step.done++;
     if (written.status === "created") {
       step.links++;

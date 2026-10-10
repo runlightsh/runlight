@@ -1320,6 +1320,11 @@ const IMPORTS: Scenario[] = [
       { url: "https://api.dub.co/links", body: [
         { id: "dub1", domain: "dub.sh", key: "launch", url: "https://example.org/launch", title: "Launch", createdAt: "2026-09-01T10:00:00.000Z" },
         { id: "dub2", domain: "go.brand.example", key: "bad key", url: "https://example.org/bad", title: null, createdAt: "2026-09-01T10:00:00.000Z" },
+        // A domain a link domain could not be (this dashboard's own host, a private name) is left off, and a
+        // destination a new link could not have fails.
+        { id: "dub3", domain: "Example.com", key: "own-host", url: "https://example.org/own", title: null, createdAt: "2026-09-01T10:00:00.000Z" },
+        { id: "dub4", domain: "go.brand.example", key: "private-name", url: "https://example.org/private", title: null, createdAt: "2026-09-01T10:00:00.000Z" },
+        { id: "dub5", domain: "dub.sh", key: "script", url: "javascript:alert(1)", title: null, createdAt: "2026-09-01T10:00:00.000Z" },
       ] },
       { url: "https://api.dub.co/events", body: [{ timestamp: "2026-09-02T10:00:00.000Z", click: { id: "c1", country: "US", city: "Austin", device: "Mobile", browser: "Chrome", os: "iOS", referer: "twitter.com" } }] },
     ],

@@ -36719,6 +36719,30 @@
               "url": "https://example.org/bad",
               "title": null,
               "createdAt": "2026-09-01T10:00:00.000Z"
+            },
+            {
+              "id": "dub3",
+              "domain": "Example.com",
+              "key": "own-host",
+              "url": "https://example.org/own",
+              "title": null,
+              "createdAt": "2026-09-01T10:00:00.000Z"
+            },
+            {
+              "id": "dub4",
+              "domain": "go.brand.example",
+              "key": "private-name",
+              "url": "https://example.org/private",
+              "title": null,
+              "createdAt": "2026-09-01T10:00:00.000Z"
+            },
+            {
+              "id": "dub5",
+              "domain": "dub.sh",
+              "key": "script",
+              "url": "javascript:alert(1)",
+              "title": null,
+              "createdAt": "2026-09-01T10:00:00.000Z"
             }
           ]
         },
@@ -37544,10 +37568,10 @@
             },
             "body": {
               "cursor": null,
-              "done": 2,
+              "done": 5,
               "total": null,
-              "links": 1,
-              "clicks": 1,
+              "links": 3,
+              "clicks": 3,
               "skipped": 0,
               "failed": [
                 {
@@ -37557,6 +37581,12 @@
                   "params": {
                     "slug": "bad key"
                   }
+                },
+                {
+                  "slug": "script",
+                  "reason": "The destination must start with http:// or https://",
+                  "code": "link_protocol",
+                  "params": {}
                 }
               ]
             },
@@ -37580,6 +37610,30 @@
               {
                 "method": "GET",
                 "url": "https://api.dub.co/events?event=clicks&linkId=dub2&interval=all&sortOrder=asc&limit=1000&page=1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/events?event=clicks&linkId=dub3&interval=all&sortOrder=asc&limit=1000&page=1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/events?event=clicks&linkId=dub4&interval=all&sortOrder=asc&limit=1000&page=1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/events?event=clicks&linkId=dub5&interval=all&sortOrder=asc&limit=1000&page=1",
                 "headers": {
                   "accept": "application/json",
                   "authorization": "Bearer dub-key"
@@ -37610,11 +37664,11 @@
             },
             "body": {
               "cursor": null,
-              "done": 4,
+              "done": 7,
               "total": null,
               "links": 0,
               "clicks": 0,
-              "skipped": 1,
+              "skipped": 3,
               "failed": [
                 {
                   "slug": "bad key",
@@ -37623,6 +37677,12 @@
                   "params": {
                     "slug": "bad key"
                   }
+                },
+                {
+                  "slug": "script",
+                  "reason": "The destination must start with http:// or https://",
+                  "code": "link_protocol",
+                  "params": {}
                 }
               ]
             },
@@ -37638,6 +37698,14 @@
               {
                 "method": "GET",
                 "url": "https://api.dub.co/events?event=clicks&linkId=dub2&interval=all&sortOrder=asc&limit=1000&page=1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/events?event=clicks&linkId=dub5&interval=all&sortOrder=asc&limit=1000&page=1",
                 "headers": {
                   "accept": "application/json",
                   "authorization": "Bearer dub-key"
@@ -37667,9 +37735,33 @@
                   "id": "<id>",
                   "site": "default",
                   "domain": "",
+                  "slug": "private-name",
+                  "name": "private-name",
+                  "url": "https://example.org/private",
+                  "createdAt": 1788256800000,
+                  "updatedAt": 1788256800000,
+                  "clicks": 1,
+                  "visitors": 1
+                },
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
                   "slug": "launch",
                   "name": "Launch",
                   "url": "https://example.org/launch",
+                  "createdAt": 1788256800000,
+                  "updatedAt": 1788256800000,
+                  "clicks": 1,
+                  "visitors": 1
+                },
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "own-host",
+                  "name": "own-host",
+                  "url": "https://example.org/own",
                   "createdAt": 1788256800000,
                   "updatedAt": 1788256800000,
                   "clicks": 1,
@@ -37700,9 +37792,33 @@
                   "id": "<id>",
                   "site": "default",
                   "domain": "",
+                  "slug": "private-name",
+                  "name": "private-name",
+                  "url": "https://example.org/private",
+                  "createdAt": 1788256800000,
+                  "updatedAt": 1788256800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
                   "slug": "launch",
                   "name": "Launch",
                   "url": "https://example.org/launch",
+                  "createdAt": 1788256800000,
+                  "updatedAt": 1788256800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "own-host",
+                  "name": "own-host",
+                  "url": "https://example.org/own",
                   "createdAt": 1788256800000,
                   "updatedAt": 1788256800000,
                   "clicks": 0,

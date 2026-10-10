@@ -1,10 +1,14 @@
 import { sha256 } from "../hash.js";
 import type { Runlight } from "../runlight.js";
+import { LinkError, cleanUrl } from "../links.js";
 import { attribute, parsePage, stripWww } from "../sources.js";
 import type { DailyClicks, ForeignClick, ForeignLink } from "./types.js";
 
 /** Domains run by the shorteners themselves. Links there stay on Runlight's own path. */
 const SHORTENER_DOMAINS = new Set(["bit.ly", "bitly.com", "j.mp", "dub.sh", "dub.co", "dub.link", "short.gy", "rebrand.ly", "rebrandly.com", "rb.gy"]);
+
+/** The most clicks a day one imported link gets from a daily count. */
+const MAX_DAILY = 10_000;
 
 export const hexId = async (value: string, length = 24) => (await sha256(value)).slice(0, length);
 
@@ -61,6 +65,8 @@ export async function writeLink(
   source: string,
   foreign: ForeignLink,
   history: { clicks?: ForeignClick[]; daily?: DailyClicks[] },
+  /** The domain as the site keeps it once it passes a link domain's checks, or null to bring the link over without it. */
+  linkDomain: (domain: string) => Promise<string | null> = async () => null,
 ): Promise<WriteResult> {
   const id = await importedLinkId(source, foreign.sourceId);
   if (await runlight.store.linkById(id)) return { status: "skipped", clicks: 0 };
@@ -70,8 +76,20 @@ export async function writeLink(
   if (taken) return { status: "failed", clicks: 0, reason: `/${foreign.slug} is already used by "${taken.name}"`, code: "import_slug_taken", params: { slug: foreign.slug, name: taken.name } };
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(foreign.slug)) return { status: "failed", clicks: 0, reason: `/${foreign.slug} has characters Runlight slugs cannot use`, code: "import_slug_bad", params: { slug: foreign.slug } };
 
-  let domain = stripWww(foreign.domain || "");
-  if (SHORTENER_DOMAINS.has(domain)) domain = "";
+  // The destination passes the checks a link made by hand does.
+  let url: string;
+  try {
+    url = cleanUrl(foreign.url);
+  } catch (error) {
+    if (!(error instanceof LinkError)) throw error;
+    return { status: "failed", clicks: 0, reason: error.message, code: error.code, params: error.params };
+  }
+
+  let domain = stripWww((foreign.domain || "").toLowerCase());
+  // A branded domain must pass the checks one added in Settings does, so an import can never claim the
+  // dashboard's own host or a name inside a private network. One that fails is left off: the link is
+  // served from the app's own path instead.
+  domain = !domain || SHORTENER_DOMAINS.has(domain) ? "" : ((await linkDomain(domain)) ?? "");
   const now = runlight.now();
   let clicks = 0;
   // Nothing in the transaction is one link's own problem (those are checked above),
@@ -139,7 +157,8 @@ export async function writeLink(
     for (const d of history.daily ?? []) {
       const start = Date.parse(`${d.day}T00:00:00Z`);
       if (!Number.isFinite(start) || d.clicks <= 0) continue;
-      const n = Math.min(d.clicks, 1_000_000);
+      // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+      const n = Math.min(Math.floor(d.clicks), MAX_DAILY);
       for (let i = 0; i < n; i++) {
         await store.insertEvent({
           site, ts: start + Math.floor(((i + 0.5) / n) * 86_400_000), kind: "click", visitor: "", session: "", pageview: "",
@@ -155,7 +174,7 @@ export async function writeLink(
       domain,
       slug: foreign.slug,
       name: (foreign.name || foreign.slug).slice(0, 100),
-      url: foreign.url,
+      url,
       createdAt: foreign.createdAt || now,
       updatedAt: foreign.createdAt || now,
     });
