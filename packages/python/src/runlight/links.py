@@ -39,7 +39,8 @@ def _text(value: Any) -> str:
     return "" if value is None or value is _js.UNDEFINED else _js.string(value)
 
 
-def _clean_url(value: Any) -> str:
+def clean_url(value: Any) -> str:
+    """A link's destination as it is kept: a full http or https URL, up to 2,000 characters."""
     text = _js.trim(_text(value))
     url = Url.parse(text)
     if url is None:
@@ -86,7 +87,7 @@ class Links:
 
     def create(self, site: str, input: dict[str, Any]) -> dict[str, Any]:
         self._runlight.init()
-        url = _clean_url(input.get("url"))
+        url = clean_url(input.get("url"))
         domain = self._domain_for(site, input.get("domain"))
         slug = input.get("slug")
         slug = self._free_slug(_js.trim(slug) if slug is not None else None)
@@ -112,7 +113,7 @@ class Links:
             raise _js.RangeError("Unknown link")
         nxt = dict(link)
         if input.get("url") is not None:
-            nxt["url"] = _clean_url(input["url"])
+            nxt["url"] = clean_url(input["url"])
         if input.get("name") is not None:
             nxt["name"] = _js.cut(_js.trim(_js.string(input["name"])), 100) or _default_name(nxt["url"])
         # Keeping a link's domain needs no check, even while that domain is removed.

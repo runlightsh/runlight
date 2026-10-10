@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from typing import Any
 
 from .. import _js
 from ..hash import sha256
 from ..http import Url
+from ..links import LinkError, clean_url
 from ..sources import attribute, parse_page, strip_www
 from .http import iso_string, parse_date
 
 # Domains run by the shorteners themselves. Links there stay on Runlight's own path.
 SHORTENER_DOMAINS = {"bit.ly", "bitly.com", "j.mp", "dub.sh", "dub.co", "dub.link", "short.gy", "rebrand.ly", "rebrandly.com", "rb.gy"}
+
+# The most clicks a day one imported link gets from a daily count.
+MAX_DAILY = 10_000
 
 
 def hex_id(value: str, length: int = 24) -> str:
@@ -77,11 +82,20 @@ def device(name: str) -> str:
     return DEVICES.get(name.lower(), "")
 
 
-def write_link(runlight: Any, site: str, source: str, foreign: dict[str, Any], history: dict[str, Any]) -> dict[str, Any]:
+def write_link(
+    runlight: Any,
+    site: str,
+    source: str,
+    foreign: dict[str, Any],
+    history: dict[str, Any],
+    link_domain: Callable[[str], str | None] = lambda _domain: None,
+) -> dict[str, Any]:
     """Writes one link and its history in a single transaction: the link (and its
     branded domain), then each click as a visit like a live one, or daily
     counts as clicks without visitors. Ids come from the source's own ids, so
-    importing again skips what is already there.
+    importing again skips what is already there. `link_domain` gives the domain
+    as the site keeps it once it passes a link domain's checks, or None to bring
+    the link over without it.
 
     Returns a WriteResult: {status: "created" | "skipped" | "failed", clicks, reason?, code?, params?}, the reason
     also as a code and its params, for the dashboard to say in its own words."""
@@ -104,9 +118,17 @@ def write_link(runlight: Any, site: str, source: str, foreign: dict[str, Any], h
     if not _SLUG.match(slug):
         return {"status": "failed", "clicks": 0, "reason": f"/{slug} has characters Runlight slugs cannot use", "code": "import_slug_bad", "params": {"slug": slug}}
 
-    domain = strip_www(_text(foreign.get("domain")))
-    if domain in SHORTENER_DOMAINS:
-        domain = ""
+    # The destination passes the checks a link made by hand does.
+    try:
+        destination = clean_url(foreign["url"])
+    except LinkError as error:
+        return {"status": "failed", "clicks": 0, "reason": error.message, "code": error.code, "params": error.params}
+
+    domain = strip_www(_text(foreign.get("domain")).lower())
+    # A branded domain must pass the checks one added in Settings does, so an import can never claim the
+    # dashboard's own host or a name inside a private network. One that fails is left off: the link is
+    # served from the app's own path instead.
+    domain = "" if not domain or domain in SHORTENER_DOMAINS else (link_domain(domain) or "")
     now = runlight.now()
     clicks = 0
 
@@ -186,7 +208,8 @@ def write_link(runlight: Any, site: str, source: str, foreign: dict[str, Any], h
             count = _js.number(d.get("clicks", _js.UNDEFINED))
             if not _js.is_finite(start) or count <= 0 or math.isnan(count):
                 continue
-            n = min(count, 1_000_000)
+            # A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+            n = math.floor(min(count, MAX_DAILY))
             i = 0
             while i < n:
                 store.insert_event(
@@ -209,7 +232,7 @@ def write_link(runlight: Any, site: str, source: str, foreign: dict[str, Any], h
                 "domain": domain,
                 "slug": slug,
                 "name": _js.slice16(_text(foreign.get("name")) or slug, 0, 100),
-                "url": foreign["url"],
+                "url": destination,
                 "createdAt": created,
                 "updatedAt": created,
             }
