@@ -46,6 +46,27 @@ class DbTest < Minitest::Test
     end
   end
 
+  # Rails turns on the query cache for every pool around each request. A poll for the lock that read its
+  # first answer from the cache would never see the lock come free.
+  def test_lock_poll_is_not_cached
+    skip "Postgres only: it polls for the lock" unless Databases.pg_url
+
+    db = Databases.db("postgres")
+    holder = db.connection_class.connection_pool.checkout
+    holder.execute("SELECT pg_advisory_lock(#{Runlight::Db::Database::MIGRATION_LOCK})")
+    waiter = Thread.new do
+      db.connection_class.connection_pool.enable_query_cache!
+      db.exclusive { :got }
+    end
+    sleep 0.3
+    holder.execute("SELECT pg_advisory_unlock(#{Runlight::Db::Database::MIGRATION_LOCK})")
+    assert_equal :got, waiter.join(5)&.value, "the lock was taken once it came free"
+  ensure
+    waiter&.kill
+    db&.connection_class&.connection_pool&.checkin(holder) if holder
+    Databases.cleanup
+  end
+
   def test_mysql_text
     assert_equal "SELECT `key` FROM t WHERE a = 'it\\'s' AND b = 'x\\\\y' AND c = 1.5",
                  Runlight::Db::Database.mysql_text("SELECT \"key\" FROM t WHERE a = ? AND b = 'x\\y' AND c = ?", ["it's", 1.5])
