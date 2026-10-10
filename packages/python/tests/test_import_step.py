@@ -58,13 +58,17 @@ def runlight(router: Router | None = None) -> Any:
     return Runlight(options)
 
 
-def run_all(router: Router, source: str, credentials: dict[str, str]) -> tuple[Any, dict[str, Any], Any]:
+def run_all(
+    router: Router, source: str, credentials: dict[str, str], link_domain: Callable[[str], str | None] = lambda domain: domain
+) -> tuple[Any, dict[str, Any], Any]:
+    """Every domain passes here unless `link_domain` says otherwise; the routes check them as Settings does (see the
+    conformance scenarios)."""
     rl = runlight(router)
     cursor = None
     done: Any = 0
     totals: dict[str, Any] = {"links": 0, "clicks": 0, "skipped": 0, "failed": []}
     while True:
-        step = import_step(rl, "default", source, credentials, cursor, done)
+        step = import_step(rl, "default", source, credentials, cursor, done, link_domain)
         cursor = step["cursor"]
         done = step["done"]
         for key in ("links", "clicks", "skipped"):
@@ -127,6 +131,35 @@ def test_dub_daily_counts_when_the_plan_has_no_events_api() -> None:
     times = [int(r["ts"]) for r in rl.store.db.all("SELECT ts FROM rl_events ORDER BY ts")]
     day = utc(2026, 3, 1)
     assert times == [day + 14_400_000, day + 43_200_000, day + 72_000_000], "spread through the day"
+
+
+def test_an_imported_links_destination_passes_the_checks_a_new_link_does_a_refused_domain_is_left_off_and_a_days_count_is_capped() -> None:
+    router = Router(
+        [
+            (
+                r"api\.dub\.co/links\?",
+                lambda u, i: [
+                    {"id": "l1", "domain": "Go.Brand.com", "key": "x", "url": "https://a.com", "title": "X", "createdAt": "2026-01-02T00:00:00Z"},
+                    {"id": "l2", "domain": "dub.sh", "key": "y", "url": "javascript:alert(1)", "title": "Y", "createdAt": "2026-01-02T00:00:00Z"},
+                    {"id": "l3", "domain": "stats.example.com", "key": "z", "url": "https://a.com/z", "title": "Z", "createdAt": "2026-01-02T00:00:00Z"},
+                ],
+            ),
+            (r"/events\?", lambda u, i: (403, {"error": {"message": "Business plan required"}})),
+            (r"/analytics\?.*linkId=l1", lambda u, i: [{"start": "2026-03-01T00:00:00.000Z", "clicks": 5_000_000}]),
+            (r"/analytics\?", lambda u, i: []),
+        ]
+    )
+    asked: list[str] = []
+
+    def link_domain(domain: str) -> str | None:
+        asked.append(domain)
+        return None if domain == "stats.example.com" else domain
+
+    rl, totals, _ = run_all(router, "dub", {"apiKey": "dub_test"}, link_domain)
+    assert asked == ["go.brand.com", "stats.example.com"], "shorteners' own domains are never asked about"
+    assert [[f["slug"], f.get("code")] for f in totals["failed"]] == [["y", "link_protocol"]]
+    assert sorted([link["slug"], link["domain"]] for link in links(rl)) == [["x", "go.brand.com"], ["z", ""]]
+    assert totals["clicks"] == 10_000
 
 
 def test_bitly_every_group_custom_back_halves_daily_counts() -> None:
@@ -287,6 +320,7 @@ def test_a_link_whose_slug_is_taken_or_unusable_is_reported_with_a_code() -> Non
         "dub",
         {"sourceId": "z", "slug": "fine", "domain": "www.Go.Brand.com", "name": "", "url": "https://a.com/z", "createdAt": 0},
         {"clicks": [{"ts": 5_000, "visit": "v", "path": "/fine", "query": "?utm_campaign=c"}]},
+        lambda domain: domain,
     )
     assert made == {"status": "created", "clicks": 1}
     link = rl.store.link_by_slug("fine")

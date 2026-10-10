@@ -666,6 +666,49 @@ class Routes:
         access = self._can_read(request)
         return False if access == "read" else access
 
+    def _check_link_domain(self, request: Request, url: Url, site: str, value: str) -> str | Response:
+        """The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
+        is kept, or the refusal to send."""
+        from .safefetch import resolves_privately
+
+        domain = _js.trim(value).lower()
+        domain = re.sub(r"^https?://", "", domain)
+        domain = re.sub(f"/{_DOT}*\\Z", "", domain)
+        domain = re.sub(r"\.+\Z", "", domain)
+        domain = re.sub(r"^www\.", "", domain)
+        if not DOMAIN_NAME.match(domain):
+            return coded("That is not a domain name", "domain_invalid", 400)
+        if _private_name(domain) or resolves_privately(domain):
+            return coded(f"{domain} is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, {"domain": domain})
+        # A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
+        # The request's own Host is the caller's to choose, so the configured address and the names people signed
+        # in from count too. A hub cannot know every name this app answers on, so it adds none until the app knows
+        # its own address.
+        if request in self.managed and not self.origin:
+            return self._origin_needed()
+        rl = self.rl
+        here = [h for h in (request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host) if h]
+        own = ([Url(self.origin).host] if self.origin else []) + here
+        own_hosts = self.options.get("ownHosts")
+        if own_hosts is not None:
+            own += [str(h) for h in (own_hosts() or [])]
+        taken = {host_name(h) for h in own}
+        for s in rl.sites:
+            taken.update(s["hostnames"])
+            remote = rl.remote(s["id"])
+            taken.update(remote["hostnames"] if remote else [])
+        if domain in taken:
+            return coded(
+                f"{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.{domain}.",
+                "domain_in_use",
+                400,
+                {"domain": domain},
+            )
+        owner = next((d for d in rl.store.link_domains() if d["domain"] == domain), None)
+        if owner and owner["site"] != site:
+            return coded(f"{domain} already belongs to another site", "domain_taken", 409, {"domain": domain})
+        return domain
+
     @staticmethod
     def _origin_needed() -> Response:
         """The refusal for a hub that asks for something only safe once this app knows its own address."""
@@ -756,41 +799,9 @@ class Routes:
                     body = self._read_json(request)
                     if isinstance(body, Response):
                         return body
-                    domain = _js.trim(_text(body, "domain")).lower()
-                    domain = re.sub(r"^https?://", "", domain)
-                    domain = re.sub(f"/{_DOT}*\\Z", "", domain)
-                    domain = re.sub(r"\.+\Z", "", domain)
-                    domain = re.sub(r"^www\.", "", domain)
-                    if not DOMAIN_NAME.match(domain):
-                        return coded("That is not a domain name", "domain_invalid", 400)
-                    if _private_name(domain) or resolves_privately(domain):
-                        return coded(f"{domain} is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, {"domain": domain})
-                    # A link domain answers every path on it, so it must never be where the dashboard or a counted site
-                    # lives. The request's own Host is the caller's to choose, so the configured address and the names
-                    # people signed in from count too. A hub cannot know every name this app answers on, so it adds none
-                    # until the app knows its own address.
-                    if request in self.managed and not self.origin:
-                        return self._origin_needed()
-                    here = [h for h in (request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host) if h]
-                    own = ([Url(self.origin).host] if self.origin else []) + here
-                    own_hosts = self.options.get("ownHosts")
-                    if own_hosts is not None:
-                        own += [str(h) for h in (own_hosts() or [])]
-                    taken = {host_name(h) for h in own}
-                    for s in rl.sites:
-                        taken.update(s["hostnames"])
-                        remote = rl.remote(s["id"])
-                        taken.update(remote["hostnames"] if remote else [])
-                    if domain in taken:
-                        return coded(
-                            f"{domain} is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.{domain}.",
-                            "domain_in_use",
-                            400,
-                            {"domain": domain},
-                        )
-                    owner = next((d for d in store.link_domains() if d["domain"] == domain), None)
-                    if owner and owner["site"] != site["id"]:
-                        return coded(f"{domain} already belongs to another site", "domain_taken", 409, {"domain": domain})
+                    domain = self._check_link_domain(request, url, site["id"], _text(body, "domain"))
+                    if isinstance(domain, Response):
+                        return domain
                     store.add_link_domain(domain, site["id"], rl.now())
                     rl.forget_link_domains()
                     return json({"domain": domain}, 201)
@@ -877,6 +888,13 @@ class Routes:
                     return body
                 cursor = _get(body, "cursor")
                 done = _js.number(_get(body, "done"))
+
+                # An imported link's domain passes the same checks as one added in Settings, or the link comes over
+                # without it.
+                def link_domain(domain: str) -> str | None:
+                    checked = self._check_link_domain(request, url, site["id"], domain)
+                    return None if isinstance(checked, Response) else checked
+
                 try:
                     step = import_step(
                         rl,
@@ -885,6 +903,7 @@ class Routes:
                         _credentials(_get(body, "credentials")),
                         cursor if isinstance(cursor, str) else None,
                         done if _js.truthy(done) else 0,
+                        link_domain,
                     )
                     return json(step)
                 except ImporterError as error:

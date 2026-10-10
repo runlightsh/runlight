@@ -17,10 +17,20 @@ from .write import imported_link_id, same_url, write_link
 IMPORTERS: dict[str, Importer] = {"umami": umami, "dub": dub, "bitly": bitly, "shortio": shortio, "rebrandly": rebrandly}
 
 
-def import_step(runlight: Any, site: str, source: str, credentials: Credentials, cursor: str | None, done: int | float) -> dict[str, Any]:
+def import_step(
+    runlight: Any,
+    site: str,
+    source: str,
+    credentials: Credentials,
+    cursor: str | None,
+    done: int | float,
+    link_domain: Callable[[str], str | None] = lambda _domain: None,
+) -> dict[str, Any]:
     """One step of an import: fetch the next few links from the source, write
     each with its history, and report progress. The cursor carries where to
     pick up, so the page calls this until the cursor comes back None.
+    `link_domain` gives the domain as the site keeps it once it passes the checks
+    a link domain added by hand does, or None to drop it.
 
     The importer makes its requests through the Runlight's fetcher, and reads the Runlight's clock as its `now`."""
     importer = IMPORTERS.get(source)
@@ -40,13 +50,21 @@ def import_step(runlight: Any, site: str, source: str, credentials: Credentials,
     # A total that is not a number is as good as none.
     total = result["total"]
     total = total if _js.is_number(total) and _js.is_finite(total) else None
+    # Each domain is checked once a step, since the check may look it up in DNS.
+    checked: dict[str, str | None] = {}
+
+    def domain_for(domain: str) -> str | None:
+        if domain not in checked:
+            checked[domain] = link_domain(domain)
+        return checked[domain]
+
     step: dict[str, Any] = {"cursor": result["cursor"], "done": done, "total": total, "links": 0, "clicks": 0, "skipped": 0, "failed": []}
     for item in result["links"]:
         if item.get("known"):
             step["done"] += 1
             step["skipped"] += 1
             continue
-        written = write_link(runlight, site, source, item["link"], item)
+        written = write_link(runlight, site, source, item["link"], item, domain_for)
         step["done"] += 1
         if written["status"] == "created":
             step["links"] += 1
