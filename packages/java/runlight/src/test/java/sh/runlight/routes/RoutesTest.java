@@ -490,6 +490,13 @@ class RoutesTest {
                 owner("/runlight/api/embed", "POST", Json.object("origin", origin), secret));
     assertEquals(400, mint.apply("https://b.com").status(), "only an origin on the site's domains");
     assertEquals(400, mint.apply("https://a.com/path").status(), "an origin, not a page");
+    assertEquals(400, mint.apply("http://a.com").status(), "only over https");
+    assertEquals(400, mint.apply("https://a.com:8443").status(), "and on the default port");
+    assertEquals(400, mint.apply("https://b.a.com").status(), "the name itself, not one under it");
+    assertEquals(
+        400,
+        mint.apply("http://localhost:8080").status(),
+        "localhost is not the site's own name either");
     String readKey =
         (String)
             body(routes.handle(
