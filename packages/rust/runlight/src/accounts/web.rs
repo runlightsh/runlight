@@ -220,13 +220,17 @@ struct Inner {
     home_path: String,
     asks_for_token: bool,
     existing: AtomicBool,
-    // Wrong passwords are counted twice. Per account and address, ten tries;
+    // Wrong passwords are counted three times. Per account and address, ten tries;
     // per account from anywhere, fifty, so a caller who invents a new address
     // for every try still cannot guess on and on. Addresses come from
-    // forwarding headers a client can write, so they never stand alone.
+    // forwarding headers a client can write, so they never stand alone. And per
+    // address across every account, thirty, so one caller trying made-up emails
+    // cannot keep the server hashing; a request with no known address skips that one,
+    // since it would hold up everyone at once.
     // Each try counts before the password is checked, and a right one is taken back.
     per_address: Throttle,
     per_account: Throttle,
+    per_ip: Throttle,
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
     code_tries: Throttle,
@@ -261,6 +265,7 @@ pub fn accounts_web(options: AccountsWebOptions) -> AccountsWeb {
         existing: AtomicBool::new(false),
         per_address: Throttle::new(10, window),
         per_account: Throttle::new(50, window),
+        per_ip: Throttle::new(30, window),
         code_tries: Throttle::new(5, window),
         decoy_tries: Throttle::new(5, window),
         confirm_tries: Throttle::new(5, window),
@@ -766,57 +771,75 @@ impl AccountsWeb {
         let ip = self.0.rl.client_ip(request);
         let pair = format!("{account}\n{}", if ip.is_empty() { "unknown" } else { ip.as_str() });
         let too_many = || self.login_html("Too many tries. Wait fifteen minutes and try again.", email, &next, 429);
+        if !ip.is_empty() && !self.0.per_ip.take(&ip, self.now()) {
+            return Ok(too_many());
+        }
         if !self.0.per_address.take(&pair, self.now()) {
             return Ok(too_many());
         }
-        // A browser that signed in to the account before is never held up by others' failures.
-        let known = self.0.accounts.by_email(&account).await?;
-        let trusted = match &known {
-            Some(known) => self.0.accounts.trusts_device(&read_cookie(request, DEVICE_COOKIE), known)?,
-            None => false,
-        };
-        let over = !trusted && !self.0.per_account.take(&account, self.now());
-        // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-        // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-        // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-        if over && !known.as_ref().is_some_and(|k| k.two_factor) {
-            if self.0.rl.mail_settings().await?.is_none() || self.home().await.is_none_or(|h| h.is_empty()) {
-                return Ok(too_many());
+        let checked: R<Response> = async {
+            // A browser that signed in to the account before is never held up by others' failures.
+            let known = self.0.accounts.by_email(&account).await?;
+            let trusted = match &known {
+                Some(known) => self.0.accounts.trusts_device(&read_cookie(request, DEVICE_COOKIE), known)?,
+                None => false,
+            };
+            let over = !trusted && !self.0.per_account.take(&account, self.now());
+            // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
+            // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
+            // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
+            if over && !known.as_ref().is_some_and(|k| k.two_factor) {
+                if self.0.rl.mail_settings().await?.is_none() || self.home().await.is_none_or(|h| h.is_empty()) {
+                    return Ok(too_many());
+                }
+                if let Some(user) = self.0.accounts.sign_in(email, password).await? {
+                    // Sent once the answer is out, so a right password takes no longer to answer than a wrong one.
+                    let web = self.clone();
+                    let next = next.clone();
+                    self.0.rl.later(async move {
+                        if let Err(error) = web.send_link(&user, &next).await {
+                            eprintln!("Runlight: could not send a sign-in link {error}");
+                        }
+                    });
+                }
+                return Ok(self.login_html(
+                    "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
+                    email,
+                    &next,
+                    429,
+                ));
             }
-            if let Some(user) = self.0.accounts.sign_in(email, password).await? {
-                // Sent once the answer is out, so a right password takes no longer to answer than a wrong one.
-                let web = self.clone();
-                let next = next.clone();
-                self.0.rl.later(async move {
-                    if let Err(error) = web.send_link(&user, &next).await {
-                        eprintln!("Runlight: could not send a sign-in link {error}");
-                    }
-                });
+            let Some(user) = self.0.accounts.sign_in(email, password).await? else {
+                if over && let Some(known) = &known {
+                    let pending = self.0.accounts.decoy_for(known, self.now())?;
+                    return Ok(html(code_page(base, &CodePage { pending: &pending, next: &next, error: None }), 200));
+                }
+                return Ok(self.login_html("That email and password do not match an account.", email, &next, 401));
+            };
+            self.0.per_address.clear(&pair);
+            if !ip.is_empty() {
+                self.0.per_ip.forgive(&ip);
             }
-            return Ok(self.login_html(
-                "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
-                email,
-                &next,
-                429,
-            ));
-        }
-        let Some(user) = self.0.accounts.sign_in(email, password).await? else {
-            if over && let Some(known) = &known {
-                let pending = self.0.accounts.decoy_for(known, self.now())?;
+            if !over && !trusted {
+                self.0.per_account.forgive(&account);
+            }
+            // With two-factor on, the password only earns the second step.
+            if user.two_factor {
+                let pending = self.0.accounts.pending_for(&user, self.now())?;
                 return Ok(html(code_page(base, &CodePage { pending: &pending, next: &next, error: None }), 200));
             }
-            return Ok(self.login_html("That email and password do not match an account.", email, &next, 401));
-        };
-        self.0.per_address.clear(&pair);
-        if !over && !trusted {
-            self.0.per_account.forgive(&account);
+            self.signed_in_to(request, &user, &next)
         }
-        // With two-factor on, the password only earns the second step.
-        if user.two_factor {
-            let pending = self.0.accounts.pending_for(&user, self.now())?;
-            return Ok(html(code_page(base, &CodePage { pending: &pending, next: &next, error: None }), 200));
+        .await;
+        match checked {
+            // Too many password checks already waiting, so this one was never run: try again in a moment.
+            Err(Error::Settings(error)) if error.code == "busy" => {
+                let mut answer = self.login_html(&error.message, email, &next, 503);
+                answer.headers.set("retry-after", "5");
+                Ok(answer)
+            }
+            answer => answer,
         }
-        self.signed_in_to(request, &user, &next)
     }
 
     /// Asks for the password again before a change; an answer when it is refused.
@@ -824,8 +847,13 @@ impl AccountsWeb {
         if !self.0.rechecks.take(&user.id, self.now()) {
             return Ok(Some(coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429, None)));
         }
-        if self.0.accounts.sign_in(&user.email, &field(input, name)).await?.is_none() {
-            return Ok(Some(coded(wrong.0, wrong.1, 400, None)));
+        match self.0.accounts.sign_in(&user.email, &field(input, name)).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(Some(coded(wrong.0, wrong.1, 400, None))),
+            Err(AuthError::Account(error)) if error.code == "busy" => {
+                return Ok(Some(coded(&error.message, "busy", 503, None)));
+            }
+            Err(error) => return Err(error.into()),
         }
         self.0.rechecks.forgive(&user.id);
         Ok(None)

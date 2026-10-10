@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use super::crypto::{
     CryptoError, HmacHash, base64url, check_password, hash_password, hex, hmac, random_bytes, same_text, seal_text,
@@ -351,9 +352,47 @@ async fn hash_slowly(password: &str) -> String {
     slow(move || hash_password(&password)).await
 }
 
-async fn check_slowly(password: &str, stored: &str) -> bool {
+/// Password checks run at once, in this process, and the most that may wait for one.
+const CHECKING: usize = 4;
+const WAITING: usize = 64;
+static CHECKS: Semaphore = Semaphore::const_new(CHECKING);
+static WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// One of the waiting places, given back however the wait ends (a cancelled request too).
+struct Waiter;
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        WAITERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Checks a password when one of the few slots is free, so a flood of sign-ins cannot take every core. Past the
+/// queue's length it refuses at once, with an AccountError coded "busy". The slot goes with the check, so a request
+/// given up on still holds it until its hash is done.
+async fn check_slowly(password: &str, stored: &str) -> R<bool> {
+    let permit = match CHECKS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            if WAITERS.fetch_add(1, Ordering::SeqCst) >= WAITING {
+                WAITERS.fetch_sub(1, Ordering::SeqCst);
+                return Err(AccountError::new(
+                    "Runlight is busy checking other sign-ins. Try again in a moment.",
+                    "busy",
+                    &[],
+                )
+                .into());
+            }
+            let _waiter = Waiter;
+            CHECKS.acquire().await.expect("the semaphore is never closed")
+        }
+    };
     let (password, stored) = (password.to_string(), stored.to_string());
-    slow(move || check_password(&password, &stored)).await
+    Ok(slow(move || {
+        let _permit = permit;
+        check_password(&password, &stored)
+    })
+    .await)
 }
 
 /// The accounts on a store, signed with the install's secret.
@@ -952,14 +991,15 @@ impl Accounts {
         .await
     }
 
-    /// The account for an email and password, or `None`. Takes the same time either way.
+    /// The account for an email and password, or `None`. Takes the same time either way. Only a few checks run at
+    /// once; with too many waiting it fails with an AccountError coded "busy".
     pub async fn sign_in(&self, email: &str, password: &str) -> R<Option<User>> {
         let Some(user) = self.by_email(email).await? else {
             let decoy = DECOY.get_or_init(|| async { hash_slowly(&hex(&random_bytes(16))).await }).await;
-            check_slowly(password, decoy).await;
+            check_slowly(password, decoy).await?;
             return Ok(None);
         };
-        Ok(if check_slowly(password, &user.hash).await { Some(user) } else { None })
+        Ok(if check_slowly(password, &user.hash).await? { Some(user) } else { None })
     }
 
     /// A cookie value naming the user and when it expires, signed with the
@@ -1169,5 +1209,32 @@ impl Throttle {
     #[doc(hidden)]
     pub fn size(&self) -> usize {
         self.state().failures.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_few_password_checks_run_at_once_and_past_the_queue_the_rest_are_refused() {
+        // Every slot taken, as by slow checks.
+        let held = CHECKS.acquire_many(CHECKING as u32).await.unwrap();
+        let waiting: Vec<_> = (0..WAITING).map(|_| tokio::spawn(check_slowly("password", "nothing"))).collect();
+        while WAITERS.load(Ordering::SeqCst) < WAITING {
+            tokio::task::yield_now().await;
+        }
+        let Err(AuthError::Account(busy)) = check_slowly("password", "nothing").await else { panic!("not busy") };
+        assert_eq!(
+            (busy.code.as_str(), busy.message.as_str()),
+            ("busy", "Runlight is busy checking other sign-ins. Try again in a moment.")
+        );
+        // Given back, the slots pass to everyone in line.
+        drop(held);
+        for run in waiting {
+            assert!(!run.await.unwrap().unwrap());
+        }
+        assert_eq!(WAITERS.load(Ordering::SeqCst), 0);
+        assert_eq!(CHECKS.available_permits(), CHECKING);
     }
 }
