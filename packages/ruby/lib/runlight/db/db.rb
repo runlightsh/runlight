@@ -115,7 +115,7 @@ module Runlight
       # seconds and applies it to every statement; MySQL counts milliseconds and applies it to reads.
       def limit_statements(ms)
         connection do |c|
-          @mariadb = c.select_value("SELECT VERSION() AS v").to_s.match?(/mariadb/i) if @mariadb.nil?
+          @mariadb = value(c, "SELECT VERSION() AS v").to_s.match?(/mariadb/i) if @mariadb.nil?
           c.execute(@mariadb ? "SET SESSION max_statement_time = #{Json.number(ms / 1000.0)}" : "SET SESSION max_execution_time = #{ms.to_i}")
         end
       end
@@ -233,7 +233,7 @@ module Runlight
         if dialect == "postgres"
           # Asked for again and again rather than waited on: a waiting statement would hold up an index being
           # built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
-          sleep 0.1 until truthy(c.select_value("SELECT pg_try_advisory_lock(#{MIGRATION_LOCK}) AS ok"))
+          sleep 0.1 until truthy(value(c, "SELECT pg_try_advisory_lock(#{MIGRATION_LOCK}) AS ok"))
           begin
             return yield(self)
           ensure
@@ -245,7 +245,7 @@ module Runlight
           end
         end
         loop do
-          ok = c.select_value("SELECT GET_LOCK(#{MYSQL_LOCK}, 5) AS ok")
+          ok = value(c, "SELECT GET_LOCK(#{MYSQL_LOCK}, 5) AS ok")
           raise "Runlight: MySQL refused the lock for creating tables" if ok.nil?
           break if ok.to_i == 1
           # Not got within 5 seconds: another process is creating the tables. Ask again.
@@ -263,6 +263,13 @@ module Runlight
             # A lost connection ends its session, and the lock with it.
           end
         end
+      end
+
+      # The first column of a statement's first row, always asked of the database. select_value goes through
+      # Rails' query cache, which a Rails request turns on for every pool, so a poll for a lock would see its
+      # first answer again and again; exec_query is never cached.
+      def value(c, sql)
+        c.exec_query(sql, "Runlight").rows.first&.first
       end
 
       def truthy(value)
