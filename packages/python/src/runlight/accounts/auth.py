@@ -194,9 +194,8 @@ class Accounts:
         self._ready = False
 
     def _turn(self, fn: Callable[[], T]) -> T:
-        """Changes to who has an account take turns, across threads and, on Postgres and MySQL, across processes,
-        through the database's lock, so two owners demoting each other at once cannot leave none, and a
-        double-clicked invite makes one."""
+        """Changes to who has an account take turns, across threads and processes, through the database's lock, so
+        two owners demoting each other at once cannot leave none, and a double-clicked invite makes one."""
         return self.store.db.exclusive(lambda _db: fn())
 
     def _init(self) -> None:
