@@ -504,6 +504,72 @@ func (rt *Routes) siteDomains(ctx context.Context, site string) ([]string, error
 	return out, nil
 }
 
+// checkLinkDomain is the checks a link domain passes before a site gets it, from Settings or from an import:
+// the name as it is kept, or the refusal to send.
+func (rt *Routes) checkLinkDomain(c *call, u *whatwg.URL, site, value string) (string, *Response, error) {
+	ctx, request := c.ctx, c.req
+	domain := lower(jsTrim(value))
+	domain = domainScheme.ReplaceAllString(domain, "")
+	domain = domainPath.ReplaceAllString(domain, "")
+	domain = domainDots.ReplaceAllString(domain, "")
+	domain = strings.TrimPrefix(domain, "www.")
+	if !isDomainName(domain) {
+		return "", Coded("That is not a domain name", "domain_invalid", 400, nil), nil
+	}
+	if privateName(domain) || web.ResolvesPrivately(ctx, domain) {
+		return "", Coded(domain+" is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, params("domain", domain)), nil
+	}
+	// A link domain answers every path on it, so it must never be where the dashboard or a counted site
+	// lives. The request's own Host is the caller's to choose, so the configured address and the names
+	// people signed in from count too. A hub cannot know every name this app answers on, so it adds none
+	// until the app knows its own address.
+	if c.managed != nil && rt.origin == "" {
+		return "", originNeeded(), nil
+	}
+	own := []string{}
+	if rt.origin != "" {
+		own = append(own, whatwg.MustParse(rt.origin).Host())
+	}
+	for _, name := range []string{"host", "x-forwarded-host"} {
+		if v := request.Header.Get(name); v != "" {
+			own = append(own, v)
+		}
+	}
+	if h := u.Host(); h != "" {
+		own = append(own, h)
+	}
+	if rt.options.OwnHosts != nil {
+		own = append(own, rt.options.OwnHosts(ctx)...)
+	}
+	taken := map[string]bool{}
+	for _, h := range own {
+		taken[HostName(h)] = true
+	}
+	for _, s := range rt.r.Sites() {
+		for _, h := range s.Hostnames {
+			taken[h] = true
+		}
+		if remote, ok := rt.r.Remote(s.ID); ok {
+			for _, h := range remote.Hostnames {
+				taken[h] = true
+			}
+		}
+	}
+	if taken[domain] {
+		return "", Coded(domain+" is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go."+domain+".", "domain_in_use", 400, params("domain", domain)), nil
+	}
+	list, err := rt.r.Store.LinkDomains(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, d := range list {
+		if d.Domain == domain && d.Site != site {
+			return "", Coded(domain+" already belongs to another site", "domain_taken", 409, params("domain", domain)), nil
+		}
+	}
+	return domain, nil, nil
+}
+
 func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow) (*Response, error) {
 	ctx, request := c.ctx, c.req
 	if path == "/api/link-domains" {
@@ -519,64 +585,9 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 			if refused != nil {
 				return refused, nil
 			}
-			domain := lower(jsTrim(field(body, "domain")))
-			domain = domainScheme.ReplaceAllString(domain, "")
-			domain = domainPath.ReplaceAllString(domain, "")
-			domain = domainDots.ReplaceAllString(domain, "")
-			domain = strings.TrimPrefix(domain, "www.")
-			if !isDomainName(domain) {
-				return Coded("That is not a domain name", "domain_invalid", 400, nil), nil
-			}
-			if privateName(domain) || web.ResolvesPrivately(ctx, domain) {
-				return Coded(domain+" is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, params("domain", domain)), nil
-			}
-			// A link domain answers every path on it, so it must never be where the dashboard or a counted site
-			// lives. The request's own Host is the caller's to choose, so the configured address and the names
-			// people signed in from count too. A hub cannot know every name this app answers on, so it adds none
-			// until the app knows its own address.
-			if c.managed != nil && rt.origin == "" {
-				return originNeeded(), nil
-			}
-			own := []string{}
-			if rt.origin != "" {
-				own = append(own, whatwg.MustParse(rt.origin).Host())
-			}
-			for _, name := range []string{"host", "x-forwarded-host"} {
-				if v := request.Header.Get(name); v != "" {
-					own = append(own, v)
-				}
-			}
-			if h := u.Host(); h != "" {
-				own = append(own, h)
-			}
-			if rt.options.OwnHosts != nil {
-				own = append(own, rt.options.OwnHosts(ctx)...)
-			}
-			taken := map[string]bool{}
-			for _, h := range own {
-				taken[HostName(h)] = true
-			}
-			for _, s := range rt.r.Sites() {
-				for _, h := range s.Hostnames {
-					taken[h] = true
-				}
-				if remote, ok := rt.r.Remote(s.ID); ok {
-					for _, h := range remote.Hostnames {
-						taken[h] = true
-					}
-				}
-			}
-			if taken[domain] {
-				return Coded(domain+" is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go."+domain+".", "domain_in_use", 400, params("domain", domain)), nil
-			}
-			list, err := rt.r.Store.LinkDomains(ctx)
-			if err != nil {
-				return nil, err
-			}
-			for _, d := range list {
-				if d.Domain == domain && d.Site != site.ID {
-					return Coded(domain+" already belongs to another site", "domain_taken", 409, params("domain", domain)), nil
-				}
+			domain, refused, err := rt.checkLinkDomain(c, u, site.ID, field(body, "domain"))
+			if err != nil || refused != nil {
+				return refused, err
 			}
 			if err := rt.r.Store.AddLinkDomain(ctx, domain, site.ID, rt.r.now()); err != nil {
 				return nil, err
@@ -712,7 +723,15 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 		if math.IsNaN(done) {
 			done = 0
 		}
-		step, err := ImportStep(ctx, rt.r, site.ID, m[1], credentials, cursor, done)
+		// An imported link's domain passes the same checks as one added in Settings, or the link comes over without it.
+		linkDomain := func(_ context.Context, domain string) (string, error) {
+			checked, refused, err := rt.checkLinkDomain(c, u, site.ID, domain)
+			if err != nil || refused != nil {
+				return "", err
+			}
+			return checked, nil
+		}
+		step, err := ImportStep(ctx, rt.r, site.ID, m[1], credentials, cursor, done, linkDomain)
 		if err != nil {
 			if isImportError(err) {
 				return refusedAnswer(err, "import_failed", 400), nil

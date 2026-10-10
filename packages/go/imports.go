@@ -49,6 +49,9 @@ func (r *Runlight) importClient() *importers.Client {
 	return &importers.Client{Fetcher: r.fetcher}
 }
 
+// maxDaily is the most clicks a day one imported link gets from a daily count.
+const maxDaily = 10_000
+
 // shortenerDomains are domains run by the shorteners themselves. Links there stay on Runlight's own path.
 var shortenerDomains = map[string]bool{"bit.ly": true, "bitly.com": true, "j.mp": true, "dub.sh": true, "dub.co": true, "dub.link": true, "short.gy": true, "rebrand.ly": true, "rebrandly.com": true, "rb.gy": true}
 
@@ -157,7 +160,10 @@ type writeResult struct {
 // link (and its branded domain), then each click as a visit like a live one,
 // or daily counts as clicks without visitors. Ids come from the source's own
 // ids, so importing again skips what is already there.
-func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign importers.ForeignLink, item importers.ForeignItem) (writeResult, error) {
+// linkDomain is the domain as the site keeps it once it passes a link domain's checks, or "" to bring the
+// link over without it.
+func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign importers.ForeignLink, item importers.ForeignItem,
+	linkDomain func(context.Context, string) (string, error)) (writeResult, error) {
 	id := importedLinkID(source, foreign.SourceID)
 	if existing, err := r.Store.LinkByID(ctx, id); err != nil || existing != nil {
 		return writeResult{status: "skipped"}, err
@@ -176,9 +182,23 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 	if !runlightSlug.MatchString(foreign.Slug) {
 		return writeResult{status: "failed", reason: "/" + foreign.Slug + " has characters Runlight slugs cannot use", code: "import_slug_bad", params: js.NewObject("slug", foreign.Slug)}, nil
 	}
-	domain := StripWww(foreign.Domain)
-	if shortenerDomains[domain] {
+	// The destination passes the checks a link made by hand does.
+	url, err := cleanURL(foreign.URL)
+	if err != nil {
+		var le *LinkError
+		if !errors.As(err, &le) {
+			return writeResult{}, err
+		}
+		return writeResult{status: "failed", reason: le.Message, code: le.Code, params: le.Params}, nil
+	}
+	// A branded domain must pass the checks one added in Settings does, so an import can never claim the
+	// dashboard's own host or a name inside a private network. One that fails is left off: the link is
+	// served from the app's own path instead.
+	domain := StripWww(lower(foreign.Domain))
+	if domain == "" || shortenerDomains[domain] {
 		domain = ""
+	} else if domain, err = linkDomain(ctx, domain); err != nil {
+		return writeResult{}, err
 	}
 	now := r.now()
 	var clicks int64
@@ -268,7 +288,8 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 			if math.IsNaN(start) || math.IsInf(start, 0) || d.Clicks <= 0 {
 				continue
 			}
-			n := math.Min(d.Clicks, 1_000_000)
+			// A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+			n := math.Min(math.Floor(d.Clicks), maxDaily)
 			for i := 0.0; i < n; i++ {
 				if err := store.InsertEvent(ctx, EventRow{Site: site, Ts: int64(start + math.Floor(((i+0.5)/n)*86_400_000)), Kind: "click",
 					Path: "/" + foreign.Slug, Hostname: domain, Name: foreign.Slug, Props: js.NewObject("imported", "daily"), Link: id}); err != nil {
@@ -290,7 +311,7 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 		if created == 0 {
 			created = now
 		}
-		return store.InsertLink(ctx, LinkRow{ID: id, Site: site, Domain: domain, Slug: foreign.Slug, Name: head16(name, 100), URL: foreign.URL, CreatedAt: created, UpdatedAt: created})
+		return store.InsertLink(ctx, LinkRow{ID: id, Site: site, Domain: domain, Slug: foreign.Slug, Name: head16(name, 100), URL: url, CreatedAt: created, UpdatedAt: created})
 	})
 	if err != nil {
 		return writeResult{}, err
@@ -316,8 +337,10 @@ type ImportResult struct {
 
 // ImportStep is one step of an import: fetch the next few links from the
 // source, write each with its history, and report progress. The cursor
-// carries where to pick up, so the page calls this until it comes back nil.
-func ImportStep(ctx context.Context, r *Runlight, site, source string, credentials map[string]string, cursor *string, done float64) (*ImportResult, error) {
+// carries where to pick up, so the page calls this until it comes back nil. linkDomain is the domain as a
+// site keeps it once it passes the checks a link domain added by hand does, or "" to drop it; nil drops every one.
+func ImportStep(ctx context.Context, r *Runlight, site, source string, credentials map[string]string, cursor *string, done float64,
+	linkDomain func(context.Context, string) (string, error)) (*ImportResult, error) {
 	importer, ok := importers.Importers[source]
 	if !ok {
 		return nil, importError("Runlight cannot import from "+source, "import_source", "source", source)
@@ -345,6 +368,22 @@ func ImportStep(ctx context.Context, r *Runlight, site, source string, credentia
 	if total != nil && (math.IsNaN(*total) || math.IsInf(*total, 0)) {
 		total = nil
 	}
+	// Each domain is checked once a step, since the check may look it up in DNS.
+	checked := map[string]string{}
+	domainFor := func(ctx context.Context, domain string) (string, error) {
+		if kept, ok := checked[domain]; ok {
+			return kept, nil
+		}
+		kept := ""
+		if linkDomain != nil {
+			var err error
+			if kept, err = linkDomain(ctx, domain); err != nil {
+				return "", err
+			}
+		}
+		checked[domain] = kept
+		return kept, nil
+	}
 	step := &ImportResult{Cursor: result.Cursor, Done: done, Total: total, Failed: []importers.FailedLink{}}
 	for _, item := range result.Links {
 		if item.Known {
@@ -352,7 +391,7 @@ func ImportStep(ctx context.Context, r *Runlight, site, source string, credentia
 			step.Skipped++
 			continue
 		}
-		written, err := r.writeLink(ctx, site, source, item.Link, item)
+		written, err := r.writeLink(ctx, site, source, item.Link, item, domainFor)
 		if err != nil {
 			return nil, err
 		}
