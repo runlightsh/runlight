@@ -2901,6 +2901,28 @@ defmodule Runlight.Routes do
     if path == "/api/sites" do
       visible = if only, do: Enum.filter(Runlight.sites(rl), &(&1["id"] == only)), else: Runlight.sites(rl)
 
+      # Every connected install is asked at once, so the list waits for the slowest, not for them all in turn. One
+      # that runs past its own timeout reads as unreachable.
+      infos =
+        visible
+        |> Enum.map(& &1["id"])
+        |> Enum.filter(&Runlight.remote(rl, &1))
+        |> Task.async_stream(&{&1, Runlight.remote_info(rl, &1)},
+          max_concurrency: 16,
+          ordered: false,
+          timeout: 10_000,
+          on_timeout: :kill_task
+        )
+        |> Enum.flat_map(fn
+          {:ok, pair} -> [pair]
+          {:exit, _} -> []
+        end)
+        |> Map.new()
+
+      info = fn id ->
+        Map.get(infos, id) || %{last_seen: nil, retention_months: :undefined, connection: "unreachable"}
+      end
+
       sites =
         Enum.map(visible, fn site ->
           remote = Runlight.remote(rl, site["id"])
@@ -2922,7 +2944,7 @@ defmodule Runlight.Routes do
             Object.put(
               out,
               "lastSeen",
-              if(remote, do: Runlight.remote_last_seen(rl, site["id"]), else: Store.last_seen(rl.store, site["id"]))
+              if(remote, do: info.(site["id"]).last_seen, else: Store.last_seen(rl.store, site["id"]))
             )
 
           # Left out for a connected install that cannot be reached, so nobody reads "forever" by mistake.
@@ -2934,14 +2956,14 @@ defmodule Runlight.Routes do
                 out,
                 "retentionMonths",
                 if(remote,
-                  do: Runlight.remote_info(rl, site["id"]).retention_months,
+                  do: info.(site["id"]).retention_months,
                   else: Runlight.retention(rl, site["id"])
                 )
               )
             end
 
           if remote && shared == nil,
-            do: Object.put(out, "connection", Runlight.remote_info(rl, site["id"]).connection),
+            do: Object.put(out, "connection", info.(site["id"]).connection),
             else: out
         end)
 
