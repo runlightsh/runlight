@@ -1551,12 +1551,10 @@ defmodule Runlight.Routes do
         origin_needed()
 
       true ->
-        given = if routes.origin, do: "", else: body |> JS.prop("origin") |> JS.nullish("") |> JS.string()
-
-        home =
-          if Regex.match?(~r/^https?:\/\/[^\s]+$/u, given) and not String.contains?(given, "\n"),
-            do: String.replace(given, ~r/\/+\z/, ""),
-            else: "#{routes.origin || Url.origin(url)}#{routes.base}"
+        # Links in the email point back to the configured address, or else to this dashboard at the address the
+        # request came to. An address in the body is never used, so whoever adds a report cannot point its links
+        # somewhere else.
+        home = "#{routes.origin || Url.origin(url)}#{routes.base}"
 
         # A period already due counts as sent, so a report added mid-week first goes out on the next Monday.
         now = Runlight.now(rl)
