@@ -33,6 +33,8 @@ final class Throttle
 
     private function salt(): string
     {
+        // The settings table first, for an install whose first requests are all sign-ins.
+        $this->store->migrate();
         $saved = $this->store->setting(self::KEY);
         if ($saved !== null && $saved !== '') {
             return $saved;
