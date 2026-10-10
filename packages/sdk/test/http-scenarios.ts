@@ -1350,6 +1350,12 @@ const IMPORTS: Scenario[] = [
           { website_id: "w9", session_id: "u1", created_at: "2026-10-02 08:02:00", url_path: "/umami-csv", event_type: "2" },
         ],
       }),
+      // A file's later batches send back the secret the first answer gave, so a visit across two batches stays one;
+      // without it (or with one that is not a secret) the batch keys its visitors with a new one.
+      { ...post("/api/import/csv/visits", { rows: [{ time: "2026-09-25T10:00:00Z", path: "/one", visitor: "203.0.113.50" }] }), capture: { csvSecret: "secret" } },
+      post("/api/import/csv/visits", { rows: [{ time: "2026-09-25T10:05:00Z", path: "/two", visitor: "203.0.113.50" }], secret: "{{csvSecret}}" }),
+      post("/api/import/csv/visits", { rows: [{ time: "2026-09-25T10:10:00Z", path: "/three", visitor: "203.0.113.50" }], secret: "short" }),
+      get("/api/stats?from=2026-09-25&to=2026-09-25&compare=off"),
       get("/api/stats?from=2026-10-01&to=2026-10-06&compare=off"),
       get("/api/breakdown?from=2026-10-01&to=2026-10-06&dimension=page"),
       get("/api/breakdown?from=2026-10-01&to=2026-10-06&dimension=source"),

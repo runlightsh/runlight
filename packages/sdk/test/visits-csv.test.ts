@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { csvFormat, rowTime } from "../src/importers/csvvisits.js";
 import { importCsvVisits } from "../src/importers/visits.js";
@@ -27,8 +28,9 @@ const runlightRows = [
 
 test("CSV in Runlight's format: rows become visits with sources, places, devices, and events", async () => {
   const { rl, get } = make();
-  const step = await importCsvVisits(rl, "default", runlightRows);
+  const { secret, ...step } = await importCsvVisits(rl, "default", runlightRows);
   assert.deepEqual(step, { pageviews: 3, events: 1, visits: 2, skipped: 1 });
+  assert.match(secret, /^[A-Za-z0-9_-]{32}$/);
   const stats = (await get(`/api/stats?${range}`)).stats;
   assert.equal(stats.pageviews, 3);
   assert.equal(stats.visits, 2);
@@ -53,7 +55,7 @@ test("CSV in Runlight's format without a visitor column: every row is its own vi
   ];
   assert.equal((await importCsvVisits(rl, "default", rows)).visits, 2);
   await importCsvVisits(rl, "default", rows);
-  assert.equal((await get(`/api/stats?${range}`)).stats.visits, 2, "the same rows get the same ids the second time");
+  assert.equal((await get(`/api/stats?${range}`)).stats.visits, 2, "the second import replaces the first");
   assert.deepEqual((await get(`/api/breakdown?${range}&dimension=page`)).rows.map((r: any) => r.value).sort(), ["/a", "/b"]);
 });
 
@@ -67,10 +69,40 @@ const umamiRows = [
 
 test("CSV from Umami's export: pageviews and named events come across, other event types do not", async () => {
   const { rl, get } = make();
-  assert.deepEqual(await importCsvVisits(rl, "default", umamiRows), { pageviews: 2, events: 1, visits: 2, skipped: 1 });
+  const { secret: _, ...step } = await importCsvVisits(rl, "default", umamiRows);
+  assert.deepEqual(step, { pageviews: 2, events: 1, visits: 2, skipped: 1 });
   assert.deepEqual((await get(`/api/breakdown?${range}&dimension=source`)).rows.map((r: any) => r.value), ["Hacker News"]);
   assert.deepEqual((await get(`/api/breakdown?${range}&dimension=region`)).rows.map((r: any) => r.value), ["CA-ON"]);
   assert.deepEqual((await get(`/api/breakdown?${range}&dimension=browser`)).rows.map((r: any) => r.value).sort(), ["Chrome", "Safari"]);
+});
+
+test("a CSV visitor column is keyed with a secret only the import holds, which later batches of the file send back", async () => {
+  const { rl, get } = make();
+  const people = [
+    { time: "2026-03-01T10:00:00Z", path: "/a", visitor: "203.0.113.7" },
+    { time: "2026-03-01T10:10:00Z", path: "/b", visitor: "203.0.113.7" },
+    { time: "2026-03-01T10:20:00Z", path: "/c", visitor: "jon@example.com" },
+  ];
+  // A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+  const plain = (key: string, length: number) => createHash("sha256").update(`csv:${key}:2026-03-01`).digest("hex").slice(0, length);
+  const first = await importCsvVisits(rl, "default", people.slice(0, 1));
+  const second = await importCsvVisits(rl, "default", people.slice(1), first.secret);
+  assert.equal(second.secret, first.secret);
+  assert.equal(second.visits, 1, "the second batch's visitor continues the first batch's visit");
+  const visitors = (await rl.store.db.all<{ visitor: string }>("SELECT DISTINCT visitor FROM rl_sessions")).map((r) => r.visitor);
+  assert.equal(visitors.length, 2);
+  for (const key of ["203.0.113.7", "jon@example.com"]) assert.ok(!visitors.includes(plain(key, 16)), key);
+  assert.equal((await get(`/api/stats?${range}`)).stats.visits, 2);
+
+  // The same file again, with a new secret and so new ids, leaves no visit of the old import behind,
+  // even one that ran across its two batches.
+  const again = await importCsvVisits(rl, "default", people.slice(0, 1));
+  assert.notEqual(again.secret, first.secret);
+  await importCsvVisits(rl, "default", people.slice(1), again.secret);
+  const stats = (await get(`/api/stats?${range}`)).stats;
+  assert.equal(stats.visits, 2);
+  assert.equal(stats.pageviews, 3);
+  assert.equal((await rl.store.db.all("SELECT id FROM rl_sessions")).length, 2);
 });
 
 test("CSV rows from after Runlight's own first visit are left to Runlight", async () => {

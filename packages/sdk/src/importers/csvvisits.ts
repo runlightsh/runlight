@@ -41,7 +41,7 @@ const cell = (row: Record<string, string>, ...names: string[]) => {
   return "";
 };
 
-/** A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids. */
+/** A row with no visitor is its own visit, keyed by its whole content. */
 const ownKey = (row: Record<string, string>) => `row:${JSON.stringify(Object.entries(row).sort(([a], [b]) => (a < b ? -1 : 1)))}`;
 
 /** A referrer as a full address: a bare domain gains https://. */

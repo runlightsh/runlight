@@ -8,6 +8,7 @@
  * begin, so nothing is counted twice, and it remembers how far it got, so
  * running it again carries on from there.
  */
+import { base64url, hmac, randomBytes } from "../accounts/crypto.js";
 import { addDays, localDate } from "../time.js";
 import type { Runlight } from "../runlight.js";
 import { SESSION_IDLE_MS } from "../runlight.js";
@@ -197,11 +198,13 @@ async function writeStep(
     const imported = `SELECT id FROM rl_sessions WHERE site = ? AND imported = 1`;
     await store.db.run(`DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${imported})`, [siteId, from, to, siteId]);
     // Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
-    // so the time bounds let the (site, ts) index find them, with no scan of every event.
+    // so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+    // EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
+    // CSV imported again has new ids, so its new visit does not take that one's place.
     await store.db.run(
       `DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
          AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
-      [siteId, from, to, siteId, from, to + EVENT_TAIL_MS],
+      [siteId, from - EVENT_TAIL_MS, to, siteId, from - EVENT_TAIL_MS, to + EVENT_TAIL_MS],
     );
     for (const { ns, hit } of hits) {
       const made = await writeEvent(store, site, ns, hit);
@@ -384,8 +387,20 @@ async function writeEvent(store: SqlStore, site: { id: string; hostnames: string
  * One batch of a CSV file, sorted oldest first by the dashboard. As with Umami, only rows from before
  * Runlight's own first visit, and within what the site keeps, are written. A batch can run again: its
  * time span is cleared first, so batches must not share a moment, which the dashboard sees to.
+ *
+ * A CSV's visitor column can hold anything, an email or an IP address among them, and a plain hash of
+ * one is easily undone by trying every address. So each key is an HMAC under a random secret made for
+ * the import and never stored: the first batch gets one, the answer carries it, and the caller sends
+ * it with every later batch of the same file, so a visit that runs across two batches stays one. A file
+ * imported again gets a new secret and new ids; its time span is cleared first, as always, so nothing is
+ * counted twice.
  */
-export async function importCsvVisits(runlight: Runlight, siteId: string, rows: unknown): Promise<{ pageviews: number; events: number; visits: number; skipped: number }> {
+export async function importCsvVisits(
+  runlight: Runlight,
+  siteId: string,
+  rows: unknown,
+  secret?: unknown,
+): Promise<{ pageviews: number; events: number; visits: number; skipped: number; secret: string }> {
   await runlight.init();
   if (!runlight.site(siteId)) throw new ImportError("Unknown site", "unknown_site");
   if (!Array.isArray(rows) || rows.length > CSV_BATCH) throw new ImportError(`Send at most ${CSV_BATCH} rows at a time`, "import_csv_batch", { max: String(CSV_BATCH) });
@@ -394,6 +409,7 @@ export async function importCsvVisits(runlight: Runlight, siteId: string, rows: 
   );
   const format = csvFormat(Object.keys(clean[0] ?? {}));
   if (!format) throw new ImportError("This CSV is not an Umami export or Runlight's visit format", "import_csv_format");
+  const key = typeof secret === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(secret) ? secret : base64url(randomBytes(24));
   const cutoff = (await runlight.retentionCutoff(siteId)) ?? 0;
   const end = Math.min((await runlight.store.firstOwnVisit(siteId)) ?? Infinity, runlight.now());
   const hits = clean
@@ -401,7 +417,8 @@ export async function importCsvVisits(runlight: Runlight, siteId: string, rows: 
     .filter((h): h is NonNullable<typeof h> => h !== null && h.hit.ts >= cutoff && h.hit.ts < end)
     .sort((a, b) => a.hit.ts - b.hit.ts);
   const skipped = clean.length - hits.length;
-  if (!hits.length) return { pageviews: 0, events: 0, visits: 0, skipped };
+  if (!hits.length) return { pageviews: 0, events: 0, visits: 0, skipped, secret: key };
+  for (const h of hits) h.hit.key = base64url(await hmac("SHA-256", key, h.hit.key));
   const counts = await writeStep(runlight, siteId, hits[0]!.hit.ts, hits[hits.length - 1]!.hit.ts + 1, hits);
-  return { ...counts, skipped };
+  return { ...counts, skipped, secret: key };
 }
