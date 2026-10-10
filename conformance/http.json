@@ -27115,6 +27115,94 @@
         },
         {
           "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "owner@example.com",
+            "origin": "https://evil.example/phish"
+          },
+          "capture": {
+            "ownReport": "report.id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "report": {
+                "id": "<id>",
+                "site": "default",
+                "email": "owner@example.com",
+                "frequency": "weekly",
+                "lang": "en",
+                "lastSentAt": null,
+                "createdAt": 1791288001000
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports/{{ownReport}}/send",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            },
+            "fetched": [
+              {
+                "method": "POST",
+                "url": "https://hooks.example.net/invites",
+                "headers": {
+                  "content-type": "application/json"
+                },
+                "body": {
+                  "to": "owner@example.com",
+                  "from": "runlight@example.com",
+                  "fromName": "",
+                  "subject": "example.com: 0 people last week",
+                  "html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"supported-color-schemes\" content=\"light dark\"><title>example.com: 0 people last week</title>\n<style>\n@media (prefers-color-scheme: dark) {\n  .rl-page { background: #09090b !important; }\n  .rl-card { background: #141417 !important; border-color: #27272a !important; }\n  .rl-line { border-color: #27272a !important; }\n  .rl-row { border-top-color: #1f1f23 !important; }\n  .rl-ink { color: #ffffff !important; }\n  .rl-body-text { color: #d4d4d8 !important; }\n  .rl-muted, .rl-flat { color: #a1a1aa !important; }\n  .rl-up { color: #4ade80 !important; }\n  .rl-down { color: #f87171 !important; }\n  .rl-button { background: #ffffff !important; color: #000000 !important; }\n  .rl-mark { background: #ffffff !important; color: #000000 !important; }\n  .rl-foot, .rl-foot a { color: #a1a1aa !important; }\n}\n</style></head>\n<body class=\"rl-page\" style=\"margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif\">\n<div style=\"display:none;max-height:0;overflow:hidden\">0 people visited last week.</div>\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" class=\"rl-page\" style=\"background:#f4f4f5\"><tr><td align=\"center\" style=\"padding:32px 16px\">\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" class=\"rl-card\" style=\"max-width:600px;background:#ffffff;border-radius:14px;border:1px solid #e5e7eb\"><tr><td style=\"padding:32px\">\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;margin:0 0 24px\"><tr>\n<td style=\"vertical-align:middle\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse\"><tr>\n<td class=\"rl-mark\" width=\"24\" height=\"24\" align=\"center\" style=\"width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif\">R</td>\n<td class=\"rl-ink\" style=\"padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif\">Runlight</td></tr></table></td>\n<td align=\"right\" class=\"rl-muted\" style=\"vertical-align:middle;font-size:12px;color:#6b7280\">Your dashboard is at <a href=\"https://example.com/runlight/?site=default\" class=\"rl-muted\" style=\"color:#6b7280\">example.com/runlight</a></td>\n</tr></table>\n<div class=\"rl-muted\" style=\"font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">example.com · Sep 28 to Oct 4, 2026</div>\n<h1 class=\"rl-ink\" style=\"font-size:24px;line-height:1.3;color:#111827;margin:10px 0 24px;font-weight:600\">0 people visited last week.</h1>\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"6\" style=\"border-collapse:separate;margin:0 -6px\">\n<tr><td width=\"33%\" class=\"rl-line\" style=\"padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top\">\n<div class=\"rl-muted\" style=\"font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">Visitors</div>\n<div class=\"rl-ink\" style=\"font-size:24px;font-weight:600;color:#111827;margin-top:4px\">0</div>\n<div class=\"rl-flat\" style=\"font-size:12px;color:#6b7280;margin-top:2px;min-height:16px\"></div></td><td width=\"33%\" class=\"rl-line\" style=\"padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top\">\n<div class=\"rl-muted\" style=\"font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">Visits</div>\n<div class=\"rl-ink\" style=\"font-size:24px;font-weight:600;color:#111827;margin-top:4px\">0</div>\n<div class=\"rl-flat\" style=\"font-size:12px;color:#6b7280;margin-top:2px;min-height:16px\"></div></td><td width=\"33%\" class=\"rl-line\" style=\"padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top\">\n<div class=\"rl-muted\" style=\"font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">Pageviews</div>\n<div class=\"rl-ink\" style=\"font-size:24px;font-weight:600;color:#111827;margin-top:4px\">0</div>\n<div class=\"rl-flat\" style=\"font-size:12px;color:#6b7280;margin-top:2px;min-height:16px\"></div></td></tr><tr><td width=\"33%\" class=\"rl-line\" style=\"padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top\">\n<div class=\"rl-muted\" style=\"font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">Views per visit</div>\n<div class=\"rl-ink\" style=\"font-size:24px;font-weight:600;color:#111827;margin-top:4px\">0.0</div>\n<div class=\"rl-flat\" style=\"font-size:12px;color:#6b7280;margin-top:2px;min-height:16px\"></div></td><td width=\"33%\" class=\"rl-line\" style=\"padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top\">\n<div class=\"rl-muted\" style=\"font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">Bounce rate</div>\n<div class=\"rl-ink\" style=\"font-size:24px;font-weight:600;color:#111827;margin-top:4px\">0%</div>\n<div class=\"rl-flat\" style=\"font-size:12px;color:#6b7280;margin-top:2px;min-height:16px\"></div></td><td width=\"33%\" class=\"rl-line\" style=\"padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top\">\n<div class=\"rl-muted\" style=\"font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280\">Visit duration</div>\n<div class=\"rl-ink\" style=\"font-size:24px;font-weight:600;color:#111827;margin-top:4px\">0s</div>\n<div class=\"rl-flat\" style=\"font-size:12px;color:#6b7280;margin-top:2px;min-height:16px\"></div></td></tr></table>\n<h3 class=\"rl-ink\" style=\"font-size:14px;color:#111827;margin:28px 0 8px\">Top pages</h3>\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:14px\"><tr><td class=\"rl-muted\" style=\"padding:7px 0;color:#6b7280\">Nothing in this range</td></tr></table><h3 class=\"rl-ink\" style=\"font-size:14px;color:#111827;margin:28px 0 8px\">Top sources</h3>\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:14px\"><tr><td class=\"rl-muted\" style=\"padding:7px 0;color:#6b7280\">Nothing in this range</td></tr></table><h3 class=\"rl-ink\" style=\"font-size:14px;color:#111827;margin:28px 0 8px\">Top countries</h3>\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:14px\"><tr><td class=\"rl-muted\" style=\"padding:7px 0;color:#6b7280\">Nothing in this range</td></tr></table>\n<p style=\"margin:32px 0 0\"><a href=\"https://example.com/runlight/?site=default\" class=\"rl-button\" style=\"display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:11px 18px;border-radius:8px;font-size:14px;font-weight:600\">Open the dashboard</a></p>\n</td></tr></table>\n<p class=\"rl-foot\" style=\"max-width:600px;font-size:12px;line-height:1.5;color:#6b7280;margin:16px auto 0\">You get this weekly report for example.com from Runlight. <a href=\"https://example.com/runlight/unsubscribe/<hex>\" style=\"color:#6b7280\">Unsubscribe</a></p>\n</td></tr></table></body></html>",
+                  "text": "Runlight · Your dashboard is at example.com/runlight\n\nexample.com · Sep 28 to Oct 4, 2026\n\n0 people visited last week.\n\nVisitors: 0\nVisits: 0\nPageviews: 0\nViews per visit: 0.0\nBounce rate: 0%\nVisit duration: 0s\n\nTop pages\n  Nothing in this range\n\nTop sources\n  Nothing in this range\n\nTop countries\n  Nothing in this range\n\nOpen the dashboard: https://example.com/runlight/?site=default\n\nYou get this weekly report for example.com from Runlight. Unsubscribe: https://example.com/runlight/unsubscribe/<hex>",
+                  "headers": {
+                    "List-Unsubscribe": "<https://example.com/runlight/unsubscribe/<hex>>",
+                    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/reports/{{ownReport}}",
+          "headers": {},
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            }
+          }
+        },
+        {
+          "method": "POST",
           "path": "/api/people",
           "headers": {
             "content-type": "application/json"

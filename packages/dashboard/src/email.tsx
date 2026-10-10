@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, base, type MailState, type Report, type Site } from "./api.js";
+import { api, type MailState, type Report, type Site } from "./api.js";
 import { LANGUAGES, currentLocale, t, type Key } from "./i18n.js";
 import { Secret } from "./secret.js";
 import { Callout } from "./callout.js";
@@ -248,7 +248,7 @@ export function EmailReports({ site, onSetUp }: { site: Site; onSetUp: () => voi
     e.preventDefault();
     setError("");
     api
-      .addReport(site.id, { email: email.trim(), frequency, lang, origin: `${location.origin}${base}` })
+      .addReport(site.id, { email: email.trim(), frequency, lang })
       .then(() => {
         setEmail("");
         return load();

@@ -975,7 +975,11 @@ const ACCOUNTS: Scenario[] = [
       { ...post("/api/people", { email: "Member@Example.com", role: "member" }, { "content-type": "application/json" }), capture: { memberCode: "link~code=([^&]+)" } },
       later(1000, { ...post("/api/people", { email: "admin@example.com", role: "admin" }, { "content-type": "application/json" }), capture: { adminInvite: "invite.id" } }),
       put("/api/mail", { service: "webhook", url: "https://hooks.example.net/invites", from: "runlight@example.com" }, { "content-type": "application/json" }),
-      later(1000, { ...post("/api/people", { email: "viewer@example.com", role: "viewer" }, { "content-type": "application/json" }), capture: { viewerCode: "link~code=([^&]+)" } }),
+      // A report's links go to this dashboard at the address the request came to, never one the body names.
+      { ...post("/api/reports", { email: "owner@example.com", origin: "https://evil.example/phish" }, { "content-type": "application/json" }), capture: { ownReport: "report.id" } },
+      post("/api/reports/{{ownReport}}/send", undefined, { "content-type": "application/json" }),
+      del("/api/reports/{{ownReport}}", {}),
+      later(1000,{ ...post("/api/people", { email: "viewer@example.com", role: "viewer" }, { "content-type": "application/json" }), capture: { viewerCode: "link~code=([^&]+)" } }),
       // A new link replaces the old one, whose invite is gone.
       later(1000, { ...post("/api/invites/{{adminInvite}}/resend", {}, { "content-type": "application/json" }), capture: { adminInvite2: "invite.id" } }),
       post("/api/invites/{{adminInvite}}/resend", {}, { "content-type": "application/json" }),
