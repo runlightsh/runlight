@@ -26,6 +26,20 @@ public sealed class TimeTests
     }
 
     [Fact]
+    public void Every_zone_is_carried_for_systems_without_zoneinfo()
+    {
+        Assert.DoesNotContain(ZoneNames.All, name => name is not ("UTC" or "Etc/UTC") && Tz.Carried(name) == null);
+        long winter = Utc(2026, 0, 15) / 1000;
+        long summer = Utc(2026, 6, 15) / 1000;
+        Assert.Equal(-5 * 3600, Tz.Carried("America/New_York")!.Offset(winter));
+        Assert.Equal(-4 * 3600, Tz.Carried("America/New_York")!.Offset(summer));
+        Assert.Equal(5 * 3600 + 1800, Tz.Carried("Asia/Kolkata")!.Offset(summer));
+        Assert.Equal(11 * 3600, Tz.Carried("Australia/Lord_Howe")!.Offset(winter));
+        Assert.Equal(10 * 3600 + 1800, Tz.Carried("Australia/Lord_Howe")!.Offset(summer));
+        Assert.Equal(3600, Tz.Carried("Europe/London")!.Offset(summer));
+    }
+
+    [Fact]
     public void The_spring_dst_change_makes_a_23_hour_day()
     {
         var range = Resolve(new JsObject { ["from"] = "2026-03-07", ["to"] = "2026-03-09" }, "America/Toronto", Utc(2026, 2, 10))!;
