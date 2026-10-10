@@ -236,13 +236,19 @@ type Runlight struct {
 	checkMu   sync.Mutex
 	checking  *checkRun
 	pruneMu   sync.Mutex
-	pruneWG   sync.WaitGroup
 	turnsMu   sync.Mutex
 	turns     map[string]*turn
 	optimized int64
 	// warnDirect is true until the default trust, never chosen, has been seen
 	// answering a public address directly, and warned about once.
 	warnDirect atomic.Bool
+
+	// busy counts work running after the answer, which Idle waits for. A
+	// WaitGroup cannot take an Add while a Wait is going on, and requests
+	// start work at any time.
+	busyMu   sync.Mutex
+	busyDone *sync.Cond
+	busy     int
 
 	mu          sync.Mutex
 	configured  []SiteRow
@@ -1112,9 +1118,9 @@ func retentionList() string {
 
 // prune runs retention work after the answer, one piece of it at a time.
 func (r *Runlight) prune(fn func(ctx context.Context) error) {
-	r.pruneWG.Add(1)
+	r.start()
 	go func() {
-		defer r.pruneWG.Done()
+		defer r.finish()
 		r.pruneMu.Lock()
 		defer r.pruneMu.Unlock()
 		if err := fn(context.Background()); err != nil {
@@ -1126,18 +1132,44 @@ func (r *Runlight) prune(fn func(ctx context.Context) error) {
 // later runs work after the answer, such as an email a right password
 // should not wait for; Idle waits for it.
 func (r *Runlight) later(fn func(ctx context.Context)) {
-	r.pruneWG.Add(1)
+	r.start()
 	go func() {
-		defer r.pruneWG.Done()
+		defer r.finish()
 		fn(context.Background())
 	}()
+}
+
+// start counts one more piece of work running after the answer.
+func (r *Runlight) start() {
+	r.busyMu.Lock()
+	r.busy++
+	r.busyMu.Unlock()
+}
+
+// finish counts one piece of work done, and wakes Idle when none is left.
+func (r *Runlight) finish() {
+	r.busyMu.Lock()
+	r.busy--
+	if r.busy == 0 && r.busyDone != nil {
+		r.busyDone.Broadcast()
+	}
+	r.busyMu.Unlock()
 }
 
 // errURIMalformed is what decodeURIComponent throws for a broken escape.
 var errURIMalformed = errors.New("URIError: URI malformed")
 
-// Idle waits for retention work still running; the scheduled check and tests wait for it.
-func (r *Runlight) Idle() { r.pruneWG.Wait() }
+// Idle waits for work still running after the answer, such as retention; shutdown and tests wait for it.
+func (r *Runlight) Idle() {
+	r.busyMu.Lock()
+	defer r.busyMu.Unlock()
+	if r.busyDone == nil {
+		r.busyDone = sync.NewCond(&r.busyMu)
+	}
+	for r.busy > 0 {
+		r.busyDone.Wait()
+	}
+}
 
 // zoneChanged clears a site's built days for a new timezone. Visitor ids
 // recorded before the change were made per day of the old timezone, and
@@ -2014,8 +2046,13 @@ func (r *Runlight) runCheck(ctx context.Context) (CheckResult, error) {
 	if err := r.dropOldSalts(ctx, r.now()); err != nil {
 		return CheckResult{}, err
 	}
-	r.prune(func(ctx context.Context) error { return r.applyRetention(ctx, "") })
-	r.Idle()
+	// Retention runs here, after any still going, rather than through Idle,
+	// which steady traffic starting work after each answer could hold up.
+	r.pruneMu.Lock()
+	if err := r.applyRetention(context.Background(), ""); err != nil {
+		r.logf("Runlight: could not apply retention %v", err)
+	}
+	r.pruneMu.Unlock()
 	if r.now()-r.optimized >= 86_400_000 {
 		r.optimized = r.now()
 		r.Store.Optimize(ctx, false)
