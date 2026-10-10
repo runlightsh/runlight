@@ -1424,6 +1424,8 @@ func (rt *Routes) viewerDaily(ctx context.Context) (float64, error) {
 // past the owner's daily number for a viewer. Returns how to finish.
 func (rt *Routes) askTurn(ctx context.Context, who string, owner bool) (*Response, func(), error) {
 	now := rt.r.now()
+	// The check and the count happen together, so questions asked at once
+	// cannot all pass the check before any of them is counted.
 	rt.mu.Lock()
 	mine, ok := rt.asked[who]
 	if !ok {
@@ -1436,53 +1438,10 @@ func (rt *Routes) askTurn(ctx context.Context, who string, owner bool) (*Respons
 		}
 	}
 	mine.at = kept
-	busy := len(mine.at) >= askPerHour || mine.open >= askAtOnce
-	rt.mu.Unlock()
-	if busy {
+	if len(mine.at) >= askPerHour || mine.open >= askAtOnce {
+		rt.mu.Unlock()
 		return Coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429, nil), nil, nil
 	}
-	if !owner {
-		limit, err := rt.viewerDaily(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		day := "assistant-asked:" + js.ISOString(now)[:10]
-		stored, has, err := rt.r.Store.Setting(ctx, day)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !has {
-			stored = "{}"
-		}
-		parsed, err := js.Parse(stored)
-		if err != nil {
-			return nil, nil, err
-		}
-		counts, _ := parsed.(*js.Object)
-		if counts == nil {
-			counts = &js.Object{}
-		}
-		if js.ToNumber(counts.Value(who)) >= limit {
-			l := js.FormatNumber(limit)
-			return Coded("Viewers can ask "+l+" questions a day. Ask again tomorrow.", "assistant_daily", 429, params("limit", l)), nil, nil
-		}
-		counts.Set(who, js.ToNumber(counts.Value(who))+1)
-		if err := rt.r.Store.SetSetting(ctx, day, ptr(js.Stringify(counts))); err != nil {
-			return nil, nil, err
-		}
-		old, err := rt.r.Store.SettingsStartingWith(ctx, "assistant-asked:")
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, s := range old {
-			if s.Key != day {
-				if err := rt.r.Store.SetSetting(ctx, s.Key, nil); err != nil {
-					return nil, nil, err
-				}
-			}
-		}
-	}
-	rt.mu.Lock()
 	mine.at = append(mine.at, now)
 	mine.open++
 	rt.asked[who] = mine
@@ -1501,11 +1460,76 @@ func (rt *Routes) askTurn(ctx context.Context, who string, owner bool) (*Respons
 		}
 	}
 	rt.mu.Unlock()
-	return nil, func() {
+	finish := func() {
 		rt.mu.Lock()
 		mine.open--
 		rt.mu.Unlock()
-	}, nil
+	}
+	if owner {
+		return nil, finish, nil
+	}
+	refused, err := rt.viewerAsked(ctx, who, now)
+	if refused != nil || err != nil {
+		// A question that was not asked gives its place back.
+		rt.mu.Lock()
+		mine.open--
+		for i := len(mine.at) - 1; i >= 0; i-- {
+			if mine.at[i] == now {
+				mine.at = append(mine.at[:i], mine.at[i+1:]...)
+				break
+			}
+		}
+		rt.mu.Unlock()
+		return refused, nil, err
+	}
+	return nil, finish, nil
+}
+
+// viewerAsked counts a viewer's question against the owner's daily number,
+// or refuses it. Questions are counted one at a time, so two asked at once
+// cannot both read the count before either writes it.
+func (rt *Routes) viewerAsked(ctx context.Context, who string, now int64) (*Response, error) {
+	defer rt.r.oneAtATime("assistant-asked")()
+	limit, err := rt.viewerDaily(ctx)
+	if err != nil {
+		return nil, err
+	}
+	day := "assistant-asked:" + js.ISOString(now)[:10]
+	stored, has, err := rt.r.Store.Setting(ctx, day)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		stored = "{}"
+	}
+	parsed, err := js.Parse(stored)
+	if err != nil {
+		return nil, err
+	}
+	counts, _ := parsed.(*js.Object)
+	if counts == nil {
+		counts = &js.Object{}
+	}
+	if js.ToNumber(counts.Value(who)) >= limit {
+		l := js.FormatNumber(limit)
+		return Coded("Viewers can ask "+l+" questions a day. Ask again tomorrow.", "assistant_daily", 429, params("limit", l)), nil
+	}
+	counts.Set(who, js.ToNumber(counts.Value(who))+1)
+	if err := rt.r.Store.SetSetting(ctx, day, ptr(js.Stringify(counts))); err != nil {
+		return nil, err
+	}
+	old, err := rt.r.Store.SettingsStartingWith(ctx, "assistant-asked:")
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range old {
+		if s.Key != day {
+			if err := rt.r.Store.SetSetting(ctx, s.Key, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, nil
 }
 
 var tokenPath = regexp.MustCompile(`^/api/tokens/([a-f0-9]{24})$`)
