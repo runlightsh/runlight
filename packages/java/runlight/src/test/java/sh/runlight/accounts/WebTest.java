@@ -422,6 +422,9 @@ class WebTest {
             "/\\evil.example",
             "/\t/evil.example",
             "https://evil.example/",
+            "/..//evil.example/",
+            "/runlight/..//evil.example",
+            "/./../..//evil.example/x",
             "",
             "runlight")) {
       assertEquals("/runlight/", web.safeNext(next), "never sent off the app: " + next);
