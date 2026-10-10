@@ -52,10 +52,13 @@ impl Db for PostgresDb {
 
     fn hold(&self, kind: Hold) -> BoxFuture<'_, Result<Arc<dyn Db>, DbError>> {
         Box::pin(async move {
-            let mut conn = self.pool.acquire().await.map_err(db_error)?;
+            // In its slot from the start, so a request cancelled part way closes the connection rather than
+            // give it back to the pool in a transaction or with the lock taken.
+            let mut slot = Slot { conn: Some(self.pool.acquire().await.map_err(db_error)?), nested: false };
+            let conn = slot.conn.as_mut().ok_or_else(ended)?;
             match kind {
                 Hold::Transaction => {
-                    sqlx::raw_sql(AssertSqlSafe("BEGIN".to_string())).execute(&mut *conn).await.map_err(db_error)?;
+                    sqlx::raw_sql(AssertSqlSafe("BEGIN".to_string())).execute(&mut **conn).await.map_err(db_error)?;
                 }
                 Hold::Exclusive => loop {
                     // Asked for again and again rather than waited on: a waiting statement would hold up an
@@ -63,7 +66,7 @@ impl Db for PostgresDb {
                     // other for good.
                     let rows =
                         sqlx::raw_sql(AssertSqlSafe(format!("SELECT pg_try_advisory_lock({MIGRATION_LOCK}) AS ok")))
-                            .fetch_all(&mut *conn)
+                            .fetch_all(&mut **conn)
                             .await
                             .map_err(db_error)?;
                     let ok = rows.first().map(pg_row).transpose()?.is_some_and(|r| r.num("ok") == 1.0);
@@ -73,16 +76,49 @@ impl Db for PostgresDb {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 },
             }
-            Ok(Arc::new(Held { conn: Arc::new(Mutex::new(Some(conn))), kind, role: Role::Owner }) as Arc<dyn Db>)
+            Ok(Arc::new(Held { conn: Arc::new(Mutex::new(slot)), kind, role: Role::Owner }) as Arc<dyn Db>)
         })
+    }
+}
+
+/// The held connection. Let go of with it still in (a request cancelled before `finish`), it closes the
+/// connection, so no transaction or lock goes back to the pool.
+struct Slot {
+    conn: Option<PoolConnection<Postgres>>,
+    /// A transaction begun inside the lock that has not ended.
+    nested: bool,
+}
+
+impl Slot {
+    fn close(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            drop(conn.detach());
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
 /// One connection held for a transaction or a lock.
 struct Held {
-    conn: Arc<Mutex<Option<PoolConnection<Postgres>>>>,
+    conn: Arc<Mutex<Slot>>,
     kind: Hold,
     role: Role,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Its owner gone without `finish`: closed now rather than when the last joined handle goes.
+        if self.role == Role::Owner
+            && let Ok(mut slot) = self.conn.try_lock()
+        {
+            slot.close();
+        }
+    }
 }
 
 /// What finishing a held connection does.
@@ -107,8 +143,8 @@ impl Db for Held {
 
     fn all<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
         Box::pin(async move {
-            let mut guard = self.conn.lock().await;
-            let conn = guard.as_mut().ok_or_else(ended)?;
+            let mut slot = self.conn.lock().await;
+            let conn = slot.conn.as_mut().ok_or_else(ended)?;
             let rows = sqlx::raw_sql(text(sql, &params)?).fetch_all(&mut **conn).await.map_err(db_error)?;
             rows.iter().map(pg_row).collect()
         })
@@ -116,8 +152,8 @@ impl Db for Held {
 
     fn run<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<u64, DbError>> {
         Box::pin(async move {
-            let mut guard = self.conn.lock().await;
-            let conn = guard.as_mut().ok_or_else(ended)?;
+            let mut slot = self.conn.lock().await;
+            let conn = slot.conn.as_mut().ok_or_else(ended)?;
             Ok(sqlx::raw_sql(text(sql, &params)?).execute(&mut **conn).await.map_err(db_error)?.rows_affected())
         })
     }
@@ -126,8 +162,11 @@ impl Db for Held {
         Box::pin(async move {
             // A transaction inside the lock runs on the locked connection; anything else joins what is held.
             if kind == Hold::Transaction && self.kind == Hold::Exclusive {
-                let mut guard = self.conn.lock().await;
-                let conn = guard.as_mut().ok_or_else(ended)?;
+                let mut slot = self.conn.lock().await;
+                let slot = &mut *slot;
+                let conn = slot.conn.as_mut().ok_or_else(ended)?;
+                // Marked before it is sent: a BEGIN cancelled part way may still have run.
+                slot.nested = true;
                 sqlx::raw_sql(AssertSqlSafe("BEGIN".to_string())).execute(&mut **conn).await.map_err(db_error)?;
                 return Ok(Arc::new(Held { conn: self.conn.clone(), kind, role: Role::Nested }) as Arc<dyn Db>);
             }
@@ -137,17 +176,25 @@ impl Db for Held {
 
     fn finish(&self, ok: bool) -> BoxFuture<'_, Result<(), DbError>> {
         Box::pin(async move {
-            let mut guard = self.conn.lock().await;
+            let mut slot = self.conn.lock().await;
             if self.role == Role::Joined {
                 return Ok(());
             }
             if self.role == Role::Nested {
-                let Some(conn) = guard.as_mut() else { return Ok(()) };
+                let slot = &mut *slot;
+                let Some(conn) = slot.conn.as_mut() else { return Ok(()) };
                 let end = if ok { "COMMIT" } else { "ROLLBACK" };
                 sqlx::raw_sql(AssertSqlSafe(end.to_string())).execute(&mut **conn).await.map_err(db_error)?;
+                slot.nested = false;
                 return Ok(());
             }
-            let Some(mut conn) = guard.take() else { return Ok(()) };
+            // A transaction inside the lock that never ended: closing the connection rolls it back and lets
+            // the lock go.
+            if slot.nested {
+                slot.close();
+                return Ok(());
+            }
+            let Some(mut conn) = slot.conn.take() else { return Ok(()) };
             let result = match self.kind {
                 Hold::Transaction => {
                     let end = if ok { "COMMIT" } else { "ROLLBACK" };
@@ -157,19 +204,19 @@ impl Db for Held {
                         .map(|_| ())
                         .map_err(db_error)
                 }
-                // A lost connection ends its session, and the lock with it.
-                Hold::Exclusive => {
-                    let _ = sqlx::raw_sql(AssertSqlSafe(format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})")))
-                        .execute(&mut *conn)
-                        .await;
-                    Ok(())
-                }
+                // A connection whose unlock failed may still have the lock, so it is closed below, and a
+                // lost connection ends its session, and the lock with it.
+                Hold::Exclusive => sqlx::raw_sql(AssertSqlSafe(format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})")))
+                    .execute(&mut *conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(db_error),
             };
             if result.is_err() {
-                // A connection still in its transaction must never go back to the pool.
-                conn.detach();
+                // A connection still in its transaction or holding the lock must never go back to the pool.
+                drop(conn.detach());
             }
-            result
+            if self.kind == Hold::Exclusive { Ok(()) } else { result }
         })
     }
 }

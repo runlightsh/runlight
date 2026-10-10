@@ -15,7 +15,15 @@ use crate::rows::{db_error, sqlite_row};
 /// How long opening SQLite keeps retrying a busy database before it gives up.
 const BUSY_RETRY: Duration = Duration::from_secs(2);
 
-type Slot = Option<PoolConnection<Sqlite>>;
+/// The store's one connection, opened on first use.
+#[derive(Default)]
+struct Slot {
+    conn: Option<PoolConnection<Sqlite>>,
+    /// A transaction was let go of before it ended (a request cancelled before `finish`), so it is
+    /// rolled back before the connection is used again. Closing the connection instead would lose an
+    /// in-memory database.
+    abandoned: bool,
+}
 
 /// The pool, and the one connection of it the store holds. Statements and transactions take turns, so
 /// a request's insert can never land inside an import's open transaction, and a rollback can only undo
@@ -29,20 +37,33 @@ pub struct SqliteDb {
 impl SqliteDb {
     /// The store's driver over a pool.
     pub fn new(pool: SqlitePool) -> SqliteDb {
-        SqliteDb { pool, conn: Arc::new(Mutex::new(None)) }
+        SqliteDb { pool, conn: Arc::new(Mutex::new(Slot::default())) }
     }
 }
 
 /// The connection, opened (and its pragmas set) on first use and held for the caller.
 async fn open(pool: &SqlitePool, guard: &mut Slot) -> Result<(), DbError> {
-    if guard.is_none() {
+    if guard.abandoned {
+        if let Some(conn) = guard.conn.as_mut()
+            && let Err(e) = exec(conn, "ROLLBACK").await
+            && !e.to_string().contains("no transaction is active")
+        {
+            // Still in the transaction, perhaps: never used again.
+            if let Some(conn) = guard.conn.take() {
+                drop(conn.detach());
+            }
+        }
+        // Only once the rollback is done, so one cancelled in turn is tried again.
+        guard.abandoned = false;
+    }
+    if guard.conn.is_none() {
         let mut conn = pool.acquire().await.map_err(db_error)?;
         // No busy handler until WAL is on: switching journal mode can answer busy at once while
         // another process is doing the same on a new file, so that is retried.
         wal(&mut conn).await.map_err(db_error)?;
         exec(&mut conn, "PRAGMA synchronous = NORMAL").await.map_err(db_error)?;
         exec(&mut conn, "PRAGMA busy_timeout = 5000").await.map_err(db_error)?;
-        *guard = Some(conn);
+        guard.conn = Some(conn);
     }
     Ok(())
 }
@@ -68,24 +89,24 @@ fn broken(err: &sqlx::Error) -> bool {
 
 async fn all_on(pool: &SqlitePool, slot: &mut Slot, sql: &str, params: Vec<Param>) -> Result<Vec<Row>, DbError> {
     open(pool, slot).await?;
-    let conn = slot.as_mut().expect("an open connection");
+    let conn = slot.conn.as_mut().expect("an open connection");
     let result = sqlx::query_with(AssertSqlSafe(sql.to_string()), arguments(params)?).fetch_all(&mut **conn).await;
     if let Err(e) = &result
         && broken(e)
     {
-        *slot = None;
+        slot.conn = None;
     }
     result.map_err(db_error)?.iter().map(sqlite_row).collect()
 }
 
 async fn run_on(pool: &SqlitePool, slot: &mut Slot, sql: &str, params: Vec<Param>) -> Result<u64, DbError> {
     open(pool, slot).await?;
-    let conn = slot.as_mut().expect("an open connection");
+    let conn = slot.conn.as_mut().expect("an open connection");
     let result = sqlx::query_with(AssertSqlSafe(sql.to_string()), arguments(params)?).execute(&mut **conn).await;
     if let Err(e) = &result
         && broken(e)
     {
-        *slot = None;
+        slot.conn = None;
     }
     Ok(result.map_err(db_error)?.rows_affected())
 }
@@ -115,11 +136,27 @@ impl Db for SqliteDb {
             if kind == Hold::Exclusive {
                 return Ok(Arc::new(self.clone()) as Arc<dyn Db>);
             }
-            let mut guard = self.conn.clone().lock_owned().await;
-            run_on(&self.pool, &mut guard, "BEGIN", vec![]).await?;
-            Ok(Arc::new(Held { pool: self.pool.clone(), guard: Arc::new(Mutex::new(Some(guard))), owner: true })
+            // Open from before BEGIN is sent, since a BEGIN cancelled part way may still have run.
+            let mut tx = Tx { slot: self.conn.clone().lock_owned().await, open: true };
+            run_on(&self.pool, &mut tx.slot, "BEGIN", vec![]).await?;
+            Ok(Arc::new(Held { pool: self.pool.clone(), guard: Arc::new(Mutex::new(Some(tx))), owner: true })
                 as Arc<dyn Db>)
         })
+    }
+}
+
+/// The connection, held for one transaction until it ends. Let go of while still open, it has the
+/// transaction rolled back before anything else uses the connection.
+struct Tx {
+    slot: OwnedMutexGuard<Slot>,
+    open: bool,
+}
+
+impl Drop for Tx {
+    fn drop(&mut self) {
+        if self.open {
+            self.slot.abandoned = true;
+        }
     }
 }
 
@@ -127,8 +164,20 @@ impl Db for SqliteDb {
 /// connection, with nothing to finish.
 struct Held {
     pool: SqlitePool,
-    guard: Arc<Mutex<Option<OwnedMutexGuard<Slot>>>>,
+    guard: Arc<Mutex<Option<Tx>>>,
     owner: bool,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Its owner gone without `finish`: the connection is let go now rather than when the last joined
+        // handle goes, so other statements are not held up behind it.
+        if self.owner
+            && let Ok(mut held) = self.guard.try_lock()
+        {
+            held.take();
+        }
+    }
 }
 
 fn ended() -> DbError {
@@ -143,7 +192,7 @@ impl Db for Held {
     fn all<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
         Box::pin(async move {
             let mut held = self.guard.lock().await;
-            let slot = held.as_mut().ok_or_else(ended)?;
+            let slot = &mut held.as_mut().ok_or_else(ended)?.slot;
             all_on(&self.pool, slot, sql, params).await
         })
     }
@@ -151,7 +200,7 @@ impl Db for Held {
     fn run<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<u64, DbError>> {
         Box::pin(async move {
             let mut held = self.guard.lock().await;
-            let slot = held.as_mut().ok_or_else(ended)?;
+            let slot = &mut held.as_mut().ok_or_else(ended)?.slot;
             run_on(&self.pool, slot, sql, params).await
         })
     }
@@ -169,12 +218,11 @@ impl Db for Held {
                 return Ok(());
             }
             let mut held = self.guard.lock().await;
-            let Some(mut guard) = held.take() else { return Ok(()) };
-            let result = run_on(&self.pool, &mut guard, if ok { "COMMIT" } else { "ROLLBACK" }, vec![]).await;
-            if result.is_err() {
-                // A connection still in its transaction must never be used again.
-                *guard = None;
-            }
+            let Some(mut tx) = held.take() else { return Ok(()) };
+            let result = run_on(&self.pool, &mut tx.slot, if ok { "COMMIT" } else { "ROLLBACK" }, vec![]).await;
+            // One that failed may still be in its transaction, which is rolled back before the connection
+            // is used again.
+            tx.open = result.is_err();
             result.map(|_| ())
         })
     }

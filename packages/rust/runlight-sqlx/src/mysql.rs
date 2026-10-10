@@ -65,11 +65,14 @@ impl Db for MysqlDb {
 
     fn hold(&self, kind: Hold) -> BoxFuture<'_, Result<Arc<dyn Db>, DbError>> {
         Box::pin(async move {
-            let mut conn = self.pool.acquire().await.map_err(db_error)?;
+            // In its slot from the start, so a request cancelled part way closes the connection rather than
+            // give it back to the pool in a transaction or with the lock taken.
+            let mut slot = Slot { conn: Some(self.pool.acquire().await.map_err(db_error)?), nested: false };
+            let conn = slot.conn.as_mut().ok_or_else(ended)?;
             match kind {
-                Hold::Transaction => begin(&mut conn).await?,
+                Hold::Transaction => begin(conn).await?,
                 Hold::Exclusive => loop {
-                    let rows = exec(&mut conn, &format!("SELECT GET_LOCK({LOCK}, 5) AS ok")).await?;
+                    let rows = exec(conn, &format!("SELECT GET_LOCK({LOCK}, 5) AS ok")).await?;
                     let row = rows.into_iter().next().unwrap_or_default();
                     if row.is_null("ok") {
                         return Err(DbError("Runlight: MySQL refused the lock for creating tables".into()));
@@ -80,7 +83,7 @@ impl Db for MysqlDb {
                     // Not got within 5 seconds: another process is creating the tables. Ask again.
                 },
             }
-            Ok(Arc::new(Held { conn: Arc::new(Mutex::new(Some(conn))), kind, role: Role::Owner }) as Arc<dyn Db>)
+            Ok(Arc::new(Held { conn: Arc::new(Mutex::new(slot)), kind, role: Role::Owner }) as Arc<dyn Db>)
         })
     }
 }
@@ -93,11 +96,44 @@ async fn begin(conn: &mut PoolConnection<MySql>) -> Result<(), DbError> {
     Ok(())
 }
 
+/// The held connection. Let go of with it still in (a request cancelled before `finish`), it closes the
+/// connection, so no transaction or lock goes back to the pool.
+struct Slot {
+    conn: Option<PoolConnection<MySql>>,
+    /// A transaction begun inside the lock that has not ended.
+    nested: bool,
+}
+
+impl Slot {
+    fn close(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            drop(conn.detach());
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// One connection held for a transaction or a lock.
 struct Held {
-    conn: Arc<Mutex<Option<PoolConnection<MySql>>>>,
+    conn: Arc<Mutex<Slot>>,
     kind: Hold,
     role: Role,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Its owner gone without `finish`: closed now rather than when the last joined handle goes.
+        if self.role == Role::Owner
+            && let Ok(mut slot) = self.conn.try_lock()
+        {
+            slot.close();
+        }
+    }
 }
 
 /// What finishing a held connection does.
@@ -122,8 +158,8 @@ impl Db for Held {
 
     fn all<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
         Box::pin(async move {
-            let mut guard = self.conn.lock().await;
-            let conn = guard.as_mut().ok_or_else(ended)?;
+            let mut slot = self.conn.lock().await;
+            let conn = slot.conn.as_mut().ok_or_else(ended)?;
             let rows = sqlx::raw_sql(text(sql, &params)?).fetch_all(&mut **conn).await.map_err(db_error)?;
             rows.iter().map(mysql_row).collect()
         })
@@ -131,8 +167,8 @@ impl Db for Held {
 
     fn run<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<u64, DbError>> {
         Box::pin(async move {
-            let mut guard = self.conn.lock().await;
-            let conn = guard.as_mut().ok_or_else(ended)?;
+            let mut slot = self.conn.lock().await;
+            let conn = slot.conn.as_mut().ok_or_else(ended)?;
             Ok(sqlx::raw_sql(text(sql, &params)?).execute(&mut **conn).await.map_err(db_error)?.rows_affected())
         })
     }
@@ -140,8 +176,12 @@ impl Db for Held {
     fn hold(&self, kind: Hold) -> BoxFuture<'_, Result<Arc<dyn Db>, DbError>> {
         Box::pin(async move {
             if kind == Hold::Transaction && self.kind == Hold::Exclusive {
-                let mut guard = self.conn.lock().await;
-                begin(guard.as_mut().ok_or_else(ended)?).await?;
+                let mut slot = self.conn.lock().await;
+                let slot = &mut *slot;
+                let conn = slot.conn.as_mut().ok_or_else(ended)?;
+                // Marked before it is sent: a transaction cancelled part way may still have begun.
+                slot.nested = true;
+                begin(conn).await?;
                 return Ok(Arc::new(Held { conn: self.conn.clone(), kind, role: Role::Nested }) as Arc<dyn Db>);
             }
             Ok(Arc::new(Held { conn: self.conn.clone(), kind: self.kind, role: Role::Joined }) as Arc<dyn Db>)
@@ -150,28 +190,36 @@ impl Db for Held {
 
     fn finish(&self, ok: bool) -> BoxFuture<'_, Result<(), DbError>> {
         Box::pin(async move {
-            let mut guard = self.conn.lock().await;
+            let mut slot = self.conn.lock().await;
             match self.role {
                 Role::Joined => Ok(()),
                 Role::Nested => {
-                    let Some(conn) = guard.as_mut() else { return Ok(()) };
-                    exec(conn, if ok { "COMMIT" } else { "ROLLBACK" }).await.map(|_| ())
+                    let slot = &mut *slot;
+                    let Some(conn) = slot.conn.as_mut() else { return Ok(()) };
+                    exec(conn, if ok { "COMMIT" } else { "ROLLBACK" }).await?;
+                    slot.nested = false;
+                    Ok(())
+                }
+                // A transaction inside the lock that never ended: closing the connection rolls it back and
+                // lets the lock go.
+                Role::Owner if slot.nested => {
+                    slot.close();
+                    Ok(())
                 }
                 Role::Owner => {
-                    let Some(mut conn) = guard.take() else { return Ok(()) };
+                    let Some(mut conn) = slot.conn.take() else { return Ok(()) };
                     let result = match self.kind {
                         Hold::Transaction => exec(&mut conn, if ok { "COMMIT" } else { "ROLLBACK" }).await.map(|_| ()),
-                        // A lost connection ends its session, and the lock with it.
-                        Hold::Exclusive => {
-                            let _ = exec(&mut conn, &format!("DO RELEASE_LOCK({LOCK})")).await;
-                            Ok(())
-                        }
+                        // A connection whose release failed may still have the lock, so it is closed below,
+                        // and a lost connection ends its session, and the lock with it.
+                        Hold::Exclusive => exec(&mut conn, &format!("DO RELEASE_LOCK({LOCK})")).await.map(|_| ()),
                     };
                     if result.is_err() {
-                        // A connection still in its transaction must never go back to the pool.
-                        conn.detach();
+                        // A connection still in its transaction or holding the lock must never go back to
+                        // the pool.
+                        drop(conn.detach());
                     }
-                    result
+                    if self.kind == Hold::Exclusive { Ok(()) } else { result }
                 }
             }
         })
