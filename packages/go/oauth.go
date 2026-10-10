@@ -239,15 +239,10 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 			return oauthError("unsupported_grant_type", "Only authorization_code is supported", 400), nil
 		}
 		key := "oauth-code:" + sha256Hex(form.Value("code"))
-		stored, has, err := r.Store.Setting(ctx, key)
+		// A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+		stored, has, err := r.Store.TakeSetting(ctx, key)
 		if err != nil {
 			return nil, err
-		}
-		// A code works once: it is gone before anything else is checked.
-		if has && stored != "" {
-			if err := r.Store.SetSetting(ctx, key, nil); err != nil {
-				return nil, err
-			}
 		}
 		var grant *js.Object
 		if has && stored != "" {
