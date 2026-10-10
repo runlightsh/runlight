@@ -167,10 +167,8 @@ def finish_connect(runlight: Any, params: SearchParams) -> str:
     """Finishes connecting when the owner comes back from the consent page. Returns the site's id here."""
     state = params.get("state") or ""
     key = f"connect:{state}"
-    stored = runlight.store.setting(key) if _STATE.match(state) else None
-    # Each attempt works once.
-    if stored:
-        runlight.store.set_setting(key, None)
+    # Each attempt works once, even when it comes back twice at once.
+    stored = runlight.store.take_setting(key) if _STATE.match(state) else None
     pending = _pending_from(stored, runlight.now()) if stored else None
     if pending is None:
         raise ConnectError("That connection took too long or was already used. Start again.", "expired")

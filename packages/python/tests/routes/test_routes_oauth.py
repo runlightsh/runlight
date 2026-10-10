@@ -7,6 +7,7 @@ import calendar
 import hashlib
 import re
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from runlight import _js
@@ -103,7 +104,11 @@ def test_an_app_connects_to_the_mcp_server_over_oauth() -> None:
     # Again, properly this time.
     second = routes.handle(_at(f"{origin}/runlight/oauth/authorize", "POST", {**owner, "origin": origin, **form}, f"{params}&decision=allow&site=b"))
     code2 = Url(second.headers.get("location") or "").search_params.get("code") or ""
-    issued = body(exchange(code2, verifier))
+    # The same code swapped twice at once makes one token, not two.
+    with ThreadPoolExecutor(2) as pool:
+        both = list(pool.map(lambda _: exchange(code2, verifier), range(2)))
+    assert sorted(r.status for r in both) == [200, 400]
+    issued = body(next(r for r in both if r.status == 200))
     assert issued["token_type"] == "Bearer"
     assert issued["scope"] == "read"
     assert issued["site"] == "b"

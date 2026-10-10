@@ -345,10 +345,8 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         if form.get("grant_type") != "authorization_code":
             return _oauth_error("unsupported_grant_type", "Only authorization_code is supported")
         key = f"oauth-code:{sha256(form.get('code') or '')}"
-        stored = runlight.store.setting(key)
-        # A code works once: it is gone before anything else is checked.
-        if stored:
-            runlight.store.set_setting(key, None)
+        # A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+        stored = runlight.store.take_setting(key)
         grant = _js.loads(stored) if stored else None
         if not grant or grant["expires"] < runlight.now():
             return _oauth_error("invalid_grant", "The code has expired or was already used")
