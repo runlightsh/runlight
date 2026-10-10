@@ -538,15 +538,14 @@ impl Routes {
                 if existing.len() >= 50 {
                     return Ok(coded("A site can send to at most 50 addresses", "report_limit", 400, None));
                 }
+                // Links in the email point back to the configured address, or else to this dashboard at the address
+                // the request came to. An address in the body is never used, so whoever adds a report cannot point
+                // its links somewhere else. A report made from a hub needs the configured address, where its
+                // unsubscribe link answers, since the Host its request names is the hub's to choose.
                 if call.is_managed() && self.0.origin.is_none() {
                     return Ok(self.origin_needed());
                 }
-                let given = if self.0.origin.is_some() { String::new() } else { js::str_or_empty(body.get("origin")) };
-                let home = if test(js_re!(r"^https?://[^\s]+$"), &given) && !given.chars().any(js::is_space) {
-                    given.trim_end_matches('/').to_string()
-                } else {
-                    format!("{}{}", self.0.origin.clone().unwrap_or_else(|| url.origin()), self.0.base)
-                };
+                let home = format!("{}{}", self.0.origin.clone().unwrap_or_else(|| url.origin()), self.0.base);
                 // A period already due counts as sent, so a report added mid-week first goes out on the next Monday.
                 let (due_key, due_at) = glue::last_period(frequency, rl.now(), &site.timezone);
                 let lang = body.get("lang").map_or_else(|| "undefined".to_string(), js::js_string);
