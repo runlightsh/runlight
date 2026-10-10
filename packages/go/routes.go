@@ -1110,10 +1110,7 @@ func reportView(r ReportRow) *js.Object {
 	return js.NewObject("id", r.ID, "site", r.Site, "email", r.Email, "frequency", r.Frequency, "lang", r.Lang, "lastSentAt", r.LastSentAt, "createdAt", r.CreatedAt)
 }
 
-var (
-	reportPath = regexp.MustCompile(`^/api/reports/([a-f0-9]{24})(/send)?$`)
-	homeURL    = regexp.MustCompile(`^https?://[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+$`)
-)
+var reportPath = regexp.MustCompile(`^/api/reports/([a-f0-9]{24})(/send)?$`)
 
 func (rt *Routes) mailAPI(c *call, path string, u *whatwg.URL) (*Response, error) {
 	if err := rt.r.Init(c.ctx); err != nil {
@@ -1222,20 +1219,14 @@ func (rt *Routes) mailRoutes(c *call, path string, u *whatwg.URL) (*Response, er
 			if len(existing) >= 50 {
 				return Coded("A site can send to at most 50 addresses", "report_limit", 400, nil), nil
 			}
-			// Links in the email point back to the configured address, or else to this dashboard as the browser
-			// sees it. A report made from a hub needs the configured address, where its unsubscribe link
-			// answers, since the Host its request names is the hub's to choose.
+			// Links in the email point back to the configured address, or else to this dashboard at the address
+			// the request came to. An address in the body is never used, so whoever adds a report cannot point
+			// its links somewhere else. A report made from a hub needs the configured address, where its
+			// unsubscribe link answers, since the Host its request names is the hub's to choose.
 			if c.managed != nil && rt.origin == "" {
 				return originNeeded(), nil
 			}
-			given := ""
-			if rt.origin == "" {
-				given = field(body, "origin")
-			}
 			home := firstNonEmpty(rt.origin, u.Origin()) + rt.base
-			if homeURL.MatchString(given) {
-				home = strings.TrimRight(given, "/")
-			}
 			// A period already due counts as sent, so a report added mid-week first goes out on the next Monday, as the form says.
 			now := rt.r.now()
 			due := LastPeriod(frequency, now, site.Timezone)
