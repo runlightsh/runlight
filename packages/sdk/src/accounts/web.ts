@@ -117,7 +117,15 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
 
   const signedIn = async (request: Request) => {
     const value = readCookie(request, SESSION_COOKIE);
-    return value ? accounts.fromSession(decodeURIComponent(value), now()) : null;
+    if (!value) return null;
+    // A cookie that is not valid percent-encoding is nobody's session, never an error.
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(value);
+    } catch {
+      return null;
+    }
+    return accounts.fromSession(decoded, now());
   };
 
   const dropTokensOf = async (id: string) => {

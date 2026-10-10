@@ -114,6 +114,9 @@ for (const kind of STORES) {
     assert.equal(back.headers.get("location"), "/runlight/?period=7d");
     const elsewhere = await handler(req("/runlight/login", form({ email: "mo@example.com", password: "another long one", next: "//evil.example/" })));
     assert.equal(elsewhere.headers.get("location"), "/runlight/", "never sent off the app");
+    // A session cookie that is not valid percent-encoding reads as signed out.
+    assert.equal((await handler(req("/runlight/api/sites", { headers: { cookie: "runlight_session=%E0%A4%A" } }))).status, 401);
+    assert.equal((await handler(req("/runlight/", { headers: { cookie: "runlight_session=%" } }))).headers.get("location"), "/runlight/login");
     // Dot segments that resolve to a path starting "//" would leave from the Location header too.
     for (const next of ["/..//evil.example/", "/runlight/..//evil.example", "/./../..//evil.example/x"]) {
       const dotted = await handler(req("/runlight/login", form({ email: "mo@example.com", password: "another long one", next })));

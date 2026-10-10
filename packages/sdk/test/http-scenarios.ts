@@ -955,6 +955,9 @@ const ACCOUNTS: Scenario[] = [
       { method: "GET", path: "/?site=default&period=7d" },
       { method: "GET", path: "/login?next=//evil.example/", look: ['name="next" value="/runlight/"'] },
       { method: "GET", path: "/login?next=/..//evil.example/", look: ['name="next" value="/runlight/"'] },
+      // A session cookie that is not valid percent-encoding is signed out, not an error.
+      { method: "GET", path: "/api/account", jar: false, headers: { cookie: "runlight_session=%E0%A4%A" } },
+      { method: "GET", path: "/", jar: false, headers: { cookie: "runlight_session=%" } },
       { method: "GET", path: "/login?next=/runlight/?site=default", look: ['name="next" value="/runlight/?site=default"'] },
       signIn(OWNER.email, "wrong password"),
       signIn("nobody@example.com", OWNER.password),
