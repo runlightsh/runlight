@@ -54,11 +54,13 @@ defmodule Runlight.Accounts.Web do
 
     # Wrong passwords are counted twice. Per account and address, ten tries; per account from anywhere, fifty, so a
     # caller who invents a new address for every try still cannot guess on and on. Six-digit codes: five wrong tries
-    # an account every fifteen minutes, and five to confirm the first one. Password re-checks in Account: ten.
+    # an account every fifteen minutes, and five to confirm the first one. A decoy ticket's tries count apart, the
+    # same way, so someone guessing passwords cannot use up the owner's five. Password re-checks in Account: ten.
     throttles = %{
       per_address: Throttle.new(table, {:web, id, :per_address}, 10),
       per_account: Throttle.new(table, {:web, id, :per_account}, 50),
       code_tries: Throttle.new(table, {:web, id, :code_tries}, 5),
+      decoy_tries: Throttle.new(table, {:web, id, :decoy_tries}, 5),
       confirm_tries: Throttle.new(table, {:web, id, :confirm_tries}, 5),
       rechecks: Throttle.new(table, {:web, id, :rechecks}, 10)
     }
@@ -391,7 +393,11 @@ defmodule Runlight.Accounts.Web do
           %{user: user, real: real} ->
             # Counted before the check, so a burst cannot get past five.
             cond do
-              not Throttle.take(web.throttles.code_tries, user["id"], now(web)) ->
+              not Throttle.take(
+                if(real, do: web.throttles.code_tries, else: web.throttles.decoy_tries),
+                user["id"],
+                now(web)
+              ) ->
                 html(
                   Pages.code_page(base, %{
                     pending: pending_text,
