@@ -274,12 +274,9 @@ public final class Connect {
       boolean local) {
     String state = params.get("state") == null ? "" : params.get("state");
     String key = "connect:" + state;
-    String stored = STATE.matcher(state).find() ? store.setting(key) : null;
+    // Each attempt works once, even when it comes back twice at once.
+    String stored = STATE.matcher(state).find() ? store.takeSetting(key) : null;
     boolean found = stored != null && !stored.isEmpty();
-    // Each attempt works once.
-    if (found) {
-      store.setSetting(key, null);
-    }
     Object pending = found ? pendingFrom(stored, now.getAsLong()) : null;
     if (pending == null) {
       throw new ConnectError(

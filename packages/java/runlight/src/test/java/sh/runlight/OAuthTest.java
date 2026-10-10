@@ -9,6 +9,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import sh.runlight.http.Headers;
@@ -274,16 +275,27 @@ final class OAuthTest {
             params + "&decision=allow&site=b",
             null);
     swap.put("code", new Url(allowed.headers().get("location")).searchParams().get("code"));
-    // As JSON, which the token endpoint also takes.
-    Response issued =
-        handle(
-            ctx,
-            "https://x.com/runlight/oauth/token",
-            "POST",
-            jsonType,
-            Json.stringify(new LinkedHashMap<String, Object>(swap)),
-            null);
-    assertEquals(200, issued.status(), issued.text());
+    // As JSON, which the token endpoint also takes. The same code swapped twice at once makes one
+    // token, not two.
+    String body = Json.stringify(new LinkedHashMap<String, Object>(swap));
+    List<CompletableFuture<Response>> both =
+        List.of(1, 2).stream()
+            .map(
+                i ->
+                    CompletableFuture.supplyAsync(
+                        () ->
+                            handle(
+                                ctx,
+                                "https://x.com/runlight/oauth/token",
+                                "POST",
+                                jsonType,
+                                body,
+                                null)))
+            .toList();
+    List<Response> answers = both.stream().map(CompletableFuture::join).toList();
+    assertEquals(
+        List.of(200, 400), answers.stream().map(Response::status).sorted().toList(), "one token");
+    Response issued = answers.stream().filter(r -> r.status() == 200).findFirst().orElseThrow();
     Map<String, Object> token = Js.map(Json.parse(issued.text()));
     assertEquals("Bearer", token.get("token_type"));
     assertEquals("read", token.get("scope"));

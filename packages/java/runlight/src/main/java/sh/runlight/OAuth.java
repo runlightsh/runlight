@@ -621,11 +621,9 @@ public final class OAuth {
       return oauthError("unsupported_grant_type", "Only authorization_code is supported");
     }
     String key = "oauth-code:" + Hash.sha256(orEmpty(form.get("code")));
-    String stored = runlight.store().setting(key);
-    // A code works once: it is gone before anything else is checked.
-    if (stored != null && !stored.isEmpty()) {
-      runlight.store().setSetting(key, null);
-    }
+    // A code works once: it is gone before anything else is checked, and of two swaps at once only
+    // one gets it.
+    String stored = runlight.store().takeSetting(key);
     Map<String, Object> grant =
         stored != null && !stored.isEmpty() ? Js.map(Json.parse(stored)) : null;
     if (grant == null || Js.asDouble(grant.get("expires")) < runlight.now()) {
