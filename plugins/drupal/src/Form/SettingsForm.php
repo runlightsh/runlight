@@ -6,6 +6,7 @@ namespace Drupal\runlight\Form;
 
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Url;
 
 /**
  * Configuration, System, Runlight: where the site's Runlight is, and what it sends.
@@ -33,8 +34,25 @@ final class SettingsForm extends ConfigFormBase {
     $form['intro'] = [
       '#markup' => '<p>' . $this->t('Runlight counts visitors without cookies and keeps the numbers in your own database. This module adds its script to every page and reports AI agents that read your pages. The numbers live in your Runlight, wherever you run it.') . '</p>',
     ];
+    // Checked once the page has loaded, so a slow or missing Runlight never holds it up.
     if ($address !== '') {
-      $form['status'] = ['#markup' => '<p>' . $this->check($address) . '</p>'];
+      $form['status'] = [
+        '#type' => 'html_tag',
+        '#tag' => 'div',
+        '#value' => $this->t('Checking that your Runlight answers…'),
+        '#attributes' => ['id' => 'runlight-status', 'class' => ['messages', 'messages--info']],
+        '#attached' => [
+          'library' => ['runlight/settings'],
+          'drupalSettings' => [
+            'runlight' => [
+              'check' => Url::fromRoute('runlight.check')->toString(),
+              'dashboard' => $address . '/',
+              'open' => (string) $this->t('Open the dashboard'),
+              'failed' => (string) $this->t('Could not check your Runlight from here.'),
+            ],
+          ],
+        ],
+      ];
     }
     $form['address'] = [
       '#type' => 'url',
@@ -77,21 +95,6 @@ final class SettingsForm extends ConfigFormBase {
       '#default_value' => $config->get('downloads'),
     ];
     return parent::buildForm($form, $form_state);
-  }
-
-  /** Whether the address answers as a Runlight, in words. */
-  private function check(string $address): string {
-    try {
-      $response = \Drupal::httpClient()->request('GET', $address . '/api', ['timeout' => 5, 'http_errors' => FALSE]);
-      $body = json_decode((string) $response->getBody(), TRUE);
-      if ($response->getStatusCode() === 200 && is_array($body) && ($body['name'] ?? '') === 'runlight') {
-        return (string) $this->t('Connected to Runlight @version. <a href=":url" target="_blank" rel="noopener">Open the dashboard</a>.', ['@version' => (string) ($body['version'] ?? ''), ':url' => $address . '/']);
-      }
-      return (string) $this->t('Something answered, but not Runlight. Check that this is the address Runlight answers at, such as https://example.com/runlight for an app with Runlight mounted, or https://stats.example.com for the standalone server.');
-    }
-    catch (\Throwable $e) {
-      return (string) $this->t('Could not reach it: @message', ['@message' => $e->getMessage()]);
-    }
   }
 
   public function submitForm(array &$form, FormStateInterface $form_state): void {

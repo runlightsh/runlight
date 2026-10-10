@@ -6,6 +6,15 @@ runlight.settings:
   requirements:
     _permission: 'administer runlight'
 
+runlight.check:
+  path: '/admin/config/system/runlight/check'
+  defaults:
+    _controller: '\Drupal\runlight\Controller\DashboardController::check'
+  methods: [POST]
+  requirements:
+    _permission: 'administer runlight'
+    _csrf_token: 'TRUE'
+
 runlight.dashboard:
   path: '/admin/reports/runlight'
   defaults:

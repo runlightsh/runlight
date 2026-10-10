@@ -6,6 +6,7 @@ namespace Drupal\runlight\Controller;
 
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Url;
+use Symfony\Component\HttpFoundation\JsonResponse;
 
 /**
  * Reports, Runlight: this site's dashboard, framed from your Runlight with a
@@ -67,6 +68,38 @@ final class DashboardController extends ControllerBase {
       '#attached' => ['library' => ['runlight/embed']],
     ];
     return $build;
+  }
+
+  /**
+   * Whether the saved address answers as a Runlight, asked for by the settings
+   * page once it has loaded. Only the saved address is checked, never one the
+   * request names.
+   */
+  public function check(): JsonResponse {
+    $address = (string) $this->config('runlight.settings')->get('address');
+    // Nothing to check is null, which JsonResponse would otherwise send as {}.
+    $response = $address !== '' ? new JsonResponse($this->answers($address)) : new JsonResponse('null', 200, [], TRUE);
+    $response->headers->set('Cache-Control', 'no-store');
+    return $response;
+  }
+
+  /**
+   * Whether the address answers as a Runlight, and what to say about it.
+   *
+   * @return array{ok: bool, message: string}
+   */
+  private function answers(string $address): array {
+    try {
+      $response = \Drupal::httpClient()->request('GET', $address . '/api', ['timeout' => 5, 'http_errors' => FALSE]);
+      $body = json_decode((string) $response->getBody(), TRUE);
+      if ($response->getStatusCode() === 200 && is_array($body) && ($body['name'] ?? '') === 'runlight') {
+        return ['ok' => TRUE, 'message' => (string) $this->t('Connected to Runlight @version.', ['@version' => (string) ($body['version'] ?? '')])];
+      }
+      return ['ok' => FALSE, 'message' => (string) $this->t('Something answered, but not Runlight. Check that this is the address Runlight answers at, such as https://example.com/runlight for an app with Runlight mounted, or https://stats.example.com for the standalone server.')];
+    }
+    catch (\Throwable $e) {
+      return ['ok' => FALSE, 'message' => (string) $this->t('Could not reach it: @message', ['@message' => $e->getMessage()])];
+    }
   }
 
   /** The scheme, host, and port of an address, as a browser writes its origin. */
