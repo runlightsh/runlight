@@ -68,6 +68,10 @@ class RoutesAccountsTest {
     Response call(String cookie, String method, String path, Object body);
   }
 
+  private interface Join {
+    String call(String by, String email, String role);
+  }
+
   @ParameterizedTest
   @MethodSource("kinds")
   void anAppWithAccountsOnMakesItsFirstAccountWithItsTokenThenInvitesPeopleByRole(String kind) {
@@ -222,6 +226,73 @@ class RoutesAccountsTest {
                 "next",
                 "//evil.example/"));
     assertEquals("/runlight/", elsewhere.headers().get("location"), "never sent off the app");
+  }
+
+  @Test
+  void invitesGoWithWhoeverSentThem() {
+    Runlight rl =
+        new Runlight(
+            new Runlight.Options().store(Databases.fresh("sqlite")).secret("k".repeat(64)));
+    Function<Request, Response> handler =
+        rl.routes(new Routes.Options().token("app-token").accounts(true))::handle;
+    JsonCall json =
+        (cookie, method, path, body) ->
+            handler.apply(
+                req(
+                    "/runlight" + path,
+                    method,
+                    Headers.of("cookie", cookie, "content-type", "application/json"),
+                    body == null ? "" : Json.stringify(body)));
+    String owner = cookieOf(handler.apply(setup("app-token")));
+    Join join =
+        (by, email, role) -> {
+          Map<String, Object> sent =
+              body(json.call(by, "POST", "/api/people", Json.object("email", email, "role", role)));
+          return new Url((String) sent.get("link")).searchParams().get("code");
+        };
+    Function<String, Response> accept =
+        code ->
+            handler.apply(
+                form(
+                    "/runlight/invite",
+                    "",
+                    "code",
+                    code,
+                    "password",
+                    "a long password",
+                    "again",
+                    "a long password"));
+    String admin = cookieOf(accept.apply(join.call(owner, "ada@example.com", "admin")));
+    Object adminId =
+        Js.get(body(json.call(admin, "GET", "/api/account", null)).get("account"), "id");
+
+    // Made a member: what they sent stops working.
+    String fromAda = join.call(admin, "eve@example.com", "admin");
+    assertEquals(
+        200,
+        json.call(owner, "PATCH", "/api/people/" + adminId, Json.object("role", "member"))
+            .status());
+    assertEquals(410, handler.apply(req("/runlight/invite?code=" + fromAda)).status());
+    assertEquals(410, accept.apply(fromAda).status());
+
+    // Removed: the same.
+    json.call(owner, "PATCH", "/api/people/" + adminId, Json.object("role", "admin"));
+    String again = join.call(admin, "eve@example.com", "admin");
+    assertEquals(200, json.call(owner, "DELETE", "/api/people/" + adminId, null).status());
+    assertEquals(410, accept.apply(again).status());
+    assertEquals(List.of(), body(json.call(owner, "GET", "/api/people", null)).get("invites"));
+
+    // An invite left from before, whose sender is no longer an admin, is refused when used.
+    String second = cookieOf(accept.apply(join.call(owner, "bo@example.com", "admin")));
+    String fromBo = join.call(second, "zed@example.com", "admin");
+    rl.store
+        .db()
+        .run("UPDATE rl_users SET role = 'viewer' WHERE email = ?", List.of("bo@example.com"));
+    assertEquals(410, accept.apply(fromBo).status());
+    assertEquals(
+        410,
+        handler.apply(req("/runlight/invite?code=" + fromBo)).status(),
+        "and it is gone afterwards");
   }
 
   private static Request setup(String code) {
