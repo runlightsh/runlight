@@ -450,16 +450,27 @@ class MigrateTest {
         kind.equals("postgres") ? "SELECT pg_backend_pid() AS id" : "SELECT CONNECTION_ID() AS id";
     long id = Js.asLong(store.db().all(idSql).get(0).get("id"));
     Db admin;
+    String aliveSql;
     if (kind.equals("postgres")) {
       admin = Connect.postgres(Databases.pgUrl(), 0, null);
       // JDBC sends a whole number as a bigint, which pg_terminate_backend does not take.
       admin.all("SELECT pg_terminate_backend(CAST(? AS INTEGER))", List.of(id));
+      aliveSql = "SELECT COUNT(*) AS n FROM pg_stat_activity WHERE pid = CAST(? AS INTEGER)";
     } else {
       admin = Connect.mysql(Databases.mysqlUrls().get(kind), 0);
       admin.run("KILL " + id);
+      aliveSql = "SELECT COUNT(*) AS n FROM information_schema.PROCESSLIST WHERE ID = ?";
     }
-    admin.close();
-    Thread.sleep(200);
+    // Ending a connection takes the server a moment; it is waited for, rather than guessed at.
+    try {
+      for (int i = 0;
+          i < 400 && Js.asLong(admin.all(aliveSql, List.of(id)).get(0).get("n")) > 0;
+          i++) {
+        Thread.sleep(25);
+      }
+    } finally {
+      admin.close();
+    }
     List<String> logged = new ArrayList<>();
     Handler handler =
         new Handler() {
