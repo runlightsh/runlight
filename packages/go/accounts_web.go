@@ -122,6 +122,8 @@ func (w *AccountsWeb) setExisting() {
 var unsafeNext = regexp.MustCompile(`[\x00-\x1f\x7f\\]`)
 
 // safeNext is only a path on this install, so a sign-in can never send someone elsewhere.
+// A path that resolves to one starting "//", as "/..//evil.example" does, would
+// leave from the Location header, so that goes home too.
 func (w *AccountsWeb) safeNext(value string) string {
 	if value == "" || !strings.HasPrefix(value, "/") || unsafeNext.MatchString(value) {
 		return w.home
@@ -130,7 +132,11 @@ func (w *AccountsWeb) safeNext(value string) string {
 	if err != nil || u.Origin() != "http://runlight.invalid" {
 		return w.home
 	}
-	return u.Pathname + u.Search + u.Hash
+	path := u.Pathname + u.Search + u.Hash
+	if strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
+		return w.home
+	}
+	return path
 }
 
 // SignedIn is the account a request is signed in as, or nil.
