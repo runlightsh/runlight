@@ -510,10 +510,9 @@ def test_an_account_held_up_by_others_gets_a_sign_in_link(h):
     assert accounts.by_email("jon@example.com") is not None
 
 
-def test_a_broken_session_cookie_raises_as_decode_uri_component_throws(h):
+def test_a_broken_session_cookie_is_nobodys_session(h):
     web = h.web()
-    with pytest.raises(ValueError):
-        web.signed_in(req("/", "GET", {"cookie": "runlight_session=%E0%A4%A"}))
+    assert web.signed_in(req("/", "GET", {"cookie": "runlight_session=%E0%A4%A"})) is None
 
 
 def test_the_session_cookie_is_read_among_others(h):
@@ -521,6 +520,9 @@ def test_the_session_cookie_is_read_among_others(h):
     signed = owner(web)
     assert web.signed_in(req("/", "GET", {"cookie": f"a=b; {signed} ; c=d=e"})) is not None
     assert signed.split("=")[0] == SESSION_COOKIE
+    # A session cookie that is not valid percent-encoding reads as signed out.
+    assert handle(web, req("/api/account", "GET", {"cookie": "runlight_session=%E0%A4%A"})).status == 401
+    assert handle(web, req("/", "GET", {"cookie": "runlight_session=%"})).headers.get("location") == "/runlight/login"
     plain = Request(
         "http://example.com/runlight/login",
         "POST",

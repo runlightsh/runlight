@@ -194,9 +194,9 @@ class AccountsWeb:
         if not value:
             return None
         decoded = _js.decode_uri_component(value)
+        # A cookie that is not valid percent-encoding is nobody's session, never an error.
         if decoded is None:
-            # decodeURIComponent throws a URIError here in TypeScript.
-            raise ValueError("URI malformed")
+            return None
         return self.accounts.from_session(decoded, self.now())
 
     def _drop_tokens_of(self, id_: str) -> None:
