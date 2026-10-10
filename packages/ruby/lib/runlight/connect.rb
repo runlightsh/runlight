@@ -136,9 +136,8 @@ module Runlight
     def finish_connect(runlight, params)
       state = params.get("state") || ""
       key = "connect:#{state}"
-      stored = state.match?(/\A[a-f0-9]{32}\z/) ? runlight.store.setting(key) : nil
-      # Each attempt works once.
-      runlight.store.set_setting(key, nil) if !stored.nil? && stored != ""
+      # Each attempt works once, even when it comes back twice at once.
+      stored = state.match?(/\A[a-f0-9]{32}\z/) ? runlight.store.take_setting(key) : nil
       pending = !stored.nil? && stored != "" ? pending_from(stored, runlight.now) : nil
       if pending.nil?
         raise ConnectError.new("That connection took too long or was already used. Start again.", "expired")

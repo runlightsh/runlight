@@ -230,9 +230,8 @@ module Runlight
         return oauth_error("unsupported_grant_type", "Only authorization_code is supported") if form.get("grant_type") != "authorization_code"
 
         key = "oauth-code:#{Hashing.sha256(form.get("code") || "")}"
-        stored = runlight.store.setting(key)
-        # A code works once: it is gone before anything else is checked.
-        runlight.store.set_setting(key, nil) if !stored.nil? && stored != ""
+        # A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+        stored = runlight.store.take_setting(key)
         grant = !stored.nil? && stored != "" ? Json.decode(stored) : nil
         return oauth_error("invalid_grant", "The code has expired or was already used") if grant.nil? || grant["expires"] < runlight.now
         if grant["client"] != form.get("client_id") || grant["redirect"] != form.get("redirect_uri")
