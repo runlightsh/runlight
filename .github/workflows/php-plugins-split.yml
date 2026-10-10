@@ -5,8 +5,11 @@
 # and Packagist read a plugin's composer.json from a repository's root, so
 # neither can be published from this monorepo directly. The split is
 # `git subtree split`, as for the PHP package (php-split.yml), so each push
-# fast-forwards. A tag already there on the same commit is a rerun and is
-# left alone. Can also be started by hand on a tag.
+# fast-forwards. The tag is checked first: one already there on the same
+# commit is a rerun, and the job stops there without touching the branch.
+# The branch is pushed only as a fast-forward, and left alone when it already
+# holds the split (a rerun for an older tag). Can also be started by hand on
+# a tag.
 #
 # Neither plugin carries a version of its own: drupal.org stamps the
 # release's version into the module's .info.yml when it packages it, and
@@ -75,6 +78,7 @@ jobs:
           # drupal.org names releases X.Y.Z (no "v") and their branches X.Y.x.
           branch="$(echo "$version" | cut -d. -f1-2).x"
           key="$RUNNER_TEMP/split_key"
+          trap 'rm -f "$key"' EXIT
           printf '%s\n' "$SSH_KEY" > "$key"
           chmod 600 "$key"
           # git.drupal.org's ED25519 host key, checked against the fingerprint drupal.org
@@ -84,15 +88,32 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
           git config user.name "Runlight release"
           git config user.email "noreply@runlight.sh"
+          # push_split <remote> <branch> <tag> <commit>: the tag first, then the branch.
+          push_split() {
+            local remote="$1" branch="$2" tag="$3" split="$4" remote_tag remote_branch
+            # A tag already there on this commit is a rerun; on another commit, a release changed after it shipped.
+            remote_tag="$(git ls-remote "$remote" "refs/tags/$tag^{}" | cut -f1)"
+            if [ "$remote_tag" = "$split" ]; then echo "$tag is already there on this commit"; return 0; fi
+            if [ -n "$remote_tag" ]; then echo "$tag is already there on another commit ($remote_tag)"; return 1; fi
+            remote_branch="$(git ls-remote "$remote" "refs/heads/$branch" | cut -f1)"
+            if [ -n "$remote_branch" ]; then
+              git fetch -q "$remote" "refs/heads/$branch"
+              if git merge-base --is-ancestor "$split" FETCH_HEAD; then
+                echo "$branch already holds $split"
+              elif git merge-base --is-ancestor FETCH_HEAD "$split"; then
+                git push "$remote" "$split:refs/heads/$branch"
+              else
+                echo "$branch there ($remote_branch) is not an ancestor of the split ($split); it is not pushed over"
+                return 1
+              fi
+            else
+              git push "$remote" "$split:refs/heads/$branch"
+            fi
+            git tag -f -a "$tag" -m "Release ${tag#v}" "$split"
+            git push "$remote" "refs/tags/$tag"
+          }
           split="$(git subtree split --prefix=plugins/drupal HEAD)"
-          git tag -f -a "$version" -m "Release $version" "$split"
-          git push "$REPOSITORY" "$split:refs/heads/$branch"
-          # A tag already there on this commit is a rerun; on another commit, a release changed after it shipped.
-          remote_tag="$(git ls-remote "$REPOSITORY" "refs/tags/$version^{}" | cut -f1)"
-          if [ -z "$remote_tag" ]; then git push "$REPOSITORY" "refs/tags/$version";
-          elif [ "$remote_tag" = "$split" ]; then echo "$version is already there on this commit";
-          else echo "$version is already there on another commit ($remote_tag)"; exit 1; fi
-          rm -f "$key"
+          push_split "$REPOSITORY" "$branch" "$version" "$split"
 
   craft:
     needs: ci
@@ -116,6 +137,7 @@ jobs:
           # The Plugin Store shows the release's notes from CHANGELOG.md, found by its heading.
           if ! grep -q "^## ${TAG#v} - " plugins/craft/CHANGELOG.md; then echo "plugins/craft/CHANGELOG.md has no section for ${TAG#v}"; exit 1; fi
           key="$RUNNER_TEMP/split_key"
+          trap 'rm -f "$key"' EXIT
           printf '%s\n' "$DEPLOY_KEY" > "$key"
           chmod 600 "$key"
           # GitHub's published ED25519 host key (SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU,
@@ -124,12 +146,29 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
           git config user.name "Runlight release"
           git config user.email "noreply@runlight.sh"
+          # push_split <remote> <branch> <tag> <commit>: the tag first, then the branch.
+          push_split() {
+            local remote="$1" branch="$2" tag="$3" split="$4" remote_tag remote_branch
+            # A tag already there on this commit is a rerun; on another commit, a release changed after it shipped.
+            remote_tag="$(git ls-remote "$remote" "refs/tags/$tag^{}" | cut -f1)"
+            if [ "$remote_tag" = "$split" ]; then echo "$tag is already there on this commit"; return 0; fi
+            if [ -n "$remote_tag" ]; then echo "$tag is already there on another commit ($remote_tag)"; return 1; fi
+            remote_branch="$(git ls-remote "$remote" "refs/heads/$branch" | cut -f1)"
+            if [ -n "$remote_branch" ]; then
+              git fetch -q "$remote" "refs/heads/$branch"
+              if git merge-base --is-ancestor "$split" FETCH_HEAD; then
+                echo "$branch already holds $split"
+              elif git merge-base --is-ancestor FETCH_HEAD "$split"; then
+                git push "$remote" "$split:refs/heads/$branch"
+              else
+                echo "$branch there ($remote_branch) is not an ancestor of the split ($split); it is not pushed over"
+                return 1
+              fi
+            else
+              git push "$remote" "$split:refs/heads/$branch"
+            fi
+            git tag -f -a "$tag" -m "Release ${tag#v}" "$split"
+            git push "$remote" "refs/tags/$tag"
+          }
           split="$(git subtree split --prefix=plugins/craft HEAD)"
-          git tag -f -a "$TAG" -m "Release ${TAG#v}" "$split"
-          git push "git@github.com:$REPOSITORY.git" "$split:refs/heads/main"
-          # A tag already there on this commit is a rerun; on another commit, a release changed after it shipped.
-          remote_tag="$(git ls-remote "git@github.com:$REPOSITORY.git" "refs/tags/$TAG^{}" | cut -f1)"
-          if [ -z "$remote_tag" ]; then git push "git@github.com:$REPOSITORY.git" "refs/tags/$TAG";
-          elif [ "$remote_tag" = "$split" ]; then echo "$TAG is already there on this commit";
-          else echo "$TAG is already there on another commit ($remote_tag)"; exit 1; fi
-          rm -f "$key"
+          push_split "git@github.com:$REPOSITORY.git" main "$TAG" "$split"
