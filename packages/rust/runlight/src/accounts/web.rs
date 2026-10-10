@@ -230,6 +230,8 @@ struct Inner {
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
     code_tries: Throttle,
+    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+    decoy_tries: Throttle,
     confirm_tries: Throttle,
     rechecks: Throttle,
     /// When each account was last sent a sign-in link, at most one a minute.
@@ -260,6 +262,7 @@ pub fn accounts_web(options: AccountsWebOptions) -> AccountsWeb {
         per_address: Throttle::new(10, window),
         per_account: Throttle::new(50, window),
         code_tries: Throttle::new(5, window),
+        decoy_tries: Throttle::new(5, window),
         confirm_tries: Throttle::new(5, window),
         rechecks: Throttle::new(10, window),
         link_sent: Mutex::new(HashMap::new()),
@@ -662,7 +665,8 @@ impl AccountsWeb {
             };
             let user = pending.user;
             // Counted before the check, so a burst cannot get past five.
-            if !self.0.code_tries.take(&user.id, self.now()) {
+            let tries = if pending.real { &self.0.code_tries } else { &self.0.decoy_tries };
+            if !tries.take(&user.id, self.now()) {
                 let page = CodePage {
                     pending: given,
                     next: &next,
