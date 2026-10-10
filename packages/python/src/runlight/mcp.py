@@ -328,14 +328,21 @@ def _answer(message: Any, read_api: ApiRead) -> Json | None:
         return _rpc_error(id, -32603 if code is None else code, str(error) if _js.truthy(code) else "Internal error")
 
 
+# The most messages one batch may hold.
+MAX_BATCH = 20
+
+
 def mcp_response(request: Request, read_api: ApiRead) -> Response:
     """Answers one POST to the MCP endpoint, already authorised."""
     headers = {"content-type": "application/json; charset=utf-8", "cache-control": "no-store"}
     ok, body = _js.try_loads(request.body())
     if not ok or not _js.is_object(body):
         return Response(_js.dumps(_rpc_error(None, -32700, "Send a JSON-RPC message")), 400, headers)
-    # Batches were in the 2025-03-26 protocol; answering them costs nothing.
+    # Batches were in the 2025-03-26 protocol. They come from a short list, answered one message at a time here
+    # (TypeScript runs four at once), so one request cannot start hundreds of reports.
     if isinstance(body, list):
+        if len(body) > MAX_BATCH:
+            return Response(_js.dumps(_rpc_error(None, -32600, f"Send at most {MAX_BATCH} messages in a batch")), 400, headers)
         answers = [a for a in (_answer(m, read_api) for m in body) if a is not None]
         return Response(_js.dumps(answers), 200, headers) if answers else Response(None, 202)
     one = _answer(body, read_api)
