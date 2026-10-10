@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import re
 import struct
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .. import _js
+from ..store.sql import upsert
 from .crypto import (
     base64url,
     check_password,
@@ -641,6 +643,7 @@ class Throttle:
         self.name = name
         self.limit = limit
         self.window_ms = window_ms
+        self._lock = threading.Lock()
 
     def _salt(self) -> str:
         saved = self.store.setting(self._KEY)
@@ -668,6 +671,25 @@ class Throttle:
     def _save(self, id_: str, entry: dict[str, int]) -> None:
         self.store.set_setting(self._prefix() + id_, _js.dumps(entry))
 
+    def _turn(self, id_: str, make: bool, fn: Callable[[], T]) -> T:
+        """Runs a read and a change of one entry as a single step, so a burst of tries at once cannot all find
+        room under the limit: one thread at a time in this process, and a transaction holding the entry's row
+        against other processes. SQLite's transaction holds the whole file; on Postgres and MySQL the row is
+        locked, made first (empty, which reads as expired) when `make` asks and it is not there yet."""
+        db = self.store.db
+
+        def step(_db: Any) -> T:
+            dialect = db.dialect()
+            if dialect != "sqlite":
+                key = self._prefix() + id_
+                if make:
+                    db.run(upsert(dialect, "rl_settings", ['"key"', "value"], ['"key"'], []), [key, "{}"])
+                db.all('SELECT "key" FROM rl_settings WHERE "key" = ? FOR UPDATE', [key])
+            return fn()
+
+        with self._lock:
+            return db.transaction(step)
+
     def blocked(self, key: str, now: int) -> bool:
         return self._is_blocked(self._id(key), now)
 
@@ -681,32 +703,50 @@ class Throttle:
         """Counts a try before the slow check it guards, so a burst that arrives
         while earlier tries are still being checked cannot get past the limit.
         False, counting nothing, when the key is already at its limit. A try
-        that turns out right is taken back with forgive()."""
+        that turns out right is taken back with forgive(). The check and the
+        count happen as one step, across threads and processes."""
         id_ = self._id(key)
-        if self._is_blocked(id_, now):
-            return False
-        self._count(id_, now)
-        return True
+
+        def step() -> tuple[bool, bool]:
+            if self._is_blocked(id_, now):
+                return False, False
+            return True, self._count(id_, now)
+
+        taken, made = self._turn(id_, True, step)
+        if made:
+            self._prune(now)
+        return taken
 
     def forgive(self, key: str) -> None:
         """Takes back one counted try, for one that turned out right."""
         id_ = self._id(key)
-        entry = self._entry(id_)
-        if entry is not None and entry["count"] > 0:
-            entry["count"] -= 1
-            self._save(id_, entry)
+
+        def step() -> None:
+            entry = self._entry(id_)
+            if entry is not None and entry["count"] > 0:
+                entry["count"] -= 1
+                self._save(id_, entry)
+
+        self._turn(id_, False, step)
 
     def fail(self, key: str, now: int) -> None:
-        self._count(self._id(key), now)
+        id_ = self._id(key)
+        if self._turn(id_, True, lambda: self._count(id_, now)):
+            self._prune(now)
 
-    def _count(self, id_: str, now: int) -> None:
+    def _count(self, id_: str, now: int) -> bool:
+        """Counts a try, and says whether that made a new entry."""
         entry = self._entry(id_)
         if entry is None or entry["until"] <= now:
             self._save(id_, {"count": 1, "until": now + self.window_ms})
-            self._prune(now)
-            return
+            return True
         entry["count"] += 1
         self._save(id_, entry)
+        return False
+
+    def _drop(self, key: str, value: str) -> None:
+        """Deletes an entry only if it still holds what was read, so a try counted since is never lost."""
+        self.store.db.run('DELETE FROM rl_settings WHERE "key" = ? AND value = ?', [key, value])
 
     def _prune(self, now: int) -> None:
         """Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
@@ -717,10 +757,10 @@ class Throttle:
             ok, entry = _js.try_loads(setting["value"])
             until = int(_js.number(entry.get("until", 0))) if ok and isinstance(entry, dict) else 0
             if until <= now:
-                self.store.set_setting(setting["key"], None)
+                self._drop(setting["key"], setting["value"])
                 continue
             count = int(_js.number(entry.get("count", 0))) if isinstance(entry, dict) else 0
-            entries.append({"key": setting["key"], "until": until, "blocked": count >= self.limit})
+            entries.append({"key": setting["key"], "value": setting["value"], "until": until, "blocked": count >= self.limit})
         size = len(entries)
         if size <= MAX_THROTTLED:
             return
@@ -731,7 +771,7 @@ class Throttle:
                 if size <= MAX_THROTTLED:
                     return
                 if entry["blocked"] is blocked:
-                    self.store.set_setting(entry["key"], None)
+                    self._drop(entry["key"], entry["value"])
                     size -= 1
 
     def clear(self, key: str) -> None:

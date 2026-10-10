@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from support.databases import kinds
@@ -184,6 +186,44 @@ def test_two_factor_codes_work_once_and_recovery_codes_are_crossed_off(databases
     accounts.start_two_factor(user["id"])
     accounts.cancel_two_factor_setup(user["id"])
     assert accounts.confirm_two_factor(user["id"], totp(secret, step), NOW) is None, "a cancelled set-up confirms nothing"
+
+
+@pytest.mark.parametrize("kind", kinds())
+def test_the_throttle_lets_a_burst_through_no_further_than_its_limit(databases, kind):
+    store = fresh(databases, kind)
+    throttle = Throttle(store, "burst", 10, 60_000)
+    throttle.take("warm@example.com", NOW)
+    start = threading.Barrier(40)
+
+    def one(_: int) -> bool:
+        start.wait()
+        return throttle.take("jon@example.com", NOW)
+
+    with ThreadPoolExecutor(40) as pool:
+        taken = list(pool.map(one, range(40)))
+    assert taken.count(True) == 10
+
+
+def test_the_throttle_holds_its_limit_across_processes(tmp_path):
+    # Two stores on one file stand in for two worker processes, each with its own connection.
+    path = str(tmp_path / "runlight.db")
+    stores = [Stores.sqlite(path) for _ in range(2)]
+    stores[0].migrate()
+    throttles = [Throttle(s, "burst", 10, 60_000) for s in stores]
+    throttles[0].take("warm@example.com", NOW)
+    start = threading.Barrier(40)
+
+    def one(i: int) -> bool:
+        start.wait()
+        return throttles[i % 2].take("jon@example.com", NOW)
+
+    try:
+        with ThreadPoolExecutor(40) as pool:
+            taken = list(pool.map(one, range(40)))
+    finally:
+        for s in stores:
+            s.close()
+    assert taken.count(True) == 10
 
 
 def test_an_old_table_gains_roles_and_keeps_one_owner(databases):
