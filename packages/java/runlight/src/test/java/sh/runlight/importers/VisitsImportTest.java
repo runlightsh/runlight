@@ -1,6 +1,7 @@
 package sh.runlight.importers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,6 +21,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
 import sh.runlight.Time;
@@ -609,8 +612,12 @@ class VisitsImportTest {
     return harness(Databases.fresh("sqlite"), new FakeService(), at("2026-03-04T00:00:00Z"), "UTC");
   }
 
+  /** A CSV step's counts, without the secret, which is checked to be one. */
   private static String counts(Map<String, Object> step) {
-    return Json.stringify(step);
+    Map<String, Object> out = new LinkedHashMap<>(step);
+    assertTrue(
+        ((String) out.remove("secret")).matches("[A-Za-z0-9_-]{32}"), "a fresh secret each time");
+    return Json.stringify(out);
   }
 
   @Test
@@ -646,9 +653,47 @@ class VisitsImportTest {
     assertEquals(2L, Visits.importCsvVisits(t, "default", rows).get("visits"));
     Visits.importCsvVisits(t, "default", rows);
     Map<String, Object> q = t.query("2026-03-01", "2026-03-03");
-    assertEquals(
-        2L, t.store.stats(q).get("visits"), "the same rows get the same ids the second time");
+    assertEquals(2L, t.store.stats(q).get("visits"), "the second import replaces the first");
     assertEquals(List.of("/a", "/b"), sorted(t.values(q, "page")));
+  }
+
+  @Test
+  void aCsvVisitorColumnIsKeyedWithASecretOnlyTheImportHoldsWhichLaterBatchesSendBack() {
+    TestHost t = csv();
+    List<Object> people =
+        Json.array(
+            Json.object("time", "2026-03-01T10:00:00Z", "path", "/a", "visitor", "203.0.113.7"),
+            Json.object("time", "2026-03-01T10:10:00Z", "path", "/b", "visitor", "203.0.113.7"),
+            Json.object(
+                "time", "2026-03-01T10:20:00Z", "path", "/c", "visitor", "jon@example.com"));
+    Map<String, Object> first = Visits.importCsvVisits(t, "default", people.subList(0, 1));
+    Map<String, Object> second =
+        Visits.importCsvVisits(t, "default", people.subList(1, 3), first.get("secret"));
+    assertEquals(first.get("secret"), second.get("secret"));
+    assertEquals(
+        1L, second.get("visits"), "the second batch's visitor continues the first's visit");
+    List<Object> visitors = new ArrayList<>();
+    for (Map<String, Object> r : t.store.db().all("SELECT DISTINCT visitor FROM rl_sessions")) {
+      visitors.add(r.get("visitor"));
+    }
+    assertEquals(2, visitors.size());
+    // A plain hash of a visitor column, as ids were made before, is undone by trying every
+    // address.
+    for (String key : List.of("203.0.113.7", "jon@example.com")) {
+      String plain = Hash.sha256("csv:" + key + ":2026-03-01").substring(0, 16);
+      assertTrue(!visitors.contains(plain), key);
+    }
+    Map<String, Object> q = t.query("2026-03-01", "2026-03-03");
+    assertEquals(2L, t.store.stats(q).get("visits"));
+
+    // The same file again, with a new secret and so new ids, leaves no visit of the old import
+    // behind, even one that ran across its two batches.
+    Map<String, Object> again = Visits.importCsvVisits(t, "default", people.subList(0, 1));
+    assertNotEquals(first.get("secret"), again.get("secret"));
+    Visits.importCsvVisits(t, "default", people.subList(1, 3), again.get("secret"));
+    assertEquals(2L, t.store.stats(q).get("visits"));
+    assertEquals(3L, t.store.stats(q).get("pageviews"));
+    assertEquals(2, t.store.db().all("SELECT id FROM rl_sessions").size());
   }
 
   @Test
