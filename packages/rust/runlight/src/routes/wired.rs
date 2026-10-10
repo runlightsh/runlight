@@ -433,7 +433,12 @@ pub(crate) async fn assistant_api(
             return Ok(Some(coded("Ask a question", "question_needed", 400, None)));
         }
         let owner = reader == Reader::Owner;
-        let who = if owner { "owner" } else { "viewer" };
+        // Each signed-in account counts on its own; without accounts, the owner and the viewers.
+        let who = match glue::account_of(routes, request).await? {
+            Some(account) => account,
+            None => (if owner { "owner" } else { "viewer" }).to_string(),
+        };
+        let who = who.as_str();
         if let Some(refusal) = ask_turn(routes, who, owner).await? {
             return Ok(Some(refusal));
         }

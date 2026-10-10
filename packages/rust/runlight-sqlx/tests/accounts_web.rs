@@ -322,6 +322,44 @@ async fn tokens_made_by_someone_go_when_they_do() {
     assert_eq!(by_app.status, 201);
 }
 
+impl App {
+    /// A new account with the role, signed in through its invite.
+    async fn invited(&self, owner: &str, email: &str, role: &str) -> String {
+        let made = self
+            .routes
+            .handle(json(owner, "POST", "/api/people", &runlight::obj! { "email" => email, "role" => role }))
+            .await;
+        let link = js::str_or_empty(made.json_body().unwrap().get("link"));
+        let code = Url::parse(&link).unwrap().search_params().get("code").unwrap().to_string();
+        let joined = self
+            .routes
+            .handle(form("/invite", &[("code", &code), ("password", "a long password"), ("again", "a long password")]))
+            .await;
+        cookie_of(&joined)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_viewer_account_has_its_own_daily_questions() {
+    let app = app(false, None).await;
+    let owner = app.owner().await;
+    let ada = app.invited(&owner, "ada@example.com", "viewer").await;
+    let bob = app.invited(&owner, "bob@example.com", "viewer").await;
+    let set = runlight::obj! { "provider" => "anthropic", "model" => "claude", "key" => "sk-test" };
+    assert_eq!(app.routes.handle(json(&owner, "PUT", "/api/assistant", &set)).await.status, 200);
+    let limit = runlight::obj! { "viewerDaily" => 1 };
+    assert_eq!(app.routes.handle(json(&owner, "PUT", "/api/assistant/limits", &limit)).await.status, 200);
+    let ask = runlight::obj! { "messages" => runlight::arr![runlight::obj! { "role" => "user", "content" => "Hi" }] };
+    let code = |r: &Response| js::str_or_empty(r.json_body().ok().as_ref().and_then(|b| b.get("code")));
+    let first = app.routes.handle(json(&ada, "POST", "/api/assistant/chat", &ask)).await;
+    assert_ne!(first.status, 429);
+    let again = app.routes.handle(json(&ada, "POST", "/api/assistant/chat", &ask)).await;
+    assert_eq!((again.status, code(&again)), (429, "assistant_daily".to_string()));
+    // Bob's questions are his own, not every viewer's.
+    let other = app.routes.handle(json(&bob, "POST", "/api/assistant/chat", &ask)).await;
+    assert_ne!(other.status, 429, "{}", code(&other));
+}
+
 fn web(first: FirstAccount, rl: &Runlight) -> AccountsWeb {
     let clock = rl.clone();
     accounts_web(AccountsWebOptions {
