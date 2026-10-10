@@ -332,11 +332,8 @@ final class OAuth
                 return self::oauthError('unsupported_grant_type', 'Only authorization_code is supported');
             }
             $key = 'oauth-code:' . Hash::sha256($form->get('code') ?? '');
-            $stored = $runlight->store->setting($key);
-            // A code works once: it is gone before anything else is checked.
-            if ($stored !== null && $stored !== '') {
-                $runlight->store->setSetting($key, null);
-            }
+            // A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+            $stored = $runlight->store->takeSetting($key);
             $grant = $stored !== null && $stored !== '' ? Json::decode($stored, true) : null;
             if ($grant === null || $grant['expires'] < $runlight->now()) {
                 return self::oauthError('invalid_grant', 'The code has expired or was already used');
