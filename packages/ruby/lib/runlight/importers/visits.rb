@@ -162,11 +162,13 @@ module Runlight
           store.db.run("DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (#{imported})",
                        [site_id, from, to, site_id])
           # Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
-          # so the time bounds let the (site, ts) index find them, with no scan of every event.
+          # so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+          # EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
+          # CSV imported again has new ids, so its new visit does not take that one's place.
           store.db.run(
             "DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
          AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)",
-            [site_id, from, to, site_id, from, to + tail],
+            [site_id, from - tail, to, site_id, from - tail, to + tail],
           )
           hits.each do |h|
             counts["visits"] += 1 if write_event(store, site, h["ns"], h["hit"])
@@ -336,8 +338,15 @@ module Runlight
       # One batch of a CSV file, sorted oldest first by the dashboard. As with Umami, only rows from before
       # Runlight's own first visit, and within what the site keeps, are written. A batch can run again: its
       # time span is cleared first, so batches must not share a moment, which the dashboard sees to.
-      # Returns { "pageviews", "events", "visits", "skipped" }.
-      def import_csv_visits(runlight, site_id, rows)
+      #
+      # A CSV's visitor column can hold anything, an email or an IP address among them, and a plain hash of
+      # one is easily undone by trying every address. So each key is an HMAC under a random secret made for
+      # the import and never stored: the first batch gets one, the answer carries it, and the caller sends
+      # it with every later batch of the same file, so a visit that runs across two batches stays one. A file
+      # imported again gets a new secret and new ids; its time span is cleared first, as always, so nothing is
+      # counted twice.
+      # Returns { "pageviews", "events", "visits", "skipped", "secret" }.
+      def import_csv_visits(runlight, site_id, rows, secret = nil)
         runlight.init
         raise ImportError.new("Unknown site", "unknown_site") if runlight.site(site_id).nil?
         if !rows.is_a?(Array) || rows.length > CsvVisits::CSV_BATCH
@@ -356,6 +365,7 @@ module Runlight
         format = CsvVisits.csv_format(clean.empty? ? [] : clean[0].keys)
         raise ImportError.new("This CSV is not an Umami export or Runlight's visit format", "import_csv_format") if format.nil?
 
+        key = secret.is_a?(String) && secret.match?(/\A[A-Za-z0-9_-]{22,128}\z/) ? secret : Accounts::Crypto.base64url(Accounts::Crypto.random_bytes(24))
         cutoff = runlight.retention_cutoff(site_id) || 0
         own = runlight.store.first_own_visit(site_id)
         finish = [own.nil? ? Float::INFINITY : own, runlight.now].min
@@ -369,10 +379,11 @@ module Runlight
         end
         hits = hits.each_with_index.sort_by { |h, i| [h["hit"]["ts"], i] }.map(&:first)
         skipped = clean.length - hits.length
-        return { "pageviews" => 0, "events" => 0, "visits" => 0, "skipped" => skipped } if hits.empty?
+        return { "pageviews" => 0, "events" => 0, "visits" => 0, "skipped" => skipped, "secret" => key } if hits.empty?
 
+        hits.each { |h| h["hit"]["key"] = Accounts::Crypto.base64url(Accounts::Crypto.hmac("SHA-256", key, h["hit"]["key"])) }
         counts = write_step(runlight, site_id, hits[0]["hit"]["ts"], hits[-1]["hit"]["ts"] + 1, hits)
-        counts.merge("skipped" => skipped)
+        counts.merge("skipped" => skipped, "secret" => key)
       end
 
       private_class_method :progress_key, :all, :write_step, :referrer_of, :from_umami, :write_event

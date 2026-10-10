@@ -1647,7 +1647,7 @@ module Runlight
         return site if site.is_a?(Http::Response)
 
         begin
-          return json(Importers::Visits.import_csv_visits(rl, site["id"], plain(Js.get(body, "rows"))))
+          return json(Importers::Visits.import_csv_visits(rl, site["id"], plain(Js.get(body, "rows")), Js.get(body, "secret")))
         rescue Importers::ImportError => e
           return refused(e, "import_failed")
         end

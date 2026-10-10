@@ -48,7 +48,7 @@ module Runlight
         ""
       end
 
-      # A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same ids.
+      # A row with no visitor is its own visit, keyed by its whole content.
       def own_key(row)
         entries = row.map { |k, v| [k.to_s, v] }
         entries = entries.sort { |a, b| Js.compare(a[0], b[0]).negative? ? -1 : 1 }
