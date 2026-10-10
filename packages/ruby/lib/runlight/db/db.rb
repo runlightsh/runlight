@@ -26,6 +26,10 @@ module Runlight
       # characters at most.
       MYSQL_LOCK = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))"
 
+      # The session's sql_mode as it was, less NO_BACKSLASH_ESCAPES, wherever it sits in the list, as
+      # stores/mysql.ts sets it.
+      NO_BACKSLASH_ESCAPES_OFF = "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))"
+
       attr_reader :connection_class
 
       # connection_class: an ActiveRecord::Base subclass whose pool to use (ActiveRecord::Base for the app's
@@ -40,11 +44,13 @@ module Runlight
         @held = 0
         # Set on the thread inside a SQLite turn, whose BEGIN IMMEDIATE Rails does not know about.
         @turn_key = :"runlight_turn_#{object_id}"
+        # The MySQL sessions already set up, by their driver connection, which a reconnect replaces.
+        @set_up = ObjectSpace::WeakMap.new
       end
 
       # "sqlite", "postgres", or "mysql".
       def dialect
-        @dialect ||= self.class.dialect_of(connection { |c| c.adapter_name })
+        @dialect ||= @connection_class.connection_pool.with_connection { |c| self.class.dialect_of(c.adapter_name) }
       end
 
       def self.dialect_of(adapter)
@@ -221,8 +227,23 @@ module Runlight
 
       private
 
-      def connection(&block)
-        @connection_class.connection_pool.with_connection(&block)
+      def connection
+        @connection_class.connection_pool.with_connection do |c|
+          set_up(c) if dialect == "mysql"
+          yield c
+        end
+      end
+
+      # Values are escaped with backslashes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a
+      # quote could end the value early. Every MySQL session Runlight uses drops that one mode first, an app's
+      # own ActiveRecord connection's too, and again after a reconnect, which starts the session over.
+      def set_up(c)
+        raw = c.instance_variable_get(:@raw_connection)
+        return if raw && @set_up[raw]
+
+        c.execute(NO_BACKSLASH_ESCAPES_OFF, "Runlight")
+        raw = c.instance_variable_get(:@raw_connection)
+        @set_up[raw] = true if raw
       end
 
       # A statement on a connection. A connection the server dropped (a restart, a failover, an idle timeout)
@@ -236,6 +257,7 @@ module Runlight
         warn "Runlight: a #{dialect == "mysql" ? "MySQL" : "Postgres"} connection was lost; it reconnects on the next query. #{e.message}"
         connection do |c|
           c.reconnect!
+          set_up(c) if dialect == "mysql"
           block.call(c)
         end
       end

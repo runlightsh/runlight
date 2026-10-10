@@ -60,7 +60,8 @@ module Runlight
       # MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://),
       # through the trilogy gem when it is installed, else mysql2. The session is utf8mb4 with the server's own
       # SQL mode plus IGNORE_SPACE, as mysql2 opens it for the TypeScript driver (its connect flags ask for
-      # that, which neither Ruby driver can, so it is set as the session's mode). Runlight's tables carry their
+      # that, which neither Ruby driver can, so it is set as the session's mode), less NO_BACKSLASH_ESCAPES, as
+      # stores/mysql.ts drops it. Runlight's tables carry their
       # own binary collation, so text compares and sorts by code point. statement_timeout is set per
       # connection as stores/mysql.ts sets it; 0 turns it off.
       def mysql(url, statement_timeout: 120_000)
@@ -71,7 +72,9 @@ module Runlight
         db = Database.new(Pools.make(config.compact), owned: true, statement_timeout: statement_timeout.to_i, dialect: "mysql")
         version, mode = db.connection_class.connection_pool.with_connection { |c| c.select_rows("SELECT VERSION(), @@GLOBAL.sql_mode")[0] }
         db.connection_class.connection_pool.disconnect!
-        variables = { sql_mode: (mode.to_s.split(",") | ["IGNORE_SPACE"]).join(",") }
+        # Less NO_BACKSLASH_ESCAPES, since values are written with backslash escapes (Database drops it from
+        # every session too).
+        variables = { sql_mode: ((mode.to_s.split(",") - ["NO_BACKSLASH_ESCAPES"]) | ["IGNORE_SPACE"]).join(",") }
         if statement_timeout.to_i.positive?
           variables.merge!(version.to_s.match?(/mariadb/i) ? { max_statement_time: statement_timeout.to_i / 1000.0 } : { max_execution_time: statement_timeout.to_i })
         end

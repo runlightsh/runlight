@@ -46,6 +46,36 @@ class DbTest < Minitest::Test
     end
   end
 
+  # Values are written with backslash escapes, which a server set to NO_BACKSLASH_ESCAPES would read as text.
+  # An app's own connection set that way (here a pool of its own, as ActiveRecord::Base would be) still
+  # round-trips quotes and backslashes, before and after a reconnect.
+  def test_mysql_values_round_trip_on_a_connection_set_to_no_backslash_escapes
+    kinds = Databases.mysql_urls
+    skip "MySQL only: set RUNLIGHT_TEST_MYSQL" if kinds.empty?
+
+    kinds.each do |kind, url|
+      Databases.db(kind) # empties the test database
+      parts = URI.parse(url)
+      config = { adapter: Runlight::Db::Connect.mysql_adapter, host: parts.host, port: parts.port, database: parts.path.delete_prefix("/"),
+                 username: parts.user, password: parts.password, encoding: "utf8mb4",
+                 variables: { sql_mode: "NO_BACKSLASH_ESCAPES,STRICT_TRANS_TABLES" } }
+      pool = Runlight::Db::Pools.make(config)
+      mode = pool.connection_pool.with_connection { |c| c.select_value("SELECT @@SESSION.sql_mode") }
+      assert_includes mode, "NO_BACKSLASH_ESCAPES", "the app's connection starts with the mode"
+      db = Runlight::Db::Database.new(pool)
+      db.run('CREATE TABLE rl_probe ("key" VARCHAR(64) PRIMARY KEY, t TEXT)')
+      text = "it's a \\ back\\'slash\\\\' OR '1'='1 \"quoted\" \\0"
+      db.run('INSERT INTO rl_probe ("key", t) VALUES (?, ?)', ["a", text])
+      assert_equal text, db.all('SELECT t FROM rl_probe WHERE "key" = ?', ["a"])[0]["t"], kind
+      assert_equal [], db.all("SELECT t FROM rl_probe WHERE t = ?", ["x' OR '1'='1"]), kind
+      refute_includes db.all("SELECT @@SESSION.sql_mode AS m")[0]["m"], "NO_BACKSLASH_ESCAPES", kind
+      pool.connection_pool.with_connection(&:reconnect!)
+      assert_equal text, db.all('SELECT t FROM rl_probe WHERE t = ?', [text])[0]["t"], "#{kind}, after a reconnect"
+    ensure
+      pool&.connection_pool&.disconnect!
+    end
+  end
+
   def test_a_turn_commits_rolls_back_and_joins
     each_db do |db, kind|
       db.run("CREATE TABLE rl_probe (n BIGINT)")
