@@ -254,9 +254,8 @@ ${sendsTo}
     const form = type === "application/json" ? new URLSearchParams(Object.entries(((await request.json().catch(() => ({}))) as Record<string, string>) ?? {})) : new URLSearchParams(await request.text());
     if (form.get("grant_type") !== "authorization_code") return oauthError("unsupported_grant_type", "Only authorization_code is supported");
     const key = `oauth-code:${await sha256(form.get("code") ?? "")}`;
-    const stored = await runlight.store.setting(key);
-    // A code works once: it is gone before anything else is checked.
-    if (stored) await runlight.store.setSetting(key, null);
+    // A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.
+    const stored = await runlight.store.takeSetting(key);
     const grant = stored ? (JSON.parse(stored) as Code) : null;
     if (!grant || grant.expires < runlight.now()) return oauthError("invalid_grant", "The code has expired or was already used");
     if (grant.client !== form.get("client_id") || grant.redirect !== form.get("redirect_uri")) return oauthError("invalid_grant", "The code was issued to another app");

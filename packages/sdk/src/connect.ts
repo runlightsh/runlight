@@ -138,9 +138,8 @@ export class ConnectError extends RangeError {
 export async function finishConnect(runlight: Runlight, params: URLSearchParams): Promise<string> {
   const state = params.get("state") ?? "";
   const key = `connect:${state}`;
-  const stored = /^[a-f0-9]{32}$/.test(state) ? await runlight.store.setting(key) : null;
-  // Each attempt works once.
-  if (stored) await runlight.store.setSetting(key, null);
+  // Each attempt works once, even when it comes back twice at once.
+  const stored = /^[a-f0-9]{32}$/.test(state) ? await runlight.store.takeSetting(key) : null;
   const pending = stored ? pendingFrom(stored, runlight.now()) : null;
   if (!pending) throw new ConnectError("That connection took too long or was already used. Start again.", "expired");
   if (params.get("error") === "access_denied") throw new ConnectError("The connection was not allowed.", "denied");
