@@ -140,8 +140,7 @@ final class PdoDb implements Db
     private function locked(callable $fn): mixed
     {
         if ($this->dialect === 'sqlite') {
-            // SQLite's file lock already serialises its writers.
-            return $fn($this);
+            return $this->immediate($fn);
         }
         if ($this->dialect === 'postgres') {
             // Asked for again and again rather than waited on: a waiting statement would hold up an index being
@@ -196,6 +195,35 @@ final class PdoDb implements Db
                 } catch (\Throwable) {
                 }
             }
+        }
+    }
+
+    /**
+     * SQLite's lock is its write lock, taken up front with BEGIN IMMEDIATE, so a second process waits (up to the
+     * busy timeout) before it reads anything, and a read-then-write in `$fn` cannot interleave with another's.
+     * Inside a transaction or a lock already held on this connection, `$fn` runs in that one.
+     */
+    private function immediate(callable $fn): mixed
+    {
+        $pdo = $this->pdo();
+        if ($this->depth > 0 || $this->held > 1 || $pdo->inTransaction()) {
+            return $fn($this);
+        }
+        $pdo->exec('BEGIN IMMEDIATE');
+        $this->depth++;
+        try {
+            $result = $fn($this);
+            $this->depth--;
+            $pdo->exec('COMMIT');
+            return $result;
+        } catch (\Throwable $error) {
+            $this->depth = 0;
+            try {
+                $pdo->exec('ROLLBACK');
+            } catch (\Throwable) {
+                // Already rolled back by SQLite itself, or the connection is unusable.
+            }
+            throw $error;
         }
     }
 

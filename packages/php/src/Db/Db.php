@@ -31,7 +31,8 @@ interface Db
 
     /**
      * Runs `$fn` while holding a database-wide lock, so two processes starting
-     * at once do not race to create the same tables.
+     * at once do not race to create the same tables, and a read-then-write in
+     * `$fn` cannot interleave with another process's.
      *
      * @template T
      * @param callable(Db): T $fn

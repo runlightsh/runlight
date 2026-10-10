@@ -58,8 +58,8 @@ final class Accounts
     }
 
     /**
-     * Changes to who has an account take turns: on Postgres and MySQL across processes, through the database's
-     * lock, so two owners demoting each other at once cannot leave none, and a double-clicked invite makes one.
+     * Changes to who has an account take turns across processes, through the database's lock (SQLite's write
+     * lock, taken up front), so two owners demoting each other at once cannot leave none, and a double-clicked invite makes one.
      *
      * @template T
      * @param callable(): T $fn
