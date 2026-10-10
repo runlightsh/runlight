@@ -603,7 +603,10 @@ const SHARING: Scenario[] = [
       post("/api/embed", { origin: "https://admin.blog.example.com" }, asJson("{{key}}")),
       { method: "GET", path: "/api/embed", headers: as("{{key}}") },
       { ...post("/api/embed", { origin: "https://blog.example.com" }, asJson("{{key}}")), capture: { ticket: "ticket" } },
-      { ...post("/api/embed", { origin: "http://www.blog.example.com:8080" }, asJson("{{key}}")), capture: { second: "ticket" } },
+      // Only https on the default port; a www. in front of a site's name is the same name.
+      post("/api/embed", { origin: "http://blog.example.com" }, asJson("{{key}}")),
+      post("/api/embed", { origin: "https://blog.example.com:8443" }, asJson("{{key}}")),
+      { ...post("/api/embed", { origin: "https://www.blog.example.com" }, asJson("{{key}}")), capture: { second: "ticket" } },
       { ...post("/api/embed", { origin: "https://blog.example.com" }, asJson("{{key}}")), capture: { third: "ticket" } },
       // The page a ticket opens: framed only by its origin, once.
       {
@@ -634,7 +637,7 @@ const SHARING: Scenario[] = [
       // Every other page still refuses to be framed.
       { method: "GET", path: "/" },
       // A ticket runs out after five minutes, unused or not.
-      later(5 * 60_000 + 1, { method: "GET", path: "/embed?ticket={{second}}", look: ['data-embed=""', 'data-embed-origin="http://www.blog.example.com:8080"'] }),
+      later(5 * 60_000 + 1, { method: "GET", path: "/embed?ticket={{second}}", look: ['data-embed=""', 'data-embed-origin="https://www.blog.example.com"'] }),
       { method: "GET", path: "/api/stats?period=today&compare=off", headers: { "x-runlight-embed": "{{session}}" } },
       // A session lasts an hour.
       later(55 * 60_000, { method: "GET", path: "/api/stats?period=today&compare=off", headers: { "x-runlight-embed": "{{session}}" } }),

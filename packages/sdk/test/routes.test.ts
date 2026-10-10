@@ -260,6 +260,10 @@ test("the dashboard inside a CMS: a ticket opens one framed page once, whose ses
   const mint = async (origin: string) =>
     POST(req("/runlight/api/embed", { method: "POST", headers: { authorization: `Bearer ${made.secret}`, "content-type": "application/json" }, body: JSON.stringify({ origin }) }));
   assert.equal((await mint("https://b.com")).status, 400, "only an origin on the site's own domains");
+  assert.equal((await mint("http://a.com")).status, 400, "only over https");
+  assert.equal((await mint("https://a.com:8443")).status, 400, "and on the default port");
+  assert.equal((await mint("https://b.a.com")).status, 400, "the name itself, not one under it");
+  assert.equal((await mint("http://localhost:8080")).status, 400, "localhost is not the site's own name either");
   const minted = await mint("https://www.a.com");
   assert.equal(minted.status, 201);
   const { ticket, path, site } = (await minted.json()) as { ticket: string; path: string; site: string };

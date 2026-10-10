@@ -19341,7 +19341,53 @@
             "content-type": "application/json"
           },
           "body": {
-            "origin": "http://www.blog.example.com:8080"
+            "origin": "http://blog.example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the admin page's origin, such as https://example.com",
+              "code": "embed_origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/embed",
+          "headers": {
+            "authorization": "Bearer {{key}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://blog.example.com:8443"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the admin page's origin, such as https://example.com",
+              "code": "embed_origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/embed",
+          "headers": {
+            "authorization": "Bearer {{key}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://www.blog.example.com"
           },
           "capture": {
             "second": "ticket"
@@ -19835,7 +19881,7 @@
           "path": "/embed?ticket={{second}}",
           "look": [
             "data-embed=\"\"",
-            "data-embed-origin=\"http://www.blog.example.com:8080\""
+            "data-embed-origin=\"https://www.blog.example.com\""
           ],
           "advance": 300001,
           "expect": {
@@ -19843,7 +19889,7 @@
             "headers": {
               "content-type": "text/html",
               "cache-control": "no-store",
-              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors http://www.blog.example.com:8080",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors https://www.blog.example.com",
               "referrer-policy": "no-referrer",
               "x-robots-tag": "noindex"
             },
