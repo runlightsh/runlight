@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using Runlight.Http;
 using Xunit;
 using static Runlight.Tests.Fixtures;
@@ -63,6 +65,14 @@ public sealed class GeoSourcesTests
                     Assert.Equal(J(c.Get("record")), J(paged.Get(ip)));
                     Assert.Equal(J(c.Get("location")), J(lookup(ip)));
                 }
+                // Lookups on many threads at once read the file side by side and still agree.
+                using var shared = Mmdb.Open(file);
+                var records = db.Arr("records")!.Cast<JsObject>().ToList();
+                Parallel.For(0, 200, i =>
+                {
+                    var c = records[i % records.Count];
+                    Assert.Equal(J(c.Get("record")), J(shared.Get(c.Str("ip")!)));
+                });
             }
             finally
             {
