@@ -6,9 +6,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
+import sh.runlight.db.Db;
 import sh.runlight.store.SqlStore;
 
 /**
@@ -20,9 +22,9 @@ import sh.runlight.store.SqlStore;
  * key as "throttle-key". Every process of an install, in any of the ports, then shares the same
  * counts.
  *
- * <p>Reading a count and writing it back take turns, so a burst of tries at once cannot each read
- * the same count and all get past the limit: within a process through a lock per key, and across
- * processes through the database's lock.
+ * <p>A count is written back only if it is still the one read, so a burst of tries at once cannot
+ * each read the same count and all get past the limit, in one process or across several. Tries
+ * under the same key in one process take turns first, so they do not keep reading again.
  */
 public final class Throttle {
   private static final String KEY = "throttle-key";
@@ -62,27 +64,18 @@ public final class Throttle {
     if (saved != null && !saved.isEmpty()) {
       return saved;
     }
-    // Made once: two processes making their own at once would count the same key apart.
-    return store
-        .db()
-        .exclusive(
-            db -> {
-              String again = store.setting(KEY);
-              if (again != null && !again.isEmpty()) {
-                return again;
-              }
-              String made = Hash.randomId(16);
-              store.setSetting(KEY, made);
-              return made;
-            });
+    // Made once: of two processes making one at once, the first written is the one both use, or
+    // they would count the same key apart.
+    String made = Hash.randomId(16);
+    return swap(KEY, saved, made) ? made : store.setting(KEY);
   }
 
-  /** Runs fn while no other try under the same id, in this process or another, reads or counts. */
-  private <T> T turn(String id, Supplier<T> fn) {
+  /** Runs fn while no other try under the same id in this process reads or counts. */
+  private static <T> T turn(String name, String id, Supplier<T> fn) {
     ReentrantLock lock = STRIPES[Math.floorMod((name + ":" + id).hashCode(), STRIPES.length)];
     lock.lock();
     try {
-      return store.db().exclusive(db -> fn.get());
+      return fn.get();
     } finally {
       lock.unlock();
     }
@@ -98,7 +91,10 @@ public final class Throttle {
 
   /** The count and end of the window kept for an id, as {count, until}, or null. */
   private long[] entry(String id) {
-    String saved = store.setting(prefix() + id);
+    return parse(store.setting(prefix() + id));
+  }
+
+  private static long[] parse(String saved) {
     Map<String, Object> entry = saved == null ? null : Js.map(Json.tryParse(saved).value());
     return entry == null ? null : new long[] {field(entry, "count"), field(entry, "until")};
   }
@@ -108,8 +104,60 @@ public final class Throttle {
     return value == null ? 0 : Js.asLong(value);
   }
 
-  private void save(String id, long count, long until) {
-    store.setSetting(prefix() + id, Json.stringify(Json.object("count", count, "until", until)));
+  /**
+   * Rewrites an id's entry as change makes it from the one kept (null leaving it be), and gives
+   * back what was written, or null. The write only lands if the entry is still the one read, so a
+   * try counted meanwhile, here or in another process, is read again rather than written over.
+   */
+  private long[] update(String id, UnaryOperator<long[]> change) {
+    String key = prefix() + id;
+    return turn(
+        name,
+        id,
+        () -> {
+          while (true) {
+            String saved = store.setting(key);
+            long[] next = change.apply(parse(saved));
+            if (next == null) {
+              return null;
+            }
+            String value = Json.stringify(Json.object("count", next[0], "until", next[1]));
+            if (swap(key, saved, value)) {
+              return next;
+            }
+          }
+        });
+  }
+
+  /** Sets a setting to value if it still holds before (null for not there), and says if it did. */
+  private boolean swap(String key, String before, String value) {
+    Db db = store.db();
+    boolean my = db.dialect().equals("mysql");
+    if (before == null) {
+      if (my) {
+        return db.affected(
+                "INSERT IGNORE INTO rl_settings (\"key\", value) VALUES (?, ?)",
+                List.of(key, value))
+            == 1;
+      }
+      return db.all(
+                  "INSERT INTO rl_settings (\"key\", value) VALUES (?, ?) ON CONFLICT (\"key\") DO NOTHING RETURNING \"key\"",
+                  List.of(key, value))
+              .size()
+          == 1;
+    }
+    String sql = "UPDATE rl_settings SET value = ? WHERE \"key\" = ? AND value = ?";
+    List<Object> params = List.of(value, key, before);
+    return my
+        ? db.affected(sql, params) == 1
+        : db.all(sql + " RETURNING \"key\"", params).size() == 1;
+  }
+
+  /** A try counted on an entry: the first of a new window when there is none or it has ended. */
+  private long[] counted(long[] entry, long now) {
+    return entry == null || entry[1] <= now
+        ? new long[] {1, now + windowMs}
+        : new long[] {entry[0] + 1, entry[1]};
   }
 
   public boolean blocked(String key, long now) {
@@ -130,50 +178,32 @@ public final class Throttle {
    * at its limit. A try that turns out right is taken back with forgive().
    */
   public boolean take(String key, long now) {
-    String id = id(key);
-    return turn(
-        id,
-        () -> {
-          if (isBlocked(id, now)) {
-            return false;
-          }
-          count(id, now);
-          return true;
-        });
+    long[] made =
+        update(
+            id(key),
+            entry ->
+                entry != null && entry[1] > now && entry[0] >= limit ? null : counted(entry, now));
+    if (made == null) {
+      return false;
+    }
+    if (made[0] == 1) {
+      prune(now);
+    }
+    return true;
   }
 
   /** Takes back one counted try, for one that turned out right. */
   public void forgive(String key) {
-    String id = id(key);
-    turn(
-        id,
-        () -> {
-          long[] entry = entry(id);
-          if (entry != null && entry[0] > 0) {
-            save(id, entry[0] - 1, entry[1]);
-          }
-          return null;
-        });
+    update(
+        id(key),
+        entry -> entry != null && entry[0] > 0 ? new long[] {entry[0] - 1, entry[1]} : null);
   }
 
   public void fail(String key, long now) {
-    String id = id(key);
-    turn(
-        id,
-        () -> {
-          count(id, now);
-          return null;
-        });
-  }
-
-  private void count(String id, long now) {
-    long[] entry = entry(id);
-    if (entry == null || entry[1] <= now) {
-      save(id, 1, now + windowMs);
+    long[] made = update(id(key), entry -> counted(entry, now));
+    if (made[0] == 1) {
       prune(now);
-      return;
     }
-    save(id, entry[0] + 1, entry[1]);
   }
 
   private record Kept(String key, long until, boolean blocked) {}
