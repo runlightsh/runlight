@@ -165,7 +165,11 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
             # Until the server answers: the app's read fails, so it sends an error, if anything, and hangs up.
             while not select.select([slow], [], [], 0.1)[0] and time.monotonic() - started < 5:
                 slow.sendall(b"x")
-            answer = slow.makefile("rb").read()
+            try:
+                answer = slow.makefile("rb").read()
+            except ConnectionResetError:
+                # A byte sent after the server's last read makes its hang-up a reset: hung up all the same.
+                answer = b""
             assert answer == b"" or answer.startswith(b"HTTP/1.0 500")
             assert time.monotonic() - started < 3
         # A request that arrives in time is answered.
