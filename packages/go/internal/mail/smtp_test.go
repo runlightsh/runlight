@@ -367,7 +367,39 @@ func TestSMTPReplyCodesAreReadAsNumberReadsThem(t *testing.T) {
 	}()
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 	err = SMTPSend(context.Background(), Config{"host": "127.0.0.1", "port": port, "security": "none"}, message, "a@b", Options{})
-	if got := js.Stringify(errorValue(err)); !regexp.MustCompile(`^\{"message":"SMTP greeting: NaN first second"`).MatchString(got) {
+	// A code Number reads as NaN is no mail server's, so its words are not quoted.
+	if got := js.Stringify(errorValue(err)); !regexp.MustCompile(`^\{"message":"SMTP greeting: 127\.0\.0\.1:` + port + ` did not answer as a mail server does"`).MatchString(got) {
 		t.Fatal(got)
+	}
+}
+
+// Never a link-local or metadata address, and something that is not a mail server is not quoted.
+func TestSMTPRefusesMetadataAndDoesNotQuoteOtherServers(t *testing.T) {
+	ctx := context.Background()
+	for _, host := range []string{"169.254.169.254", "[fd00:ec2::254]", "metadata.google.internal"} {
+		err := SMTPSend(ctx, Config{"service": "smtp", "host": host, "port": "25", "security": "none"}, message, "reports@example.com", Options{})
+		var e *MailError
+		if !errors.As(err, &e) || e.Code != "address_refused" {
+			t.Fatalf("%s: %v", host, err)
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n"))
+		conn.Close()
+	}()
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	err = SMTPSend(ctx, Config{"service": "smtp", "host": "127.0.0.1", "port": port, "security": "none"}, message, "reports@example.com", Options{})
+	mustMatch(t, `did not answer as a mail server does`, err)
+	if strings.Contains(err.Error(), "internal") || strings.Contains(err.Error(), "HTTP") {
+		t.Fatal(err)
 	}
 }

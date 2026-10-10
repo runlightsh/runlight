@@ -258,6 +258,19 @@ func TestModelsAreListedWithinTwentySeconds(t *testing.T) {
 	}
 }
 
+// The assistant never calls a link-local or cloud metadata address, though one on this computer is fine.
+func TestMetadataAddressesAreNeverCalled(t *testing.T) {
+	fetcher := &recorder{}
+	_, err := ListModels(context.Background(), fetcher, Settings{Provider: "custom", BaseURL: "http://169.254.169.254/v1"})
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "address_refused" || js.Stringify(e.Params) != `{"host":"169.254.169.254"}` {
+		t.Fatalf("%v", err)
+	}
+	if len(fetcher.requests) != 0 {
+		t.Errorf("fetched %+v", fetcher.requests)
+	}
+}
+
 func TestProvidersAreWrittenAsTheTypeScriptHasThem(t *testing.T) {
 	want := `{"id":"anthropic","name":"Anthropic (Claude)","protocol":"anthropic","baseUrl":"https://api.anthropic.com/v1","model":"claude-sonnet-5-5","key":"yes"}`
 	if got := js.Stringify(Providers[0]); got != want {

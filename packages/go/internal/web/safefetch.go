@@ -158,6 +158,68 @@ func PublicAddress(ip string) bool {
 	return true
 }
 
+// metadataNames are names clouds give their metadata services.
+var metadataNames = map[string]bool{"metadata": true, "metadata.google.internal": true, "metadata.goog": true, "instance-data": true, "instance-data.ec2.internal": true}
+
+// MetadataAddress reports whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata
+// service (fd00:ec2::254, Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail
+// server is never there, though it may well be on this computer or a private network, so those stay allowed
+// where this is checked.
+func MetadataAddress(ip string) bool {
+	inner := v4(ip)
+	var g []int
+	if inner == nil {
+		g = v6(ip)
+	}
+	zero := func(from, to int) bool {
+		for i := from; i < to; i++ {
+			if g[i] != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	// IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+	if g != nil && ((zero(0, 5) && (g[5] == 0xffff || g[5] == 0)) || (g[0] == 0x64 && g[1] == 0xff9b && zero(2, 6))) {
+		inner = []int{g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255}
+	}
+	if inner != nil {
+		return (inner[0] == 169 && inner[1] == 254) || (inner[0] == 100 && inner[1] == 100 && inner[2] == 100 && inner[3] == 200)
+	}
+	if g == nil {
+		return false
+	}
+	if g[0]&0xffc0 == 0xfe80 {
+		return true
+	}
+	return g[0] == 0xfd00 && g[1] == 0xec2 && zero(2, 7) && g[7] == 0x254
+}
+
+var bracketsAndDots = regexp.MustCompile(`^\[|\]$|\.+$`)
+
+// MetadataHost reports whether a host, by its name, its address, or any address its name resolves to now, is
+// link-local or a metadata service. A name that does not resolve here is let through, since the connection
+// then goes nowhere such a check could have stopped.
+func MetadataHost(ctx context.Context, host string) bool {
+	name := bracketsAndDots.ReplaceAllString(strings.ToLower(strings.TrimSpace(host)), "")
+	if metadataNames[name] || MetadataAddress(name) {
+		return true
+	}
+	if v4(name) != nil || v6(name) != nil {
+		return false
+	}
+	found, err := Resolver(ctx, name)
+	if err != nil {
+		return false
+	}
+	for _, a := range found {
+		if MetadataAddress(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // Resolver looks a name up; net.DefaultResolver unless a test sets another.
 var Resolver = func(ctx context.Context, name string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, name)

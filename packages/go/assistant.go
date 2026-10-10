@@ -64,6 +64,9 @@ func (r *Runlight) SaveAssistantSettings(ctx context.Context, input *js.Object) 
 		if err != nil || (parsed.Protocol != "https:" && parsed.Protocol != "http:") {
 			return settingsError("Enter the service's address, starting with https://", "assistant_address_bad")
 		}
+		if web.MetadataHost(ctx, parsed.Hostname) {
+			return settingsError(parsed.Hostname+" is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", "host", parsed.Hostname)
+		}
 	}
 	if baseURL == "" && provider.BaseURL == "" {
 		return settingsError("Enter the service's address", "assistant_address")

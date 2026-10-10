@@ -16,10 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/web"
 )
 
 // A small SMTP client: implicit TLS (465), STARTTLS (587), or plain (local
@@ -227,9 +229,33 @@ func (s *session) tlsConfig(base *tls.Config) *tls.Config {
 	return c
 }
 
+// refused is the error for a mail server at a link-local or cloud metadata address.
+func (s *session) refused() error {
+	return mailError("SMTP: "+s.host+" is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", "host", s.host)
+}
+
 func (s *session) connect(useTLS bool, opts Options) error {
-	dialer := net.Dialer{Timeout: replyTimeout}
+	// A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+	// address: not by its name or any address it resolves to, and not by the address the connection uses, so
+	// a name cannot answer differently later.
+	if web.MetadataHost(s.limited, s.host) {
+		return s.refused()
+	}
+	var metadata atomic.Bool
+	dialer := net.Dialer{Timeout: replyTimeout, Control: func(_, address string, _ syscall.RawConn) error {
+		if ip, _, err := net.SplitHostPort(address); err == nil && web.MetadataAddress(ip) {
+			metadata.Store(true)
+			return errors.New("refused")
+		}
+		return nil
+	}}
 	conn, err := dialer.DialContext(s.limited, "tcp", net.JoinHostPort(s.host, strconv.Itoa(s.port)))
+	if metadata.Load() {
+		if conn != nil {
+			conn.Close()
+		}
+		return s.refused()
+	}
 	if err == nil && useTLS {
 		secured := tls.Client(conn, s.tlsConfig(opts.TLS))
 		conn = secured
@@ -345,6 +371,10 @@ func (s *session) converse(config Config, m Message, from, security string, opts
 		r, err := s.next(replyTimeout, false)
 		if err != nil {
 			return nil, err
+		}
+		// Something that is not a mail server gets no more than that said, so its own words are never passed on.
+		if !(r.code >= 200 && r.code <= 599) {
+			return nil, NewMailError("SMTP " + what + ": " + s.address + " did not answer as a mail server does")
 		}
 		for _, c := range codes {
 			if r.code == c {

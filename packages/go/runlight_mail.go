@@ -6,6 +6,7 @@ import (
 
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/mail"
+	"runlight.sh/go/internal/web"
 )
 
 // seal encrypts a value kept in the database under the install's secret,
@@ -155,8 +156,12 @@ func (r *Runlight) SaveMailSettings(ctx context.Context, input *js.Object) error
 	if fromName != "" {
 		settings.Set("fromName", fromName)
 	}
-	if err := mail.CheckConfig(configOf(settings)); err != nil {
+	config := configOf(settings)
+	if err := mail.CheckConfig(config); err != nil {
 		return err
+	}
+	if config["service"] == "smtp" && config["host"] != "" && web.MetadataHost(ctx, config["host"]) {
+		return &mail.MailError{Message: config["host"] + " is a link-local or cloud metadata address, which Runlight never connects to", Code: "address_refused", Params: js.NewObject("host", config["host"])}
 	}
 	sealed, err := r.seal(js.Stringify(settings))
 	if err != nil {
