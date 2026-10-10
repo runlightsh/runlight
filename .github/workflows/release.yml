@@ -8,7 +8,7 @@
 # A release that is already there keeps its title and notes, and uploads
 # replace a file of the same name, so a rerun is safe. A prerelease
 # (v0.2.0-beta.1) is marked one, and only the highest stable tag is marked
-# latest. Can also be started by hand for a tag.
+# latest. Can also be started by hand on a tag.
 #
 # Stays off until the repository variable RELEASE_ENABLED is "true". It needs
 # no secret: it writes only to this repository's releases, with the
@@ -19,10 +19,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to make the release for (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -39,8 +35,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-    with:
-      tag: ${{ inputs.tag }}
 
   release:
     needs: ci
@@ -61,7 +55,7 @@ jobs:
           tools: none
       - name: Make the release and attach the WordPress zip
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |

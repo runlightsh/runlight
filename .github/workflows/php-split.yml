@@ -9,7 +9,7 @@
 # checks that packages/php/assets/build.json carries the tag's version, and
 # pushes the same tag on the split commit, which Packagist publishes. A tag
 # already there on the same commit is a rerun and is left alone. The tag
-# can also be pushed by hand from the Actions tab.
+# can also be pushed by hand from the Actions tab, run on the tag.
 #
 # Nothing runs until the repository secret PHP_SPLIT_DEPLOY_KEY holds the
 # private half of a deploy key with write access on the split repository
@@ -21,10 +21,6 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to push (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -73,13 +69,11 @@ jobs:
   # CI must pass on the tagged commit first (ci-passed.yml).
   ci:
     needs: gate
-    if: needs.gate.outputs.enabled == 'true' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    if: needs.gate.outputs.enabled == 'true' && startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/ci-passed.yml
     permissions:
       actions: read
       contents: read
-    with:
-      tag: ${{ inputs.tag }}
 
   tag:
     needs: ci
@@ -91,7 +85,7 @@ jobs:
     env:
       DEPLOY_KEY: ${{ secrets.PHP_SPLIT_DEPLOY_KEY }}
       SPLIT_REPO: ${{ vars.PHP_SPLIT_REPO || 'runlightsh/runlight-php' }}
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

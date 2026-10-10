@@ -6,7 +6,7 @@
 # neither can be published from this monorepo directly. The split is
 # `git subtree split`, as for the PHP package (php-split.yml), so each push
 # fast-forwards. A tag already there on the same commit is a rerun and is
-# left alone. Can also be started by hand for a tag.
+# left alone. Can also be started by hand on a tag.
 #
 # Neither plugin carries a version of its own: drupal.org stamps the
 # release's version into the module's .info.yml when it packages it, and
@@ -29,10 +29,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to push (v0.1.0, say)
-        required: true
 
 # The jobs read the monorepo and push elsewhere with their own keys.
 permissions:
@@ -52,8 +48,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-    with:
-      tag: ${{ inputs.tag }}
 
   drupal:
     needs: ci
@@ -68,7 +62,7 @@ jobs:
           persist-credentials: false
       - name: Split plugins/drupal and push it with the tag
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ vars.DRUPAL_SPLIT_REPOSITORY }}
           SSH_KEY: ${{ secrets.DRUPAL_SPLIT_SSH_KEY }}
         run: |
@@ -112,7 +106,7 @@ jobs:
           persist-credentials: false
       - name: Split plugins/craft and push it with the tag
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ vars.CRAFT_SPLIT_REPOSITORY }}
           DEPLOY_KEY: ${{ secrets.CRAFT_SPLIT_DEPLOY_KEY }}
         run: |

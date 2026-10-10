@@ -2,7 +2,7 @@
 # (runlight, then runlight-sqlx, which requires it at exactly the same
 # version), with crates.io's trusted publishing: crates.io trusts this
 # workflow's OIDC token and hands back a token that lives for the job, so no
-# API token is stored anywhere. Can also be started by hand for a tag.
+# API token is stored anywhere. Can also be started by hand on a tag.
 #
 # Three jobs. "ci" waits for CI to pass on the tagged commit (ci-passed.yml).
 # "package" resolves the dependencies once, builds each crate from its own
@@ -30,10 +30,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to publish (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -50,7 +46,6 @@ jobs:
       actions: read
       contents: read
     with:
-      tag: ${{ inputs.tag }}
       workflows: ci.yml rust.yml
 
   package:
@@ -67,7 +62,7 @@ jobs:
       - name: Check the tag is the workspace's version
         working-directory: packages/rust
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
@@ -107,7 +102,7 @@ jobs:
       - name: Check the tag is the workspace's version
         working-directory: packages/rust
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
           # The crates' version must be the tag's, or crates.io would list a

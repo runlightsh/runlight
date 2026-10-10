@@ -1,7 +1,7 @@
 # A release tag -> packages/python built and published to PyPI as
 # runlight, with PyPI's trusted publishing: PyPI trusts this workflow's
 # OIDC token, so no API token is stored anywhere. Can also be started by hand
-# for a tag.
+# on a tag.
 #
 # Three jobs. "ci" waits for CI to pass on the tagged commit (ci-passed.yml).
 # "build" builds the sdist and wheel from that commit with no credential and
@@ -21,10 +21,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to publish (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -41,7 +37,6 @@ jobs:
       actions: read
       contents: read
     with:
-      tag: ${{ inputs.tag }}
       workflows: ci.yml python.yml
 
   build:
@@ -59,7 +54,7 @@ jobs:
       - name: Build packages/python
         working-directory: packages/python
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
           # The package's version must be the tag's, or PyPI would list a
@@ -92,7 +87,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - name: Publish to PyPI
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
           ls -l dist

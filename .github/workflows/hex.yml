@@ -1,7 +1,7 @@
 # A release tag -> packages/elixir published to Hex as runlight, with its
 # documentation to HexDocs. Hex has no trusted publishing yet, so this takes
 # an API key from the environment's secret; when Hex ships it, this moves to
-# OIDC and the key is revoked. Can also be started by hand for a tag.
+# OIDC and the key is revoked. Can also be started by hand on a tag.
 #
 # Three jobs. "ci" waits for CI to pass on the tagged commit (ci-passed.yml).
 # "build" fetches the dependencies, builds the package's tarball
@@ -31,10 +31,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: The release tag to publish (v0.1.0, say)
-        required: true
 
 permissions:
   contents: read
@@ -51,7 +47,6 @@ jobs:
       actions: read
       contents: read
     with:
-      tag: ${{ inputs.tag }}
       workflows: ci.yml elixir.yml
 
   build:
@@ -68,7 +63,7 @@ jobs:
       - name: Check the tag is the package's version
         working-directory: packages/elixir
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
           # The package's version must be the tag's, or Hex would list a
@@ -87,7 +82,7 @@ jobs:
         working-directory: packages/elixir
         env:
           MIX_ENV: dev
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           OUT: ${{ runner.temp }}/hex/docs.tar.gz
         run: |
           version="${TAG#v}"
@@ -122,7 +117,7 @@ jobs:
           path: hex
       - name: Publish to Hex and HexDocs
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
