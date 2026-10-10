@@ -315,6 +315,14 @@ class RecordsTest extends StoreTestCase {
     store.setSetting("remote%c", "4");
     store.setSetting("remote\\d", "5");
     assertEquals("2", store.setting("remote:a"));
+    // A swap lands only on the value read.
+    assertFalse(store.swapSetting("remote:a", null, "x"), "it is there already");
+    assertFalse(store.swapSetting("remote:a", "1", "x"), "it changed since");
+    assertTrue(store.swapSetting("remote:a", "2", "x"));
+    assertTrue(store.swapSetting("swapped", null, "y"));
+    assertEquals("y", store.setting("swapped"));
+    store.setSetting("remote:a", "2");
+    store.setSetting("swapped", null);
     assertJson(
         List.of(Json.object("key", "remote:a", "value", "2")),
         store.settingsStartingWith("remote:"));
