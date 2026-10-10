@@ -44,13 +44,17 @@ module Runlight
         @home_path = "#{@base}/"
         @asks_for_token = @first.is_a?(Hash) && @first.key?("token")
         @existing = false
-        # Wrong passwords are counted twice. Per account and address, ten tries;
+        # Wrong passwords are counted three times. Per account and address, ten tries;
         # per account from anywhere, fifty, so a caller who invents a new address
         # for every try still cannot guess on and on. Addresses come from
-        # forwarding headers a client can write, so they never stand alone.
+        # forwarding headers a client can write, so they never stand alone. And per
+        # address across every account, thirty, so one caller trying made-up emails
+        # cannot keep the server hashing; a request with no known address skips that one,
+        # since it would hold up everyone at once.
         # Each try counts before the password is checked, and a right one is taken back.
         @per_address = Throttle.new(@store, "address", 10)
         @per_account = Throttle.new(@store, "account", 50)
+        @per_ip = Throttle.new(@store, "ip", 30)
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
         @code_tries = Throttle.new(@store, "code", 5)
@@ -451,6 +455,7 @@ module Runlight
         pair = "#{account}\n#{ip == "" ? "unknown" : ip}"
         login_page = ->(opts) { Pages.login_page(base, opts.merge("next" => next_path, "forgot" => @forgot) { |_k, mine, _theirs| mine }) }
         too_many = -> { html(login_page.call({ "error" => "Too many tries. Wait fifteen minutes and try again.", "email" => email }), 429) }
+        return too_many.call if ip != "" && !@per_ip.take(ip, now)
         return too_many.call unless @per_address.take(pair, now)
 
         # A browser that signed in to the account before is never held up by others' failures.
@@ -484,11 +489,17 @@ module Runlight
           return html(login_page.call({ "error" => "That email and password do not match an account.", "email" => email }), 401)
         end
         @per_address.clear(pair)
+        @per_ip.forgive(ip) if ip != ""
         @per_account.forgive(account) if !over && !trusted
         # With two-factor on, the password only earns the second step.
         return html(Pages.code_page(base, { "pending" => @accounts.pending_for(user, now), "next" => next_path })) if user["twoFactor"]
 
         signed_in_to(request, user, next_path)
+      rescue AccountError => e
+        # Too many password checks already waiting, so this one was never run: try again in a moment.
+        raise unless e.code == "busy"
+
+        html(login_page.call({ "error" => e.message, "email" => email }), 503, { "retry-after" => "5" })
       end
 
       # Your own account, and for the owner and admins, everyone else's.
@@ -504,7 +515,14 @@ module Runlight
 
         recheck = lambda do |input, name, wrong|
           return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429) unless @rechecks.take(user["id"], now)
-          return coded(wrong[0], wrong[1], 400) if @accounts.sign_in(user["email"], field(input, name)).nil?
+          begin
+            right = @accounts.sign_in(user["email"], field(input, name))
+          rescue AccountError => e
+            raise unless e.code == "busy"
+
+            return coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503)
+          end
+          return coded(wrong[0], wrong[1], 400) if right.nil?
 
           @rechecks.forgive(user["id"])
           nil

@@ -309,4 +309,26 @@ class AccountsAccountsTest < Minitest::Test
     throttle.record_failure("zed@example.com", NOW + 2000)
     assert_equal 1, store.settings_starting_with("throttle:test:").length
   end
+
+  def test_only_a_few_passwords_are_checked_at_once_and_past_a_queue_the_rest_are_told_to_wait
+    gate = Queue.new
+    started = Queue.new
+    held = Array.new(4 + 64) do
+      Thread.new do
+        Accounts.slot do
+          started << true
+          gate.pop
+        end
+      end
+    end
+    4.times { started.pop }
+    deadline = Time.now + 10
+    Thread.pass until Accounts.instance_variable_get(:@waiting) == 64 || Time.now > deadline
+    assert started.empty?, "four checking, and the rest waiting"
+    assert_equal "busy", code_of { Accounts.slot { flunk "never run" } }, "sixty-four waiting, so the next is told to wait"
+    68.times { gate << true }
+    held.each(&:join)
+    assert_equal 64, started.length, "and the waiting ones each got a turn"
+    assert_equal :ran, Accounts.slot { :ran }, "and once they are done, checks go on"
+  end
 end

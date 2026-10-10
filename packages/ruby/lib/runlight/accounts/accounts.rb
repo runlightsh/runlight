@@ -34,8 +34,43 @@ module Runlight
       # A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed.
       @decoy = nil
 
+      # Password checks run at once, in this process, and the most that may wait for one.
+      CHECKING = 4
+      WAITING = 64
+      SLOTS = Mutex.new
+      FREED = ConditionVariable.new
+      private_constant :SLOTS, :FREED
+      @running = 0
+      @waiting = 0
+
       class << self
         attr_accessor :decoy
+
+        # Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core.
+        # Past the queue's length it refuses at once, with an AccountError coded "busy".
+        def slot
+          SLOTS.synchronize do
+            if @running >= CHECKING
+              raise AccountError.new("Runlight is busy checking other sign-ins. Try again in a moment.", "busy") if @waiting >= WAITING
+
+              @waiting += 1
+              begin
+                FREED.wait(SLOTS) while @running >= CHECKING
+              ensure
+                @waiting -= 1
+              end
+            end
+            @running += 1
+          end
+          begin
+            yield
+          ensure
+            SLOTS.synchronize do
+              @running -= 1
+              FREED.signal
+            end
+          end
+        end
       end
 
       def initialize(store, secret)
@@ -319,14 +354,16 @@ module Runlight
         user
       end
 
-      # The account for an email and password, or nil. Takes the same time either way.
+      # The account for an email and password, or nil. Takes the same time either way. Only a few checks run at
+      # once; with too many waiting it raises an AccountError coded "busy".
       def sign_in(email, password)
         user = by_email(email)
         if user.nil?
-          Crypto.check_password(password, self.class.decoy ||= Crypto.hash_password(Crypto.hex(Crypto.random_bytes(16))))
+          hash = self.class.decoy ||= Crypto.hash_password(Crypto.hex(Crypto.random_bytes(16)))
+          self.class.slot { Crypto.check_password(password, hash) }
           return nil
         end
-        Crypto.check_password(password, user["hash"]) ? user : nil
+        self.class.slot { Crypto.check_password(password, user["hash"]) } ? user : nil
       end
 
       # A cookie value naming the user and when it expires, signed with the
