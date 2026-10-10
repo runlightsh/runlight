@@ -43,8 +43,9 @@ on:
 permissions:
   contents: read
 
+# One queue per tag, so a pending run for one tag never displaces another's.
 concurrency:
-  group: maven
+  group: maven-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
