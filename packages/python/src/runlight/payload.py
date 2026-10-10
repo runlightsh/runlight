@@ -11,7 +11,7 @@ pair, reads as U+FFFD, which is how the SDK stores it.
 from __future__ import annotations
 
 import re
-import sys
+from json.decoder import scanstring
 from typing import Any
 
 from . import _js
@@ -75,19 +75,115 @@ def _loads(text: str) -> tuple[bool, Any]:
         return False, None
 
 
+# Only the body itself and the props inside it are read; anything opened deeper than this is never looked at.
+_KEPT_DEPTH = 2
+_JSON_SPACE = " \t\n\r"
+_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?")
+
+
+def _space(text: str, i: int) -> int:
+    while i < len(text) and text[i] in _JSON_SPACE:
+        i += 1
+    return i
+
+
+def _key(text: str, i: int) -> int:
+    """Past an object's key and its colon, from where the key's quote should be."""
+    if text[i : i + 1] != '"':
+        raise ValueError("no key")
+    i = _space(text, scanstring(text, i + 1, True)[1])
+    if text[i : i + 1] != ":":
+        raise ValueError("no colon")
+    return i + 1
+
+
+def _value_end(text: str, i: int) -> int:
+    """Where the JSON value starting at `i` ends, checked as JSON.parse checks it, however deep it nests, with a
+    stack rather than recursion. Raises ValueError for one that is not JSON."""
+    closers: list[str] = []
+    while True:
+        i = _space(text, i)
+        c = text[i : i + 1]
+        if c == "{" or c == "[":
+            i = _space(text, i + 1)
+            closer = "}" if c == "{" else "]"
+            if text[i : i + 1] == closer:
+                i += 1
+            else:
+                closers.append(closer)
+                if closer == "}":
+                    i = _key(text, i)
+                continue
+        elif c == '"':
+            i = scanstring(text, i + 1, True)[1]
+        else:
+            number = _NUMBER.match(text, i)
+            if number:
+                i = number.end()
+            elif text.startswith(("true", "null"), i):
+                i += 4
+            elif text.startswith("false", i):
+                i += 5
+            else:
+                raise ValueError("not a value")
+        # After a value: the next in its container, or the container's end.
+        while closers:
+            i = _space(text, i)
+            c = text[i : i + 1]
+            if c == ",":
+                i += 1
+                if closers[-1] == "}":
+                    i = _key(text, _space(text, i))
+                break
+            if c != closers[-1]:
+                raise ValueError("unclosed")
+            closers.pop()
+            i += 1
+        if not closers:
+            return i
+
+
+def _shallow(text: str) -> str | None:
+    """The body with every array or object opened deeper than anything read put as null, which reads the same
+    (props skip both), once it is checked to be JSON itself, so a body nested past Python's recursion limit reads
+    as JavaScript reads it. None for a deep part that is not JSON, where JSON.parse would throw."""
+    out: list[str] = []
+    depth = 0
+    i = start = 0
+    try:
+        while i < len(text):
+            c = text[i]
+            if c == '"':
+                i = scanstring(text, i + 1, True)[1]
+                continue
+            if c in "{[":
+                if depth >= _KEPT_DEPTH:
+                    end = _value_end(text, i)
+                    out.append(text[start:i])
+                    out.append("null")
+                    i = start = end
+                    continue
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+            i += 1
+    except ValueError:
+        return None
+    out.append(text[start:])
+    return "".join(out)
+
+
 def _parse(text: str) -> tuple[bool, Any]:
     """JSON.parse, with no practical limit on nesting: Python's parser gives up past its recursion limit, where
-    JavaScript reads a body of 8 KB however deep it nests, so a body that may be that deep is read again with
-    room."""
-    ok, value = _loads(text)
-    if ok or text.count("[") + text.count("{") < 500:
-        return ok, value
-    limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(limit, 4 * MAX_BODY + 1000))
+    JavaScript reads a body of 8 KB however deep it nests. What is that deep is never read, so it is checked
+    without recursion and left out, and the rest parsed as it is."""
     try:
-        return _loads(text)
-    finally:
-        sys.setrecursionlimit(limit)
+        return True, _js.loads(text)
+    except RecursionError:
+        shallow = _shallow(text)
+        return (False, None) if shallow is None else _loads(shallow)
+    except ValueError:
+        return False, None
 
 
 def parse_payload(text: str) -> dict[str, Any] | None:
