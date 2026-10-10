@@ -44,6 +44,9 @@ public final class Connect {
                 statement.execute("PRAGMA journal_mode = WAL");
                 statement.execute("PRAGMA synchronous = NORMAL");
                 statement.execute("PRAGMA busy_timeout = 5000");
+                // Deleted rows, such as a day's salt once it is gone, are overwritten where that
+                // costs no extra writes, so they do not linger in the file's free space.
+                statement.execute("PRAGMA secure_delete = FAST");
               }
               return connection;
             }),
