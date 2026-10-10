@@ -2252,7 +2252,7 @@ public sealed class Routes
             try
             {
                 object? rows = body.Prop("rows");
-                return JsonResponse(await Visits.ImportCsvVisitsAsync(rl, site.Str("id")!, rows is Undefined ? null : rows, cancellationToken).ConfigureAwait(false));
+                return JsonResponse(await Visits.ImportCsvVisitsAsync(rl, site.Str("id")!, rows is Undefined ? null : rows, body.Prop("secret"), cancellationToken).ConfigureAwait(false));
             }
             catch (ImportError error)
             {

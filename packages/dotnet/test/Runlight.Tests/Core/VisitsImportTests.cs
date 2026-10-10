@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Runlight.Http;
 using Runlight.Importers;
@@ -326,7 +327,10 @@ public sealed class VisitsImportTests : CoreTestCase
     public async Task Csv_in_Runlights_format_rows_become_visits_with_sources_places_devices_and_events()
     {
         var t = await CsvAsync();
-        Assert.Equal("{\"pageviews\":3,\"events\":1,\"visits\":2,\"skipped\":1}", J(await Visits.ImportCsvVisitsAsync(t.Rl, "default", RunlightRows())));
+        var step = await Visits.ImportCsvVisitsAsync(t.Rl, "default", RunlightRows());
+        Assert.Matches("^[A-Za-z0-9_-]{32}\\z", step.Str("secret")!);
+        step.Remove("secret");
+        Assert.Equal("{\"pageviews\":3,\"events\":1,\"visits\":2,\"skipped\":1}", J(step));
         var q = t.Query("2026-03-01", "2026-03-03");
         var stats = await t.StatsAsync(q);
         Assert.Equal((3.0, 2.0, 2.0), (stats.Num("pageviews"), stats.Num("visits"), stats.Num("visitors")));
@@ -350,7 +354,7 @@ public sealed class VisitsImportTests : CoreTestCase
         Assert.Equal(2, (await Visits.ImportCsvVisitsAsync(t.Rl, "default", rows)).Num("visits"));
         await Visits.ImportCsvVisitsAsync(t.Rl, "default", rows);
         var q = t.Query("2026-03-01", "2026-03-03");
-        Assert.Equal(2, (await t.StatsAsync(q)).Num("visits")); // the same rows get the same ids the second time
+        Assert.Equal(2, (await t.StatsAsync(q)).Num("visits")); // the second import replaces the first
         Assert.Equal(["/a", "/b"], await t.SortedAsync(q, "page"));
     }
 
@@ -363,11 +367,46 @@ public sealed class VisitsImportTests : CoreTestCase
             new JsObject { ["website_id"] = "w1", ["session_id"] = "s1", ["created_at"] = "2026-03-01 10:03:00", ["hostname"] = "blog.example.com", ["url_path"] = "/pricing", ["event_type"] = "2", ["event_name"] = "Signup" },
             new JsObject { ["website_id"] = "w1", ["session_id"] = "s1", ["created_at"] = "2026-03-01 10:03:01", ["hostname"] = "blog.example.com", ["url_path"] = "/pricing", ["event_type"] = "5" },
             new JsObject { ["website_id"] = "w1", ["session_id"] = "s2", ["created_at"] = "2026-03-02T09:00:00.000Z", ["hostname"] = "blog.example.com", ["url_path"] = "/blog", ["event_type"] = "1", ["country"] = "GB", ["browser"] = "chrome", ["os"] = "Mac OS", ["device"] = "desktop" });
-        Assert.Equal("{\"pageviews\":2,\"events\":1,\"visits\":2,\"skipped\":1}", J(await Visits.ImportCsvVisitsAsync(t.Rl, "default", rows)));
+        var step = await Visits.ImportCsvVisitsAsync(t.Rl, "default", rows);
+        step.Remove("secret");
+        Assert.Equal("{\"pageviews\":2,\"events\":1,\"visits\":2,\"skipped\":1}", J(step));
         var q = t.Query("2026-03-01", "2026-03-03");
         Assert.Equal(["Hacker News"], await t.ValuesAsync(q, "source"));
         Assert.Equal(["CA-ON"], await t.ValuesAsync(q, "region"));
         Assert.Equal(["Chrome", "Safari"], await t.SortedAsync(q, "browser"));
+    }
+
+    [Fact]
+    public async Task A_CSV_visitor_column_is_keyed_with_a_secret_only_the_import_holds_which_later_batches_of_the_file_send_back()
+    {
+        var t = await CsvAsync();
+        var people = L(
+            new JsObject { ["time"] = "2026-03-01T10:00:00Z", ["path"] = "/a", ["visitor"] = "203.0.113.7" },
+            new JsObject { ["time"] = "2026-03-01T10:10:00Z", ["path"] = "/b", ["visitor"] = "203.0.113.7" },
+            new JsObject { ["time"] = "2026-03-01T10:20:00Z", ["path"] = "/c", ["visitor"] = "jon@example.com" });
+        // A plain hash of a visitor column, as ids were made before, is undone by trying every address.
+        static string Plain(string key, int length) => Convert.ToHexStringLower(SHA256.HashData(Js.Utf8("csv:" + key + ":2026-03-01")))[..length];
+        var first = await Visits.ImportCsvVisitsAsync(t.Rl, "default", people.Take(1).ToList());
+        var second = await Visits.ImportCsvVisitsAsync(t.Rl, "default", people.Skip(1).ToList(), first.Str("secret"));
+        Assert.Equal(first.Str("secret"), second.Str("secret"));
+        Assert.Equal(1, second.Num("visits")); // the second batch's visitor continues the first batch's visit
+        var visitors = (await t.Store.Db.AllAsync("SELECT DISTINCT visitor FROM rl_sessions")).Select(r => r.Str("visitor")).ToList();
+        Assert.Equal(2, visitors.Count);
+        foreach (string key in new[] { "203.0.113.7", "jon@example.com" })
+        {
+            Assert.DoesNotContain(Plain(key, 16), visitors);
+        }
+        var q = t.Query("2026-03-01", "2026-03-03");
+        Assert.Equal(2, (await t.StatsAsync(q)).Num("visits"));
+
+        // The same file again, with a new secret and so new ids, leaves no visit of the old import behind,
+        // even one that ran across its two batches.
+        var again = await Visits.ImportCsvVisitsAsync(t.Rl, "default", people.Take(1).ToList());
+        Assert.NotEqual(first.Str("secret"), again.Str("secret"));
+        await Visits.ImportCsvVisitsAsync(t.Rl, "default", people.Skip(1).ToList(), again.Str("secret"));
+        var stats = await t.StatsAsync(q);
+        Assert.Equal((2.0, 3.0), (stats.Num("visits"), stats.Num("pageviews")));
+        Assert.Equal(2, (await t.Store.Db.AllAsync("SELECT id FROM rl_sessions")).Count);
     }
 
     [Fact]
