@@ -227,8 +227,9 @@ test("reports go out once per period, retry after a failure, and keep keys from 
   await call("PUT", "/api/mail", { service: "resend", apiKey: "", from: "reports@example.com" });
   assert.equal((await rl.mailSettings())!.apiKey, "re_live_key");
 
-  const made = await call("POST", "/api/reports", { email: "Jon@Example.com", frequency: "weekly", lang: "fr", origin: "https://stats.example.com/runlight" });
+  const made = await call("POST", "/api/reports", { email: "Jon@Example.com", frequency: "weekly", lang: "fr", origin: "https://evil.example/phish" });
   assert.equal(made.status, 201);
+  assert.deepEqual((await rl.store.reports("default")).map((r) => r.origin), ["https://stats.example.com/runlight"], "an address in the body is ignored");
   const duplicate = await call("POST", "/api/reports", { email: "jon@example.com", frequency: "weekly" });
   assert.equal(duplicate.status, 400, "no duplicates");
   // The code and params let the dashboard say it in its own language.
