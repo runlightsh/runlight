@@ -166,6 +166,23 @@ public sealed class AssistantTests
     }
 
     [Fact]
+    public async Task The_assistant_never_calls_a_link_local_or_cloud_metadata_address_though_one_on_this_computer_is_fine()
+    {
+        var rl = new Runlight(new RunlightOptions { Store = await Databases.FreshAsync("sqlite"), Secret = new string('s', 64) });
+        await rl.InitAsync();
+        foreach (string baseUrl in new[] { "http://169.254.169.254/latest", "http://[fd00:ec2::254]/v1", "http://metadata.google.internal/v1" })
+        {
+            var error = await Assert.ThrowsAsync<SettingsError>(() => rl.SaveAssistantSettingsAsync(new JsObject { ["provider"] = "custom", ["model"] = "m", ["baseUrl"] = baseUrl, ["key"] = "" }));
+            Assert.Equal("address_refused", error.Code);
+        }
+        await rl.SaveAssistantSettingsAsync(new JsObject { ["provider"] = "ollama", ["model"] = "llama3", ["baseUrl"] = "", ["key"] = "" });
+        var fetcher = new RecordingFetcher(new Response("{\"data\":[]}"));
+        var refused = await Assert.ThrowsAsync<AssistantError>(() => Assistant.ListModelsAsync(new JsObject { ["provider"] = "custom", ["baseUrl"] = "http://169.254.169.254/v1", ["key"] = "" }, fetcher));
+        Assert.Equal("address_refused", refused.Code);
+        Assert.Empty(fetcher.Requests);
+    }
+
+    [Fact]
     public async Task Models_are_listed_within_twenty_seconds()
     {
         var fetcher = new RecordingFetcher(new Response("{\"data\":[{\"id\":\"b\"},{\"id\":\"a\"}]}"));

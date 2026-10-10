@@ -206,6 +206,72 @@ public static partial class Safefetch
         return true;
     }
 
+    /// <summary>Names clouds give their metadata services.</summary>
+    private static readonly HashSet<string> MetadataNames = new(StringComparer.Ordinal) { "metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal" };
+
+    private static readonly Regex TrailingDots = new("\\.+\\z", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service (fd00:ec2::254,
+    /// Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail server is never there,
+    /// though it may well be on this computer or a private network, so those stay allowed where this is checked.
+    /// </summary>
+    public static bool MetadataAddress(string ip)
+    {
+        ArgumentNullException.ThrowIfNull(ip);
+        int[]? four = V4(ip);
+        int[]? g = four == null ? V6(ip) : null;
+        static bool Zero(IEnumerable<int> groups) => groups.All(x => x == 0);
+        // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+        int[]? inner = four ?? (g != null && ((Zero(g.Take(5)) && (g[5] == 0xffff || g[5] == 0)) || (g[0] == 0x64 && g[1] == 0xff9b && Zero(g.Skip(2).Take(4))))
+            ? [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255]
+            : null);
+        if (inner != null)
+        {
+            return (inner[0] == 169 && inner[1] == 254) || (inner[0] == 100 && inner[1] == 100 && inner[2] == 100 && inner[3] == 200);
+        }
+        if (g == null)
+        {
+            return false;
+        }
+        if ((g[0] & 0xffc0) == 0xfe80)
+        {
+            return true;
+        }
+        return g[0] == 0xfd00 && g[1] == 0xec2 && Zero(g.Skip(2).Take(5)) && g[7] == 0x254;
+    }
+
+    /// <summary>
+    /// Whether a host, by its name, its address, or any address its name resolves to now, is link-local or a
+    /// metadata service. A name that does not resolve here is let through, since the connection then goes
+    /// nowhere such a check could have stopped.
+    /// </summary>
+    /// <param name="host">The host, a name or an address (an IPv6 one in brackets or not).</param>
+    /// <param name="lookup">Stands in for DNS in tests.</param>
+    public static async Task<bool> MetadataHostAsync(string host, Func<string, Task<IReadOnlyList<string>>>? lookup = null)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        string name = TrailingDots.Replace(Brackets.Replace(Js.Lower(Js.Trim(host)), ""), "");
+        if (MetadataNames.Contains(name) || MetadataAddress(name))
+        {
+            return true;
+        }
+        if (V4(name) != null || V6(name) != null)
+        {
+            return false;
+        }
+        try
+        {
+            return (await (lookup ?? LookupAsync)(name).ConfigureAwait(false)).Any(MetadataAddress);
+        }
+#pragma warning disable CA1031 // A name that does not resolve is let through, as the TypeScript's catch.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// Every address a name resolves to, v4 and v6, as getaddrinfo() would give them (the hosts
     /// file included). Empty when it does not resolve.
