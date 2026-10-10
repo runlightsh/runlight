@@ -38,10 +38,17 @@ public static class RunlightAspNetCoreExtensions
     /// <param name="runlight">The Runlight to serve.</param>
     /// <param name="options">The routes' options, such as BasePath and Token.</param>
     /// <param name="observe">Whether to record the fetches of known AI agents on the app's other pages.</param>
+    /// <exception cref="InvalidOperationException">On a route group, whose prefix the routes would not know of.</exception>
     public static IEndpointConventionBuilder MapRunlight(this IEndpointRouteBuilder endpoints, RunlightInstance runlight, RoutesOptions? options = null, bool observe = true)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentNullException.ThrowIfNull(runlight);
+        if (endpoints is RouteGroupBuilder)
+        {
+            // The routes answer paths under their own base path and write links to it, so under a group's
+            // prefix every page would point at the wrong place.
+            throw new InvalidOperationException("Runlight: MapRunlight cannot go in a route group (MapGroup). Map it on the app and set RoutesOptions.BasePath to the full path, such as \"/admin/runlight\".");
+        }
         options ??= endpoints.ServiceProvider.GetService<RoutesOptions>() ?? new RoutesOptions();
         Routes routes = runlight.Routes(options);
         string @base = Routes.NormaliseBase(options.BasePath ?? "/runlight");
