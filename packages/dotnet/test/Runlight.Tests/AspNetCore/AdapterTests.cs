@@ -185,6 +185,18 @@ public sealed class AdapterTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Mapping_in_a_route_group_is_refused_with_the_way_to_do_it()
+    {
+        var rl = await RunlightAsync();
+        WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseTestServer();
+        await using WebApplication app = builder.Build();
+        var error = Assert.Throws<InvalidOperationException>(() => app.MapGroup("/admin").MapRunlight(rl));
+        Assert.Contains("BasePath", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_request_reaches_kestrel_as_sent_and_a_streamed_answer_goes_out_as_it_is_written()
     {
         WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
