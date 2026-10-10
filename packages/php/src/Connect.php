@@ -154,11 +154,8 @@ final class Connect
     {
         $state = $params->get('state') ?? '';
         $key = "connect:$state";
-        $stored = preg_match('/^[a-f0-9]{32}$/D', $state) ? $runlight->store->setting($key) : null;
-        // Each attempt works once.
-        if ($stored !== null && $stored !== '') {
-            $runlight->store->setSetting($key, null);
-        }
+        // Each attempt works once, even when it comes back twice at once.
+        $stored = preg_match('/^[a-f0-9]{32}$/D', $state) ? $runlight->store->takeSetting($key) : null;
         $pending = $stored !== null && $stored !== '' ? self::pendingFrom($stored, $runlight->now()) : null;
         if ($pending === null) {
             throw new ConnectError('That connection took too long or was already used. Start again.', 'expired');
