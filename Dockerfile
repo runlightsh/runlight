@@ -10,9 +10,15 @@ WORKDIR /src
 COPY . .
 RUN npm ci --no-audit --no-fund && npm run build
 RUN mkdir /pack && npm pack --silent --workspace packages/sdk --workspace packages/server --pack-destination /pack
-# The install the image runs, built here so the compilers stay out of it.
+# The install the image runs, built here so the compilers stay out of it:
+# the two packages as npm packs them, in the workspace layout, installed from
+# the root package-lock.json so the image runs exactly what CI tested.
 WORKDIR /app
-RUN npm install --omit=dev --no-audit --no-fund /pack/*.tgz
+RUN cp /src/package.json /src/package-lock.json . \
+  && mkdir -p packages/sdk packages/server \
+  && tar -xzf /pack/runlight-sdk-*.tgz -C packages/sdk --strip-components=1 \
+  && tar -xzf /pack/runlight.sh-*.tgz -C packages/server --strip-components=1 \
+  && npm ci --omit=dev --workspace packages/server --no-audit --no-fund
 
 FROM node:24-slim
 ENV NODE_ENV=production DATA_DIR=/data PORT=3000 HOST=0.0.0.0
