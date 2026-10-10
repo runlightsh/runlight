@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 use super::transports::{MailConfig, MailError, Message, get, get_or_empty, mail_error};
 use crate::goals::CodedError;
 use crate::js;
+use crate::safefetch::metadata_address;
 
 /// The whole send's limit, in milliseconds.
 pub const DEADLINE_MS: u64 = 60_000;
@@ -235,6 +236,8 @@ struct Session {
     fresh: bool,
     /// The first error a write met, given once the replies before it are read.
     failure: Option<MailError>,
+    /// The server as host:port, to name one that does not answer as a mail server does.
+    place: String,
 }
 
 fn closed() -> MailError {
@@ -298,6 +301,10 @@ impl Session {
 
     async fn expect(&mut self, codes: &[f64], what: &str) -> Result<Reply, MailError> {
         let reply = self.next(REPLY_TIMEOUT).await?;
+        // Something that is not a mail server gets no more than that said, so its own words are never passed on.
+        if !(reply.code >= 200.0 && reply.code <= 599.0) {
+            return Err(mail_error(format!("SMTP {what}: {} did not answer as a mail server does", self.place)));
+        }
         if !codes.contains(&reply.code) {
             return Err(mail_error(js::head16(
                 &format!("SMTP {what}: {} {}", js::format_number(reply.code), reply.text),
@@ -378,6 +385,19 @@ async fn converse(
             &[("host", &place), ("detail", &detail)],
         )
     };
+    // A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+    // address. The check runs on the addresses the connection uses, so a name cannot answer differently later.
+    let refused = || {
+        CodedError::new(
+            format!("SMTP: {host} is a link-local or cloud metadata address, which Runlight never connects to"),
+            "address_refused",
+            &[("host", host)],
+        )
+    };
+    let bare = host.strip_prefix('[').unwrap_or(host);
+    if metadata_address(bare.strip_suffix(']').unwrap_or(bare)) {
+        return Err(refused());
+    }
     // net.connect refuses a port that is not a whole number from 0 to 65535.
     if !(port.fract() == 0.0 && (0.0..=65535.0).contains(&port)) {
         return Err(unreachable(format!(
@@ -388,10 +408,11 @@ async fn converse(
     let port = port as u16;
     let conn = match tokio::time::timeout(REPLY_TIMEOUT, connect(host, port, security == "tls")).await {
         Err(_) => return Err(unreachable("timed out".into())),
-        Ok(Err(detail)) => return Err(unreachable(detail)),
+        Ok(Err(None)) => return Err(refused()),
+        Ok(Err(Some(detail))) => return Err(unreachable(detail)),
         Ok(Ok(conn)) => conn,
     };
-    let mut s = Session { conn: Some(conn), buffer: Vec::new(), lines: Vec::new(), fresh: true, failure: None };
+    let mut s = Session { conn: Some(conn), buffer: Vec::new(), lines: Vec::new(), fresh: true, failure: None, place };
     let result = talk(&mut s, config, m, from, host, security, now, uuid).await;
     if let Some(conn) = s.conn.as_mut() {
         conn.shutdown().await;
@@ -399,20 +420,26 @@ async fn converse(
     result
 }
 
-/// Connects, under TLS from the start for `tls`, with Node's words for what goes wrong.
-async fn connect(host: &str, port: u16, tls: bool) -> Result<Conn, String> {
-    let addresses: Vec<SocketAddr> =
-        tokio::net::lookup_host((host, port)).await.map_err(|_| format!("getaddrinfo ENOTFOUND {host}"))?.collect();
+/// Connects, under TLS from the start for `tls`, with Node's words for what goes wrong. `None` when the name
+/// resolves to a link-local or metadata address, which is never connected to.
+async fn connect(host: &str, port: u16, tls: bool) -> Result<Conn, Option<String>> {
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| Some(format!("getaddrinfo ENOTFOUND {host}")))?
+        .collect();
+    if addresses.iter().any(|a| metadata_address(&a.ip().to_string())) {
+        return Err(None);
+    }
     let mut failure = format!("getaddrinfo ENOTFOUND {host}");
     for address in addresses {
         match TcpStream::connect(address).await {
             Ok(stream) => {
-                return if tls { secure(stream, host).await } else { Ok(Conn::Plain(stream)) };
+                return if tls { secure(stream, host).await.map_err(Some) } else { Ok(Conn::Plain(stream)) };
             }
             Err(e) => failure = node_message(&e, "connect", Some(address)),
         }
     }
-    Err(failure)
+    Err(Some(failure))
 }
 
 #[allow(clippy::too_many_arguments)]

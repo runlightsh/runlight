@@ -12,9 +12,38 @@ use runlight::BoxFuture;
 use runlight::http::{FetchError, FetchInit, Fetcher, Headers, Response};
 use runlight::icon::{Icon, fetch_icon, icon_links};
 use runlight::safefetch::{
-    Lookup, PrivateAddressError, PublicFetchError, PublicFetchInit, public_address, public_addresses, public_fetch,
-    resolves_privately,
+    Lookup, PrivateAddressError, PublicFetchError, PublicFetchInit, metadata_address, metadata_host, public_address,
+    public_addresses, public_fetch, resolves_privately,
 };
+
+#[tokio::test]
+async fn link_local_and_cloud_metadata_addresses_are_told_apart_from_loopback_and_private_ones() {
+    for ip in [
+        "169.254.169.254",
+        "169.254.0.1",
+        "100.100.100.200",
+        "fe80::1",
+        "fe80::a9fe:a9fe",
+        "fd00:ec2::254",
+        "::ffff:169.254.169.254",
+        "::ffff:a9fe:a9fe",
+        "64:ff9b::a9fe:a9fe",
+    ] {
+        assert!(metadata_address(ip), "{ip}");
+    }
+    for ip in
+        ["127.0.0.1", "::1", "10.0.0.5", "192.168.1.20", "fd00::1", "fd00:ec2::253", "93.184.215.14", "not an address"]
+    {
+        assert!(!metadata_address(ip), "{ip}");
+    }
+    assert!(metadata_host("metadata.google.internal", None).await);
+    assert!(metadata_host("[fd00:ec2::254]", None).await);
+    assert!(metadata_host("169.254.169.254", None).await);
+    assert!(!metadata_host("localhost", None).await, "a model on this computer is fine");
+    assert!(!metadata_host("192.168.1.20", None).await);
+    let points_at_metadata: Lookup = Arc::new(|_| Box::pin(async { vec!["169.254.169.254".to_string()] }));
+    assert!(metadata_host("llm.example.com", Some(&points_at_metadata)).await, "a name is judged by its addresses");
+}
 
 type Answer = Box<dyn Fn(&str) -> Result<Response, FetchError> + Send + Sync>;
 

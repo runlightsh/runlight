@@ -605,7 +605,29 @@ async fn smtp_that_hangs_up_or_answers_nonsense_says_so() {
         ("SMTP: the server closed the connection", "mail_failed")
     );
     let error = smtp_send(&cfg, &message(), "reports@example.com", 60_000, NOW, &mut uuids()).await.unwrap_err();
-    assert_eq!(error.message, "SMTP greeting: NaN o there");
+    assert_eq!(error.message, format!("SMTP greeting: 127.0.0.1:{port} did not answer as a mail server does"));
+}
+
+#[tokio::test]
+async fn smtp_never_reaches_a_link_local_or_metadata_address_and_does_not_quote_what_is_not_a_mail_server() {
+    for host in ["169.254.169.254", "[fd00:ec2::254]"] {
+        let cfg = config(obj! { "service" => "smtp", "host" => host, "port" => "25", "security" => "none" });
+        let error = smtp_send(&cfg, &message(), "reports@example.com", 60_000, NOW, &mut uuids()).await.unwrap_err();
+        assert_eq!(error.code, "address_refused", "{host}");
+        assert_eq!(error.params, [("host".to_string(), host.to_string())]);
+    }
+    let listener = listen(5437).await;
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut a, _) = listener.accept().await.unwrap();
+        a.write_all(b"HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n").await.unwrap();
+        let mut chunk = [0u8; 256];
+        let _ = a.read(&mut chunk).await;
+    });
+    let cfg = smtp_config(port, obj! { "security" => "none" });
+    let error = smtp_send(&cfg, &message(), "reports@example.com", 60_000, NOW, &mut uuids()).await.unwrap_err();
+    assert!(error.message.contains("did not answer as a mail server does"), "{}", error.message);
+    assert!(!error.message.contains("internal") && !error.message.contains("HTTP"), "{}", error.message);
 }
 
 #[tokio::test]

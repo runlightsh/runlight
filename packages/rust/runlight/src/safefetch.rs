@@ -232,6 +232,48 @@ pub fn public_address(ip: &str) -> bool {
     true
 }
 
+/// Names clouds give their metadata services.
+const METADATA_NAMES: [&str; 5] =
+    ["metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal"];
+
+/// Whether an address is link-local (169.254.0.0/16, fe80::/10) or a cloud's metadata service (fd00:ec2::254,
+/// Alibaba's 100.100.100.200), in any of its IPv6 spellings. A model's API or a mail server is never there,
+/// though it may well be on this computer or a private network, so those stay allowed where this is checked.
+pub fn metadata_address(ip: &str) -> bool {
+    let four = v4(ip);
+    let g = if four.is_some() { None } else { v6(ip) };
+    // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+    let inner = four.or_else(|| {
+        let g = g?;
+        let mapped = g[..5].iter().all(|x| *x == 0) && (g[5] == 0xffff || g[5] == 0);
+        let nat64 = g[0] == 0x64 && g[1] == 0xff9b && g[2..6].iter().all(|x| *x == 0);
+        (mapped || nat64).then(|| [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255])
+    });
+    if let Some(inner) = inner {
+        return (inner[0] == 169 && inner[1] == 254) || inner == [100, 100, 100, 200];
+    }
+    let Some(g) = g else { return false };
+    if (g[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    g[0] == 0xfd00 && g[1] == 0xec2 && g[2..7].iter().all(|x| *x == 0) && g[7] == 0x254
+}
+
+/// Whether a host, by its name, its address, or any address its name resolves to now, is link-local or a
+/// metadata service. A name that does not resolve here is let through, since the connection then goes nowhere
+/// such a check could have stopped. `with` stands in for DNS in tests.
+pub async fn metadata_host(host: &str, with: Option<&Lookup>) -> bool {
+    let lower = host.trim().to_lowercase();
+    let name = unbracket(&lower).trim_end_matches('.');
+    if METADATA_NAMES.contains(&name) || metadata_address(name) {
+        return true;
+    }
+    if is_literal(name) {
+        return false;
+    }
+    resolve(name, with).await.iter().any(|a| metadata_address(a))
+}
+
 fn is_literal(host: &str) -> bool {
     v4(host).is_some() || v6(host).is_some()
 }
