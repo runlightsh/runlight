@@ -20,6 +20,22 @@ final class SafefetchTest extends TestCase
         return static fn (string $name): array => $names[$name] ?? [];
     }
 
+    public function testLinkLocalAndCloudMetadataAddressesAreToldApartFromLoopbackAndPrivateOnes(): void
+    {
+        foreach (['169.254.169.254', '169.254.0.1', '100.100.100.200', 'fe80::1', 'fe80::a9fe:a9fe', 'fd00:ec2::254', '::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '64:ff9b::a9fe:a9fe'] as $ip) {
+            $this->assertTrue(Safefetch::metadataAddress($ip), $ip);
+        }
+        foreach (['127.0.0.1', '::1', '10.0.0.5', '192.168.1.20', 'fd00::1', 'fd00:ec2::253', '93.184.215.14', 'not an address'] as $ip) {
+            $this->assertFalse(Safefetch::metadataAddress($ip), $ip);
+        }
+        $this->assertTrue(Safefetch::metadataHost('metadata.google.internal'));
+        $this->assertTrue(Safefetch::metadataHost('[fd00:ec2::254]'));
+        $this->assertTrue(Safefetch::metadataHost('169.254.169.254'));
+        $this->assertFalse(Safefetch::metadataHost('localhost'), 'a model on this computer is fine');
+        $this->assertFalse(Safefetch::metadataHost('192.168.1.20'));
+        $this->assertTrue(Safefetch::metadataHost('rebind.example', self::dns(['rebind.example' => ['93.184.215.14', '169.254.169.254']])), 'any address the name resolves to');
+    }
+
     public function testOnlyAddressesOnThePublicInternetCountAsPublic(): void
     {
         foreach (['93.184.215.14', '1.1.1.1', '2606:4700:4700::1111', '2a00:1450:4001:82a::200e'] as $ip) {

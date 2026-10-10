@@ -10,6 +10,7 @@ declare(strict_types=1);
  * relay: answers as the TS tests' relay does (AUTH PLAIN checks jon/pw, no STARTTLS).
  * trickle: sends "220-still here" every 100 ms and never finishes its greeting.
  * refuse: sends "535 no" and closes at once.
+ * http: answers as a web server does, which is not a mail server, and closes.
  */
 
 $mode = $argv[1] ?? 'relay';
@@ -28,6 +29,12 @@ while (true) {
     $received = '';
     if ($mode === 'refuse') {
         fwrite($socket, "535 no\r\n");
+        @fclose($socket);
+        echo json_encode(['received' => '', 'closed' => true]), "\n";
+        continue;
+    }
+    if ($mode === 'http') {
+        fwrite($socket, "HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n");
         @fclose($socket);
         echo json_encode(['received' => '', 'closed' => true]), "\n";
         continue;

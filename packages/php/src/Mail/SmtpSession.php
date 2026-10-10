@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Runlight\Mail;
 
+use Runlight\Safefetch;
+
 /**
  * One SMTP connection for Smtp::send: the socket, the replies read from it
  * (multi-line included, one at a time), and the whole send's deadline, which
@@ -33,6 +35,12 @@ final class SmtpSession
         return new MailError($this->lateMessage, 'mail_slow', ['host' => "{$this->host}:{$this->port}"]);
     }
 
+    /** The server as "host:port", for messages. */
+    public function where(): string
+    {
+        return "{$this->host}:{$this->port}";
+    }
+
     /** Milliseconds left before the deadline. */
     private function left(): float
     {
@@ -41,7 +49,22 @@ final class SmtpSession
 
     public function connect(bool $tls, int $timeoutMs): void
     {
-        $address = str_contains($this->host, ':') ? "[{$this->host}]" : $this->host;
+        // A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+        // address. The check runs on the address the connection uses, so a name cannot answer differently later:
+        // the name is looked up here and the socket goes to what was checked, with TLS still checked against the name.
+        $refused = fn (): MailError => new MailError("SMTP: {$this->host} is a link-local or cloud metadata address, which Runlight never connects to", 'address_refused', ['host' => $this->host]);
+        $bare = (string) preg_replace('/^\[|\]\z/', '', $this->host);
+        if (Safefetch::metadataAddress($bare)) {
+            throw $refused();
+        }
+        $found = Safefetch::lookup($bare);
+        foreach ($found as $one) {
+            if (Safefetch::metadataAddress($one)) {
+                throw $refused();
+            }
+        }
+        $target = $found[0] ?? $bare;
+        $address = str_contains($target, ':') ? "[$target]" : $target;
         $wait = min($timeoutMs, $this->left());
         if ($wait <= 0) {
             throw $this->late();

@@ -9,6 +9,9 @@ use Runlight\Assistant;
 use Runlight\AssistantError;
 use Runlight\Http\Response;
 use Runlight\Json;
+use Runlight\Runlight;
+use Runlight\SettingsError;
+use Runlight\Store\Stores;
 
 /**
  * The assistant against tests/fixtures/assistant.json: for each provider and failure, the very requests the
@@ -103,6 +106,29 @@ final class AssistantTest extends TestCase
             $this->assertSame('The question was cancelled.', $error->getMessage());
         }
         $this->assertSame([], $fetcher->requests);
+    }
+
+    public function testTheAssistantNeverCallsALinkLocalOrCloudMetadataAddressThoughOneOnThisComputerIsFine(): void
+    {
+        $rl = new Runlight(['store' => Stores::sqlite(':memory:'), 'secret' => str_repeat('s', 64)]);
+        $rl->init();
+        foreach (['http://169.254.169.254/latest', 'http://[fd00:ec2::254]/v1', 'http://metadata.google.internal/v1'] as $baseUrl) {
+            try {
+                $rl->saveAssistantSettings(['provider' => 'custom', 'model' => 'm', 'baseUrl' => $baseUrl, 'key' => '']);
+                $this->fail($baseUrl);
+            } catch (SettingsError $error) {
+                $this->assertSame('address_refused', $error->code, $baseUrl);
+            }
+        }
+        $rl->saveAssistantSettings(['provider' => 'ollama', 'model' => 'llama3', 'baseUrl' => '', 'key' => '']);
+        $fetcher = new RecordingFetcher([]);
+        try {
+            Assistant::listModels(['provider' => 'custom', 'baseUrl' => 'http://169.254.169.254/v1', 'key' => ''], $fetcher);
+            $this->fail('listModels');
+        } catch (AssistantError $error) {
+            $this->assertSame('address_refused', $error->code);
+        }
+        $this->assertSame([], $fetcher->requests, 'nothing was sent');
     }
 
     public function testModelsAreListedWithinTwentySeconds(): void
