@@ -389,6 +389,12 @@ public static class Mcp
         }
     }
 
+    /// <summary>The most messages one batch may hold.</summary>
+    public const int MaxBatch = 20;
+
+    /// <summary>How many messages of a batch run at once.</summary>
+    private const int BatchAtOnce = 4;
+
     /// <summary>Answers one POST to the MCP endpoint, already authorised.</summary>
     public static async Task<Response> McpResponseAsync(Request request, ApiRead readApi)
     {
@@ -397,16 +403,23 @@ public static class Mcp
         {
             return new Response(Json.Stringify(RpcError(null, -32700, "Send a JSON-RPC message")), 400, JsonHeaders());
         }
-        // Batches were in the 2025-03-26 protocol; answering them costs nothing.
+        // Batches were in the 2025-03-26 protocol. A few messages run at a time, from a short list, so one
+        // request cannot start hundreds of reports at once.
         if (body is List<object?> batch)
         {
-            var answers = new List<object?>();
-            foreach (object? message in batch)
+            if (batch.Count > MaxBatch)
             {
-                var one = await AnswerAsync(message, readApi).ConfigureAwait(false);
-                if (one != null)
+                return new Response(Json.Stringify(RpcError(null, -32600, "Send at most " + Js.Str(MaxBatch) + " messages in a batch")), 400, JsonHeaders());
+            }
+            var answers = new List<object?>();
+            foreach (var chunk in batch.Chunk(BatchAtOnce))
+            {
+                foreach (var one in await Task.WhenAll(chunk.Select(message => AnswerAsync(message, readApi))).ConfigureAwait(false))
                 {
-                    answers.Add(one);
+                    if (one != null)
+                    {
+                        answers.Add(one);
+                    }
                 }
             }
             return answers.Count > 0 ? new Response(Json.Stringify(answers), 200, JsonHeaders()) : new Response("", 202);
