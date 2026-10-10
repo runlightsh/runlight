@@ -211,7 +211,7 @@ defmodule Runlight.Test.Conformance do
 
     Runlight.idle(rl)
     sent_out = Agent.get(fetched, & &1)
-    outbound = Enum.map(sent_out, &normalize(&1.seen))
+    outbound = sent_out |> Enum.map(&normalize(&1.seen)) |> in_sent_order(step)
 
     if answer == nil do
       out = JS.obj(pass: true)
@@ -313,6 +313,18 @@ defmodule Runlight.Test.Conformance do
       out = if outbound != [], do: Object.put(out, "fetched", outbound), else: out
       {out, kept, jars}
     end
+  end
+
+  # The sites list asks every connected install at once, as the SDK's Promise.all does, so here their requests
+  # can reach the stand-in servers in either order. When they are exactly the expected ones, they count in the
+  # order the SDK starts them.
+  defp in_sent_order(outbound, step) do
+    expected = Object.get(step["expect"] || Object.new(), "fetched")
+
+    if is_list(expected) and Regex.match?(~r/\A\/api\/sites(\?|\z)/, step["path"] || "") and
+         Enum.sort(outbound) == Enum.sort(expected),
+       do: expected,
+       else: outbound
   end
 
   defp put_new(headers, name, value),
