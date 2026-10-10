@@ -188,6 +188,28 @@ def test_two_factor_codes_work_once_and_recovery_codes_are_crossed_off(databases
     assert accounts.confirm_two_factor(user["id"], totp(secret, step), NOW) is None, "a cancelled set-up confirms nothing"
 
 
+def test_a_throttle_in_memory_keeps_its_counts_out_of_the_database(databases):
+    store = fresh(databases, "sqlite")
+    # Counts left in the settings by an earlier version are deleted on first use.
+    store.set_setting("throttle:address:old", '{"count":3,"until":9999999999999}')
+    throttle = Throttle(store, "address", 3, 1000, memory=True)
+    pair = "jon@example.com\n203.0.113.9"
+    for _ in range(3):
+        assert throttle.take(pair, NOW) is True
+    assert throttle.take(pair, NOW) is False
+    assert throttle.blocked(pair, NOW) is True
+    assert throttle.blocked(pair, NOW + 1000) is False, "a window ends"
+    throttle.forgive(pair)
+    assert throttle.blocked(pair, NOW) is False
+    throttle.fail(pair, NOW)
+    assert throttle.blocked(pair, NOW) is True
+    throttle.clear(pair)
+    assert throttle.blocked(pair, NOW) is False
+    assert store.settings_starting_with("throttle:address:") == []
+    assert store.setting("throttle-key") is None, "no hashing key is kept for it either"
+    assert Throttle(store, "address", 3, 1000, memory=True).blocked(pair, NOW) is False, "each process counts its own"
+
+
 @pytest.mark.parametrize("kind", kinds())
 def test_the_throttle_lets_a_burst_through_no_further_than_its_limit(databases, kind):
     store = fresh(databases, kind)
