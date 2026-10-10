@@ -1427,14 +1427,14 @@ final class Routes
                     if (count($existing) >= 50) {
                         return self::coded('A site can send to at most 50 addresses', 'report_limit', 400);
                     }
-                    // Links in the email point back to the configured address, or else to this dashboard as the
-                    // browser sees it. A report made from a hub needs the configured address, where its unsubscribe
-                    // link answers, since the Host its request names is the hub's to choose.
+                    // Links in the email point back to the configured address, or else to this dashboard at the address
+                    // the request came to. An address in the body is never used, so whoever adds a report cannot point
+                    // its links somewhere else. A report made from a hub needs the configured address, where its
+                    // unsubscribe link answers, since the Host its request names is the hub's to choose.
                     if (isset($this->managed[$request]) && $this->origin === null) {
                         return self::originNeeded();
                     }
-                    $given = $this->origin !== null ? '' : self::text($body, 'origin');
-                    $home = preg_match('#^https?://[^' . Js::SPACE . ']+\z#u', Js::scrub($given)) ? (string) preg_replace('#/+\z#', '', $given) : ($this->origin ?? $url->origin()) . $this->base;
+                    $home = ($this->origin ?? $url->origin()) . $this->base;
                     // A period already due counts as sent, so a report added mid-week first goes out on the next Monday, as the form says.
                     $now = $this->rl->now();
                     $due = Reports::lastPeriod($frequency, $now, $site['timezone']);
