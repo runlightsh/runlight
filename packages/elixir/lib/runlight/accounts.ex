@@ -49,13 +49,16 @@ defmodule Runlight.Accounts do
   # A stored role read back; anything unknown reads as a viewer, the least it could be.
   defp role_from(value), do: if(value in @roles, do: value, else: "viewer")
 
+  # Whether a role may invite people. The owner and admins invite as admin, member, or viewer.
+  defp may_invite?(role), do: role in ["owner", "admin"]
+
   defp db(acc), do: acc.store.db
   defp all(acc, sql, params \\ []), do: Db.all(db(acc), sql, params)
   defp run(acc, sql, params \\ []), do: Db.run(db(acc), sql, params)
   defp first(acc, sql, params), do: acc |> all(sql, params) |> List.first()
   defp dialect(acc), do: Db.dialect(db(acc))
 
-  @dialyzer {:nowarn_function, refuse: 2}
+  @dialyzer {:nowarn_function, refuse: 2, invite_gone: 0}
   defp refuse(message, code, params \\ []), do: raise(AccountError, message: message, code: code, params: params)
 
   # Changes to who has an account take turns, in this process and, on Postgres and MySQL, across processes, so two
@@ -395,6 +398,8 @@ defmodule Runlight.Accounts do
 
       if role == "owner", do: refuse("Ownership is handed over by the owner", "owner_hand_over")
       run(acc, "UPDATE rl_users SET role = ? WHERE id = ?", [role, id])
+      # Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+      unless may_invite?(role), do: run(acc, "DELETE FROM rl_invites WHERE invited_by = ?", [user["email"]])
       Object.put(user, "role", role)
     end)
   end
@@ -427,6 +432,7 @@ defmodule Runlight.Accounts do
       user = Enum.find(list(acc), &(&1["id"] == id)) || refuse("Unknown account", "unknown_account")
       if user["role"] == "owner", do: refuse("The owner cannot be removed", "owner_protected")
       run(acc, "DELETE FROM rl_users WHERE id = ?", [id])
+      run(acc, "DELETE FROM rl_invites WHERE invited_by = ?", [user["email"]])
       Store.set_setting(acc.store, "login-link-used:#{id}", nil)
       :ok
     end)
@@ -558,18 +564,33 @@ defmodule Runlight.Accounts do
     before > 0
   end
 
-  @doc "Turns an invite into an account with the password its person chose. The link then stops working."
+  defp invite_gone, do: refuse("This invite has expired or was already used. Ask for a new one.", "invite_gone")
+
+  @doc """
+  Turns an invite into an account with the password its person chose. The link
+  then stops working. It takes a turn, so it cannot cross a removal of whoever
+  sent it, and the sender must still be someone who may invite.
+  """
   def accept_invite(acc, code, password, now) do
-    invite =
-      invite_by_code(acc, code, now) ||
-        refuse("This invite has expired or was already used. Ask for a new one.", "invite_gone")
+    # The tables first: making them takes the same lock as a turn.
+    init(acc)
 
-    if by_email(acc, invite["email"]),
-      do: refuse("#{invite["email"]} already has an account", "account_exists", email: invite["email"])
+    turn(acc, fn ->
+      invite = invite_by_code(acc, code, now) || invite_gone()
+      sender = by_email(acc, invite["invitedBy"])
 
-    user = set_password(acc, invite["email"], password, now, invite["role"])
-    run(acc, "DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
-    user
+      if sender == nil or not may_invite?(sender["role"]) do
+        run(acc, "DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+        invite_gone()
+      end
+
+      if by_email(acc, invite["email"]),
+        do: refuse("#{invite["email"]} already has an account", "account_exists", email: invite["email"])
+
+      user = set_password(acc, invite["email"], password, now, invite["role"])
+      run(acc, "DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
+      user
+    end)
   end
 
   @doc "The account for an email and password, or nil. Takes the same time either way."
