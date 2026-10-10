@@ -404,11 +404,11 @@ final class WebTest extends TestCase
         $this->assertNotNull($accounts->byEmail('jon@example.com'));
     }
 
-    public function testABrokenSessionCookieThrowsAsDecodeURIComponentDoes(): void
+    public function testASessionCookieThatIsNotValidPercentEncodingReadsAsSignedOut(): void
     {
         $web = $this->web();
-        $this->expectException(\InvalidArgumentException::class);
-        $web->signedIn(self::req('/', 'GET', ['cookie' => 'runlight_session=%E0%A4%A']));
+        $this->assertNull($web->signedIn(self::req('/', 'GET', ['cookie' => 'runlight_session=%E0%A4%A'])));
+        $this->assertNull($web->signedIn(self::req('/', 'GET', ['cookie' => 'runlight_session=%'])));
     }
 
     public function testTheSessionCookieIsReadAmongOthers(): void
