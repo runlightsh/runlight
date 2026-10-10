@@ -17,7 +17,10 @@ public sealed class BodyTests : IAsyncLifetime
     private Task? _loop;
     private int _port;
 
-    /// <summary>A small HTTP/1.1 server: /bytes?n= answers n bytes of "a" as HTML, anything else its Host header.</summary>
+    /// <summary>
+    /// A small HTTP/1.1 server: /bytes?n= answers n bytes of "a" as HTML, /redirect?to= sends the client to
+    /// that address, /who answers the Authorization and Cookie headers it got, and anything else its Host header.
+    /// </summary>
     public ValueTask InitializeAsync()
     {
         _server = new TcpListener(IPAddress.Loopback, 0);
@@ -57,10 +60,20 @@ public sealed class BodyTests : IAsyncLifetime
                 }
                 string[] lines = head.ToString().Split("\r\n");
                 string target = lines[0].Split(' ')[1];
-                string host = lines.Skip(1).Select(l => l.Split(':', 2)).Where(p => p.Length == 2 && p[0].Trim().Equals("host", StringComparison.OrdinalIgnoreCase)).Select(p => p[1].Trim()).FirstOrDefault() ?? "";
+                string Header(string name) => lines.Skip(1).Select(l => l.Split(':', 2)).Where(p => p.Length == 2 && p[0].Trim().Equals(name, StringComparison.OrdinalIgnoreCase)).Select(p => p[1].Trim()).FirstOrDefault() ?? "";
+                string host = Header("host");
                 byte[] body;
                 string type = "text/plain";
-                if (target.StartsWith("/bytes?n=", StringComparison.Ordinal))
+                if (target.StartsWith("/redirect?to=", StringComparison.Ordinal))
+                {
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 302 Found\r\nLocation: " + Uri.UnescapeDataString(target["/redirect?to=".Length..]) + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+                    return;
+                }
+                if (target == "/who")
+                {
+                    body = Encoding.ASCII.GetBytes("authorization=" + Header("authorization") + " cookie=" + Header("cookie"));
+                }
+                else if (target.StartsWith("/bytes?n=", StringComparison.Ordinal))
                 {
                     body = Encoding.ASCII.GetBytes(new string('a', int.Parse(target["/bytes?n=".Length..], CultureInfo.InvariantCulture)));
                     type = "text/html; charset=utf-8";
@@ -131,5 +144,19 @@ public sealed class BodyTests : IAsyncLifetime
         using var fetcher = new HttpClientFetcher();
         var answer = await fetcher.FetchAsync($"http://pinned.invalid:{_port}/", new FetchInit { Resolve = [$"pinned.invalid:{_port}:127.0.0.1,[::1]"] });
         Assert.Equal($"host pinned.invalid:{_port}", await answer.TextAsync());
+    }
+
+    [Fact]
+    public async Task A_redirect_to_another_origin_drops_credentials_and_one_to_plain_http_is_refused()
+    {
+        using var fetcher = new HttpClientFetcher();
+        var headers = new Headers { ["authorization"] = "Bearer secret", ["cookie"] = "a=b" };
+        string same = $"http://127.0.0.1:{_port}/redirect?to=" + Uri.EscapeDataString($"http://127.0.0.1:{_port}/who");
+        Assert.Equal("authorization=Bearer secret cookie=a=b", await (await fetcher.FetchAsync(same, new FetchInit { Headers = headers })).TextAsync());
+        string other = $"http://127.0.0.1:{_port}/redirect?to=" + Uri.EscapeDataString($"http://localhost:{_port}/who");
+        Assert.Equal("authorization= cookie=", await (await fetcher.FetchAsync(other, new FetchInit { Headers = headers })).TextAsync());
+        // Once dropped, they stay dropped, even when a later hop comes back.
+        string back = $"http://127.0.0.1:{_port}/redirect?to=" + Uri.EscapeDataString($"http://localhost:{_port}/redirect?to=" + Uri.EscapeDataString($"http://127.0.0.1:{_port}/who"));
+        Assert.Equal("authorization= cookie=", await (await fetcher.FetchAsync(back, new FetchInit { Headers = headers })).TextAsync());
     }
 }

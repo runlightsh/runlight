@@ -17,6 +17,12 @@ namespace Runlight.Http;
 public sealed class HttpClientFetcher : IFetcher, IDisposable
 {
     private static readonly HttpRequestOptionsKey<List<string>> PinsKey = new("runlight.resolve");
+    /// <summary>Headers that carry who is asking, which only go to the origin they were meant for, as fetch() drops them.</summary>
+    private static readonly string[] Credentials = ["authorization", "cookie", "proxy-authorization"];
+
+    /// <summary>Headers that describe a body, dropped with it when a redirect turns a request into a GET.</summary>
+    private static readonly string[] BodyHeaders = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
+
     private readonly HttpClient _client;
     private readonly HttpClient _direct;
 
@@ -125,6 +131,7 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
         string method = init.Method.ToUpperInvariant();
         string current = url;
         byte[]? body = init.Body;
+        var dropped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             for (int hop = 0; ; hop++)
@@ -146,6 +153,10 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                 }
                 foreach (var e in init.Headers.All())
                 {
+                    if (dropped.Contains(e.Key))
+                    {
+                        continue;
+                    }
                     foreach (string v in e.Value)
                     {
                         if (!message.Headers.TryAddWithoutValidation(e.Key, v))
@@ -163,11 +174,22 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                     {
                         throw new FetchException("fetch failed: redirect count exceeded");
                     }
-                    current = new Uri(new Uri(current), answer.Headers.Location).AbsoluteUri;
+                    var from = new Uri(current);
+                    var to = new Uri(from, answer.Headers.Location);
+                    if (from.Scheme == "https" && to.Scheme == "http")
+                    {
+                        throw new FetchException("fetch failed: redirect from https to http");
+                    }
+                    if (!SameOrigin(from, to))
+                    {
+                        dropped.UnionWith(Credentials);
+                    }
+                    current = to.AbsoluteUri;
                     if (status == 303 || ((status == 301 || status == 302) && method == "POST"))
                     {
                         method = method == "HEAD" ? "HEAD" : "GET";
                         body = null;
+                        dropped.UnionWith(BodyHeaders);
                     }
                     continue;
                 }
@@ -203,6 +225,9 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
             throw new FetchException("fetch failed", false, e);
         }
     }
+
+    private static bool SameOrigin(Uri a, Uri b) =>
+        a.Scheme == b.Scheme && string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase) && a.Port == b.Port;
 
     private static async Task<byte[]> ReadAsync(HttpResponseMessage answer, FetchInit init, CancellationToken cancellationToken)
     {
