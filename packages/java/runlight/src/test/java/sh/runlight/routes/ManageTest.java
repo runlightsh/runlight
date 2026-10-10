@@ -321,7 +321,10 @@ class ManageTest {
                 .get("secret");
     Object first =
         body(call.call(
-                "POST", "/api/reports?site=blog", manage, Json.object("email", "a@example.com")))
+                "POST",
+                "/api/reports?site=blog",
+                manage,
+                Json.object("email", "a@example.com", "origin", "https://evil.example/phish")))
             .get("report");
     Object second =
         body(call.call(
