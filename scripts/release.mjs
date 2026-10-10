@@ -390,6 +390,15 @@ function remoteProblem(branch, tag) {
   return null;
 }
 
+/**
+ * The untracked files (paths from the repository's root) under any of the
+ * folders the release regenerates: new assets a release commit made with
+ * `git add -u` would leave behind.
+ */
+export function untrackedGenerated(untracked, folders) {
+  return untracked.filter((file) => folders.some((folder) => file.startsWith(`${folder.replace(/\/$/, "")}/`)));
+}
+
 /** Whether PHP, which builds the WordPress plugin's zip, is on the PATH with the zip extension. */
 function hasPhpZip() {
   return spawnSync("php", ["-r", "exit(class_exists('ZipArchive') ? 0 : 1);"], { cwd: ROOT, encoding: "utf8" }).status === 0;
@@ -502,7 +511,12 @@ function main() {
   } else {
     for (const [file, { after }] of edits) writeFileSync(path.join(ROOT, file), after);
     for (const [label, cmd, args, opts = {}] of steps) run(label, cmd, args, opts);
-    const untracked = git("status", "--porcelain").split("\n").filter((line) => line.startsWith("??"));
+    const untracked = git("status", "--porcelain", "--untracked-files=all").split("\n").filter((line) => line.startsWith("??")).map((line) => line.slice(3));
+    const generated = steps.filter(([label]) => label.startsWith("Write ")).map(([label]) => label.slice("Write ".length));
+    const missing = untrackedGenerated(untracked, generated);
+    if (missing.length > 0) {
+      fail(`the steps wrote new files under the folders they regenerate, which \`git add -u\` would leave out of the release:\n  ${missing.join("\n  ")}\nNothing is committed. Drop the bump (\`git restore .\`, then delete those files), commit the new assets in a change of their own (npm run <language>-assets), push it, and release again.`);
+    }
     if (untracked.length > 0) console.log(`\nLeft out of the commit (untracked):\n${untracked.join("\n")}`);
     git("add", "-u");
     execFileSync("git", ["commit", "-m", `Release ${next}`], { cwd: ROOT, stdio: "inherit" });
