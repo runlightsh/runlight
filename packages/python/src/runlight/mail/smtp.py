@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import _js
+from ..safefetch import metadata_address
 from .transports import MailError
 
 # Each reply must come within this long.
@@ -105,6 +106,21 @@ def _node_message(error: OSError, host: str, port: int) -> str:
     return str(error)
 
 
+def _connect_to(found: list[Any], wait: float) -> socket.socket:
+    """Connects to the first of the addresses looked up that answers, as create_connection() would."""
+    last: OSError | None = None
+    for family, kind, proto, _name, address in found:
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(wait)
+            sock.connect(address)
+            return sock
+        except OSError as error:
+            sock.close()
+            last = error
+    raise last or OSError("getaddrinfo returned no addresses")
+
+
 class _Session:
     """One SMTP connection: the socket, the replies read from it (multi-line included, one at a time), and the
     whole send's deadline, which every wait is held to."""
@@ -130,8 +146,19 @@ class _Session:
         wait = min(timeout_ms / 1000, self.left())
         if wait <= 0:
             raise self.late()
+        # A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+        # address. The check runs on the addresses the connection uses, so a name cannot answer differently later.
+        refused = MailError(
+            f"SMTP: {self.host} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", {"host": self.host}
+        )
+        bare = re.sub(r"^\[|\]\Z", "", self.host)
+        if metadata_address(bare):
+            raise refused
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=wait)
+            found = socket.getaddrinfo(bare, self.port, type=socket.SOCK_STREAM)
+            if any(metadata_address(str(info[4][0]).split("%")[0]) for info in found):
+                raise refused
+            sock = _connect_to(found, wait)
             if tls:
                 sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
         except OSError as error:
@@ -260,6 +287,9 @@ def _converse(s: _Session, config: dict[str, Any], m: dict[str, Any], from_: str
     def expect(codes: list[int], what: str) -> dict[str, Any]:
         reply = s.next(REPLY_TIMEOUT_MS)
         assert reply is not None
+        # Something that is not a mail server gets no more than that said, so its own words are never passed on.
+        if not (200 <= reply["code"] <= 599):
+            raise MailError(f"SMTP {what}: {s.host}:{s.port} did not answer as a mail server does")
         if reply["code"] not in codes:
             raise MailError(_js.cut(f"SMTP {what}: {_js.number_text(reply['code'])} {reply['text']}", 300))
         return reply

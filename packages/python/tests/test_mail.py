@@ -262,6 +262,38 @@ def test_smtp_server_that_trickles_is_cut_off_at_the_deadline():
         server.stop()
 
 
+def test_smtp_never_a_link_local_or_metadata_address_and_something_that_is_not_a_mail_server_is_not_quoted(databases):
+    from runlight import Runlight
+    from runlight.store import Stores
+
+    for host in ["169.254.169.254", "[fd00:ec2::254]"]:
+        with pytest.raises(MailError) as caught:
+            smtp_send({"service": "smtp", "host": host, "port": "25", "security": "none"}, MESSAGE, "reports@example.com")
+        assert caught.value.code == "address_refused", host
+    rl = Runlight({"store": Stores.from_db(databases.db("sqlite")), "secret": "s" * 64})
+    with pytest.raises(MailError) as caught:
+        rl.save_mail_settings({"service": "smtp", "host": "metadata.google.internal", "port": "587", "security": "starttls", "from": "a@example.com"})
+    assert caught.value.code == "address_refused"
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def answer() -> None:
+        conn, _ = listener.accept()
+        conn.sendall(b"HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n")
+        conn.close()
+
+    threading.Thread(target=answer, daemon=True).start()
+    try:
+        with pytest.raises(MailError) as caught:
+            smtp_send({"service": "smtp", "host": "127.0.0.1", "port": str(listener.getsockname()[1]), "security": "none"}, MESSAGE, "reports@example.com")
+        assert re.search("did not answer as a mail server does", caught.value.message)
+        assert not re.search("internal|HTTP", caught.value.message)
+    finally:
+        listener.close()
+
+
 def test_smtp_that_cannot_connect_says_so():
     # A port that was free a moment ago.
     probe = socket.socket()

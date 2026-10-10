@@ -80,6 +80,22 @@ def test_acknowledgements_match() -> None:
         assert acknowledgement(case["text"], case["language"]) == case["reply"], _js.dumps([case["text"], case["language"]])
 
 
+def test_the_assistant_never_calls_a_link_local_or_cloud_metadata_address_though_one_on_this_computer_is_fine(databases):
+    from runlight import Runlight
+    from runlight.store import Stores
+
+    rl = Runlight({"store": Stores.from_db(databases.db("sqlite")), "secret": "s" * 64})
+    rl.init()
+    for base_url in ["http://169.254.169.254/latest", "http://[fd00:ec2::254]/v1", "http://metadata.google.internal/v1"]:
+        with pytest.raises(Exception) as caught:
+            rl.save_assistant_settings({"provider": "custom", "model": "m", "baseUrl": base_url, "key": ""})
+        assert getattr(caught.value, "code", None) == "address_refused", base_url
+    rl.save_assistant_settings({"provider": "ollama", "model": "llama3", "baseUrl": "", "key": ""})
+    with pytest.raises(AssistantError) as refused:
+        list_models({"provider": "custom", "baseUrl": "http://169.254.169.254/v1", "key": ""})
+    assert refused.value.code == "address_refused"
+
+
 def test_thanks_gets_a_short_reply_without_the_model_or_the_tools() -> None:
     for text in ["Thanks!", "thank you", "Thanks!! 🙏", "ok", "Great, thanks.", "👍", "merci beaucoup", "Danke schön!", "valeu"]:
         assert acknowledgement(text, "en") is not None, text

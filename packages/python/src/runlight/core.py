@@ -48,7 +48,7 @@ from typing import Any
 from . import _js
 from .env import env_value
 from .http import BodyTooLong, Fetcher, Request, Response, Url, UrllibFetcher
-from .safefetch import install_address, install_fetch, public_address
+from .safefetch import install_address, install_fetch, metadata_host, public_address
 
 # A path on every link domain that answers when the domain reaches this Runlight.
 LINK_DOMAIN_CHECK = "/.well-known/runlight-link-domain"
@@ -290,6 +290,12 @@ class Runlight:
         from_name = _js.slice16(_js.trim(_js.string(_or(input.get("fromName"), ""))), 0, 80)
         config = {**settings, "from": sender, **({"fromName": from_name} if from_name else {})}
         check_config(config)
+        if config.get("service") == "smtp" and config.get("host") and metadata_host(config["host"]):
+            raise MailError(
+                f"{config['host']} is a link-local or cloud metadata address, which Runlight never connects to",
+                "address_refused",
+                {"host": config["host"]},
+            )
         self.store.set_setting("mail", seal(_js.dumps(config), self.secret))
 
     def send_mail(self, message: Mapping[str, Any]) -> None:
@@ -828,6 +834,12 @@ class Runlight:
             parsed = Url.parse(base_url)
             if parsed is None or parsed.protocol not in ("https:", "http:"):
                 raise SettingsError("Enter the service's address, starting with https://", "assistant_address_bad")
+            if metadata_host(parsed.hostname):
+                raise SettingsError(
+                    f"{parsed.hostname} is a link-local or cloud metadata address, which Runlight never connects to",
+                    "address_refused",
+                    {"host": parsed.hostname},
+                )
         if not base_url and not provider.get("baseUrl"):
             raise SettingsError("Enter the service's address", "assistant_address")
         model = _js.slice16(_js.trim(_js.string(_or(input.get("model"), ""))), 0, 200)
