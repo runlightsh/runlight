@@ -272,8 +272,14 @@ class ServletTest {
     assertEquals("app /about", RawHttp.get(port, "/about", "User-Agent", GPTBOT).text());
     RawHttp.get(port, "/contact", "User-Agent", CHROME);
     RawHttp.get(port, "/style.css", "User-Agent", GPTBOT);
-    List<Map<String, Object>> fetches =
-        rl.store.db().all("SELECT path, name FROM rl_events WHERE kind = 'fetch'");
+    // The fetch is recorded once the answer has gone, so it may land a moment after.
+    List<Map<String, Object>> fetches = List.of();
+    for (int i = 0; i < 200 && fetches.isEmpty(); i++) {
+      if (i > 0) {
+        Thread.sleep(50);
+      }
+      fetches = rl.store.db().all("SELECT path, name FROM rl_events WHERE kind = 'fetch'");
+    }
     assertEquals(1, fetches.size(), fetches.toString());
     assertEquals("/about", fetches.get(0).get("path"));
   }
