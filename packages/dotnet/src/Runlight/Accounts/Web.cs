@@ -200,7 +200,8 @@ public sealed class Web
     /// <summary>
     /// Only a path on this install, so a sign-in can never send someone elsewhere. Browsers drop tabs and
     /// newlines from a URL and read a backslash as a slash, so "/\t/evil.example" would leave; anything with
-    /// those is refused outright, and what is left must resolve to this origin.
+    /// those is refused outright, and what is left must resolve to this origin. A path that resolves to one
+    /// starting "//", as "/..//evil.example" does, would leave from the Location header, so that goes home too.
     /// </summary>
     public string SafeNext(string? value)
     {
@@ -209,11 +210,15 @@ public sealed class Web
             return _homePath;
         }
         var url = Url.Parse(value, "http://runlight.invalid");
-        return url != null && url.Origin == "http://runlight.invalid" ? url.Pathname + url.Search + url.Hash : _homePath;
+        if (url == null || url.Origin != "http://runlight.invalid")
+        {
+            return _homePath;
+        }
+        string path = url.Pathname + url.Search + url.Hash;
+        return path.StartsWith("//", StringComparison.Ordinal) || path.StartsWith("/\\", StringComparison.Ordinal) ? _homePath : path;
     }
 
     /// <summary>The signed-in user, or null.</summary>
-    /// <exception cref="ArgumentException">for a session cookie decodeURIComponent cannot read, as it throws a URIError in TypeScript</exception>
     public async Task<JsObject?> SignedInAsync(Request request, CancellationToken cancellationToken = default)
     {
         string value = ReadCookie(request, Accounts.SessionCookie);
