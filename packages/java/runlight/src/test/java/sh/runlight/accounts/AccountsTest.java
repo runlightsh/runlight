@@ -11,6 +11,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -319,5 +324,36 @@ class AccountsTest {
     // A new entry clears expired ones.
     throttle.fail("zed@example.com", NOW + 2000);
     assertEquals(1, store.settingsStartingWith("throttle:test:").size());
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void aBurstOfTriesAtOnceGetsNoMoreThanTheLimit(String kind) throws Exception {
+    SqlStore store = store(kind);
+    int tries = 40;
+    CountDownLatch start = new CountDownLatch(1);
+    AtomicInteger let = new AtomicInteger();
+    List<Future<?>> done = new ArrayList<>();
+    try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (int i = 0; i < tries; i++) {
+        // Each request makes its own throttle, as the server's handlers share only the store.
+        Throttle throttle = new Throttle(store, "burst", 5, 60_000);
+        done.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  if (throttle.take("jon@example.com", NOW)) {
+                    let.incrementAndGet();
+                  }
+                  return null;
+                }));
+      }
+      start.countDown();
+      for (Future<?> one : done) {
+        one.get();
+      }
+    }
+    assertEquals(5, let.get());
+    assertTrue(new Throttle(store, "burst", 5, 60_000).blocked("jon@example.com", NOW));
   }
 }

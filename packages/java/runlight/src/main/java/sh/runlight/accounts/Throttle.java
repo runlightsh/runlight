@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
@@ -17,9 +19,22 @@ import sh.runlight.store.SqlStore;
  * PHP port keeps them, "throttle:&lt;name&gt;:&lt;id&gt;" holding {count, until}, and the hashing
  * key as "throttle-key". Every process of an install, in any of the ports, then shares the same
  * counts.
+ *
+ * <p>Reading a count and writing it back take turns, so a burst of tries at once cannot each read
+ * the same count and all get past the limit: within a process through a lock per key, and across
+ * processes through the database's lock.
  */
 public final class Throttle {
   private static final String KEY = "throttle-key";
+
+  /** Locks shared by every throttle in the process, a key taking the one its hash picks. */
+  private static final ReentrantLock[] STRIPES = new ReentrantLock[64];
+
+  static {
+    for (int i = 0; i < STRIPES.length; i++) {
+      STRIPES[i] = new ReentrantLock();
+    }
+  }
 
   private final SqlStore store;
   private final String name;
@@ -47,9 +62,30 @@ public final class Throttle {
     if (saved != null && !saved.isEmpty()) {
       return saved;
     }
-    String made = Hash.randomId(16);
-    store.setSetting(KEY, made);
-    return made;
+    // Made once: two processes making their own at once would count the same key apart.
+    return store
+        .db()
+        .exclusive(
+            db -> {
+              String again = store.setting(KEY);
+              if (again != null && !again.isEmpty()) {
+                return again;
+              }
+              String made = Hash.randomId(16);
+              store.setSetting(KEY, made);
+              return made;
+            });
+  }
+
+  /** Runs fn while no other try under the same id, in this process or another, reads or counts. */
+  private <T> T turn(String id, Supplier<T> fn) {
+    ReentrantLock lock = STRIPES[Math.floorMod((name + ":" + id).hashCode(), STRIPES.length)];
+    lock.lock();
+    try {
+      return store.db().exclusive(db -> fn.get());
+    } finally {
+      lock.unlock();
+    }
   }
 
   private String id(String key) {
@@ -95,24 +131,39 @@ public final class Throttle {
    */
   public boolean take(String key, long now) {
     String id = id(key);
-    if (isBlocked(id, now)) {
-      return false;
-    }
-    count(id, now);
-    return true;
+    return turn(
+        id,
+        () -> {
+          if (isBlocked(id, now)) {
+            return false;
+          }
+          count(id, now);
+          return true;
+        });
   }
 
   /** Takes back one counted try, for one that turned out right. */
   public void forgive(String key) {
     String id = id(key);
-    long[] entry = entry(id);
-    if (entry != null && entry[0] > 0) {
-      save(id, entry[0] - 1, entry[1]);
-    }
+    turn(
+        id,
+        () -> {
+          long[] entry = entry(id);
+          if (entry != null && entry[0] > 0) {
+            save(id, entry[0] - 1, entry[1]);
+          }
+          return null;
+        });
   }
 
   public void fail(String key, long now) {
-    count(id(key), now);
+    String id = id(key);
+    turn(
+        id,
+        () -> {
+          count(id, now);
+          return null;
+        });
   }
 
   private void count(String id, long now) {
