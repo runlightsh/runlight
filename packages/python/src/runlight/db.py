@@ -5,8 +5,9 @@ connection what the TypeScript drivers do (stores/sqlite.ts, stores/postgres.ts,
 connection is opened on first use, so a request that reads nothing never connects.
 
 SQLite keeps one connection, shared by every thread under a lock, as better-sqlite3 has one. Postgres and
-MySQL open one connection per thread, as a pool hands each request its own, so a WSGI server's threads never
-wait on each other's statements.
+MySQL keep a pool of up to ten connections, as pg and mysql2 do: each statement borrows one and gives it back,
+and a transaction or a lock keeps one on its thread until it ends, so a WSGI server's threads share a few
+connections rather than each opening its own.
 """
 
 from __future__ import annotations
@@ -94,10 +95,22 @@ def _param(value: Any) -> Any:
     return value
 
 
+# How long a statement waits for a connection from a busy pool, in seconds, as the TypeScript pools wait.
+POOL_WAIT = 10.0
+
+
 class _Local(threading.local):
+    # The connection a transaction or a lock holds on this thread, and whether it was left unfit for the pool.
     conn: Any = None
+    broken: bool = False
     depth: int = 0
-    held: int = 0
+
+
+def _close_quietly(conn: Any) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 
 class _BaseDb:
@@ -300,58 +313,125 @@ def _lost(error: BaseException) -> bool:
 
 
 class _NetworkDb(_BaseDb):
-    """A connection per thread, for Postgres and MySQL."""
+    """A pool of connections, for Postgres and MySQL, as pg and mysql2 keep one: a statement borrows a connection
+    and gives it back, and a transaction or a lock keeps one on its thread until it ends. At most `max` are open
+    at once, so a server's threads share them rather than each keeping its own for good, and a busy pool is waited
+    on for at most ten seconds."""
 
-    def __init__(self, connect: Callable[[], Any] | None, conn: Any = None) -> None:
+    def __init__(self, connect: Callable[[], Any] | None, conn: Any = None, max: int = 10) -> None:  # noqa: A002
         super().__init__()
+        if max < 1:
+            raise ValueError("Runlight: the database pool needs at least one connection")
         self._connect = connect
         self._given = conn
         self._local = _Local()
-        self._all_conns: list[Any] = []
+        self._slots = threading.BoundedSemaphore(max)
+        self._idle: list[Any] = []
+        # Which close() each open connection was opened after; one opened before the latest is not pooled again.
+        self._generation = 0
+        self._born: dict[int, int] = {}
+
+    def _acquire(self) -> Any:
+        if self._connect is None:
+            raise RuntimeError("Runlight: the database connection is closed")
+        if not self._slots.acquire(timeout=POOL_WAIT):
+            raise RuntimeError(f"Runlight: no database connection came free within {POOL_WAIT:g} seconds")
+        try:
+            with self._lock:
+                if self._idle:
+                    return self._idle.pop()
+                generation = self._generation
+            conn = self._connect()
+            with self._lock:
+                self._born[id(conn)] = generation
+            return conn
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def _release(self, conn: Any, broken: bool) -> None:
+        with self._lock:
+            keep = not broken and self._born.get(id(conn)) == self._generation
+            if keep:
+                self._idle.append(conn)
+            else:
+                self._born.pop(id(conn), None)
+        if not keep:
+            _close_quietly(conn)
+        self._slots.release()
+
+    def _drop_idle(self) -> None:
+        with self._lock:
+            idle, self._idle = self._idle, []
+            for conn in idle:
+                self._born.pop(id(conn), None)
+        for conn in idle:
+            _close_quietly(conn)
 
     def connection(self) -> Any:
+        """The app's own connection, or the one this thread's transaction or lock holds."""
         if self._given is not None:
             return self._given
+        if self._local.conn is None:
+            raise RuntimeError("Runlight: no database connection is held on this thread")
+        return self._local.conn
+
+    def _pinned(self, fn: Callable[[Any], T]) -> T:
+        """Runs fn(conn) with a connection kept on this thread until it returns, for a transaction or a lock. One
+        already kept is used again."""
         local = self._local
-        if local.conn is None:
-            if self._connect is None:
-                raise RuntimeError("Runlight: the database connection is closed")
-            local.conn = self._connect()
-            with self._lock:
-                self._all_conns.append(local.conn)
-        return local.conn
+        if self._given is not None:
+            return fn(self._given)
+        if local.conn is not None:
+            return fn(local.conn)
+        conn = self._acquire()
+        local.conn = conn
+        local.broken = False
+        try:
+            return fn(conn)
+        finally:
+            broken = local.broken
+            local.conn = None
+            local.broken = False
+            self._release(conn, broken)
 
     def _discard(self) -> None:
-        """Drops a connection left in a state it could not undo; the next statement opens a new one."""
-        if self._given is not None:
-            return
-        conn = self._local.conn
-        self._local.conn = None
-        if conn is not None:
-            with self._lock:
-                if conn in self._all_conns:
-                    self._all_conns.remove(conn)
-            try:
-                conn.close()
-            except Exception:
-                pass
+        """Marks the connection this thread holds as left in a state it could not undo, so it is closed rather than
+        pooled again."""
+        if self._given is None and self._local.conn is not None:
+            self._local.broken = True
 
-    def _execute(self, sql: str, params: Sequence[Any], fetch: bool) -> Any:
+    def _borrowed(self, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
+        conn = self._acquire()
+        broken = True
         try:
-            return self._attempt(sql, params, fetch)
+            result = self._attempt(conn, sql, params, fetch)
+            broken = False
+            return result
+        except Exception as error:
+            broken = _lost(error)
+            raise
+        finally:
+            self._release(conn, broken)
+
+    def _execute(self, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
+        if self._given is not None or self._local.conn is not None:
+            # Inside a transaction or a lock, whose work would go with a lost connection, there is no second try.
+            return self._attempt(self.connection(), sql, params, fetch)
+        try:
+            return self._borrowed(sql, params, fetch)
         except Exception as error:
             # A connection the server dropped (a restart, a failover, an idle timeout) is replaced, as a pool
-            # replaces it, and the statement sent again: it never reached the server. Not inside a transaction
-            # or a lock, whose work went with the connection.
-            local = self._local
-            if local.depth > 0 or local.held > 0 or self._given is not None or not _lost(error):
+            # replaces it, and the statement sent again: it never reached the server.
+            if not _lost(error):
                 raise
             name = "MySQL" if self._dialect == "mysql" else "Postgres"
             print(f"Runlight: a {name} connection was lost; it reconnects on the next query. {error}", file=sys.stderr)
-            self._discard()
-            return self._attempt(sql, params, fetch)
+            # Those idle beside it were most likely dropped too.
+            self._drop_idle()
+            return self._borrowed(sql, params, fetch)
 
-    def _attempt(self, sql: str, params: Sequence[Any], fetch: bool) -> Any:
+    def _attempt(self, conn: Any, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
         raise NotImplementedError
 
     def all(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
@@ -361,16 +441,18 @@ class _NetworkDb(_BaseDb):
         self._execute(sql, params, False)
 
     def affected(self, sql: str, params: Sequence[Any] = ()) -> int:
-        return int(self._execute(sql, params, None))  # type: ignore[arg-type]
+        return int(self._execute(sql, params, None))
 
     def _begin(self, conn: Any) -> None:
         raise NotImplementedError
 
     def transaction(self, fn: Callable[[Any], T]) -> T:
-        local = self._local
-        if local.depth > 0:
+        if self._local.depth > 0:
             return fn(self)
-        conn = self.connection()
+        return self._pinned(lambda conn: self._transaction(conn, fn))
+
+    def _transaction(self, conn: Any, fn: Callable[[Any], T]) -> T:
+        local = self._local
         self._begin(conn)
         local.depth += 1
         try:
@@ -398,26 +480,18 @@ class _NetworkDb(_BaseDb):
         raise NotImplementedError
 
     def exclusive(self, fn: Callable[[Any], T]) -> T:
-        self._local.held += 1
-        try:
-            return self._locked(fn)
-        finally:
-            self._local.held -= 1
+        return self._pinned(lambda conn: self._locked(conn, fn))
 
-    def _locked(self, fn: Callable[[Any], T]) -> T:
+    def _locked(self, conn: Any, fn: Callable[[Any], T]) -> T:
         raise NotImplementedError
 
     def close(self) -> None:
+        """Closes the idle connections; those in use close when they are given back."""
         if self._given is not None:
             return
         with self._lock:
-            conns, self._all_conns = self._all_conns, []
-        for conn in conns:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        self._local = _Local()
+            self._generation += 1
+        self._drop_idle()
 
 
 class PostgresDb(_NetworkDb):
@@ -425,8 +499,8 @@ class PostgresDb(_NetworkDb):
 
     _dialect = "postgres"
 
-    def __init__(self, connect: Callable[[], Any] | None = None, conn: Any = None) -> None:
-        super().__init__(connect, conn)
+    def __init__(self, connect: Callable[[], Any] | None = None, conn: Any = None, max: int = 10) -> None:  # noqa: A002
+        super().__init__(connect, conn, max)
         self._texts: dict[str, str] = {}
 
     def _text(self, sql: str) -> str:
@@ -437,8 +511,7 @@ class PostgresDb(_NetworkDb):
                 self._texts[sql] = text
         return text
 
-    def _attempt(self, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
-        conn = self.connection()
+    def _attempt(self, conn: Any, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
         with conn.cursor() as cursor:
             cursor.execute(self._text(sql), [_pg_param(p) for p in params])
             if fetch is None:
@@ -455,7 +528,7 @@ class PostgresDb(_NetworkDb):
     def _begin(self, conn: Any) -> None:
         self._raw(conn, "BEGIN")
 
-    def _locked(self, fn: Callable[[Any], T]) -> T:
+    def _locked(self, conn: Any, fn: Callable[[Any], T]) -> T:
         # Asked for again and again rather than waited on: a waiting statement would hold up an index being
         # built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
         while not (self.all("SELECT pg_try_advisory_lock(?) AS ok", [MIGRATION_LOCK])[0].get("ok")):
@@ -476,16 +549,17 @@ class MysqlDb(_NetworkDb):
 
     _dialect = "mysql"
 
-    def __init__(self, connect: Callable[[], Any] | None = None, conn: Any = None, statement_timeout: int = 0) -> None:
-        super().__init__(connect, conn)
+    def __init__(
+        self, connect: Callable[[], Any] | None = None, conn: Any = None, statement_timeout: int = 0, max: int = 10  # noqa: A002
+    ) -> None:
+        super().__init__(connect, conn, max)
         self._statement_timeout = statement_timeout
         self._mariadb: bool | None = None
         # An app's own connection too.
         if conn is not None:
             backslash_escapes_on(conn)
 
-    def _attempt(self, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
-        conn = self.connection()
+    def _attempt(self, conn: Any, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
         text = mysql_text(sql, [_param(p) for p in params])
         with conn.cursor() as cursor:
             count = cursor.execute(text)
@@ -514,8 +588,7 @@ class MysqlDb(_NetworkDb):
             self._mariadb = is_mariadb(conn)
         _set_timeout(conn, ms, self._mariadb)
 
-    def _locked(self, fn: Callable[[Any], T]) -> T:
-        conn = self.connection()
+    def _locked(self, conn: Any, fn: Callable[[Any], T]) -> T:
         while True:
             rows = self._raw(conn, f"SELECT GET_LOCK({_MYSQL_LOCK}, 5) AS ok")
             ok = rows[0][0] if rows else None
@@ -541,7 +614,7 @@ class MysqlDb(_NetworkDb):
             self._discard()
             raise
         finally:
-            if self._local.conn is conn or self._given is conn:
+            if not self._local.broken:
                 try:
                     # A lost connection ends its session, and the lock with it.
                     self._raw(conn, f"DO RELEASE_LOCK({_MYSQL_LOCK})")
@@ -603,9 +676,10 @@ def sqlite(path: str) -> SqliteDb:
     return SqliteDb(path)
 
 
-def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = None) -> PostgresDb:
+def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = None, max: int = 10) -> PostgresDb:  # noqa: A002
     """Postgres from a URL like postgres://user:pass@host:5432/db?sslmode=require. `statement_timeout` stops any
-    one statement after that many milliseconds; 0 turns it off. `schema`, when given, is the search path."""
+    one statement after that many milliseconds; 0 turns it off. `schema`, when given, is the search path. `max`
+    is the most connections open at once."""
     try:
         import psycopg
     except ImportError:  # pragma: no cover
@@ -638,13 +712,14 @@ def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = No
             kwargs["options"] = " ".join(options)
         return psycopg.connect(**kwargs)
 
-    return PostgresDb(connect)
+    return PostgresDb(connect, max=max)
 
 
-def mysql(url: str, statement_timeout: int = 120_000) -> MysqlDb:
+def mysql(url: str, statement_timeout: int = 120_000, max: int = 10) -> MysqlDb:  # noqa: A002
     """MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://). The
     session is utf8mb4, with IGNORE_SPACE added to the server's SQL mode as mysql2 asks for it. Runlight's tables
-    carry their own binary collation, so text compares and sorts by code point."""
+    carry their own binary collation, so text compares and sorts by code point. `max` is the most connections
+    open at once."""
     try:
         import pymysql
     except ImportError:  # pragma: no cover
@@ -673,7 +748,7 @@ def mysql(url: str, statement_timeout: int = 120_000) -> MysqlDb:
             _set_timeout(conn, statement_timeout, is_mariadb(conn))
         return conn
 
-    return MysqlDb(connect, statement_timeout=statement_timeout)
+    return MysqlDb(connect, statement_timeout=statement_timeout, max=max)
 
 
 def from_url(url: str) -> SqliteDb | PostgresDb | MysqlDb:

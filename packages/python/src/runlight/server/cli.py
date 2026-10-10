@@ -22,11 +22,11 @@ import re
 import secrets
 import signal
 import socket
-import socketserver
 import sys
 import threading
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import IO, Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
@@ -235,8 +235,30 @@ def _password(settings: Settings, email: str | None, out: IO[str]) -> int:
     return 0
 
 
-class _ThreadingServer(socketserver.ThreadingMixIn, WSGIServer):
-    daemon_threads = True
+class _ThreadingServer(WSGIServer):
+    """Answers each request on one of a fixed number of threads, so a flood of connections waits its turn rather
+    than starting a thread, and holding memory, for every one."""
+
+    threads = 64
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pool = ThreadPoolExecutor(self.threads, thread_name_prefix="runlight-http")
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        self._pool.submit(self._answer, request, client_address)
+
+    def _answer(self, request: Any, client_address: Any) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
 
 class _Deadline(io.RawIOBase):
