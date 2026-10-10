@@ -294,6 +294,28 @@ class JdkFetcherTest {
                 "http://pinned.invalid:" + port + "/",
                 new FetchInit().resolve("pinned.invalid:" + port + ":[::1],127.0.0.1"));
     assertEquals(200, second.status());
+    // A v6 address whose groups look like a port is still read as part of the addresses.
+    Response third =
+        new JdkFetcher()
+            .fetch(
+                "http://pinned.invalid:" + port + "/",
+                new FetchInit().resolve("pinned.invalid:" + port + ":[0:0:0:0:0:0:0:1],127.0.0.1"));
+    assertEquals(200, third.status());
+    // A pin that cannot be read, or names no address, is refused, never looked up instead.
+    for (String pin : List.of("pinned.invalid", "localhost:" + port + ":", "localhost:x:1")) {
+      assertThrows(
+          FetchError.class,
+          () ->
+              new JdkFetcher()
+                  .fetch("http://localhost:" + port + "/", new FetchInit().resolve(pin)));
+    }
+    assertThrows(
+        FetchError.class,
+        () ->
+            new JdkFetcher()
+                .fetch(
+                    "http://localhost:" + port + "/",
+                    new FetchInit().resolve("localhost:" + port + ":not-an-address")));
     // A pin for another name or port is not used.
     assertThrows(
         FetchError.class,
