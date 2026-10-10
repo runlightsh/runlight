@@ -9,26 +9,40 @@ using System.Threading.Tasks;
 
 namespace Runlight.Http;
 
-/// <summary>Fetches with <see cref="HttpClient"/>, following redirects itself so a pinned address holds for the first hop.</summary>
+/// <summary>
+/// Fetches with <see cref="HttpClient"/>, following redirects itself so a pinned address holds for the first hop.
+/// A pinned request never goes through a proxy, which would connect wherever it liked; others take the
+/// system's proxy, if it has one.
+/// </summary>
 public sealed class HttpClientFetcher : IFetcher, IDisposable
 {
     private static readonly HttpRequestOptionsKey<List<string>> PinsKey = new("runlight.resolve");
     private readonly HttpClient _client;
+    private readonly HttpClient _direct;
 
     public HttpClientFetcher()
     {
-        var handler = new SocketsHttpHandler
+        _client = Client(useProxy: true);
+        _direct = Client(useProxy: false);
+    }
+
+    private static HttpClient Client(bool useProxy) =>
+        new(new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             AutomaticDecompression = DecompressionMethods.All,
             ConnectTimeout = TimeSpan.FromSeconds(15),
             UseCookies = false,
+            UseProxy = useProxy,
             ConnectCallback = ConnectAsync,
-        };
-        _client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
-    }
+        })
+        { Timeout = Timeout.InfiniteTimeSpan };
 
-    public void Dispose() => _client.Dispose();
+    public void Dispose()
+    {
+        _client.Dispose();
+        _direct.Dispose();
+    }
 
     private static async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancellationToken)
     {
@@ -121,7 +135,8 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                     throw new FetchException("fetch failed: unsupported protocol");
                 }
                 using var message = new HttpRequestMessage(new HttpMethod(method), current);
-                if (hop == 0 && init.Resolve.Count > 0)
+                bool pinned = hop == 0 && init.Resolve.Count > 0;
+                if (pinned)
                 {
                     message.Options.Set(PinsKey, init.Resolve);
                 }
@@ -140,7 +155,7 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                         }
                     }
                 }
-                using var answer = await _client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                using var answer = await (pinned ? _direct : _client).SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
                 int status = (int)answer.StatusCode;
                 if (init.Redirect != "manual" && status is 301 or 302 or 303 or 307 or 308 && answer.Headers.Location != null)
                 {
