@@ -104,6 +104,12 @@ class StoreMigrateTest < StoreTestCase
     assert_equal [{ "name" => "rl_events_link" }], index.call(cron), "the full pass builds it again"
   end
 
+  def test_deleted_rows_salts_among_them_are_overwritten_in_a_sqlite_file_rather_than_left_in_its_free_space
+    store = StoreDatabases.closing(Stores.sqlite(file))
+    # 2 is FAST: overwritten wherever that costs no extra writes.
+    assert_equal [{ "secure_delete" => 2 }], store.db.all("PRAGMA secure_delete")
+  end
+
   def test_a_database_that_can_only_be_read_still_answers_reports
     file = file()
     first = Stores.sqlite(file)

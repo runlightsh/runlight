@@ -30,6 +30,10 @@ module Runlight
       # stores/mysql.ts sets it.
       NO_BACKSLASH_ESCAPES_OFF = "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))"
 
+      # Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes, so
+      # they do not linger in the file's free space. Rails' pragmas setting takes this one only as on or off.
+      SECURE_DELETE = "PRAGMA secure_delete = FAST"
+
       attr_reader :connection_class
 
       # connection_class: an ActiveRecord::Base subclass whose pool to use (ActiveRecord::Base for the app's
@@ -44,7 +48,8 @@ module Runlight
         @held = 0
         # Set on the thread inside a SQLite turn, whose BEGIN IMMEDIATE Rails does not know about.
         @turn_key = :"runlight_turn_#{object_id}"
-        # The MySQL sessions already set up, by their driver connection, which a reconnect replaces.
+        # The MySQL sessions, and the SQLite connections this database opened, already set up, by their driver
+        # connection, which a reconnect replaces.
         @set_up = ObjectSpace::WeakMap.new
       end
 
@@ -229,19 +234,20 @@ module Runlight
 
       def connection
         @connection_class.connection_pool.with_connection do |c|
-          set_up(c) if dialect == "mysql"
+          set_up(c) if dialect == "mysql" || (@owned && dialect == "sqlite")
           yield c
         end
       end
 
       # Values are escaped with backslashes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a
       # quote could end the value early. Every MySQL session Runlight uses drops that one mode first, an app's
-      # own ActiveRecord connection's too, and again after a reconnect, which starts the session over.
+      # own ActiveRecord connection's too, and again after a reconnect, which starts the session over. A SQLite
+      # file Runlight opened itself turns on secure_delete, as stores/sqlite.ts does.
       def set_up(c)
         raw = c.instance_variable_get(:@raw_connection)
         return if raw && @set_up[raw]
 
-        c.execute(NO_BACKSLASH_ESCAPES_OFF, "Runlight")
+        c.execute(dialect == "sqlite" ? SECURE_DELETE : NO_BACKSLASH_ESCAPES_OFF, "Runlight")
         raw = c.instance_variable_get(:@raw_connection)
         @set_up[raw] = true if raw
       end
