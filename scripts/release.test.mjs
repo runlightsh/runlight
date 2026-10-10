@@ -8,7 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
-import { minorOf, planEdits, PUBLISH, tableProblems, UNPUBLISHED, UNVERSIONED, VERSIONED } from "./release.mjs";
+import { drupalVersion, minorOf, planEdits, PUBLISH, tableProblems, UNPUBLISHED, UNVERSIONED, VERSIONED } from "./release.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const readRepo = (file) => readFileSync(path.join(ROOT, file), "utf8");
@@ -79,6 +79,15 @@ test("an install line keeps its minor across a prerelease, and takes the next st
   assert.equal(planEdits(rows, at("0.1"), "0.2.0-beta.1", "0.2.0").get("x").after, 'runlight = { version = "0.2" }\n');
   assert.equal(planEdits(rows, at("0.1"), "0.1.0", "0.1.1").get("x").after, 'runlight = { version = "0.1" }\n');
   assert.throws(() => planEdits(rows, at("0.3"), "0.1.0", "0.2.0"), /x says 0\.3, not 0\.1/);
+});
+
+test("drupal.org's version drops a prerelease's dot, and has none for other prereleases", () => {
+  assert.equal(drupalVersion("1.2.0"), "1.2.0");
+  assert.equal(drupalVersion("1.2.0-beta.1"), "1.2.0-beta1");
+  assert.equal(drupalVersion("1.2.0-rc2"), "1.2.0-rc2");
+  assert.equal(drupalVersion("1.2.0-alpha.10"), "1.2.0-alpha10");
+  assert.equal(drupalVersion("1.2.0-preview.1"), null);
+  assert.equal(drupalVersion("1.2.0-beta"), null);
 });
 
 test("a file out of step is refused", () => {
@@ -158,6 +167,7 @@ test("a prerelease is not tagged latest", () => {
   const { status, out, err } = release("0.1.0-beta.1", "--dry-run");
   assert.equal(status, 0, err);
   assert.match(out, /runlight as 0\.1\.0-beta\.1, by/);
+  assert.match(out, /drupal\.org's repository as the tag 0\.1\.0-beta1 on the branch 0\.1\.x/);
 });
 
 test("a release refuses a version no higher than the current one, or no version", () => {

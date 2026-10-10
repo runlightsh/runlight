@@ -175,7 +175,13 @@ export const PUBLISH = [
   { dir: "packages/dotnet", commands: (v) => [`# packages/dotnet: the pushed tag v${v} is packed and published to nuget.org as Runlight, Runlight.AspNetCore, and Runlight.Server, in that order, by .github/workflows/nuget.yml, with trusted publishing (once NUGET_ENABLED is true)`] },
   { dir: "packages/rust", commands: (v) => [`# packages/rust: the pushed tag v${v} is published to crates.io as runlight, then runlight-sqlx, by .github/workflows/crates.yml, with trusted publishing (once CRATES_ENABLED is true); the first release by hand, (cd packages/rust && cargo publish --workspace)`] },
   { dir: "plugins/wordpress", commands: (v) => [`# plugins/wordpress: the pushed tag v${v} gets a GitHub release with its CHANGELOG.md section as notes and the plugin's zip attached as runlight-${v}.zip and runlight.zip, by .github/workflows/release.yml (once RELEASE_ENABLED is true)`] },
-  { dir: "plugins/drupal", commands: (v) => [`# plugins/drupal: the pushed tag is split to drupal.org's repository as the tag ${v} on the branch ${v.split(".").slice(0, 2).join(".")}.x by .github/workflows/php-plugins-split.yml (once DRUPAL_SPLIT_ENABLED is true); then make the drupal.org release from the ${v} tag`] },
+  // drupal.org writes an alpha, beta, or rc prerelease with no dot before
+  // its number (1.2.0-beta1), and has no form for any other.
+  { dir: "plugins/drupal", commands: (v) => {
+    const drupal = drupalVersion(v);
+    if (drupal === null) return [`# plugins/drupal: drupal.org takes only alpha, beta, and rc prereleases, so .github/workflows/php-plugins-split.yml skips ${v}`];
+    return [`# plugins/drupal: the pushed tag is split to drupal.org's repository as the tag ${drupal} on the branch ${v.split(".").slice(0, 2).join(".")}.x by .github/workflows/php-plugins-split.yml (once DRUPAL_SPLIT_ENABLED is true); then make the drupal.org release from the ${drupal} tag`];
+  } },
   { dir: "plugins/craft", commands: (v) => [`# plugins/craft: the pushed tag v${v} is split to runlightsh/runlight-craft, which Packagist and the Craft Plugin Store read, by .github/workflows/php-plugins-split.yml (once CRAFT_SPLIT_ENABLED is true)`] },
 ];
 
@@ -268,6 +274,18 @@ export function tableProblems(root = ROOT) {
   const unpublished = dirs.filter((d) => !PUBLISH.some((row) => row.dir === d) && !(d in UNPUBLISHED));
   if (unpublished.length > 0) problems.push(`no PUBLISH or UNPUBLISHED row for ${unpublished.join(", ")}; add how it ships, or why it does not, to scripts/release.mjs`);
   return problems;
+}
+
+/**
+ * The version drupal.org gives a release: the same, with a prerelease's dot
+ * dropped (1.2.0-beta.1 is 1.2.0-beta1), or null for a prerelease it has no
+ * form for. php-plugins-split.yml maps it the same way.
+ */
+export function drupalVersion(version) {
+  const dash = version.indexOf("-");
+  if (dash < 0) return version;
+  const pre = /^(alpha|beta|rc)\.?([1-9]\d*)$/.exec(version.slice(dash + 1));
+  return pre ? `${version.slice(0, dash)}-${pre[1]}${pre[2]}` : null;
 }
 
 /** "X.Y" of a version: what an install line's requirement names. */

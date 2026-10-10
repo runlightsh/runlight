@@ -75,7 +75,20 @@ jobs:
           # drupal.org writes the version into the packaged .info.yml; one written here would disagree with it.
           if grep -q '^version:' plugins/drupal/runlight.info.yml; then echo "plugins/drupal/runlight.info.yml has a version line; drupal.org adds it"; exit 1; fi
           version="${TAG#v}"
-          # drupal.org names releases X.Y.Z (no "v") and their branches X.Y.x.
+          # drupal.org names releases X.Y.Z (no "v") and their branches X.Y.x. It takes
+          # alpha, beta, and rc prereleases with no dot before the number
+          # (1.2.0-beta1), so 1.2.0-beta.1 goes up as that; it has no form for others.
+          case "$version" in
+            *-*)
+              if [[ "${version#*-}" =~ ^(alpha|beta|rc)\.?([1-9][0-9]*)$ ]]; then
+                version="${version%%-*}-${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+                echo "$TAG goes to drupal.org as $version"
+              else
+                echo "::warning::drupal.org takes only alpha, beta, and rc prereleases (X.Y.Z-beta1), so $TAG is not pushed there"
+                exit 0
+              fi
+              ;;
+          esac
           branch="$(echo "$version" | cut -d. -f1-2).x"
           key="$RUNNER_TEMP/split_key"
           trap 'rm -f "$key"' EXIT
