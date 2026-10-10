@@ -3,11 +3,14 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+use super::LinkDomain;
 use super::http::{date_parse, iso_string};
 use super::types::{ImportError, field, or};
+use crate::error::Error;
 use crate::hash::sha256;
 use crate::http::Url;
 use crate::js::{self, Object, Value};
+use crate::links::clean_url;
 use crate::params;
 use crate::re::{js_re, test};
 use crate::runlight::Runlight;
@@ -17,6 +20,9 @@ use crate::store::{DbError, EventRow, LinkRow, SessionRow};
 /// Domains run by the shorteners themselves. Links there stay on Runlight's own path.
 const SHORTENER_DOMAINS: [&str; 10] =
     ["bit.ly", "bitly.com", "j.mp", "dub.sh", "dub.co", "dub.link", "short.gy", "rebrand.ly", "rebrandly.com", "rb.gy"];
+
+/// The most clicks a day one imported link gets from a daily count.
+const MAX_DAILY: f64 = 10_000.0;
 
 /// The first `length` hex digits of a value's SHA-256.
 pub fn hex_id(value: &str, length: usize) -> String {
@@ -148,11 +154,12 @@ pub async fn write_link(
     source: &str,
     foreign: &Value,
     history: &Value,
+    link_domain: &LinkDomain<'_>,
 ) -> Result<WriteResult, ImportError> {
     let f = Some(foreign);
     let source_id = tpl(field(f, "sourceId"));
     let slug = tpl(field(f, "slug"));
-    let url = tpl(field(f, "url"));
+    let given_url = tpl(field(f, "url"));
     let id = imported_link_id(source, &source_id);
     let store = rl.store();
     if store.link_by_id(&id).await?.is_some() {
@@ -161,7 +168,7 @@ pub async fn write_link(
     let taken = store.link_by_slug(&slug).await?;
     // The same slug to the same place is this link, brought in earlier some other way.
     if let Some(taken) = taken {
-        if same_url(&taken.url, &url) {
+        if same_url(&taken.url, &given_url) {
             return Ok(WriteResult::skipped());
         }
         return Ok(WriteResult {
@@ -182,10 +189,30 @@ pub async fn write_link(
         });
     }
 
-    let mut domain = strip_www(&text_or_empty(field(f, "domain")));
-    if SHORTENER_DOMAINS.contains(&domain.as_str()) {
-        domain = String::new();
-    }
+    // The destination passes the checks a link made by hand does.
+    let url = match clean_url(&given_url) {
+        Ok(url) => url,
+        Err(Error::Link(error)) => {
+            return Ok(WriteResult {
+                status: WriteStatus::Failed,
+                clicks: 0.0,
+                reason: Some(error.message),
+                code: Some(error.code),
+                params: error.params,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let domain = strip_www(&text_or_empty(field(f, "domain")).to_lowercase());
+    // A branded domain must pass the checks one added in Settings does, so an import can never claim the
+    // dashboard's own host or a name inside a private network. One that fails is left off: the link is
+    // served from the app's own path instead.
+    let domain = if domain.is_empty() || SHORTENER_DOMAINS.contains(&domain.as_str()) {
+        String::new()
+    } else {
+        link_domain(domain).await?.unwrap_or_default()
+    };
     let now = rl.now();
     let name = js::head16(&tpl(or(field(f, "name"), field(f, "slug"))), 100);
     let created = field(f, "createdAt").map_or(f64::NAN, js::js_number);
@@ -319,7 +346,8 @@ pub async fn write_link(
                     if !start.is_finite() || count.is_nan() || count <= 0.0 {
                         continue;
                     }
-                    let n = count.min(1_000_000.0);
+                    // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+                    let n = count.floor().min(MAX_DAILY);
                     let mut i = 0.0;
                     while i < n {
                         store

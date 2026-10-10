@@ -47,7 +47,8 @@ fn link_error(message: impl Into<String>, code: &str, params: &[(&str, &str)]) -
     Error::Link(CodedError::new(message, code, params))
 }
 
-fn clean_url(value: &str) -> Result<String, Error> {
+/// A link's destination as it is kept: a full http or https URL, up to 2,000 characters.
+pub fn clean_url(value: &str) -> Result<String, Error> {
     let text = js::trim(value).to_string();
     let Some(url) = Url::parse(&text) else {
         return Err(link_error("The destination must be a full URL, starting with https://", "link_url", &[]));

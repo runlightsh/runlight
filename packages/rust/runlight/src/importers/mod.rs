@@ -15,10 +15,18 @@ pub mod write;
 pub use http::Http;
 pub use types::{Credentials, ImportError, ImportStep, Importer, Known, StepInput};
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use self::types::field;
 use self::write::{WriteStatus, imported_link_id, same_url, write_link};
+use crate::BoxFuture;
 use crate::js::{self, Object, Value};
 use crate::runlight::Runlight;
+
+/// The domain as a site keeps it once it passes the checks a link domain added by hand does, or `None` to bring
+/// the link over without it.
+pub type LinkDomain<'a> = dyn Fn(String) -> BoxFuture<'a, Result<Option<String>, ImportError>> + Send + Sync + 'a;
 
 /// The importer for a source: umami, dub, bitly, shortio, or rebrandly.
 pub fn importer(source: &str) -> Option<&'static dyn Importer> {
@@ -54,7 +62,8 @@ pub fn credentials_from(value: Option<&Value>) -> Credentials {
 
 /// One step of an import: fetch the next few links from the source, write each with its history, and
 /// report progress. The cursor carries where to pick up, so the page calls this until the cursor comes
-/// back `None`. Requests go through the Runlight's fetcher.
+/// back `None`. Requests go through the Runlight's fetcher. Each link's branded domain goes through
+/// `link_domain`, and one it refuses is left off.
 pub async fn import_step(
     rl: &Runlight,
     site: &str,
@@ -62,20 +71,13 @@ pub async fn import_step(
     credentials: &Credentials,
     cursor: Option<&str>,
     done: f64,
+    link_domain: &LinkDomain<'_>,
 ) -> Result<ImportStep, ImportError> {
-    import_step_with(
-        rl,
-        &Http::new(rl.fetcher().clone()).with_lookup(rl.lookup().cloned()),
-        site,
-        source,
-        credentials,
-        cursor,
-        done,
-    )
-    .await
+    let http = Http::new(rl.fetcher().clone()).with_lookup(rl.lookup().cloned());
+    import_step_with_domains(rl, &http, site, source, credentials, cursor, done, link_domain).await
 }
 
-/// [`import_step`] with the requests sent through `http`.
+/// [`import_step`] with the requests sent through `http`, and every branded domain left off.
 pub async fn import_step_with(
     rl: &Runlight,
     http: &Http,
@@ -84,6 +86,21 @@ pub async fn import_step_with(
     credentials: &Credentials,
     cursor: Option<&str>,
     done: f64,
+) -> Result<ImportStep, ImportError> {
+    import_step_with_domains(rl, http, site, source, credentials, cursor, done, &|_| Box::pin(async { Ok(None) })).await
+}
+
+/// [`import_step`] with the requests sent through `http`.
+#[allow(clippy::too_many_arguments)]
+pub async fn import_step_with_domains(
+    rl: &Runlight,
+    http: &Http,
+    site: &str,
+    source: &str,
+    credentials: &Credentials,
+    cursor: Option<&str>,
+    done: f64,
+    link_domain: &LinkDomain<'_>,
 ) -> Result<ImportStep, ImportError> {
     let Some(importer) = importer(source) else {
         return Err(ImportError::new(
@@ -123,6 +140,18 @@ pub async fn import_step_with(
         skipped: 0.0,
         failed: vec![],
     };
+    // Each domain is checked once a step, since the check may look it up in DNS.
+    let checked: Mutex<HashMap<String, Option<String>>> = Mutex::new(HashMap::new());
+    let domain_for = |domain: String| -> BoxFuture<'_, Result<Option<String>, ImportError>> {
+        Box::pin(async {
+            if let Some(known) = checked.lock().unwrap_or_else(|p| p.into_inner()).get(&domain) {
+                return Ok(known.clone());
+            }
+            let answer = link_domain(domain.clone()).await?;
+            checked.lock().unwrap_or_else(|p| p.into_inner()).insert(domain, answer.clone());
+            Ok(answer)
+        })
+    };
     let empty = vec![];
     let items = field(Some(&result), "links").and_then(Value::as_array).unwrap_or(&empty);
     for item in items {
@@ -132,7 +161,7 @@ pub async fn import_step_with(
             continue;
         }
         let link = field(Some(item), "link").cloned().unwrap_or(Value::Null);
-        let written = write_link(rl, site, source, &link, item).await?;
+        let written = write_link(rl, site, source, &link, item, &domain_for).await?;
         step.done += 1.0;
         match written.status {
             WriteStatus::Created => {
