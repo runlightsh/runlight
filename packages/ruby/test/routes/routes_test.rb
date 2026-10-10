@@ -414,6 +414,8 @@ class RoutesRoutesTest < RoutesTestCase
     assert_match(/sendBeacon/, text)
     status, _headers, body = routes.call(env.merge("REQUEST_METHOD" => "HEAD"))
     assert_equal 404, status, "a HEAD is its own method, as the TypeScript routes see it"
-    assert_equal [], body
+    parts = []
+    body.each { |part| parts << part }
+    assert_equal [], parts
   end
 end
