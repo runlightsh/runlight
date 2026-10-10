@@ -196,6 +196,14 @@ class MigrateTest {
   }
 
   @Test
+  void deletedRowsAreOverwrittenInASqliteFileRatherThanLeftInItsFreeSpace() throws IOException {
+    SqlStore store = Stores.sqlite(file().toString());
+    // 2 is FAST: overwritten wherever that costs no extra writes.
+    assertJson(List.of(Json.object("secure_delete", 2L)), store.db().all("PRAGMA secure_delete"));
+    store.close();
+  }
+
+  @Test
   void aDatabaseThatCanOnlyBeReadStillAnswersReports() throws IOException {
     Path file = file();
     SqlStore first = Stores.sqlite(file.toString());
