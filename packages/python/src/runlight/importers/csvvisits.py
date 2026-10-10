@@ -61,7 +61,7 @@ def _cell(row: dict[str, str], *names: str) -> str:
 
 
 def _own_key(row: dict[str, str]) -> str:
-    """A row with no visitor is its own visit, keyed by its whole content so a second import gives it the same
+    """A row with no visitor is its own visit, keyed by its whole content.
     ids."""
     return f"row:{_js.dumps(sorted(([k, v] for k, v in row.items()), key=lambda kv: _js.order_key(kv[0])))}"
 
