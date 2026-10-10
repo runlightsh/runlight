@@ -145,6 +145,14 @@ public sealed class MigrateTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Deleted_rows_salts_among_them_are_overwritten_in_a_SQLite_file_rather_than_left_in_its_free_space()
+    {
+        var store = Sqlite(NewFile());
+        // 2 is FAST: overwritten wherever that costs no extra writes.
+        Assert.Equal(2, Js.Number((await store.Db.AllAsync("PRAGMA secure_delete"))[0].Get("secure_delete")));
+    }
+
+    [Fact]
     public async Task A_database_that_can_only_be_read_still_answers_reports()
     {
         string file = NewFile();

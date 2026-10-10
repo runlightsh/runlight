@@ -382,7 +382,9 @@ public sealed class AdoDb : IDb
             return _sqlite;
         }
         var connection = await _source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        foreach (string pragma in new[] { "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA busy_timeout = 5000" })
+        // secure_delete overwrites deleted rows, such as a day's salt once it is gone, where that costs no extra
+        // writes, so they do not linger in the file's free space.
+        foreach (string pragma in new[] { "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA busy_timeout = 5000", "PRAGMA secure_delete = FAST" })
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = pragma;
