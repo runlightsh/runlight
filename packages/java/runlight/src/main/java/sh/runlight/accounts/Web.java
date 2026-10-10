@@ -216,7 +216,9 @@ public final class Web {
   /**
    * Only a path on this install, so a sign-in can never send someone elsewhere. Browsers drop tabs
    * and newlines from a URL and read a backslash as a slash, so "/\t/evil.example" would leave;
-   * anything with those is refused outright, and what is left must resolve to this origin.
+   * anything with those is refused outright, and what is left must resolve to this origin. A path
+   * that resolves to one starting "//", as "/..//evil.example" does, would leave from the Location
+   * header, so that goes home too.
    */
   public String safeNext(String value) {
     if (value == null
@@ -226,9 +228,11 @@ public final class Web {
       return homePath;
     }
     Url url = Url.parse(value, "http://runlight.invalid");
-    return url != null && url.origin().equals("http://runlight.invalid")
-        ? url.pathname + url.search + url.hash
-        : homePath;
+    if (url == null || !url.origin().equals("http://runlight.invalid")) {
+      return homePath;
+    }
+    String path = url.pathname + url.search + url.hash;
+    return path.startsWith("//") || path.startsWith("/\\") ? homePath : path;
   }
 
   /**
