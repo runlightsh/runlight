@@ -102,7 +102,7 @@ module Runlight
 
         # The destination passes the checks a link made by hand does.
         begin
-          url = Links.clean_url(foreign["url"])
+          destination = Links.clean_url(foreign["url"])
         rescue LinkError => e
           return { "status" => "failed", "clicks" => 0, "reason" => e.message, "code" => e.code, "params" => e.params }
         end
@@ -209,7 +209,7 @@ module Runlight
             "domain" => domain,
             "slug" => slug,
             "name" => Js.slice(name, 0, 100),
-            "url" => url,
+            "url" => destination,
             "createdAt" => created,
             "updatedAt" => created,
           })
