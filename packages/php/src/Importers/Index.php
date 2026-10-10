@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Importers;
 
 use Runlight\Js;
+use Runlight\Json;
 use Runlight\Runlight;
 
 /** Link imports from other shorteners, a step at a time. */
@@ -24,7 +25,7 @@ final class Index
      * @param array<string, string> $credentials
      * @return array{cursor: ?string, done: int|float, total: int|float|null, links: int, clicks: int, skipped: int, failed: list<array{slug: string, reason: string, code?: string, params?: array<string, string>}>}
      */
-    public static function importStep(Runlight $runlight, string $site, string $source, array $credentials, ?string $cursor, int|float $done): array
+    public static function importStep(Runlight $runlight, string $site, string $source, array $credentials, ?string $cursor, int|float $done, ?callable $linkDomain = null): array
     {
         $class = self::IMPORTERS[$source] ?? null;
         if ($class === null) {
@@ -47,6 +48,14 @@ final class Index
         // A total that is not a number is as good as none.
         $total = $result['total'] ?? null;
         $total = is_int($total) || (is_float($total) && is_finite($total)) ? $total : null;
+        // Each domain is checked once a step, since the check may look it up in DNS.
+        $checked = [];
+        $domainFor = static function (string $domain) use (&$checked, $linkDomain): ?string {
+            if (!array_key_exists($domain, $checked)) {
+                $checked[$domain] = $linkDomain !== null ? $linkDomain($domain) : null;
+            }
+            return $checked[$domain];
+        };
         $step = ['cursor' => $result['cursor'], 'done' => $done, 'total' => $total, 'links' => 0, 'clicks' => 0, 'skipped' => 0, 'failed' => []];
         foreach ($result['links'] as $item) {
             if (!empty($item['known'])) {
@@ -54,7 +63,7 @@ final class Index
                 $step['skipped']++;
                 continue;
             }
-            $written = Write::writeLink($runlight, $site, $source, $item['link'], $item);
+            $written = Write::writeLink($runlight, $site, $source, $item['link'], $item, $domainFor);
             $step['done']++;
             if ($written['status'] === 'created') {
                 $step['links']++;
@@ -62,7 +71,7 @@ final class Index
             } elseif ($written['status'] === 'skipped') {
                 $step['skipped']++;
             } else {
-                $step['failed'][] = ['slug' => $item['link']['slug'], 'reason' => $written['reason'] ?? '', ...(isset($written['code']) ? ['code' => $written['code'], 'params' => $written['params'] ?? []] : [])];
+                $step['failed'][] = ['slug' => $item['link']['slug'], 'reason' => $written['reason'] ?? '', ...(isset($written['code']) ? ['code' => $written['code'], 'params' => Json::object($written['params'] ?? [])] : [])];
             }
         }
         // Links the source skipped (deleted ones) still count toward progress.

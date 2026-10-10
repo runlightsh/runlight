@@ -7,6 +7,8 @@ namespace Runlight\Importers;
 use Runlight\Hash;
 use Runlight\Http\Url;
 use Runlight\Js;
+use Runlight\LinkError;
+use Runlight\Links;
 use Runlight\Runlight;
 use Runlight\Sources;
 use Runlight\Store\SqlStore;
@@ -16,6 +18,9 @@ final class Write
 {
     /** Domains run by the shorteners themselves. Links there stay on Runlight's own path. */
     private const SHORTENER_DOMAINS = ['bit.ly', 'bitly.com', 'j.mp', 'dub.sh', 'dub.co', 'dub.link', 'short.gy', 'rebrand.ly', 'rebrandly.com', 'rb.gy'];
+
+    /** The most clicks a day one imported link gets from a daily count. */
+    private const MAX_DAILY = 10_000;
 
     // Browser and system names as other tools write them, in Runlight's spelling.
     public const BROWSERS = [
@@ -85,9 +90,11 @@ final class Write
      *
      * @param array{sourceId: string, slug: string, domain: string, name: string, url: string, createdAt: int|float} $foreign
      * @param array{clicks?: list<array>, daily?: list<array{day: string, clicks: int|float}>} $history
+     * @param (callable(string): ?string)|null $linkDomain the domain as the site keeps it once it passes a link domain's checks,
+     *     or null to bring the link over without it
      * @return array{status: string, clicks: int, reason?: string, code?: string, params?: array<string, string>}
      */
-    public static function writeLink(Runlight $runlight, string $site, string $source, array $foreign, array $history): array
+    public static function writeLink(Runlight $runlight, string $site, string $source, array $foreign, array $history, ?callable $linkDomain = null): array
     {
         $id = self::importedLinkId($source, (string) $foreign['sourceId']);
         if ($runlight->store->linkById($id) !== null) {
@@ -106,15 +113,23 @@ final class Write
             return ['status' => 'failed', 'clicks' => 0, 'reason' => "/$slug has characters Runlight slugs cannot use", 'code' => 'import_slug_bad', 'params' => ['slug' => $slug]];
         }
 
-        $domain = Sources::stripWww(Js::truthy($foreign['domain'] ?? '') ? (string) $foreign['domain'] : '');
-        if (in_array($domain, self::SHORTENER_DOMAINS, true)) {
-            $domain = '';
+        // The destination passes the checks a link made by hand does.
+        try {
+            $destination = Links::cleanUrl($foreign['url']);
+        } catch (LinkError $error) {
+            return ['status' => 'failed', 'clicks' => 0, 'reason' => $error->getMessage(), 'code' => $error->code, 'params' => $error->params];
         }
+
+        $domain = Sources::stripWww(Js::lower(Js::truthy($foreign['domain'] ?? '') ? (string) $foreign['domain'] : ''));
+        // A branded domain must pass the checks one added in Settings does, so an import can never claim the
+        // dashboard's own host or a name inside a private network. One that fails is left off: the link is
+        // served from the app's own path instead.
+        $domain = $domain === '' || in_array($domain, self::SHORTENER_DOMAINS, true) || $linkDomain === null ? '' : ($linkDomain($domain) ?? '');
         $now = $runlight->now();
         $clicks = 0;
         // Nothing in the transaction is one link's own problem (those are checked above),
         // so a failure in it is the database's, and it stops the import rather than marking the link.
-        $runlight->store->transaction(static function (SqlStore $store) use ($id, $site, $source, $foreign, $history, $slug, $domain, $now, &$clicks): void {
+        $runlight->store->transaction(static function (SqlStore $store) use ($id, $site, $source, $foreign, $history, $slug, $domain, $destination, $now, &$clicks): void {
             // On a database without transactions (D1), a failed earlier try can have left
             // some of this link's clicks behind. Clear them, then write the link row last,
             // so a link only counts as imported once all of its history is in.
@@ -184,7 +199,8 @@ final class Write
                 if (!is_finite((float) $start) || !($d['clicks'] > 0)) {
                     continue;
                 }
-                $n = min($d['clicks'], 1_000_000);
+                // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+                $n = min((int) floor($d['clicks']), self::MAX_DAILY);
                 for ($i = 0; $i < $n; $i++) {
                     $store->insertEvent([
                         'site' => $site, 'ts' => (int) $start + (int) floor((($i + 0.5) / $n) * 86_400_000), 'kind' => 'click', 'visitor' => '', 'session' => '', 'pageview' => '',
@@ -204,7 +220,7 @@ final class Write
                 'domain' => $domain,
                 'slug' => $slug,
                 'name' => Js::slice($name, 0, 100),
-                'url' => $foreign['url'],
+                'url' => $destination,
                 'createdAt' => $created,
                 'updatedAt' => $created,
             ]);

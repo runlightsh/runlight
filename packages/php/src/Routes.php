@@ -847,6 +847,56 @@ final class Routes
         return $parsed && $body instanceof \stdClass ? $body : self::coded('Send a JSON object', 'send_object', 400);
     }
 
+    /**
+     * The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
+     * is kept, or the refusal to send.
+     */
+    private function checkLinkDomain(Request $request, Url $url, string $site, string $value): string|Response
+    {
+        $domain = Js::lower(Js::trim($value));
+        $domain = (string) preg_replace('#^https?://#', '', $domain);
+        $domain = (string) preg_replace('#/.*\z#', '', $domain);
+        $domain = (string) preg_replace('/\.+\z/', '', $domain);
+        $domain = (string) preg_replace('/^www\./', '', $domain);
+        if (!preg_match(self::DOMAIN_NAME, $domain)) {
+            return self::coded('That is not a domain name', 'domain_invalid', 400);
+        }
+        if (self::privateName($domain) || Safefetch::resolvesPrivately($domain)) {
+            return self::coded("$domain is not a public domain name. Use one that browsers anywhere can reach.", 'domain_not_public', 400, ['domain' => $domain]);
+        }
+        // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
+        // The request's own Host is the caller's to choose, so the configured address and the names people
+        // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
+        // the app knows its own address.
+        if (isset($this->managed[$request]) && $this->origin === null) {
+            return self::originNeeded();
+        }
+        $here = array_filter([$request->headers->get('host'), $request->headers->get('x-forwarded-host'), $url->host()], fn ($h) => Js::truthy($h));
+        $own = [...($this->origin !== null ? [(new Url($this->origin))->host()] : []), ...$here];
+        if (isset($this->options['ownHosts'])) {
+            foreach (($this->options['ownHosts'])() as $host) {
+                $own[] = (string) $host;
+            }
+        }
+        $taken = array_map(self::hostName(...), $own);
+        foreach ($this->sites() as $s) {
+            array_push($taken, ...$s['hostnames']);
+            array_push($taken, ...($this->rl->remote($s['id'])['hostnames'] ?? []));
+        }
+        if (in_array($domain, $taken, true)) {
+            return self::coded("$domain is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.$domain.", 'domain_in_use', 400, ['domain' => $domain]);
+        }
+        foreach ($this->store()->linkDomains() as $d) {
+            if ($d['domain'] === $domain) {
+                if ($d['site'] !== $site) {
+                    return self::coded("$domain already belongs to another site", 'domain_taken', 409, ['domain' => $domain]);
+                }
+                break;
+            }
+        }
+        return $domain;
+    }
+
     private function linksApi(Request $request, string $path, Url $url): Response
     {
         $this->rl->init();
@@ -866,46 +916,9 @@ final class Routes
                     if ($body instanceof Response) {
                         return $body;
                     }
-                    $domain = Js::lower(Js::trim(self::text($body, 'domain')));
-                    $domain = (string) preg_replace('#^https?://#', '', $domain);
-                    $domain = (string) preg_replace('#/.*\z#', '', $domain);
-                    $domain = (string) preg_replace('/\.+\z/', '', $domain);
-                    $domain = (string) preg_replace('/^www\./', '', $domain);
-                    if (!preg_match(self::DOMAIN_NAME, $domain)) {
-                        return self::coded('That is not a domain name', 'domain_invalid', 400);
-                    }
-                    if (self::privateName($domain) || Safefetch::resolvesPrivately($domain)) {
-                        return self::coded("$domain is not a public domain name. Use one that browsers anywhere can reach.", 'domain_not_public', 400, ['domain' => $domain]);
-                    }
-                    // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
-                    // The request's own Host is the caller's to choose, so the configured address and the names people
-                    // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-                    // the app knows its own address.
-                    if (isset($this->managed[$request]) && $this->origin === null) {
-                        return self::originNeeded();
-                    }
-                    $here = array_filter([$request->headers->get('host'), $request->headers->get('x-forwarded-host'), $url->host()], fn ($h) => Js::truthy($h));
-                    $own = [...($this->origin !== null ? [(new Url($this->origin))->host()] : []), ...$here];
-                    if (isset($this->options['ownHosts'])) {
-                        foreach (($this->options['ownHosts'])() as $host) {
-                            $own[] = (string) $host;
-                        }
-                    }
-                    $taken = array_map(self::hostName(...), $own);
-                    foreach ($this->sites() as $s) {
-                        array_push($taken, ...$s['hostnames']);
-                        array_push($taken, ...($this->rl->remote($s['id'])['hostnames'] ?? []));
-                    }
-                    if (in_array($domain, $taken, true)) {
-                        return self::coded("$domain is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.$domain.", 'domain_in_use', 400, ['domain' => $domain]);
-                    }
-                    foreach ($store->linkDomains() as $d) {
-                        if ($d['domain'] === $domain) {
-                            if ($d['site'] !== $site['id']) {
-                                return self::coded("$domain already belongs to another site", 'domain_taken', 409, ['domain' => $domain]);
-                            }
-                            break;
-                        }
+                    $domain = $this->checkLinkDomain($request, $url, $site['id'], self::text($body, 'domain'));
+                    if ($domain instanceof Response) {
+                        return $domain;
                     }
                     $store->addLinkDomain($domain, $site['id'], $this->rl->now());
                     $this->rl->forgetLinkDomains();
@@ -1009,6 +1022,11 @@ final class Routes
                         self::credentials(Js::get($body, 'credentials')),
                         is_string($cursor) ? $cursor : null,
                         is_float($done) && is_nan($done) ? 0 : $done,
+                        // An imported link's domain passes the same checks as one added in Settings, or the link comes over without it.
+                        function (string $domain) use ($request, $url, $site): ?string {
+                            $checked = $this->checkLinkDomain($request, $url, $site['id'], $domain);
+                            return $checked instanceof Response ? null : $checked;
+                        },
                     );
                     return self::json($step);
                 } catch (ImportError $error) {
