@@ -112,6 +112,11 @@ public static partial class Smtp
         async Task<(int Code, string Text)> Expect(int[] codes, string what)
         {
             var reply = (await s.NextAsync(ReplyTimeoutMs, false, ct).ConfigureAwait(false))!.Value;
+            // Something that is not a mail server gets no more than that said, so its own words are never passed on.
+            if (!(reply.Code >= 200 && reply.Code <= 599))
+            {
+                throw new MailError("SMTP " + what + ": " + s.Where + " did not answer as a mail server does");
+            }
             if (!codes.Contains(reply.Code))
             {
                 throw new MailError(Js.Slice("SMTP " + what + ": " + Js.Str(reply.Code) + " " + reply.Text, 0, 300));

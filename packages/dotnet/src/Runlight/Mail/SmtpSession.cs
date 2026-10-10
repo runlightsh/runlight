@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -40,6 +42,12 @@ internal sealed class SmtpSession(string host, int port, long deadline, string l
 
     private static MailError Closed() => new("SMTP: the server closed the connection");
 
+    /// <summary>The server as host:port, for messages.</summary>
+    public string Where => host + ":" + Js.Str(port);
+
+    private MailError Refused() =>
+        new("SMTP: " + host + " is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", new JsObject { ["host"] = host });
+
     public async Task ConnectAsync(bool tls, int timeoutMs, CancellationToken cancellationToken)
     {
         double wait = Math.Min(timeoutMs, Left());
@@ -47,14 +55,27 @@ internal sealed class SmtpSession(string host, int port, long deadline, string l
         {
             throw Late();
         }
-        string where = host + ":" + Js.Str(port);
+        string where = Where;
+        // A mail server may be on this computer or a private network, but never at a link-local or cloud metadata
+        // address. The check runs on the addresses the connection uses, so a name cannot answer differently later.
+        string bare = host.StartsWith('[') && host.EndsWith(']') ? host[1..^1] : host;
+        if (Safefetch.MetadataAddress(bare))
+        {
+            throw Refused();
+        }
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(TimeSpan.FromMilliseconds(Math.Ceiling(wait)));
         string? detail = null;
         try
         {
-            await socket.ConnectAsync(host, port, cts.Token).ConfigureAwait(false);
+            IPAddress[] addresses = IPAddress.TryParse(bare, out var literal) ? [literal] : await Dns.GetHostAddressesAsync(bare, cts.Token).ConfigureAwait(false);
+            if (addresses.Any(a => Safefetch.MetadataAddress((a.IsIPv4MappedToIPv6 ? a.MapToIPv4() : a).ToString())))
+            {
+                socket.Dispose();
+                throw Refused();
+            }
+            await socket.ConnectAsync(addresses, port, cts.Token).ConfigureAwait(false);
             _socket = socket;
             _stream = new NetworkStream(socket, ownsSocket: true);
             if (tls)

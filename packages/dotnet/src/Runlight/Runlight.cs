@@ -288,6 +288,11 @@ public sealed partial class Runlight
             config["fromName"] = fromName;
         }
         Transports.CheckConfig(config);
+        string smtpHost = config.Str("host") ?? "";
+        if (config.Str("service") == "smtp" && smtpHost.Length > 0 && await Safefetch.MetadataHostAsync(smtpHost).ConfigureAwait(false))
+        {
+            throw new MailError(smtpHost + " is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", new JsObject { ["host"] = smtpHost });
+        }
         await Store.SetSettingAsync("mail", Mail.Secret.Seal(Json.Stringify(config), Secret), cancellationToken).ConfigureAwait(false);
     }
 
@@ -1144,6 +1149,10 @@ public sealed partial class Runlight
             if (parsed == null || (parsed.Protocol != "https:" && parsed.Protocol != "http:"))
             {
                 throw new SettingsError("Enter the service's address, starting with https://", "assistant_address_bad");
+            }
+            if (await Safefetch.MetadataHostAsync(parsed.Hostname).ConfigureAwait(false))
+            {
+                throw new SettingsError(parsed.Hostname + " is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", new JsObject { ["host"] = parsed.Hostname });
             }
         }
         if (baseUrl.Length == 0 && provider.BaseUrl.Length == 0)

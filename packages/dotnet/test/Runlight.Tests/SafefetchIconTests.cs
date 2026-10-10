@@ -26,6 +26,24 @@ public sealed class SafefetchIconTests
     private static Headers H(string name, string value) => new() { [name] = value };
 
     [Fact]
+    public async Task Link_local_and_cloud_metadata_addresses_are_told_apart_from_loopback_and_private_ones()
+    {
+        foreach (string ip in new[] { "169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe" })
+        {
+            Assert.True(Safefetch.MetadataAddress(ip), ip);
+        }
+        foreach (string ip in new[] { "127.0.0.1", "::1", "10.0.0.5", "192.168.1.20", "fd00::1", "fd00:ec2::253", "93.184.215.14", "not an address" })
+        {
+            Assert.False(Safefetch.MetadataAddress(ip), ip);
+        }
+        Assert.True(await Safefetch.MetadataHostAsync("metadata.google.internal"));
+        Assert.True(await Safefetch.MetadataHostAsync("[fd00:ec2::254]"));
+        Assert.True(await Safefetch.MetadataHostAsync("169.254.169.254"));
+        Assert.False(await Safefetch.MetadataHostAsync("localhost")); // a model on this computer is fine
+        Assert.False(await Safefetch.MetadataHostAsync("192.168.1.20"));
+    }
+
+    [Fact]
     public void Only_addresses_on_the_public_internet_count_as_public()
     {
         foreach (string ip in new[] { "93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e" })

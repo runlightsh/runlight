@@ -290,6 +290,38 @@ public sealed class MailTests
     }
 
     [Fact]
+    public async Task Smtp_never_a_link_local_or_metadata_address_and_something_that_is_not_a_mail_server_is_not_quoted()
+    {
+        foreach (string host in new[] { "169.254.169.254", "[fd00:ec2::254]" })
+        {
+            var error = await Assert.ThrowsAsync<MailError>(() => Smtp.SendAsync(new JsObject { ["service"] = "smtp", ["host"] = host, ["port"] = "25", ["security"] = "none" }, Message(), "reports@example.com"));
+            Assert.Equal("address_refused", error.Code);
+        }
+        var rl = new Runlight(new RunlightOptions { Store = await Databases.FreshAsync("sqlite"), Secret = new string('s', 64) });
+        var saved = await Assert.ThrowsAsync<MailError>(() => rl.SaveMailSettingsAsync(new JsObject { ["service"] = "smtp", ["host"] = "metadata.google.internal", ["port"] = "587", ["security"] = "starttls", ["from"] = "a@example.com" }));
+        Assert.Equal("address_refused", saved.Code);
+
+        var (listener, port) = SmtpServer.Listen();
+        using var _ = listener;
+        var serving = Task.Run(async () =>
+        {
+            using var client = await listener.AcceptTcpClientAsync();
+            await client.GetStream().WriteAsync(Js.Utf8("HTTP/1.1 400 Bad Request\r\nsecret: internal\r\n\r\n"));
+        });
+        try
+        {
+            var error = await Assert.ThrowsAsync<MailError>(() => Smtp.SendAsync(new JsObject { ["service"] = "smtp", ["host"] = "127.0.0.1", ["port"] = Js.Str(port), ["security"] = "none" }, Message(), "reports@example.com"));
+            Assert.Matches("did not answer as a mail server does", error.Message);
+            Assert.DoesNotMatch("internal|HTTP", error.Message);
+        }
+        finally
+        {
+            await serving;
+            listener.Stop();
+        }
+    }
+
+    [Fact]
     public async Task Smtp_that_cannot_connect_says_so()
     {
         // A port that was free a moment ago.
