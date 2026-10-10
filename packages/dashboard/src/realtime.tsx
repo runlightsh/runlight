@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, type Realtime } from "./api.js";
+import { api, shared, type Realtime } from "./api.js";
 import { count, countryName, exact, flag } from "./format.js";
 import { currentLocale, rich, t, tn, type Key } from "./i18n.js";
 import { Sheet } from "./links.js";
@@ -127,7 +127,8 @@ export function RealtimeModal({ site, onClose }: { site: string; onClose: () => 
               <Now title="live.sources" rows={data.sources} dimension="source" />
               <Now title="live.countries" rows={data.countries} dimension="country" />
             </div>
-            <Feed recent={data.recent} />
+            {/* A share link or an embed gets no feed of single visits, so it shows none rather than a quiet one. */}
+            {shared ? null : <Feed recent={data.recent} />}
           </>
         ) : (
           <p class="empty">{t("common.loading")}</p>
