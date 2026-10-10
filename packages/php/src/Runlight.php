@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Runlight;
 
+use Runlight\Accounts\Throttle;
 use Runlight\Http\BodyTooLong;
 use Runlight\Http\CurlFetcher;
 use Runlight\Http\Fetcher;
@@ -1644,6 +1645,8 @@ final class Runlight
         }
         $this->dropOldSalts($this->now());
         $this->limit?->sweep();
+        // Sign-in counts that ran out, and hashing keys older than yesterday, so nothing made from an address lasts a day.
+        Throttle::sweep($this->store, $this->now());
         // Every site's retention covers any one site's that is still waiting.
         $this->pruning = [];
         try {

@@ -10,45 +10,89 @@ use Runlight\Store\SqlStore;
 
 /**
  * Counts failed sign-ins under a key and refuses more than a few in a while.
- * Keys are hashed with a key made on first use, so the counts never hold an
+ * Keys are hashed with a key made for the day, so the counts never hold an
  * address or an email as it was given.
  *
  * TypeScript keeps the counts in its process. PHP forgets everything between
  * requests, so here they live in the database's settings, as
  * "throttle:<name>:<id>" holding {count, until}, and the hashing key as
- * "throttle-key". Every process of an install then shares the same counts,
- * and changes them one at a time under the database's lock.
+ * "throttle-key:<UTC day>". Every process of an install then shares the same
+ * counts, and changes them one at a time under the database's lock.
+ *
+ * Some ids come from an address, so none may last past a day: each UTC day
+ * has its own key, keys older than yesterday are deleted, and counts that ran
+ * out go when read, when a new count starts, and in the scheduled check. A
+ * window that crosses midnight starts again under the new day's key.
  */
 final class Throttle
 {
-    private const KEY = 'throttle-key';
+    private const KEY = 'throttle-key:';
+    /** The one key kept before keys were made each day. */
+    private const OLD_KEY = 'throttle-key';
 
+    /** @var \Closure(): int */
+    private \Closure $clock;
+
+    /** @param (callable(): int)|null $clock milliseconds since the epoch, for forgive() and clear(), which are given no time */
     public function __construct(
         private readonly SqlStore $store,
         private readonly string $name,
         private readonly int $limit = 10,
         private readonly int $windowMs = 15 * 60_000,
+        ?callable $clock = null,
     ) {
+        $this->clock = $clock !== null ? \Closure::fromCallable($clock) : static fn (): int => (int) floor(microtime(true) * 1000);
     }
 
-    private function salt(): string
+    private static function day(int $now): string
+    {
+        return gmdate('Y-m-d', intdiv($now, 1000) - ($now < 0 && $now % 1000 !== 0 ? 1 : 0));
+    }
+
+    private function salt(int $now): string
     {
         // The settings table first, for an install whose first requests are all sign-ins.
         $this->store->migrate();
-        $saved = $this->store->setting(self::KEY);
+        $key = self::KEY . self::day($now);
+        $saved = $this->store->setting($key);
         if ($saved !== null && $saved !== '') {
             return $saved;
         }
         // Made in turn, so two processes starting at once settle on one key.
-        return $this->turn(function (): string {
-            $saved = $this->store->setting(self::KEY);
+        return $this->turn(function () use ($key, $now): string {
+            $saved = $this->store->setting($key);
             if ($saved !== null && $saved !== '') {
                 return $saved;
             }
             $made = Hash::randomId(16);
-            $this->store->setSetting(self::KEY, $made);
+            $this->store->setSetting($key, $made);
+            self::sweep($this->store, $now);
             return $made;
         });
+    }
+
+    /**
+     * Deletes the counts of every throttle that have run out, the hashing keys older than yesterday, and the
+     * one key kept before there was one a day, so nothing an id was made from outlasts a day. The scheduled
+     * check runs it, and so does the first count of each day.
+     */
+    public static function sweep(SqlStore $store, int $now): void
+    {
+        $keep = [self::KEY . self::day($now), self::KEY . self::day($now - 86_400_000)];
+        foreach ($store->settingsStartingWith(self::KEY) as ['key' => $key]) {
+            if (!in_array($key, $keep, true)) {
+                $store->setSetting($key, null);
+            }
+        }
+        if ($store->setting(self::OLD_KEY) !== null) {
+            $store->setSetting(self::OLD_KEY, null);
+        }
+        foreach ($store->settingsStartingWith('throttle:') as ['key' => $key, 'value' => $value]) {
+            $entry = Json::tryDecode($value, true);
+            if (!is_array($entry) || (int) ($entry['until'] ?? 0) <= $now) {
+                $store->setSetting($key, null);
+            }
+        }
     }
 
     /**
@@ -64,9 +108,9 @@ final class Throttle
         return $this->store->db->exclusive(static fn () => $fn());
     }
 
-    private function id(string $key): string
+    private function id(string $key, int $now): string
     {
-        return substr(Crypto::base64url(Crypto::hmac('SHA-256', $this->salt(), $key)), 0, 22);
+        return substr(Crypto::base64url(Crypto::hmac('SHA-256', $this->salt($now), $key)), 0, 22);
     }
 
     private function prefix(): string
@@ -74,12 +118,23 @@ final class Throttle
         return "throttle:$this->name:";
     }
 
-    /** @return array{count: int, until: int}|null */
-    private function entry(string $id): ?array
+    /**
+     * A count still running. One that has run out is deleted as it is read.
+     *
+     * @return array{count: int, until: int}|null
+     */
+    private function entry(string $id, int $now): ?array
     {
         $saved = $this->store->setting($this->prefix() . $id);
-        $entry = $saved === null ? null : Json::tryDecode($saved, true);
-        return is_array($entry) ? ['count' => (int) ($entry['count'] ?? 0), 'until' => (int) ($entry['until'] ?? 0)] : null;
+        if ($saved === null) {
+            return null;
+        }
+        $entry = Json::tryDecode($saved, true);
+        if (!is_array($entry) || (int) ($entry['until'] ?? 0) <= $now) {
+            $this->store->setSetting($this->prefix() . $id, null);
+            return null;
+        }
+        return ['count' => (int) ($entry['count'] ?? 0), 'until' => (int) $entry['until']];
     }
 
     /** @param array{count: int, until: int} $entry */
@@ -90,16 +145,13 @@ final class Throttle
 
     public function blocked(string $key, int $now): bool
     {
-        return $this->isBlocked($this->id($key), $now);
+        return $this->isBlocked($this->id($key, $now), $now);
     }
 
     private function isBlocked(string $id, int $now): bool
     {
-        $entry = $this->entry($id);
-        if ($entry === null || $entry['until'] <= $now) {
-            return false;
-        }
-        return $entry['count'] >= $this->limit;
+        $entry = $this->entry($id, $now);
+        return $entry !== null && $entry['count'] >= $this->limit;
     }
 
     /**
@@ -110,7 +162,7 @@ final class Throttle
      */
     public function take(string $key, int $now): bool
     {
-        $id = $this->id($key);
+        $id = $this->id($key, $now);
         return $this->turn(function () use ($id, $now): bool {
             if ($this->isBlocked($id, $now)) {
                 return false;
@@ -123,9 +175,10 @@ final class Throttle
     /** Takes back one counted try, for one that turned out right. */
     public function forgive(string $key): void
     {
-        $id = $this->id($key);
-        $this->turn(function () use ($id): void {
-            $entry = $this->entry($id);
+        $now = ($this->clock)();
+        $id = $this->id($key, $now);
+        $this->turn(function () use ($id, $now): void {
+            $entry = $this->entry($id, $now);
             if ($entry !== null && $entry['count'] > 0) {
                 $entry['count']--;
                 $this->save($id, $entry);
@@ -135,14 +188,14 @@ final class Throttle
 
     public function fail(string $key, int $now): void
     {
-        $id = $this->id($key);
+        $id = $this->id($key, $now);
         $this->turn(fn () => $this->count($id, $now));
     }
 
     private function count(string $id, int $now): void
     {
-        $entry = $this->entry($id);
-        if ($entry === null || $entry['until'] <= $now) {
+        $entry = $this->entry($id, $now);
+        if ($entry === null) {
             $this->save($id, ['count' => 1, 'until' => $now + $this->windowMs]);
             $this->prune($now);
             return;
@@ -189,6 +242,6 @@ final class Throttle
 
     public function clear(string $key): void
     {
-        $this->store->setSetting($this->prefix() . $this->id($key), null);
+        $this->store->setSetting($this->prefix() . $this->id($key, ($this->clock)()), null);
     }
 }
