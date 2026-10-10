@@ -72,7 +72,10 @@ module Runlight
         left = deadline - monotonic
         raise FetchError.new(TIMED_OUT, timed_out: true) if left <= 0
 
-        http = Net::HTTP.new(host, port)
+        # A pinned request never goes through a proxy from the environment (http_proxy and the rest), which would
+        # connect wherever the name leads now rather than to the address that was checked.
+        pinned = !Array(init["resolve"]).empty?
+        http = pinned ? Net::HTTP.new(host, port, nil) : Net::HTTP.new(host, port)
         http.use_ssl = https
         # A pin connects to the checked address, with the name kept for the Host header and the certificate.
         Array(init["resolve"]).each do |pin|
