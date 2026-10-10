@@ -26401,6 +26401,26 @@
         },
         {
           "method": "GET",
+          "path": "/login?next=/..//evil.example/",
+          "look": [
+            "name=\"next\" value=\"/runlight/\""
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "GET",
           "path": "/login?next=/runlight/?site=default",
           "look": [
             "name=\"next\" value=\"/runlight/?site=default\""

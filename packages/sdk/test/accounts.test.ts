@@ -114,6 +114,11 @@ for (const kind of STORES) {
     assert.equal(back.headers.get("location"), "/runlight/?period=7d");
     const elsewhere = await handler(req("/runlight/login", form({ email: "mo@example.com", password: "another long one", next: "//evil.example/" })));
     assert.equal(elsewhere.headers.get("location"), "/runlight/", "never sent off the app");
+    // Dot segments that resolve to a path starting "//" would leave from the Location header too.
+    for (const next of ["/..//evil.example/", "/runlight/..//evil.example", "/./../..//evil.example/x"]) {
+      const dotted = await handler(req("/runlight/login", form({ email: "mo@example.com", password: "another long one", next })));
+      assert.equal(dotted.headers.get("location"), "/runlight/", next);
+    }
   });
 }
 

@@ -94,13 +94,16 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
    * Only a path on this install, so a sign-in can never send someone elsewhere.
    * Browsers drop tabs and newlines from a URL and read a backslash as a slash,
    * so "/\t/evil.example" would leave; anything with those is refused outright,
-   * and what is left must resolve to this origin.
+   * and what is left must resolve to this origin. A path that resolves to one
+   * starting "//", as "/..//evil.example" does, would leave from the Location
+   * header, so that goes home too.
    */
   const safeNext = (value: string | null): string => {
     if (!value || !value.startsWith("/") || /[\u0000-\u001f\u007f\\]/.test(value)) return home;
     try {
       const url = new URL(value, "http://runlight.invalid");
-      return url.origin === "http://runlight.invalid" ? `${url.pathname}${url.search}${url.hash}` : home;
+      const path = `${url.pathname}${url.search}${url.hash}`;
+      return url.origin === "http://runlight.invalid" && !path.startsWith("//") && !path.startsWith("/\\") ? path : home;
     } catch {
       return home;
     }
