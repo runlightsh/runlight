@@ -21,6 +21,8 @@ defmodule Runlight.Importers do
 
   # Domains run by the shorteners themselves. Links there stay on Runlight's own path.
   @shortener_domains ~w(bit.ly bitly.com j.mp dub.sh dub.co dub.link short.gy rebrand.ly rebrandly.com rb.gy)
+  # The most clicks a day one imported link gets from a daily count.
+  @max_daily 10_000
 
   # Browser and system names as other tools write them, in Runlight's spelling.
   @browsers %{
@@ -112,8 +114,16 @@ defmodule Runlight.Importers do
   with its history, and report progress. The page calls again with the
   cursor until it comes back null.
   """
-  @spec import_step(Runlight.t(), String.t(), String.t(), map(), String.t() | nil, integer()) :: Object.t()
-  def import_step(rl, site, source, credentials, cursor, done) do
+  @spec import_step(
+          Runlight.t(),
+          String.t(),
+          String.t(),
+          map(),
+          String.t() | nil,
+          integer(),
+          (String.t() -> String.t() | nil)
+        ) :: Object.t()
+  def import_step(rl, site, source, credentials, cursor, done, link_domain \\ fn _ -> nil end) do
     unless source in @sources,
       do:
         raise(ImportError,
@@ -141,36 +151,31 @@ defmodule Runlight.Importers do
     # A total that is not a number is as good as none.
     total = if is_number(result["total"]), do: result["total"], else: nil
 
+    # Each domain is checked once a step, since the check may look it up in DNS.
+    checked = {__MODULE__, :checked, make_ref()}
+
+    domain_for = fn domain ->
+      cache = Process.get(checked, %{})
+
+      case Map.fetch(cache, domain) do
+        {:ok, value} ->
+          value
+
+        :error ->
+          value = link_domain.(domain)
+          Process.put(checked, Map.put(cache, domain, value))
+          value
+      end
+    end
+
     acc = %{done: done, links: 0, clicks: 0, skipped: 0, failed: []}
 
     acc =
-      Enum.reduce(result["links"], acc, fn item, acc ->
-        if item["known"] == true do
-          %{acc | done: acc.done + 1, skipped: acc.skipped + 1}
-        else
-          written = write_link(rl, site, source, item["link"], item)
-          acc = %{acc | done: acc.done + 1}
-
-          case written.status do
-            "created" ->
-              %{acc | links: acc.links + 1, clicks: acc.clicks + written.clicks}
-
-            "skipped" ->
-              %{acc | skipped: acc.skipped + 1}
-
-            _ ->
-              failure =
-                JS.obj(
-                  slug: item["link"]["slug"],
-                  reason: written.reason,
-                  code: Map.get(written, :code, :undefined),
-                  params: if(Map.has_key?(written, :code), do: JS.obj(written.params), else: :undefined)
-                )
-
-              %{acc | failed: acc.failed ++ [failure]}
-          end
-        end
-      end)
+      try do
+        Enum.reduce(result["links"], acc, &step_link(rl, site, source, &1, &2, domain_for))
+      after
+        Process.delete(checked)
+      end
 
     # Links the source skipped (deleted ones) still count toward progress.
     done = if result["cursor"] == nil and total != nil, do: max(acc.done, total), else: acc.done
@@ -184,6 +189,34 @@ defmodule Runlight.Importers do
       skipped: acc.skipped,
       failed: acc.failed
     )
+  end
+
+  defp step_link(rl, site, source, item, acc, domain_for) do
+    if item["known"] == true do
+      %{acc | done: acc.done + 1, skipped: acc.skipped + 1}
+    else
+      written = write_link(rl, site, source, item["link"], item, domain_for)
+      acc = %{acc | done: acc.done + 1}
+
+      case written.status do
+        "created" ->
+          %{acc | links: acc.links + 1, clicks: acc.clicks + written.clicks}
+
+        "skipped" ->
+          %{acc | skipped: acc.skipped + 1}
+
+        _ ->
+          failure =
+            JS.obj(
+              slug: item["link"]["slug"],
+              reason: written.reason,
+              code: Map.get(written, :code, :undefined),
+              params: if(Map.has_key?(written, :code), do: JS.obj(written.params), else: :undefined)
+            )
+
+          %{acc | failed: acc.failed ++ [failure]}
+      end
+    end
   end
 
   @doc false
@@ -205,10 +238,13 @@ defmodule Runlight.Importers do
   branded domain), then each click as a visit like a live one, or daily
   counts as clicks without visitors. Ids come from the source's own ids, so
   importing again skips what is already there. Answers `%{status, clicks}`,
-  with `reason`, `code`, and `params` for a link that failed.
+  with `reason`, `code`, and `params` for a link that failed. `link_domain`
+  answers a branded domain as the site keeps it once it passes a link
+  domain's checks, or nil to bring the link over without it.
   """
-  @spec write_link(Runlight.t(), String.t(), String.t(), Object.t(), Object.t()) :: map()
-  def write_link(rl, site, source, foreign, history) do
+  @spec write_link(Runlight.t(), String.t(), String.t(), Object.t(), Object.t(), (String.t() -> String.t() | nil)) ::
+          map()
+  def write_link(rl, site, source, foreign, history, link_domain \\ fn _ -> nil end) do
     id = imported_link_id(source, foreign["sourceId"])
     slug = foreign["slug"]
     url = foreign["url"]
@@ -240,50 +276,69 @@ defmodule Runlight.Importers do
         }
 
       true ->
-        domain = Sources.strip_www(JS.or_else(foreign["domain"], ""))
-        domain = if domain in @shortener_domains, do: "", else: domain
-        now = Runlight.now(rl)
-
-        # Nothing in the transaction is one link's own problem (those are checked above), so a failure in it is
-        # the database's, and it stops the import rather than marking the link.
-        clicks =
-          Store.transaction(rl.store, fn store ->
-            # A failed earlier try can have left some of this link's clicks behind. Clear them, then write the
-            # link row last, so a link only counts as imported once all of its history is in.
-            Store.run_sql(
-              store,
-              "DELETE FROM rl_sessions WHERE id IN (SELECT DISTINCT session FROM rl_events WHERE link = ? AND session <> '')",
-              [id]
-            )
-
-            Store.run_sql(store, "DELETE FROM rl_events WHERE link = ?", [id])
-
-            clicks = write_clicks(store, site, source, foreign, domain, id, JS.nullish(field(history, "clicks"), []))
-            clicks = write_daily(store, site, foreign, domain, id, JS.nullish(field(history, "daily"), []), clicks)
-
-            if domain != "", do: Store.add_link_domain(store, domain, site, now)
-            created = JS.or_else(foreign["createdAt"], now)
-
-            Store.insert_link(
-              store,
-              JS.obj(
-                id: id,
-                site: site,
-                domain: domain,
-                slug: slug,
-                name: JS.slice(JS.or_else(foreign["name"], slug), 0, 100),
-                url: url,
-                createdAt: created,
-                updatedAt: created
-              )
-            )
-
-            clicks
-          end)
-
-        if domain != "", do: Runlight.forget_link_domains(rl)
-        %{status: "created", clicks: clicks}
+        # The destination passes the checks a link made by hand does.
+        case clean_url(url) do
+          {:ok, url} -> write_new_link(rl, site, source, foreign, history, link_domain, id, url)
+          {:error, failed} -> failed
+        end
     end
+  end
+
+  defp clean_url(url) do
+    {:ok, Runlight.Links.clean_url(url)}
+  rescue
+    error in Runlight.LinkError ->
+      {:error, %{status: "failed", clicks: 0, reason: error.message, code: error.code, params: error.params}}
+  end
+
+  defp write_new_link(rl, site, source, foreign, history, link_domain, id, url) do
+    slug = foreign["slug"]
+    domain = foreign["domain"] |> JS.or_else("") |> JS.lower() |> Sources.strip_www()
+    # A branded domain must pass the checks one added in Settings does, so an import can never claim the
+    # dashboard's own host or a name inside a private network. One that fails is left off: the link is served
+    # from the app's own path instead.
+    domain = if domain == "" or domain in @shortener_domains, do: "", else: link_domain.(domain) || ""
+    now = Runlight.now(rl)
+
+    # Nothing in the transaction is one link's own problem (those are checked above), so a failure in it is
+    # the database's, and it stops the import rather than marking the link.
+    clicks =
+      Store.transaction(rl.store, fn store ->
+        # A failed earlier try can have left some of this link's clicks behind. Clear them, then write the
+        # link row last, so a link only counts as imported once all of its history is in.
+        Store.run_sql(
+          store,
+          "DELETE FROM rl_sessions WHERE id IN (SELECT DISTINCT session FROM rl_events WHERE link = ? AND session <> '')",
+          [id]
+        )
+
+        Store.run_sql(store, "DELETE FROM rl_events WHERE link = ?", [id])
+
+        clicks = write_clicks(store, site, source, foreign, domain, id, JS.nullish(field(history, "clicks"), []))
+        clicks = write_daily(store, site, foreign, domain, id, JS.nullish(field(history, "daily"), []), clicks)
+
+        if domain != "", do: Store.add_link_domain(store, domain, site, now)
+        created = JS.or_else(foreign["createdAt"], now)
+
+        Store.insert_link(
+          store,
+          JS.obj(
+            id: id,
+            site: site,
+            domain: domain,
+            slug: slug,
+            name: JS.slice(JS.or_else(foreign["name"], slug), 0, 100),
+            url: url,
+            createdAt: created,
+            updatedAt: created
+          )
+        )
+
+        clicks
+      end)
+
+    if domain != "", do: Runlight.forget_link_domains(rl)
+    %{status: "created", clicks: clicks}
   end
 
   defp write_clicks(store, site, source, foreign, domain, id, clicks) do
@@ -397,10 +452,10 @@ defmodule Runlight.Importers do
       if not JS.finite?(start) or not (is_number(count) and count > 0) do
         clicks
       else
-        n = min(count, 1_000_000)
-        whole = JS.ceil(n)
+        # A day's count is capped, so one made-up figure from a source cannot write millions of rows.
+        n = min(JS.floor(count), @max_daily)
 
-        Enum.reduce(0..(whole - 1)//1, clicks, fn i, clicks ->
+        Enum.reduce(0..(n - 1)//1, clicks, fn i, clicks ->
           Store.insert_event(store, %{
             site: site,
             ts: start + JS.floor((i + 0.5) / n * 86_400_000),
