@@ -741,6 +741,9 @@ impl AccountsWeb {
                         self.0.existing.store(true, Ordering::Relaxed);
                         Ok(Some(redirect(&self.0.home_path, &[("set-cookie", &self.fresh_session(request, &user)?)])))
                     }
+                    Err(AuthError::Account(error)) if error.code == "invite_gone" => {
+                        Ok(Some(html(invite_gone_page(base), 410)))
+                    }
                     Err(AuthError::Account(error)) => Ok(Some(again(&error.message))),
                     Err(error) => Err(error.into()),
                 };
