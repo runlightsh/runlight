@@ -136,6 +136,31 @@ const codeHash = async (code: string) => hex(await sha256(code));
 /** A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed. */
 let decoy: Promise<string> | null = null;
 
+/** Password checks run at once, in this process, and the most that may wait for one. */
+const CHECKING = 4;
+const WAITING = 64;
+let running = 0;
+const waiting: Array<() => void> = [];
+
+/**
+ * Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core.
+ * Past the queue's length it refuses at once, with an AccountError coded "busy".
+ */
+async function slot<T>(fn: () => Promise<T>): Promise<T> {
+  if (running >= CHECKING) {
+    if (waiting.length >= WAITING) throw new AccountError("Runlight is busy checking other sign-ins. Try again in a moment.", "busy");
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  } else running++;
+  try {
+    return await fn();
+  } finally {
+    // The slot passes straight to the next in line, or is given back.
+    const next = waiting.shift();
+    if (next) next();
+    else running--;
+  }
+}
+
 export class Accounts {
   private ready: Promise<void> | null = null;
 
@@ -523,14 +548,18 @@ export class Accounts {
     });
   }
 
-  /** The account for an email and password, or null. Takes the same time either way. */
+  /**
+   * The account for an email and password, or null. Takes the same time either way. Only a few checks run at
+   * once; with too many waiting it throws an AccountError coded "busy".
+   */
   async signIn(email: string, password: string): Promise<User | null> {
     const user = await this.byEmail(email);
     if (!user) {
-      await checkPassword(password, await (decoy ??= hashPassword(hex(randomBytes(16)))));
+      const hash = await (decoy ??= hashPassword(hex(randomBytes(16))));
+      await slot(() => checkPassword(password, hash));
       return null;
     }
-    return (await checkPassword(password, user.hash)) ? user : null;
+    return (await slot(() => checkPassword(password, user.hash))) ? user : null;
   }
 
   /**

@@ -1084,6 +1084,10 @@ const ACCOUNTS: Scenario[] = [
       later(30_000, { ...signIn(OWNER.email, OWNER.password, {}, "owner"), headers: { "x-forwarded-for": "192.0.2.77" }, capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
       { method: "POST", path: "/login/code", jar: "owner", form: { pending: "{{pending}}", code: "{{totp:totp}}", next: "/runlight/" } },
       { method: "GET", path: "/api/account", jar: "owner" },
+      // One address trying thirty made-up emails waits, whichever email comes next.
+      ...Array.from({ length: 30 }, (_, i) => ({ ...signIn(`nobody${i}@example.com`, "wrong password", {}, "sprayer"), headers: { "x-forwarded-for": "198.51.100.1" } })),
+      { ...signIn("someone@example.com", "wrong password", {}, "sprayer"), headers: { "x-forwarded-for": "198.51.100.1" }, look: ["Too many tries"] },
+      { ...signIn("someone@example.com", "wrong password", {}, "sprayer"), headers: { "x-forwarded-for": "198.51.100.2" } },
     ],
   },
 ];

@@ -30520,6 +30520,716 @@
               }
             }
           }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody0@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody1@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody2@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody3@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody4@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody5@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody6@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody7@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody8@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody9@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody10@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody11@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody12@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody13@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody14@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody15@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody16@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody17@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody18@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody19@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody20@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody21@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody22@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody23@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody24@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody25@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody26@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody27@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody28@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "nobody29@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "someone@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.1"
+          },
+          "look": [
+            "Too many tries"
+          ],
+          "expect": {
+            "status": 429,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "someone@example.com",
+            "password": "wrong password"
+          },
+          "jar": "sprayer",
+          "headers": {
+            "x-forwarded-for": "198.51.100.2"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
         }
       ]
     },
