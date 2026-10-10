@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\runlight\Controller;
 
 use Drupal\Core\Controller\ControllerBase;
+use Drupal\Core\Site\Settings;
 use Drupal\Core\Url;
 use Symfony\Component\HttpFoundation\JsonResponse;
 
@@ -102,6 +103,17 @@ final class DashboardController extends ControllerBase {
     }
   }
 
+  /**
+   * The origin the admin is served from, which alone may frame the dashboard:
+   * $settings['runlight_admin_origin'] when settings.php names it, else the
+   * request's, which Drupal reads from a proxy's headers once
+   * $settings['reverse_proxy'] trusts it.
+   */
+  private static function adminOrigin(): string {
+    $configured = self::originOf(trim((string) Settings::get('runlight_admin_origin', '')));
+    return $configured !== '' ? $configured : \Drupal::request()->getSchemeAndHttpHost();
+  }
+
   /** The scheme, host, and port of an address, as a browser writes its origin. */
   private static function originOf(string $address): string {
     $parts = parse_url($address);
@@ -141,7 +153,7 @@ final class DashboardController extends ControllerBase {
         'http_errors' => FALSE,
         'allow_redirects' => FALSE,
         'headers' => ['Authorization' => 'Bearer ' . $key],
-        'json' => ['origin' => \Drupal::request()->getSchemeAndHttpHost()],
+        'json' => ['origin' => self::adminOrigin()],
       ]);
     }
     catch (\Throwable $e) {

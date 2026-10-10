@@ -8,3 +8,5 @@ Counts your site's visitors with [Runlight](https://runlight.sh/): privacy frien
 - Adds a Runlight item to the Control Panel that shows your dashboard there with a dashboard key, and links to your Runlight.
 
 The address, site id, and keys accept environment variables, so the keys can stay out of project config. Full steps: [runlight.sh/docs/craft](https://runlight.sh/docs/craft/).
+
+Only the Control Panel's own origin may frame the dashboard. When a proxy in front of Craft ends HTTPS, set `baseCpUrl` in `config/general.php` (or `CRAFT_BASE_CP_URL`), so the plugin asks for the right one.
