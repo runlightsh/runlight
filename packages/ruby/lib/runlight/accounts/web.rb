@@ -54,6 +54,8 @@ module Runlight
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
         @code_tries = Throttle.new(@store, "code", 5)
+        # A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+        @decoy_tries = Throttle.new(@store, "decoy", 5)
         @confirm_tries = Throttle.new(@store, "confirm", 5)
         @rechecks = Throttle.new(@store, "recheck", 10)
       end
@@ -391,7 +393,7 @@ module Runlight
           user = pending["user"]
           real = pending["real"]
           # Counted before the check, so a burst cannot get past five.
-          unless @code_tries.take(user["id"], now)
+          unless (real ? @code_tries : @decoy_tries).take(user["id"], now)
             return html(Pages.code_page(base, { "pending" => form.get("pending") || "", "next" => next_path, "error" => "Too many tries. Wait fifteen minutes and try again." }), 429)
           end
           if !real || !@accounts.check_second_factor(user["id"], form.get("code") || "", now)
