@@ -144,14 +144,18 @@ class AccountsWeb:
         self.home_path = f"{self.base}/"
         self.asks_for_token = isinstance(self.first, Mapping) and "token" in self.first
         self._existing = False
-        # Wrong passwords are counted twice. Per account and address, ten tries;
+        # Wrong passwords are counted three times. Per account and address, ten tries;
         # per account from anywhere, fifty, so a caller who invents a new address
         # for every try still cannot guess on and on. Addresses come from
-        # forwarding headers a client can write, so they never stand alone.
+        # forwarding headers a client can write, so they never stand alone. And per
+        # address across every account, thirty, so one caller trying made-up emails
+        # cannot keep the server hashing; a request with no known address skips that one,
+        # since it would hold up everyone at once.
         # Each try counts before the password is checked, and a right one is taken back.
         # Counts by address stay in the process, as TypeScript keeps them, so no address reaches the database.
         self.per_address = Throttle(self.store, "address", 10, memory=True)
         self.per_account = Throttle(self.store, "account", 50)
+        self.per_ip = Throttle(self.store, "ip", 30, memory=True)
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
         self.code_tries = Throttle(self.store, "code", 5)
@@ -422,34 +426,44 @@ class AccountsWeb:
         def too_many() -> Response:
             return _html(login({"error": "Too many tries. Wait fifteen minutes and try again.", "email": email}), 429)
 
+        if ip and not self.per_ip.take(ip, self.now()):
+            return too_many()
         if not self.per_address.take(pair, self.now()):
             return too_many()
-        # A browser that signed in to the account before is never held up by others' failures.
-        known = self.accounts.by_email(account)
-        trusted = known is not None and self.accounts.trusts_device(_read_cookie(request, DEVICE_COOKIE), known)
-        over = not trusted and not self.per_account.take(account, self.now())
-        # Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-        # addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-        # where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-        if over and not (known is not None and known["twoFactor"]):
-            if not self.rl.mail_settings() or not self._home_origin():
-                return too_many()
+        try:
+            # A browser that signed in to the account before is never held up by others' failures.
+            known = self.accounts.by_email(account)
+            trusted = known is not None and self.accounts.trusts_device(_read_cookie(request, DEVICE_COOKIE), known)
+            over = not trusted and not self.per_account.take(account, self.now())
+            # Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
+            # addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
+            # where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
+            if over and not (known is not None and known["twoFactor"]):
+                if not self.rl.mail_settings() or not self._home_origin():
+                    return too_many()
+                user = self.accounts.sign_in(email, password)
+                if user is not None:
+                    self._send_link_later(user, next_)
+                return _html(login({"error": "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", "email": email}), 429)
             user = self.accounts.sign_in(email, password)
-            if user is not None:
-                self._send_link_later(user, next_)
-            return _html(login({"error": "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", "email": email}), 429)
-        user = self.accounts.sign_in(email, password)
-        if user is None:
-            if over and known is not None:
-                return _html(code_page(base, {"pending": self.accounts.decoy_for(known, self.now()), "next": next_}))
-            return _html(login({"error": "That email and password do not match an account.", "email": email}), 401)
-        self.per_address.clear(pair)
-        if not over and not trusted:
-            self.per_account.forgive(account)
-        # With two-factor on, the password only earns the second step.
-        if user["twoFactor"]:
-            return _html(code_page(base, {"pending": self.accounts.pending_for(user, self.now()), "next": next_}))
-        return self._signed_in_to(request, user, next_)
+            if user is None:
+                if over and known is not None:
+                    return _html(code_page(base, {"pending": self.accounts.decoy_for(known, self.now()), "next": next_}))
+                return _html(login({"error": "That email and password do not match an account.", "email": email}), 401)
+            self.per_address.clear(pair)
+            if ip:
+                self.per_ip.forgive(ip)
+            if not over and not trusted:
+                self.per_account.forgive(account)
+            # With two-factor on, the password only earns the second step.
+            if user["twoFactor"]:
+                return _html(code_page(base, {"pending": self.accounts.pending_for(user, self.now()), "next": next_}))
+            return self._signed_in_to(request, user, next_)
+        except AccountError as error:
+            # Too many password checks already waiting, so this one was never run: try again in a moment.
+            if error.code == "busy":
+                return _html(login({"error": error.message, "email": email}), 503, {"retry-after": "5"})
+            raise
 
     def _api(self, request: Request, path: str) -> Response:
         """Your own account, and for the owner and admins, everyone else's."""
@@ -467,7 +481,13 @@ class AccountsWeb:
         def recheck(input: Mapping[str, Any], field: str, wrong: tuple[str, str]) -> Response | None:  # noqa: A002
             if not self.rechecks.take(user["id"], now):
                 return _coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429)
-            if self.accounts.sign_in(user["email"], _field(input, field)) is None:
+            try:
+                right = self.accounts.sign_in(user["email"], _field(input, field))
+            except AccountError as error:
+                if error.code == "busy":
+                    return _coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503)
+                raise
+            if right is None:
                 return _coded(wrong[0], wrong[1], 400)
             self.rechecks.forgive(user["id"])
             return None

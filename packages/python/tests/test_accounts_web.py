@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import html
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -412,6 +414,65 @@ def test_ten_wrong_passwords_from_one_address_wait(h):
     assert handle(web, req("/login", "POST", elsewhere, right)).status == 303, "another address is not held up"
     h.now += 15 * 60_000
     assert handle(web, req("/login", "POST", headers, right)).status == 303, "fifteen minutes later"
+
+
+def test_one_address_trying_made_up_emails_waits_after_thirty_before_any_password_is_hashed(h):
+    web = h.web()
+    owner(web)
+
+    def login(email: str, password: str, ip: str) -> int:
+        headers = {"content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip}
+        return handle(web, req("/login", "POST", headers, SearchParams({"email": email, "password": password}).to_string())).status
+
+    # A right password is taken back, so signing in now and then from a shared address never adds up.
+    assert login("jon@example.com", "a long password", "203.0.113.9") == 303
+    for i in range(30):
+        assert login(f"nobody{i}@example.com", "wrong wrong wrong", "203.0.113.9") == 401
+    assert login("someone@example.com", "wrong wrong wrong", "203.0.113.9") == 429
+    assert login("jon@example.com", "a long password", "203.0.113.9") == 429
+    assert login("jon@example.com", "a long password", "203.0.113.10") == 303, "another address is not held up"
+
+
+def test_only_a_few_passwords_are_checked_at_once_and_past_a_queue_the_rest_are_told_to_wait(h, monkeypatch):
+    from runlight.accounts import auth
+
+    web = h.web()
+    owner(web)
+    # Every check holds its place until all hundred have asked, as a burst arriving at once would.
+    started = threading.Semaphore(0)
+    go = threading.Event()
+    real = auth.check_password
+
+    def held(password: str, stored: str) -> bool:
+        started.release()
+        go.wait(10)
+        return real(password, stored)
+
+    monkeypatch.setattr(auth, "check_password", held)
+
+    def login(i: int) -> Response:
+        headers = {"content-type": "application/x-www-form-urlencoded", "x-forwarded-for": f"198.51.100.{i}"}
+        return handle(web, req("/login", "POST", headers, SearchParams({"email": f"n{i}@example.com", "password": "wrong wrong wrong"}).to_string()))
+
+    with ThreadPoolExecutor(100) as pool:
+        answers = [pool.submit(login, i) for i in range(100)]
+        for _ in range(auth.PASSWORD_SLOTS + auth.WAITING):
+            assert started.acquire(timeout=10)
+        # The rest answer without waiting for a slot.
+        deadline = time.monotonic() + 10
+        while sum(a.done() for a in answers) < 32 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        busy = [a.result() for a in answers if a.done()]
+        go.set()
+        statuses = [a.result(10).status for a in answers]
+    assert statuses.count(401) == 68, "four checking and sixty-four waiting"
+    assert statuses.count(503) == 32
+    assert all(r.status == 503 and r.headers.get("retry-after") == "5" for r in busy)
+    assert "Runlight is busy checking other sign-ins. Try again in a moment." in busy[0].text()
+    right = SearchParams({"email": "jon@example.com", "password": "a long password"}).to_string()
+    assert handle(web, req("/login", "POST", {"content-type": "application/x-www-form-urlencoded", "x-forwarded-for": "192.0.2.1"}, right)).status == 303, (
+        "and once they are done, sign-ins go on"
+    )
 
 
 def test_an_account_held_up_by_others_gets_a_sign_in_link(h):

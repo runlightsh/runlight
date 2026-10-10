@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from .. import _js
 from ..store.sql import upsert
 from .crypto import (
+    PASSWORD_SLOTS,
     base64url,
     check_password,
     hash_password,
@@ -178,6 +179,23 @@ INVITE_MS = 7 * 86_400_000
 
 _INVITE_CODE = re.compile(r"[A-Za-z0-9_-]{20,64}\Z")
 _SIX_DIGITS = re.compile(r"[0-9]{6}\Z")
+
+
+# Password checks for sign-ins that may wait at once, in this process, beyond the few that run (PASSWORD_SLOTS,
+# which crypto holds every hash to). Past that a sign-in is refused at once rather than queued.
+WAITING = 64
+_checks = threading.BoundedSemaphore(PASSWORD_SLOTS + WAITING)
+
+
+def _slot(fn: Callable[[], T]) -> T:
+    """Runs a password check when there is room, so a flood of sign-ins cannot pile up without end. Past the
+    queue's length it refuses at once, with an AccountError coded "busy"."""
+    if not _checks.acquire(blocking=False):
+        raise AccountError("Runlight is busy checking other sign-ins. Try again in a moment.", "busy")
+    try:
+        return fn()
+    finally:
+        _checks.release()
 
 
 def _code_hash(code: str) -> str:
@@ -596,14 +614,16 @@ class Accounts:
         return user
 
     def sign_in(self, email: str, password: str) -> dict[str, Any] | None:
-        """The account for an email and password, or None. Takes the same time either way."""
+        """The account for an email and password, or None. Takes the same time either way. Only a few checks run at
+        once; with too many waiting it raises an AccountError coded "busy"."""
         user = self.by_email(email)
         if user is None:
             if Accounts._decoy is None:
                 Accounts._decoy = hash_password(hex(random_bytes(16)))
-            check_password(password, Accounts._decoy)
+            decoy = Accounts._decoy
+            _slot(lambda: check_password(password, decoy))
             return None
-        return user if check_password(password, user["hash"]) else None
+        return user if _slot(lambda: check_password(password, user["hash"])) else None
 
     def session_for(self, user: dict[str, Any], now: int) -> str:
         """A cookie value naming the user and when it expires, signed with the
