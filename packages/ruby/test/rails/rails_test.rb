@@ -79,6 +79,13 @@ class RailsEngineTest < Minitest::Test
     assert_equal 1, count
   end
 
+  # The engine sits behind Rack::MethodOverride, so a form's POST with _method=DELETE must still need JSON.
+  def test_a_form_cannot_pass_for_a_delete_through_method_override
+    answer = @app.post("/runlight/api/tokens/#{"a" * 24}", "HTTP_HOST" => "example.com",
+                                                           "CONTENT_TYPE" => "application/x-www-form-urlencoded", input: "_method=DELETE")
+    assert_equal 415, answer.status
+  end
+
   def test_rake_tasks_run_the_check_and_migrate
     RailsApp::Application.load_tasks if Rake::Task.tasks.none? { |t| t.name == "runlight:check" }
     out = capture_io { Rake::Task["runlight:migrate"].execute }.first

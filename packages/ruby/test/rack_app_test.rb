@@ -3,6 +3,7 @@
 require "test_helper"
 require "rack/mock"
 require "rack/lint"
+require "rack/method_override"
 
 # Runlight::RackApp on its own and as middleware in front of a plain Rack app: Runlight's paths, short links,
 # AI agent fetches, bodies left for the app, and the work that runs once an answer is sent.
@@ -60,6 +61,17 @@ class RackAppTest < Minitest::Test
     assert_includes [301, 302, 307, 308], answer.status
     assert_equal "https://example.org/launch", answer.headers["location"]
     assert_equal "app saw GET /launch ", @app.get("/launch", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI).body
+  end
+
+  # Behind Rack::MethodOverride a form on another page could send POST with _method=DELETE, and a DELETE needs
+  # no JSON. It is answered as the POST the browser sent.
+  def test_a_method_override_is_answered_as_the_post_the_browser_sent
+    signed_in = Runlight::RackApp.new(@inner, runlight: @rl, base_path: "/runlight", authorize: ->(_r) { true })
+    app = Rack::MockRequest.new(Rack::MethodOverride.new(signed_in))
+    answer = app.post("/runlight/api/tokens/#{"a" * 24}", "HTTP_HOST" => "example.com",
+                                                          "CONTENT_TYPE" => "application/x-www-form-urlencoded", input: "_method=DELETE")
+    assert_equal 415, answer.status
+    assert_equal "send_json", Runlight::Json.decode(answer.body)["code"]
   end
 
   def test_alone_it_answers_everything_and_a_head_has_no_body

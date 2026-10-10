@@ -51,7 +51,9 @@ module Runlight
         headers.set("content-type", type) unless type.empty?
         length = env["CONTENT_LENGTH"].to_s
         headers.set("content-length", length) unless length.empty?
-        method = env["REQUEST_METHOD"].to_s.upcase
+        # Rack::MethodOverride (in every Rails app) turns a form's POST with _method=DELETE into a DELETE. Runlight
+        # answers the method the browser sent, so a form on another page cannot pass for a write that needs no JSON.
+        method = (env["rack.methodoverride.original_method"] || env["REQUEST_METHOD"]).to_s.upcase
         body = +""
         input = env["rack.input"]
         if read_body && !%w[GET HEAD].include?(method) && input
