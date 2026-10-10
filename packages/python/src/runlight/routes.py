@@ -2267,10 +2267,14 @@ class Routes:
                 return coded("Name the event", "event_needed", 400)
             keys = store.event_prop_keys(query, event)
             asked = params.get("key")
-            # A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-            if asked is not None and not ('"' not in asked and "\\" not in asked and 1 <= _js.length(asked) <= 64):
+            # A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+            # one asked for, the most used name that has none is shown.
+            def safe(name: str) -> bool:
+                return '"' not in name and "\\" not in name and 1 <= _js.length(name) <= 64
+
+            if asked is not None and not safe(asked):
                 return coded("Bad property name", "property_bad", 400)
-            key = asked if asked is not None else (keys[0]["key"] if keys else None)
+            key = asked if asked is not None else next((k["key"] for k in keys if safe(k["key"])), None)
             limit = _limit(params.get("limit"), 100)
             rows = store.event_prop_values(query, event, key, limit) if key else []
             return json({"site": site["id"], "range": range_out, "event": event, "keys": keys, "key": key, "rows": rows})
