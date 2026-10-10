@@ -625,6 +625,10 @@ public sealed class Web
                     _existing = true;
                     return Redirect(_homePath, FreshSession(request, user));
                 }
+                catch (AccountError error) when (error.Code == "invite_gone")
+                {
+                    return Html(Pages.InviteGonePage(b), 410);
+                }
                 catch (AccountError error)
                 {
                     return Again(error.Message);

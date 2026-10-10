@@ -65,6 +65,9 @@ public sealed class Accounts
     /// <summary>A stored role read back; anything unknown reads as a viewer, the least it could be.</summary>
     public static string RoleFrom(object? value) => value is string s && Roles.Contains(s) ? s : "viewer";
 
+    /// <summary>Whether a role may invite people. The owner and admins invite as admin, member, or viewer.</summary>
+    private static bool MayInvite(string? role) => role is "owner" or "admin";
+
     /// <summary>
     /// Changes to who has an account take turns: on Postgres and MySQL across processes, through the database's
     /// lock, so two owners demoting each other at once cannot leave none, and a double-clicked invite makes one.
@@ -369,6 +372,11 @@ public sealed class Accounts
                     throw new AccountError("Ownership is handed over by the owner", "owner_hand_over");
                 }
                 await Db.RunAsync("UPDATE rl_users SET role = ? WHERE id = ?", [role, id], cancellationToken).ConfigureAwait(false);
+                // Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
+                if (!MayInvite(role))
+                {
+                    await Db.RunAsync("DELETE FROM rl_invites WHERE invited_by = ?", [user.Str("email")], cancellationToken).ConfigureAwait(false);
+                }
                 user.Set("role", role);
                 return user;
             },
@@ -420,6 +428,7 @@ public sealed class Accounts
                     throw new AccountError("The owner cannot be removed", "owner_protected");
                 }
                 await Db.RunAsync("DELETE FROM rl_users WHERE id = ?", [id], cancellationToken).ConfigureAwait(false);
+                await Db.RunAsync("DELETE FROM rl_invites WHERE invited_by = ?", [user.Str("email")], cancellationToken).ConfigureAwait(false);
                 await _store.SetSettingAsync("login-link-used:" + id, null, cancellationToken).ConfigureAwait(false);
                 return true;
             },
@@ -551,19 +560,35 @@ public sealed class Accounts
         return before > 0;
     }
 
-    /// <summary>Turns an invite into an account with the password its person chose. The link then stops working.</summary>
+    /// <summary>
+    /// Turns an invite into an account with the password its person chose. The link then stops working. It takes a
+    /// turn, so it cannot cross a removal of whoever sent it, and the sender must still be someone who may invite.
+    /// </summary>
     public async Task<JsObject> AcceptInviteAsync(string code, string password, long now, CancellationToken cancellationToken = default)
     {
-        var invite = await InviteByCodeAsync(code, now, cancellationToken).ConfigureAwait(false)
-            ?? throw new AccountError("This invite has expired or was already used. Ask for a new one.", "invite_gone");
-        string email = invite.Str("email")!;
-        if (await ByEmailAsync(email, cancellationToken).ConfigureAwait(false) != null)
-        {
-            throw new AccountError(email + " already has an account", "account_exists", new Dictionary<string, string>(StringComparer.Ordinal) { ["email"] = email });
-        }
-        var user = await SetPasswordAsync(email, password, now, invite.Str("role"), cancellationToken).ConfigureAwait(false);
-        await Db.RunAsync("DELETE FROM rl_invites WHERE id = ?", [invite.Str("id")], cancellationToken).ConfigureAwait(false);
-        return user;
+        // The tables first: making them takes the same lock as a turn.
+        await InitAsync(cancellationToken).ConfigureAwait(false);
+        return await TurnAsync(
+            async () =>
+            {
+                static AccountError Gone() => new("This invite has expired or was already used. Ask for a new one.", "invite_gone");
+                var invite = await InviteByCodeAsync(code, now, cancellationToken).ConfigureAwait(false) ?? throw Gone();
+                var sender = await ByEmailAsync(invite.Str("invitedBy") ?? "", cancellationToken).ConfigureAwait(false);
+                if (sender == null || !MayInvite(sender.Str("role")))
+                {
+                    await Db.RunAsync("DELETE FROM rl_invites WHERE id = ?", [invite.Str("id")], cancellationToken).ConfigureAwait(false);
+                    throw Gone();
+                }
+                string email = invite.Str("email")!;
+                if (await ByEmailAsync(email, cancellationToken).ConfigureAwait(false) != null)
+                {
+                    throw new AccountError(email + " already has an account", "account_exists", new Dictionary<string, string>(StringComparer.Ordinal) { ["email"] = email });
+                }
+                var user = await SetPasswordAsync(email, password, now, invite.Str("role"), cancellationToken).ConfigureAwait(false);
+                await Db.RunAsync("DELETE FROM rl_invites WHERE id = ?", [invite.Str("id")], cancellationToken).ConfigureAwait(false);
+                return user;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The account for an email and password, or null. Takes the same time either way.</summary>
