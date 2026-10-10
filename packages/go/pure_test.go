@@ -391,7 +391,7 @@ func TestGeo(t *testing.T) {
 
 func TestNamesLikeObjectPropertiesAreJustNames(t *testing.T) {
 	for _, source := range []string{"constructor", "toString", "__proto__", "hasOwnProperty"} {
-		_, err := ImportStep(t.Context(), nil, "default", source, nil, nil, 0)
+		_, err := ImportStep(t.Context(), nil, "default", source, nil, nil, 0, nil)
 		if e, ok := err.(*ImportError); !ok || e.Code != "import_source" {
 			t.Errorf("%s: %v", source, err)
 		}
