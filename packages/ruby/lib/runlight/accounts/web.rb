@@ -70,12 +70,17 @@ module Runlight
       # Only a path on this install, so a sign-in can never send someone elsewhere.
       # Browsers drop tabs and newlines from a URL and read a backslash as a slash,
       # so "/\t/evil.example" would leave; anything with those is refused outright,
-      # and what is left must resolve to this origin.
+      # and what is left must resolve to this origin. A path that resolves to one
+      # starting "//", as "/..//evil.example" does, would leave from the Location
+      # header, so that goes home too.
       def safe_next(value)
         return @home_path if value.nil? || value == "" || !value.start_with?("/") || value.match?(/[\x00-\x1f\x7f\\]/)
 
         url = Http::Url.parse(value, "http://runlight.invalid")
-        !url.nil? && url.origin == "http://runlight.invalid" ? "#{url.pathname}#{url.search}#{url.hash}" : @home_path
+        return @home_path if url.nil? || url.origin != "http://runlight.invalid"
+
+        path = "#{url.pathname}#{url.search}#{url.hash}"
+        path.start_with?("//") || path.start_with?("/\\") ? @home_path : path
       end
 
       def signed_in(request)
