@@ -1503,7 +1503,13 @@ class Routes:
             parsed = Url(origin) if _ORIGIN.match(origin) and _js.length(origin) <= 200 and Url.can_parse(origin) else None
             if parsed is None or parsed.origin != origin:
                 return coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400)
-            host = host_name(parsed.host)
+            # Only https and the default port, so a plain http page or another service on the same name cannot
+            # frame the dashboard; a page on this computer, for development, may use http and any port. The name
+            # must be one of the site's own, which are kept without www, so www. is the only difference allowed.
+            local = parsed.hostname in ("localhost", "127.0.0.1", "[::1]")
+            if not local and (parsed.protocol != "https:" or parsed.port != ""):
+                return coded("Send the admin page's origin, such as https://example.com", "embed_origin", 400)
+            host = re.sub(r"\Awww\.", "", parsed.hostname)
             remote = rl.remote(site["id"])
             if host not in [host_name(h) for h in (remote["hostnames"] if remote else site["hostnames"])]:
                 return coded(f"{host} is not one of this site's domains. Add it to the site's domains in Runlight's settings.", "embed_host", 400, {"host": host})
