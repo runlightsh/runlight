@@ -6,12 +6,13 @@ This crate is the Rust version of [Runlight](https://runlight.sh). It runs on to
 
 ## Get started
 
-Add the crates.
+Add the crates, and axum if your app does not have it already.
 
 ```toml
 [dependencies]
 runlight = { version = "0.1", features = ["axum"] }
 runlight-sqlx = { version = "0.1", features = ["sqlite"] }
+axum = "0.8"
 ```
 
 The `runlight` crate needs Rust 1.88 or later. `runlight-sqlx` needs Rust 1.94 or later, as sqlx 0.9 does, so an app that uses both needs 1.94.

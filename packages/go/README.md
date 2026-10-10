@@ -12,7 +12,7 @@ Add it with `go get`, along with a SQLite driver.
 go get runlight.sh/go modernc.org/sqlite
 ```
 
-Create one instance for your app.
+Import the driver for its side effect (`_ "modernc.org/sqlite"`), then create one instance for your app.
 
 ```go
 db, err := sql.Open("sqlite", "data/runlight.db")
@@ -52,14 +52,7 @@ The [Go guide](https://runlight.sh/docs/go/) has the chi and Echo adapters, the 
 
 ## Modules
 
-The core module is `runlight.sh/go`, with the standalone server in `runlight.sh/go/server`. The chi adapter (`runlight.sh/go/chi`), the Echo adapter (`runlight.sh/go/echo`), and the command (`runlight.sh/go/cmd/runlight`) are modules of their own, so their requirements stay out of the core. `dbtest` holds the tests that need database drivers, the conformance tests among them. The workspace in `go.work` builds them all against the core in this folder; `go mod tidy` ignores it, so tidy the nested modules with `node scripts/go-tidy.mjs` from the repository root.
-
-Run the tests from `packages/go`. The database tests use SQLite, and Postgres, MySQL, and MariaDB too when `RUNLIGHT_TEST_PG`, `RUNLIGHT_TEST_MYSQL`, and `RUNLIGHT_TEST_MARIADB` hold their URLs.
-
-```bash
-go test ./...
-(cd dbtest && go test ./...)
-```
+The core module is `runlight.sh/go`, with the standalone server in its `runlight.sh/go/server` package. The chi adapter (`runlight.sh/go/chi`), the Echo adapter (`runlight.sh/go/echo`), and the command (`runlight.sh/go/cmd/runlight`) are modules of their own, so their requirements stay out of the core.
 
 ## License
 

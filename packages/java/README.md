@@ -6,7 +6,7 @@ This is the Java version of [Runlight](https://runlight.sh). It runs on Java 21 
 
 ## Get started
 
-Add `sh.runlight:runlight` from Maven Central to your build, with the JDBC driver for your database. In a Spring Boot app, add `sh.runlight:runlight-spring-boot-starter` in its place and set `runlight.site.hostnames` in `application.properties`. It keeps its tables in the app’s own `DataSource`.
+Add `sh.runlight:runlight` from Maven Central to your build, with the JDBC driver for your database. In a servlet container (Jakarta Servlet 6, such as Tomcat 10.1 or Jetty 12), add `sh.runlight:runlight-servlet` as well. In a Spring Boot 3.5 or 4 app, add `sh.runlight:runlight-spring-boot-starter` in its place and set `runlight.site.hostnames` in `application.properties`. It keeps its tables in the app’s own `DataSource`, or in the database `runlight.database-url` names.
 
 ```xml
 <dependency>

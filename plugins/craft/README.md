@@ -7,4 +7,4 @@ Counts your site's visitors with [Runlight](https://runlight.sh/): privacy frien
 - Reports AI agents such as ChatGPT and Claude that fetch your pages, after the response has been sent.
 - Adds a Runlight item to the Control Panel that shows your dashboard there with a dashboard key, and links to your Runlight.
 
-Settings accept environment variables, so the observe key can stay out of project config. Full steps: [runlight.sh/docs/craft](https://runlight.sh/docs/craft/).
+The address, site id, and keys accept environment variables, so the keys can stay out of project config. Full steps: [runlight.sh/docs/craft](https://runlight.sh/docs/craft/).
