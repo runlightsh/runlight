@@ -288,4 +288,14 @@ defmodule Runlight.StoreCrossTest do
       GenServer.stop(pid)
     end
   end
+
+  test "deleted rows, salts among them, are overwritten in a SQLite file rather than left in its free space" do
+    {store, cleanup} = Stores.store(:sqlite)
+    on_exit(cleanup)
+    Store.migrate(store)
+    Store.set_setting(store, "x", "1")
+    Store.set_setting(store, "x", nil)
+    # 2 is FAST: overwritten wherever that costs no extra writes. The test repo has one connection.
+    assert Runlight.Db.all(store.db, "PRAGMA secure_delete", []) == [JS.obj(secure_delete: 2)]
+  end
 end
