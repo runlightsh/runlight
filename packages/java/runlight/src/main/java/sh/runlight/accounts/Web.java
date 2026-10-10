@@ -104,6 +104,9 @@ public final class Web {
   // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the
   // first one. Password re-checks in Account: ten.
   private final Throttle codeTries;
+  // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up
+  // the owner's five.
+  private final Throttle decoyTries;
   private final Throttle confirmTries;
   private final Throttle rechecks;
 
@@ -133,6 +136,7 @@ public final class Web {
     this.perAddress = new Throttle(store, "address", 10);
     this.perAccount = new Throttle(store, "account", 50);
     this.codeTries = new Throttle(store, "code", 5);
+    this.decoyTries = new Throttle(store, "decoy", 5);
     this.confirmTries = new Throttle(store, "confirm", 5);
     this.rechecks = new Throttle(store, "recheck", 10);
   }
@@ -651,8 +655,9 @@ public final class Web {
       }
       Map<String, Object> user = Js.map(pending.get("user"));
       String id = (String) user.get("id");
+      boolean real = Boolean.TRUE.equals(pending.get("real"));
       // Counted before the check, so a burst cannot get past five.
-      if (!codeTries.take(id, now())) {
+      if (!(real ? codeTries : decoyTries).take(id, now())) {
         return html(
             Pages.codePage(
                 base,
@@ -665,8 +670,7 @@ public final class Web {
                     "Too many tries. Wait fifteen minutes and try again.")),
             429);
       }
-      if (!Boolean.TRUE.equals(pending.get("real"))
-          || !accounts.checkSecondFactor(id, formValue(form, "code"), now())) {
+      if (!real || !accounts.checkSecondFactor(id, formValue(form, "code"), now())) {
         return html(
             Pages.codePage(
                 base,
