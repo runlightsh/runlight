@@ -2229,7 +2229,14 @@ defmodule Runlight.Routes do
              :ok <- Runlight.init(rl),
              {:ok, site} <- query_site(routes, url) do
           try do
-            json(Runlight.Importers.Visits.import_csv_visits(rl, site["id"], JS.prop(body, "rows")))
+            json(
+              Runlight.Importers.Visits.import_csv_visits(
+                rl,
+                site["id"],
+                JS.prop(body, "rows"),
+                JS.prop(body, "secret")
+              )
+            )
           rescue
             error in Runlight.ImportError -> refused(error, "import_failed")
           end
