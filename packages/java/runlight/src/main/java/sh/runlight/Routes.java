@@ -1752,7 +1752,19 @@ public final class Routes {
       return coded(
           "Send the admin page's origin, such as https://example.com", "embed_origin", 400);
     }
-    String host = hostName(parsed.host());
+    // Only https and the default port, so a plain http page or another service on the same name
+    // cannot frame the dashboard; a page on this computer, for development, may use http and any
+    // port. The name must be one of the site's own, which are kept without www, so www. is the only
+    // difference allowed.
+    boolean local =
+        parsed.hostname.equals("localhost")
+            || parsed.hostname.equals("127.0.0.1")
+            || parsed.hostname.equals("[::1]");
+    if (!local && (!parsed.protocol.equals("https:") || !parsed.port.isEmpty())) {
+      return coded(
+          "Send the admin page's origin, such as https://example.com", "embed_origin", 400);
+    }
+    String host = parsed.hostname.replaceFirst("^www\\.", "");
     Map<String, Object> remote = rl.remote((String) site.get("id"));
     Object names =
         remote != null && remote.get("hostnames") != null
