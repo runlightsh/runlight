@@ -261,6 +261,10 @@ async function answer(message: unknown, readApi: ApiRead): Promise<Json | null> 
   }
 }
 
+/** The most messages one batch may hold, and how many of them run at once. */
+export const MAX_BATCH = 20;
+const BATCH_AT_ONCE = 4;
+
 /** Answers one POST to the MCP endpoint, already authorised. */
 export async function mcpResponse(request: Request, readApi: ApiRead): Promise<Response> {
   const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
@@ -268,10 +272,14 @@ export async function mcpResponse(request: Request, readApi: ApiRead): Promise<R
   if (body === undefined || body === null || typeof body !== "object") {
     return new Response(JSON.stringify(rpcError(null, -32700, "Send a JSON-RPC message")), { status: 400, headers });
   }
-  // Batches were in the 2025-03-26 protocol; answering them costs nothing.
+  // Batches were in the 2025-03-26 protocol. A few messages run at a time, from a short list, so one
+  // request cannot start hundreds of reports at once.
   if (Array.isArray(body)) {
-    const answers = (await Promise.all(body.map((m) => answer(m, readApi)))).filter((a) => a !== null);
-    return answers.length ? new Response(JSON.stringify(answers), { headers }) : new Response(null, { status: 202 });
+    if (body.length > MAX_BATCH) return new Response(JSON.stringify(rpcError(null, -32600, `Send at most ${MAX_BATCH} messages in a batch`)), { status: 400, headers });
+    const answers: Array<Awaited<ReturnType<typeof answer>>> = [];
+    for (let i = 0; i < body.length; i += BATCH_AT_ONCE) answers.push(...(await Promise.all(body.slice(i, i + BATCH_AT_ONCE).map((m) => answer(m, readApi)))));
+    const sent = answers.filter((a) => a !== null);
+    return sent.length ? new Response(JSON.stringify(sent), { headers }) : new Response(null, { status: 202 });
   }
   const one = await answer(body as RpcRequest, readApi);
   return one ? new Response(JSON.stringify(one), { headers }) : new Response(null, { status: 202 });

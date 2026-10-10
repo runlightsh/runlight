@@ -828,6 +828,9 @@ const MCP: Scenario[] = [
       // A notification never runs a tool, and a batch element that is not an object is an invalid request of its own.
       post("/mcp", { jsonrpc: "2.0", method: "tools/call", params: { name: "list_sites" } }),
       post("/mcp", [null, { jsonrpc: "2.0", id: 40, method: "ping" }, 7]),
+      // A batch holds at most twenty messages.
+      post("/mcp", Array.from({ length: 20 }, (_, i) => ({ jsonrpc: "2.0", id: 100 + i, method: "ping" }))),
+      post("/mcp", Array.from({ length: 21 }, (_, i) => ({ jsonrpc: "2.0", id: 200 + i, method: "ping" }))),
       // A token for one site sees only that site through the tools too.
       tool(25, "list_sites", {}, asJson("{{blog}}")),
       tool(26, "get_stats", { site: "shop", period: "today" }, asJson("{{blog}}")),
