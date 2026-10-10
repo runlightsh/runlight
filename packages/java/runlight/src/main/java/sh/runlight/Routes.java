@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -300,6 +301,9 @@ public final class Routes {
   }
 
   private final Map<String, Asked> asked = new LinkedHashMap<>();
+
+  /** Taken while a viewer's question is counted toward the day. */
+  private final ReentrantLock dailyTurn = new ReentrantLock();
 
   private record Script(String body, String etag, long at) {}
 
@@ -2271,6 +2275,8 @@ public final class Routes {
   private Object askTurn(String who, boolean owner) {
     long now = rl.now();
     Asked mine;
+    // The hour's count and the questions open are checked and taken together, so a burst at once
+    // cannot all pass the check before any is counted.
     synchronized (asked) {
       mine = asked.computeIfAbsent(who, key -> new Asked());
       mine.at.removeIf(at -> now - at >= 3_600_000);
@@ -2280,33 +2286,8 @@ public final class Routes {
             "assistant_soon",
             429);
       }
-    }
-    if (!owner) {
-      Object limit = viewerDaily();
-      String day = "assistant-asked:" + Time.isoString(now).substring(0, 10);
-      String stored = store().setting(day);
-      Map<String, Object> counts =
-          new LinkedHashMap<>(Js.map(Json.parse(stored != null ? stored : "{}")));
-      double count = counts.containsKey(who) ? Js.asDouble(counts.get(who)) : 0;
-      if (count >= Js.asDouble(limit)) {
-        return coded(
-            "Viewers can ask " + Js.string(limit) + " questions a day. Ask again tomorrow.",
-            "assistant_daily",
-            429,
-            Json.object("limit", Js.string(limit)));
-      }
-      counts.put(who, Js.num(count + 1));
-      store().setSetting(day, Json.stringify(counts));
-      for (Map<String, Object> entry : store().settingsStartingWith("assistant-asked:")) {
-        if (!day.equals(entry.get("key"))) {
-          store().setSetting((String) entry.get("key"), null);
-        }
-      }
-    }
-    synchronized (asked) {
       mine.at.add(now);
       mine.open++;
-      asked.put(who, mine);
       // People who stopped asking are dropped, so the map holds only the last hour's.
       if (asked.size() > 1000) {
         asked
@@ -2315,6 +2296,7 @@ public final class Routes {
                 value ->
                     value.open == 0 && value.at.stream().noneMatch(at -> now - at < 3_600_000));
       }
+      asked.put(who, mine);
     }
     Runnable finish =
         () -> {
@@ -2322,7 +2304,62 @@ public final class Routes {
             mine.open--;
           }
         };
+    if (!owner) {
+      Response refused;
+      try {
+        refused = countDaily(who, now);
+      } catch (RuntimeException error) {
+        finish.run();
+        throw error;
+      }
+      if (refused != null) {
+        // A question refused here was never asked, so it counts toward nothing.
+        synchronized (asked) {
+          mine.at.remove(Long.valueOf(now));
+          mine.open--;
+        }
+        return refused;
+      }
+    }
     return finish;
+  }
+
+  /**
+   * Counts a viewer's question toward the owner's daily number, or refuses it. The day's counts are
+   * written back only if they are still the ones read, so viewers asking at once, here or through
+   * another process, cannot each read the same count and all get past it.
+   */
+  private Response countDaily(String who, long now) {
+    Object limit = viewerDaily();
+    String day = "assistant-asked:" + Time.isoString(now).substring(0, 10);
+    dailyTurn.lock();
+    try {
+      while (true) {
+        String stored = store().setting(day);
+        Map<String, Object> counts =
+            new LinkedHashMap<>(Js.map(Json.parse(stored != null ? stored : "{}")));
+        double count = counts.containsKey(who) ? Js.asDouble(counts.get(who)) : 0;
+        if (count >= Js.asDouble(limit)) {
+          return coded(
+              "Viewers can ask " + Js.string(limit) + " questions a day. Ask again tomorrow.",
+              "assistant_daily",
+              429,
+              Json.object("limit", Js.string(limit)));
+        }
+        counts.put(who, Js.num(count + 1));
+        if (store().swapSetting(day, stored, Json.stringify(counts))) {
+          break;
+        }
+      }
+    } finally {
+      dailyTurn.unlock();
+    }
+    for (Map<String, Object> entry : store().settingsStartingWith("assistant-asked:")) {
+      if (!day.equals(entry.get("key"))) {
+        store().setSetting((String) entry.get("key"), null);
+      }
+    }
+    return null;
   }
 
   private Response tokensApi(Request request, String path) {
