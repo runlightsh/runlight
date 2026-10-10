@@ -2662,11 +2662,21 @@ final class Routes
             }
             $keys = $store->eventPropKeys($query, $event);
             $asked = $params->get('key');
-            // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused.
-            if ($asked !== null && !preg_match('/^[^"\\\\]{1,64}\z/u', $asked)) {
+            // A property name goes into a JSON path on SQLite, so quotes and backslashes are refused, and without
+            // one asked for, the most used name that has none is shown.
+            $safe = static fn (string $name): bool => (bool) preg_match('/^[^"\\\\]{1,64}\z/u', $name);
+            if ($asked !== null && !$safe($asked)) {
                 return self::coded('Bad property name', 'property_bad', 400);
             }
-            $key = $asked ?? ($keys[0]['key'] ?? null);
+            $key = $asked;
+            if ($key === null) {
+                foreach ($keys as $k) {
+                    if ($safe((string) $k['key'])) {
+                        $key = (string) $k['key'];
+                        break;
+                    }
+                }
+            }
             $limit = self::limit($params->get('limit'), 100);
             $rows = $key !== null && $key !== '' ? $store->eventPropValues($query, $event, $key, (int) $limit) : [];
             return self::json(['site' => $site['id'], 'range' => $rangeOut, 'event' => $event, 'keys' => $keys, 'key' => $key, 'rows' => $rows]);
