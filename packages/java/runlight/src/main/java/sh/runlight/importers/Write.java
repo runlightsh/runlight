@@ -4,10 +4,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
+import sh.runlight.CodedError.LinkError;
 import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
+import sh.runlight.Links;
 import sh.runlight.Sources;
 import sh.runlight.http.Url;
 import sh.runlight.store.SqlStore;
@@ -31,6 +34,9 @@ public final class Write {
           "rebrand.ly",
           "rebrandly.com",
           "rb.gy");
+
+  /** The most clicks a day one imported link gets from a daily count. */
+  private static final double MAX_DAILY = 10_000;
 
   // Browser and system names as other tools write them, in Runlight's spelling.
   public static final Map<String, String> BROWSERS =
@@ -151,12 +157,27 @@ public final class Write {
   }
 
   /**
+   * As {@link #writeLink(Host, String, String, Map, Map, UnaryOperator)}, leaving the branded
+   * domain off.
+   */
+  public static Map<String, Object> writeLink(
+      Host runlight,
+      String site,
+      String source,
+      Map<String, Object> foreign,
+      Map<String, Object> history) {
+    return writeLink(runlight, site, source, foreign, history, domain -> null);
+  }
+
+  /**
    * Writes one link and its history in a single transaction: the link (and its branded domain),
    * then each click as a visit like a live one, or daily counts as clicks without visitors. Ids
    * come from the source's own ids, so importing again skips what is already there.
    *
    * @param foreign a ForeignLink
    * @param history {@code clicks} (ForeignClicks) and {@code daily} (DailyClicks), each optional
+   * @param checkDomain the domain as the site keeps it once it passes a link domain's checks, or
+   *     null to bring the link over without it
    * @return {@code status} ("created", "skipped", or "failed"), {@code clicks}, and for a failure
    *     {@code reason}, {@code code}, and {@code params}
    */
@@ -165,7 +186,8 @@ public final class Write {
       String site,
       String source,
       Map<String, Object> foreign,
-      Map<String, Object> history) {
+      Map<String, Object> history,
+      UnaryOperator<String> checkDomain) {
     String sourceId = Js.string(foreign.get("sourceId"));
     String id = importedLinkId(source, sourceId);
     SqlStore main = runlight.store();
@@ -194,9 +216,27 @@ public final class Write {
       return failed;
     }
 
-    String domain = Sources.stripWww(str(foreign, "domain"));
-    if (SHORTENER_DOMAINS.contains(domain)) {
+    // The destination passes the checks a link made by hand does.
+    String destination;
+    try {
+      destination = Links.cleanUrl(foreign.get("url"));
+    } catch (LinkError error) {
+      Map<String, Object> failed = result("failed");
+      failed.put("reason", error.getMessage());
+      failed.put("code", error.code());
+      failed.put("params", error.params());
+      return failed;
+    }
+
+    String domain = Sources.stripWww(Js.lower(str(foreign, "domain")));
+    // A branded domain must pass the checks one added in Settings does, so an import can never
+    // claim the dashboard's own host or a name inside a private network. One that fails is left
+    // off: the link is served from the app's own path instead.
+    if (domain.isEmpty() || SHORTENER_DOMAINS.contains(domain)) {
       domain = "";
+    } else {
+      String checked = checkDomain.apply(domain);
+      domain = checked == null ? "" : checked;
     }
     String linkDomain = domain;
     long now = runlight.now();
@@ -305,7 +345,9 @@ public final class Write {
             if (Double.isNaN(start) || !(count > 0)) {
               continue;
             }
-            double n = Math.min(count, 1_000_000);
+            // A day's count is capped, so one made-up figure from a source cannot write millions of
+            // rows.
+            double n = Math.min(Math.floor(count), MAX_DAILY);
             for (int i = 0; i < n; i++) {
               store.insertEvent(
                   event(
@@ -334,7 +376,7 @@ public final class Write {
                   "domain", linkDomain,
                   "slug", slug,
                   "name", Js.slice(name, 0, 100),
-                  "url", url,
+                  "url", destination,
                   "createdAt", created,
                   "updatedAt", created));
           return null;
