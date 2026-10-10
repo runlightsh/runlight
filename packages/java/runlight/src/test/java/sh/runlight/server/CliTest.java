@@ -118,6 +118,7 @@ class CliTest {
     try (Config config = new Config(root)) {
       Standalone server = config.standalone();
       text = Files.readString(config.setupFile());
+      assertEquals("rw-------", permissions(config.setupFile()));
       assertTrue(
           text.matches(
               "^Open this link to create the first Runlight account\\. It works only while Runlight has no account\\.\nhttps://stats\\.example\\.com/setup\\?code=[A-Za-z0-9_-]{12}\n$"),

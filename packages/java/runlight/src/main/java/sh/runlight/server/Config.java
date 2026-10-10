@@ -3,14 +3,18 @@ package sh.runlight.server;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import sh.runlight.Env;
@@ -116,8 +120,7 @@ public final class Config implements AutoCloseable {
     Path dir = dataPath();
     if (!Files.isDirectory(dir)) {
       try {
-        Files.createDirectories(dir);
-        restrict(dir, "rwx------");
+        createPrivately(dir);
       } catch (IOException e) {
         if (!Files.isDirectory(dir)) {
           throw new IllegalStateException(
@@ -131,11 +134,21 @@ public final class Config implements AutoCloseable {
     return dir;
   }
 
-  private static void restrict(Path path, String permissions) {
+  /**
+   * Makes a folder only this user can open, made so from the start. Folders above it that are
+   * missing are made as usual.
+   */
+  private static void createPrivately(Path dir) throws IOException {
+    Path parent = dir.toAbsolutePath().getParent();
+    if (parent != null) {
+      Files.createDirectories(parent);
+    }
     try {
-      Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(permissions));
-    } catch (IOException | UnsupportedOperationException e) {
+      Files.createDirectory(
+          dir, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+    } catch (UnsupportedOperationException e) {
       // A file system without POSIX permissions keeps its own.
+      Files.createDirectory(dir);
     }
   }
 
@@ -222,22 +235,35 @@ public final class Config implements AutoCloseable {
     }
   }
 
-  /** Writes a new file readable only by this user; false when it is already there. */
+  /**
+   * Writes a new file readable only by this user; false when it is already there. The file is made
+   * with those permissions, so it is never readable by others, even for a moment.
+   */
   private static boolean create(Path path, String text) {
-    try {
-      Files.writeString(
-          path,
-          text,
-          StandardCharsets.UTF_8,
-          StandardOpenOption.CREATE_NEW,
-          StandardOpenOption.WRITE);
+    Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+    try (SeekableByteChannel channel = open(path, options)) {
+      ByteBuffer bytes = ByteBuffer.wrap(text.getBytes(StandardCharsets.UTF_8));
+      while (bytes.hasRemaining()) {
+        channel.write(bytes);
+      }
     } catch (FileAlreadyExistsException e) {
       return false;
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
-    restrict(path, "rw-------");
     return true;
+  }
+
+  private static SeekableByteChannel open(Path path, Set<OpenOption> options) throws IOException {
+    try {
+      return Files.newByteChannel(
+          path,
+          options,
+          PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+    } catch (UnsupportedOperationException e) {
+      // A file system without POSIX permissions keeps its own.
+      return Files.newByteChannel(path, options);
+    }
   }
 
   private static void pause() {
