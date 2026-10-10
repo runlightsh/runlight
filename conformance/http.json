@@ -24251,6 +24251,355 @@
           "method": "POST",
           "path": "/mcp",
           "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": [
+            {
+              "jsonrpc": "2.0",
+              "id": 100,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 101,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 102,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 103,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 104,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 105,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 106,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 107,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 108,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 109,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 110,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 111,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 112,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 113,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 114,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 115,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 116,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 117,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 118,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 119,
+              "method": "ping"
+            }
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": [
+              {
+                "jsonrpc": "2.0",
+                "id": 100,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 101,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 102,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 103,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 104,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 105,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 106,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 107,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 108,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 109,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 110,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 111,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 112,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 113,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 114,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 115,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 116,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 117,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 118,
+                "result": {}
+              },
+              {
+                "jsonrpc": "2.0",
+                "id": 119,
+                "result": {}
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/mcp",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": [
+            {
+              "jsonrpc": "2.0",
+              "id": 200,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 201,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 202,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 203,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 204,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 205,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 206,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 207,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 208,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 209,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 210,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 211,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 212,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 213,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 214,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 215,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 216,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 217,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 218,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 219,
+              "method": "ping"
+            },
+            {
+              "jsonrpc": "2.0",
+              "id": 220,
+              "method": "ping"
+            }
+          ],
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "jsonrpc": "2.0",
+              "id": null,
+              "error": {
+                "code": -32600,
+                "message": "Send at most 20 messages in a batch"
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/mcp",
+          "headers": {
             "authorization": "Bearer {{blog}}",
             "content-type": "application/json"
           },
