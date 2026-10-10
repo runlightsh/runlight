@@ -91,6 +91,11 @@ final class DbIp
         if (is_file($this->file($current))) {
             return;
         }
+        // DB-IP sends its releases gzipped, so without zlib a download could never be used.
+        if (!self::canUnpack()) {
+            ($this->log)("Runlight: location data from DB-IP needs PHP's zlib extension to unpack. Turn zlib on, or set RUNLIGHT_GEO to off or to the path of an MMDB file.");
+            return;
+        }
         if (!is_dir($this->dir) && !@mkdir($this->dir, 0755, true) && !is_dir($this->dir)) {
             ($this->log)("Runlight: could not make the folder for location data, {$this->dir}");
             return;
@@ -128,8 +133,16 @@ final class DbIp
         }
     }
 
+    private static function canUnpack(): bool
+    {
+        return function_exists('gzopen');
+    }
+
     private static function gunzip(string $from, string $to): void
     {
+        if (!self::canUnpack()) {
+            throw new \RuntimeException("could not unpack $from: PHP's zlib extension is not loaded");
+        }
         $in = gzopen($from, 'rb');
         $out = fopen($to, 'wb');
         if ($in === false || $out === false) {

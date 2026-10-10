@@ -21,6 +21,7 @@
         "ext-pdo_pgsql": "For the Postgres store",
         "ext-pdo_mysql": "For the MySQL and MariaDB store",
         "ext-apcu": "Keeps the tracker's rate limit in shared memory rather than files",
+        "ext-zlib": "Unpacks DB-IP's location data for the standalone server",
         "symfony/http-foundation": "For Runlight\\Bridge\\HttpFoundation in Laravel and Symfony, which already have it"
     },
     "autoload": {
