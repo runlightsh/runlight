@@ -26,6 +26,15 @@
 #                            (runlightsh/runlight-craft)
 #   CRAFT_SPLIT_DEPLOY_KEY   secret, the private half of a deploy key with
 #                            write access to it
+#
+# The two keys are repository secrets for now, which any workflow run can
+# read. To scope them, create the environments "drupal-split" and
+# "craft-split" (Settings, Environments), each with a deployment rule that
+# allows only the tags v*, move DRUPAL_SPLIT_SSH_KEY and
+# CRAFT_SPLIT_DEPLOY_KEY into them as environment secrets, and only then add
+# `environment: drupal-split` to the drupal job and `environment:
+# craft-split` to the craft job (without that line a job sees the secret as
+# empty and fails).
 name: PHP plugins split
 
 on:

@@ -9,7 +9,10 @@
 # Stays off until the repository variable DOCKER_ENABLED is "true". It needs
 # no secret: the workflow's own token may write this repository's packages.
 # The first push makes the package private; make it public once, under the
-# package's settings on GitHub, so `docker pull` needs no login.
+# package's settings on GitHub, so `docker pull` needs no login. To make
+# each push wait for a reviewer and run only from a tag, create an
+# environment "docker" (Settings, Environments) that allows only the tags v*,
+# then add `environment: docker` to the image job.
 name: Docker image
 
 on:
