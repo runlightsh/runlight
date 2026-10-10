@@ -75,6 +75,8 @@ final class Web
     private Slots $checks;
 
     /**
+    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+    private Throttle $decoyTries;
      * @param array{runlight: object, secret: string, base: string, now: callable(): int, firstAccount: 'open'|'locked'|array{code: string}|array{token: string}, home?: callable(): ?string, forgot: string, setupWhere?: string} $options
      *     setupWhere says where to find the setup link with the one-time code, when it is not in a log (HTML)
      */
@@ -102,6 +104,7 @@ final class Web
 
     /**
      * The account for an email and password, checked in one of the few places password checks share, or false
+        $this->decoyTries = new Throttle($this->store, 'decoy', 5);
      * when none came free in time.
      *
      * @return User|null|false
@@ -461,7 +464,7 @@ final class Web
             }
             ['user' => $user, 'real' => $real] = $pending;
             // Counted before the check, so a burst cannot get past five.
-            if (!$this->codeTries->take($user['id'], $this->now())) {
+            if (!($real ? $this->codeTries : $this->decoyTries)->take($user['id'], $this->now())) {
                 return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => 'Too many tries. Wait fifteen minutes and try again.']), 429);
             }
             if (!$real || !$this->accounts->checkSecondFactor($user['id'], $form->get('code') ?? '', $this->now())) {
