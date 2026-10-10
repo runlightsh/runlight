@@ -201,6 +201,49 @@ class AccountsAccountsTest < Minitest::Test
     assert_equal [%w[a owner], %w[b admin]], accounts.list.map { |u| [u["id"], u["role"]] }
   end
 
+  # A store on a SQLite file in a folder of its own, which several connections (and processes) can share.
+  def sqlite_file
+    Dir.mktmpdir("runlight-turns-") do |dir|
+      path = File.join(dir, "turns.sqlite3")
+      Runlight::Stores.sqlite(path).migrate(true)
+      yield path
+    end
+  end
+
+  # Runs the block in several processes at once, each with a store of its own on the file, and gives back
+  # what each returned.
+  def in_processes(path, count)
+    readers = count.times.map do
+      reader, writer = IO.pipe
+      fork do
+        reader.close
+        writer.write(Marshal.dump(yield(Runlight::Stores.sqlite(path))))
+        writer.close
+        exit!(0)
+      end
+      writer.close
+      reader
+    end
+    Process.waitall
+    readers.map { |r| Marshal.load(r.read) }
+  end
+
+  def test_a_sign_in_link_opened_at_once_from_several_processes_lets_one_in
+    skip "no fork here" unless Process.respond_to?(:fork)
+
+    sqlite_file do |path|
+      user = Accounts.new(Runlight::Stores.sqlite(path), SECRET).set_password("jon@example.com", "a long password", NOW)
+      link = Accounts.new(Runlight::Stores.sqlite(path), SECRET).link_for(user, NOW)
+      results = in_processes(path, 8) do |store|
+        accounts = Accounts.new(store, SECRET)
+        accounts.count
+        sleep 0.2 # every process ready before any opens the link
+        Array.new(5) { accounts.from_link(link, NOW + 1) ? 1 : 0 }.sum
+      end
+      assert_equal 1, results.sum
+    end
+  end
+
   def test_the_throttle_counts_before_the_check_and_forgives_a_right_try
     store = store("sqlite")
     throttle = Throttle.new(store, "test", 3, 1000)

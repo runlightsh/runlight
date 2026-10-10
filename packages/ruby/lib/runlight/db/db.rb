@@ -38,6 +38,8 @@ module Runlight
         @statement_timeout = statement_timeout
         @dialect = dialect
         @held = 0
+        # Set on the thread inside a SQLite turn, whose BEGIN IMMEDIATE Rails does not know about.
+        @turn_key = :"runlight_turn_#{object_id}"
       end
 
       # "sqlite", "postgres", or "mysql".
@@ -80,7 +82,7 @@ module Runlight
       # transaction already open (the store's, or the app's) is joined, not nested. Yields this database.
       def transaction
         connection do |c|
-          if c.transaction_open?
+          if c.transaction_open? || Thread.current[@turn_key]
             yield self
           elsif dialect == "mysql"
             # As Postgres does by default: each statement sees what was committed before it began, and InnoDB
@@ -101,6 +103,41 @@ module Runlight
             locked(c, &block)
           ensure
             @held -= 1
+          end
+        end
+      end
+
+      # Runs the block as the only one reading and changing what it reads, across threads and processes, and
+      # yields this database. On Postgres and MySQL that is the database-wide lock. On SQLite it is a
+      # transaction begun IMMEDIATE, which takes the file's write lock before the block reads anything, so a
+      # second turn waits (up to the busy timeout) rather than reading what the first is about to change. A turn
+      # inside a turn, or inside a transaction already open, joins it.
+      def turn(&block)
+        return exclusive(&block) unless dialect == "sqlite"
+
+        connection do |c|
+          next yield(self) if Thread.current[@turn_key] || c.transaction_open?
+
+          c.execute("BEGIN IMMEDIATE", "Runlight")
+          Thread.current[@turn_key] = true
+          failed = nil
+          begin
+            yield self
+          rescue Exception => e
+            failed = e
+            raise
+          ensure
+            Thread.current[@turn_key] = nil
+            if failed
+              begin
+                c.execute("ROLLBACK", "Runlight")
+              rescue StandardError
+                # The error that got here matters more than one rolling back.
+              end
+            else
+              # Also when the block leaves early with return, break, or next.
+              c.execute("COMMIT", "Runlight")
+            end
           end
         end
       end

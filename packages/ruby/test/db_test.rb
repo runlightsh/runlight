@@ -46,6 +46,25 @@ class DbTest < Minitest::Test
     end
   end
 
+  def test_a_turn_commits_rolls_back_and_joins
+    each_db do |db, kind|
+      db.run("CREATE TABLE rl_probe (n BIGINT)")
+      assert_raises(RuntimeError) do
+        db.turn do |d|
+          d.run("INSERT INTO rl_probe (n) VALUES (?)", [1])
+          raise "undo"
+        end
+      end
+      expected = kind == "sqlite" ? 0 : 1 # elsewhere a turn is a lock, not a transaction
+      assert_equal expected, Integer(db.all("SELECT COUNT(*) AS c FROM rl_probe")[0]["c"]), kind
+      db.run("DELETE FROM rl_probe")
+      db.turn do |d|
+        d.turn { |inner| inner.transaction { |t| t.run("INSERT INTO rl_probe (n) VALUES (?)", [2]) } }
+      end
+      assert_equal 1, Integer(db.all("SELECT COUNT(*) AS c FROM rl_probe")[0]["c"]), kind
+    end
+  end
+
   # Rails turns on the query cache for every pool around each request. A poll for the lock that read its
   # first answer from the cache would never see the lock come free.
   def test_lock_poll_is_not_cached
