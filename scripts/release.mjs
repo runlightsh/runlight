@@ -3,7 +3,8 @@
  * lockfile and the PHP package's build.json, runs every check, builds the
  * WordPress plugin's zip, packs and installs the npm packages, then commits
  * "Release <version>" and tags v<version>. It never pushes or publishes; it
- * prints those commands.
+ * prints those commands. It fetches the branch first and refuses unless HEAD
+ * is exactly origin's, and the tag is on neither this clone nor origin.
  *
  *   node scripts/release.mjs <version> [options]
  *   npm run release -- <version> [options]
@@ -351,6 +352,40 @@ function strays(current) {
   return found.filter((line) => line && !skip.has(line.split(":")[0]) && !known(line)).map((line) => (line.length > 160 ? `${line.slice(0, 157)}...` : line));
 }
 
+/**
+ * Why the release cannot go on top of origin, or null when it can: the
+ * branch is fetched and HEAD must be exactly origin's, so the release commit
+ * is the only new commit the push carries, and the tag must not be on origin
+ * already.
+ */
+function remoteProblem(branch, tag) {
+  try {
+    git("remote", "get-url", "origin");
+  } catch {
+    return "there is no remote named origin to release to";
+  }
+  try {
+    git("fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  } catch (error) {
+    return `could not fetch ${branch} from origin: ${String(error.stderr ?? error.message).trim()}`;
+  }
+  const head = git("rev-parse", "HEAD");
+  const upstream = git("rev-parse", `refs/remotes/origin/${branch}`);
+  if (head !== upstream) {
+    const behind = git("rev-list", "--count", `HEAD..refs/remotes/origin/${branch}`);
+    const ahead = git("rev-list", "--count", `refs/remotes/origin/${branch}..HEAD`);
+    return `${branch} is ${ahead} commit(s) ahead of and ${behind} behind origin/${branch}; release from exactly what origin has (pull, or push and let CI pass, first)`;
+  }
+  let remoteTag;
+  try {
+    remoteTag = git("ls-remote", "--tags", "origin", `refs/tags/${tag}`);
+  } catch (error) {
+    return `could not list origin's tags: ${String(error.stderr ?? error.message).trim()}`;
+  }
+  if (remoteTag !== "") return `tag ${tag} is already on origin`;
+  return null;
+}
+
 /** Whether PHP, which builds the WordPress plugin's zip, is on the PATH with the zip extension. */
 function hasPhpZip() {
   return spawnSync("php", ["-r", "exit(class_exists('ZipArchive') ? 0 : 1);"], { cwd: ROOT, encoding: "utf8" }).status === 0;
@@ -417,6 +452,9 @@ function main() {
     if (!result.written) console.log(`Note: ${file} has no ${heading} section, so the release adds a placeholder changelog entry; edit it before tagging, or write the notes under ${heading} next time.\n`);
   }
 
+  const remote = remoteProblem(options.branch, tag);
+  if (remote) fail(remote);
+
   const php = hasPhpZip();
   const zipDir = options.dryRun ? path.join(os.tmpdir(), "runlight-wordpress-XXXXXX") : mkdtempSync(path.join(os.tmpdir(), "runlight-wordpress-"));
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -468,7 +506,7 @@ function main() {
     console.log(`\nCommitted "Release ${next}" and tagged ${tag}. Nothing is pushed or published.`);
   }
 
-  console.log(`\nNext, by hand:\n  git push origin ${branch} ${tag}\n  # The tag's workflows wait for CI to pass on this commit (.github/workflows/ci-passed.yml); publish to npm once it has.`);
+  console.log(`\nNext, by hand:\n  git push --atomic origin ${branch} ${tag}\n  # The commit and the tag go up together, or neither does. The tag's workflows wait for CI to pass on this commit (.github/workflows/ci-passed.yml); publish to npm once it has.`);
   for (const { commands } of PUBLISH) for (const command of commands(next)) console.log(`  ${command}`);
   console.log("  # Once both packages exist on npm, a later release can publish them from a workflow with npm's trusted publishing instead of by hand.");
   console.log(`  # Then move the docs' install lines in runlightsh/runlight-website: npm run versions -- ${next}`);

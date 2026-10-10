@@ -44,7 +44,7 @@ npm run release -- X.Y.Z             # bump, check, commit "Release X.Y.Z", tag 
 
 The script bumps every file listed in `VERSIONED` at the top of `scripts/release.mjs`, dates the changelogs' Unreleased sections, and lists any other tracked file that still names the old version. It refreshes `package-lock.json` and each language's copy of the built assets, runs `npm run check` and the build, builds the WordPress zip, and installs the packed npm packages in a scratch project to load every entry point and run `runlight.sh --version`. Set `RUNLIGHT_TEST_PG` and `RUNLIGHT_TEST_MYSQL` first so the check covers both databases. A new folder under `packages/` or `plugins/` needs a row in the script's tables, or the script refuses to run.
 
-It never pushes or publishes. It prints what to run next, which is `git push origin main vX.Y.Z` and then `npm publish` for `@runlight/sdk` and `runlight.sh`, in that order, once CI has passed. The tag starts the workflows below, and each one waits for CI to pass on the tagged commit (`ci-passed.yml`) and does nothing until its switch is set.
+It fetches `main` first and refuses unless your `main` is exactly origin's and the tag is not on origin yet. It never pushes or publishes. It prints what to run next, which is `git push --atomic origin main vX.Y.Z` (the commit and the tag go up together, or neither does) and then `npm publish` for `@runlight/sdk` and `runlight.sh`, in that order, once CI has passed. The tag starts the workflows below, and each one waits for CI to pass on the tagged commit (`ci-passed.yml`) and does nothing until its switch is set.
 
 | Workflow | What it does | Switch |
 | --- | --- | --- |
