@@ -125,6 +125,8 @@ defmodule Runlight.Accounts.Web do
   defp esc(s), do: JS.escape_html(s)
 
   # Only a path on this install, so a sign-in can never send someone elsewhere.
+  # A path that resolves to one starting "//", as "/..//evil.example" does,
+  # would leave from the Location header, so that goes home too.
   defp safe_next(web, value) do
     cond do
       value in [nil, ""] or not String.starts_with?(value, "/") or Regex.match?(~r/[\x00-\x1f\x7f\\]/, value) ->
@@ -133,8 +135,10 @@ defmodule Runlight.Accounts.Web do
       true ->
         case Url.parse(value, "http://runlight.invalid") do
           %Url{} = url ->
-            if Url.origin(url) == "http://runlight.invalid",
-              do: url.pathname <> url.search <> url.hash,
+            path = url.pathname <> url.search <> url.hash
+
+            if Url.origin(url) == "http://runlight.invalid" and not String.starts_with?(path, ["//", "/\\"]),
+              do: path,
               else: home_path(web)
 
           nil ->
