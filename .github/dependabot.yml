@@ -1,0 +1,17 @@
+# Weekly pull requests for the pinned GitHub Actions (each is pinned by
+# commit SHA, with its version in a comment, which Dependabot keeps in step)
+# and for the Docker base image's digest in the Dockerfile. Every pull
+# request runs CI like any other.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
