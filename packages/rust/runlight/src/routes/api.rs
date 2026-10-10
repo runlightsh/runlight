@@ -102,7 +102,13 @@ impl Routes {
                 && js::len16(&origin) <= 200)
                 .then(|| Url::parse(&origin))
                 .flatten()
-                .filter(|u| u.origin() == origin);
+                .filter(|u| u.origin() == origin)
+                // Only https and the default port, so a plain http page or another service on the same name cannot
+                // frame the dashboard; a page on this computer, for development, may use http and any port.
+                .filter(|u| {
+                    matches!(u.hostname().as_str(), "localhost" | "127.0.0.1" | "[::1]")
+                        || (u.protocol() == "https:" && u.port().is_empty())
+                });
             let Some(parsed) = parsed else {
                 return Ok(coded(
                     "Send the admin page's origin, such as https://example.com",
@@ -111,7 +117,9 @@ impl Routes {
                     None,
                 ));
             };
-            let host = host_name(&parsed.host());
+            // The name must be one of the site's own, which are kept without www, so www. is the only difference allowed.
+            let hostname = parsed.hostname();
+            let host = hostname.strip_prefix("www.").unwrap_or(&hostname).to_string();
             let domains = rl.remote(&site.id).map_or(site.hostnames.clone(), |r| r.hostnames);
             if !domains.iter().any(|d| host_name(d) == host) {
                 return Ok(coded(
