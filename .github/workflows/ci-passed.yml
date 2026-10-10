@@ -16,6 +16,8 @@
 # by hand with the tag picked under "Use workflow from". A run by hand from a
 # branch fails here, before anything else, so a publish job only ever runs
 # with github.ref the tag, which is what an environment's tag rule checks.
+# With `main: true` a push to main passes too, for php-split.yml's push of
+# main to the split repository.
 #
 # The commit is the one the tag names (github.sha), the job's output "sha",
 # which the publish jobs check out, so what is published is exactly what CI
@@ -30,6 +32,10 @@ on:
         description: The workflow files that must pass on the tagged commit, separated by spaces
         type: string
         default: ci.yml
+      main:
+        description: Accept a push to main as well as a release tag
+        type: boolean
+        default: false
     outputs:
       sha:
         description: The tagged commit, which CI passed
@@ -55,9 +61,12 @@ jobs:
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
+          MAIN: ${{ inputs.main }}
           WORKFLOWS: ${{ inputs.workflows }}
         run: |
-          if ! [[ "$REF" =~ ^refs/tags/v[0-9][0-9A-Za-z.-]*$ ]]; then
+          if [ "$MAIN" = "true" ] && [ "$REF" = "refs/heads/main" ]; then
+            echo "a push to main"
+          elif ! [[ "$REF" =~ ^refs/tags/v[0-9][0-9A-Za-z.-]*$ ]]; then
             echo "not a release tag: $REF. Start this from the tag (Run workflow, then the tag under Use workflow from), not a branch."
             exit 1
           fi
