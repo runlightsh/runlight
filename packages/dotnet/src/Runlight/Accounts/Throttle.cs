@@ -71,6 +71,8 @@ public sealed class Throttle
 
     private async Task<string> IdAsync(string key, CancellationToken cancellationToken)
     {
+        // The counts live in settings, so the tables come first: a password re-check can be the first thing a new install does.
+        await _store.MigrateAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         string salt = await SaltAsync(cancellationToken).ConfigureAwait(false);
         return Crypto.Base64url(Crypto.Hmac("SHA-256", Js.Utf8(salt), Js.Utf8(key)))[..22];
     }
