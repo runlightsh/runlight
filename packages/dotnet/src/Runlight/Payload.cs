@@ -109,7 +109,7 @@ public sealed class Payload
         {
             return null;
         }
-        if (!Json.TryParse(text, out object? parsed) || parsed is not JsObject body)
+        if (!Json.TryParse(text, out object? parsed, Json.MaxPayloadDepth) || parsed is not JsObject body)
         {
             return null;
         }

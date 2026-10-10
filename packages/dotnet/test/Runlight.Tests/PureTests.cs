@@ -170,6 +170,23 @@ public sealed class PureTests
     }
 
     [Fact]
+    public void Deep_nesting_never_runs_out_of_stack()
+    {
+        // Text nested past the depth JSON can be written at is not JSON, so nothing walks it.
+        Assert.False(Json.TryParse(new string('[', 200_000) + new string(']', 200_000), out _));
+        Assert.True(Json.TryParse(new string('[', Json.MaxParseDepth) + new string(']', Json.MaxParseDepth), out _));
+
+        // String() of a list nested far deeper than the stack would allow joins it as JavaScript does.
+        var deep = new List<object?> { 1.0 };
+        for (int i = 0; i < 200_000; i++)
+        {
+            deep = [deep, null];
+        }
+        Assert.Equal("1" + new string(',', 200_000), Js.String(deep));
+        Assert.Equal(",1,2,,3,[object Object]", Js.String(new List<object?> { new List<object?>(), 1.0, new List<object?> { 2.0, Undefined.Value, new List<object?> { 3.0 } }, new JsObject() }));
+    }
+
+    [Fact]
     public void Query_fixture()
     {
         var fixture = Load("query");

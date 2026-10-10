@@ -241,14 +241,14 @@ public static class OAuth
             var redirects = new List<string>();
             if (uris is List<object?> list)
             {
-                redirects = list.Select(Js.String).Where(AllowedRedirect).Take(10).ToList();
+                redirects = list.OfType<string>().Where(AllowedRedirect).Take(10).ToList();
             }
             if (redirects.Count == 0)
             {
                 return OauthError("invalid_redirect_uri", "Register at least one https redirect address");
             }
             object? name = body != null && Js.IsObject(body) ? Js.Get(body, "client_name") : null;
-            return await RegisterAsync(ctx, Js.String(name is null or Undefined ? "An app" : name), redirects, cancellationToken).ConfigureAwait(false);
+            return await RegisterAsync(ctx, name as string ?? "An app", redirects, cancellationToken).ConfigureAwait(false);
         }
 
         if (path == "/oauth/authorize" && (request.Method == "GET" || request.Method == "POST"))
@@ -500,7 +500,10 @@ public static class OAuth
         return JsonAnswer(answer);
     }
 
-    /// <summary><c>new URLSearchParams(Object.entries(await request.json() ?? {}))</c>, each value as String() writes it.</summary>
+    /// <summary>
+    /// <c>new URLSearchParams(Object.entries(await request.json() ?? {}))</c>, keeping only the
+    /// values that are strings: every field OAuth reads is one, and nothing else is worth writing out.
+    /// </summary>
     private static SearchParams JsonForm(string text)
     {
         var form = new SearchParams();
@@ -513,13 +516,19 @@ public static class OAuth
             case JsObject o:
                 foreach (var e in o)
                 {
-                    form.Append(e.Key, Js.String(e.Value));
+                    if (e.Value is string v)
+                    {
+                        form.Append(e.Key, v);
+                    }
                 }
                 break;
             case List<object?> list:
                 for (int i = 0; i < list.Count; i++)
                 {
-                    form.Append(Js.Str(i), Js.String(list[i]));
+                    if (list[i] is string v)
+                    {
+                        form.Append(Js.Str(i), v);
+                    }
                 }
                 break;
             case string s:

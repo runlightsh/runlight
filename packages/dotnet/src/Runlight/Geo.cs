@@ -94,7 +94,7 @@ public static class Geo
         {
             try
             {
-                object? geo = Json.Parse(Atob(netlify));
+                object? geo = Json.Parse(Atob(netlify), Json.MaxPayloadDepth);
                 if (geo == null)
                 {
                     // Reading a field of null is a TypeError.
