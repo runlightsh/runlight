@@ -70,6 +70,11 @@ public final class Accounts {
     return value instanceof String s && ROLES.contains(s) ? s : "viewer";
   }
 
+  /** Whether a role may invite people. The owner and admins invite as admin, member, or viewer. */
+  private static boolean mayInvite(Object role) {
+    return "owner".equals(role) || "admin".equals(role);
+  }
+
   /**
    * Changes to who has an account take turns: on Postgres and MySQL across processes, through the
    * database's lock, so two owners demoting each other at once cannot leave none, and a
@@ -450,6 +455,11 @@ public final class Accounts {
             throw new AccountError("Ownership is handed over by the owner", "owner_hand_over");
           }
           db().run("UPDATE rl_users SET role = ? WHERE id = ?", List.of(role, id));
+          // Someone who may no longer invite takes back the invites they sent, so nobody joins on
+          // their word.
+          if (!mayInvite(role)) {
+            db().run("DELETE FROM rl_invites WHERE invited_by = ?", List.of(user.get("email")));
+          }
           user.put("role", role);
           return user;
         });
@@ -500,6 +510,7 @@ public final class Accounts {
             throw new AccountError("The owner cannot be removed", "owner_protected");
           }
           db().run("DELETE FROM rl_users WHERE id = ?", List.of(id));
+          db().run("DELETE FROM rl_invites WHERE invited_by = ?", List.of(user.get("email")));
           store.setSetting("login-link-used:" + id, null);
           return null;
         });
@@ -641,22 +652,37 @@ public final class Accounts {
 
   /**
    * Turns an invite into an account with the password its person chose. The link then stops
-   * working.
+   * working. It takes a turn, so it cannot cross a removal of whoever sent it, and the sender must
+   * still be someone who may invite.
    */
   public Map<String, Object> acceptInvite(String code, String password, long now) {
-    Map<String, Object> invite = inviteByCode(code, now);
-    if (invite == null) {
-      throw new AccountError(
-          "This invite has expired or was already used. Ask for a new one.", "invite_gone");
-    }
-    String email = (String) invite.get("email");
-    if (byEmail(email) != null) {
-      throw new AccountError(
-          email + " already has an account", "account_exists", Json.object("email", email));
-    }
-    Map<String, Object> user = setPassword(email, password, now, (String) invite.get("role"));
-    db().run("DELETE FROM rl_invites WHERE id = ?", List.of(invite.get("id")));
-    return user;
+    // The tables first: making them takes the same lock as a turn.
+    init();
+    return turn(
+        () -> {
+          Map<String, Object> invite = inviteByCode(code, now);
+          if (invite == null) {
+            throw inviteGone();
+          }
+          Map<String, Object> sender = byEmail((String) invite.get("invitedBy"));
+          if (sender == null || !mayInvite(sender.get("role"))) {
+            db().run("DELETE FROM rl_invites WHERE id = ?", List.of(invite.get("id")));
+            throw inviteGone();
+          }
+          String email = (String) invite.get("email");
+          if (byEmail(email) != null) {
+            throw new AccountError(
+                email + " already has an account", "account_exists", Json.object("email", email));
+          }
+          Map<String, Object> user = setPassword(email, password, now, (String) invite.get("role"));
+          db().run("DELETE FROM rl_invites WHERE id = ?", List.of(invite.get("id")));
+          return user;
+        });
+  }
+
+  private static AccountError inviteGone() {
+    return new AccountError(
+        "This invite has expired or was already used. Ask for a new one.", "invite_gone");
   }
 
   /** The account for an email and password, or null. Takes the same time either way. */

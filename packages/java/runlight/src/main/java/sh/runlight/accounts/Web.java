@@ -722,6 +722,9 @@ public final class Web {
           existing = true;
           return redirect(homePath, "set-cookie", freshSession(request, user, now()));
         } catch (AccountError error) {
+          if (error.code().equals("invite_gone")) {
+            return html(Pages.inviteGonePage(base), 410);
+          }
           return inviteAgain(invite, code, url, error.getMessage());
         }
       }
