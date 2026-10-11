@@ -1,23 +1,24 @@
 <?php
 /**
- * Connecting to a Runlight without copying keys: the plugin registers itself
- * with the Runlight's OAuth server, sends the admin to its consent page to
- * pick this site, and on the way back swaps the code, checked with PKCE, for
- * the site's dashboard key, agents key, and id, which it saves.
+ * Connecting to a Runlight without copying keys: the package's Connect
+ * (Runlight\Cms\Connect) registers the plugin with the Runlight's OAuth
+ * server, sends the admin to its consent page to pick this site, and on the
+ * way back swaps the code, checked with PKCE, for the site's dashboard key,
+ * agents key, and id. This class gives it WordPress's HTTP API and the
+ * plugin's words, keeps the attempt in a transient, and saves the keys.
  *
  * @package Runlight
  */
 
 namespace Runlight\WordPress;
 
+use Runlight\Cms\Connect as CmsConnect;
+
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
 final class Connect {
-	/** How long a connection may wait on the consent page before it has to be started again. */
-	private const PENDING = 15 * MINUTE_IN_SECONDS;
-
 	public static function boot(): void {
 		add_action( 'admin_post_runlight_connect', array( self::class, 'start' ) );
 		add_action( 'admin_post_runlight_connected', array( self::class, 'finish' ) );
@@ -51,28 +52,62 @@ final class Connect {
 		return is_array( $notice ) && 2 === count( $notice ) ? array( (bool) $notice[0], (string) $notice[1] ) : null;
 	}
 
-	/**
-	 * Whether this admin is somewhere a Runlight can send people back to: https,
-	 * or this computer while trying things out.
-	 */
-	public static function possible(): bool {
-		$back = wp_parse_url( self::back() );
-		$host = strtolower( (string) ( $back['host'] ?? '' ) );
-		return 'https' === ( $back['scheme'] ?? '' ) || in_array( $host, array( 'localhost', '127.0.0.1', '[::1]' ), true );
+	/** The package's Connect, with WordPress's HTTP API and this plugin's words. */
+	private static function connect(): CmsConnect {
+		Library::load();
+		if ( ! class_exists( CmsConnect::class ) ) {
+			self::done( __( 'This copy of the plugin is missing its vendor folder. Install it again from WordPress.org.', 'runlight' ) );
+		}
+		return new CmsConnect( new Fetcher(), self::back(), array( self::class, 'say' ) );
 	}
 
 	/**
-	 * JSON from the Runlight, or null when it could not be reached or did not answer with any.
+	 * What to say about each step of connecting, by the package's codes.
 	 *
-	 * @param array<string,mixed>|\WP_Error $response What wp_remote_* returned.
-	 * @return array<string,mixed>|null
+	 * @param string               $code   What happened.
+	 * @param array<string,string> $params Its details.
 	 */
-	private static function json( $response ): ?array {
-		if ( is_wp_error( $response ) ) {
-			return null;
+	public static function say( string $code, array $params ): string {
+		switch ( $code ) {
+			case 'address':
+				return __( 'Enter your Runlight’s address, then press Connect.', 'runlight' );
+			case 'scheme':
+				return __( 'Enter a web address, such as https://stats.example.com.', 'runlight' );
+			case 'https':
+				return __( 'Connecting needs this site’s admin on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.', 'runlight' );
+			case 'unreachable':
+				/* translators: 1: the Runlight's address, 2: why it could not be reached */
+				return sprintf( __( 'Could not reach a Runlight at %1$s: %2$s', 'runlight' ), $params['address'], $params['error'] );
+			case 'unknown':
+				/* translators: %s: the Runlight's address */
+				return sprintf( __( 'Could not connect to a Runlight at %s. Check the address, which is shown in Runlight under Settings, Install.', 'runlight' ), $params['address'] );
+			case 'older':
+				return __( 'Your Runlight is older than this plugin. Update it, or copy the keys from its Settings, Install into the fields below.', 'runlight' );
+			case 'client':
+				/* translators: %s: this site's host */
+				return sprintf( __( 'WordPress at %s', 'runlight' ), $params['host'] );
+			case 'silent':
+				return __( 'It did not say why.', 'runlight' );
+			case 'refused':
+				/* translators: %s: what the Runlight said */
+				return sprintf( __( 'Your Runlight would not let this site connect: %s', 'runlight' ), $params['reason'] );
+			case 'expired':
+				return __( 'That connection took too long or was already used. Press Connect again.', 'runlight' );
+			case 'denied':
+				return __( 'The connection was not allowed.', 'runlight' );
+			case 'failed':
+				/* translators: %s: what the Runlight said */
+				return sprintf( __( 'Your Runlight did not connect this site: %s', 'runlight' ), $params['reason'] );
+			case 'lost':
+				/* translators: %s: why the Runlight could not be reached */
+				return sprintf( __( 'Could not reach your Runlight to finish connecting: %s', 'runlight' ), $params['error'] );
+			case 'keys':
+				return __( 'Your Runlight did not give this site its keys. Press Connect again.', 'runlight' );
+			case 'connected':
+				/* translators: %s: the site's id in Runlight */
+				return sprintf( __( 'Connected. Runlight counts this site as %s.', 'runlight' ), $params['site'] );
 		}
-		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
-		return is_array( $body ) ? $body : null;
+		return $code;
 	}
 
 	/** Starts connecting, from the Connect button on the settings page. */
@@ -86,76 +121,11 @@ final class Connect {
 		if ( ! Settings::can_change_address() ) {
 			$address = Settings::get()['address'];
 		}
-		if ( '' === $address ) {
-			self::done( __( 'Enter your Runlight’s address, then press Connect.', 'runlight' ) );
+		[ $to, $pending, $error ] = self::connect()->start( $address );
+		if ( null === $to ) {
+			self::done( $error );
 		}
-		if ( ! self::possible() ) {
-			self::done( __( 'Connecting needs this site’s admin on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.', 'runlight' ) );
-		}
-
-		$meta = self::json( wp_remote_get( $address . '/.well-known/oauth-authorization-server', array( 'timeout' => 10, 'redirection' => 0 ) ) );
-		if ( null === $meta || ! is_string( $meta['authorization_endpoint'] ?? null ) || ! is_string( $meta['token_endpoint'] ?? null ) || ! is_string( $meta['registration_endpoint'] ?? null ) ) {
-			/* translators: %s: the Runlight's address */
-			self::done( sprintf( __( 'Could not connect to a Runlight at %s. Check the address, which is shown in Runlight under Settings, Install.', 'runlight' ), $address ) );
-		}
-		// Its endpoints must be on its own address, so an address cannot send this server's requests elsewhere.
-		$origin = self::origin( $address );
-		foreach ( array( 'authorization_endpoint', 'token_endpoint', 'registration_endpoint' ) as $endpoint ) {
-			if ( self::origin( $meta[ $endpoint ] ) !== $origin ) {
-				/* translators: %s: the Runlight's address */
-				self::done( sprintf( __( 'Could not connect to a Runlight at %s. Check the address, which is shown in Runlight under Settings, Install.', 'runlight' ), $address ) );
-			}
-		}
-		if ( ! in_array( 'cms', (array) ( $meta['scopes_supported'] ?? array() ), true ) ) {
-			self::done( __( 'Your Runlight is older than this plugin. Update it, or copy the keys from its Settings, Install into the fields below.', 'runlight' ) );
-		}
-
-		$client = self::json(
-			wp_remote_post(
-				$meta['registration_endpoint'],
-				array(
-					'timeout'     => 10,
-					'redirection' => 0,
-					'headers'     => array( 'Content-Type' => 'application/json' ),
-					/* translators: %s: this site's host */
-					'body'        => (string) wp_json_encode( array( 'client_name' => sprintf( __( 'WordPress at %s', 'runlight' ), (string) wp_parse_url( home_url(), PHP_URL_HOST ) ), 'redirect_uris' => array( self::back() ) ) ),
-				)
-			)
-		);
-		if ( null === $client || ! is_string( $client['client_id'] ?? null ) ) {
-			$reason = is_string( $client['error_description'] ?? null ) ? $client['error_description'] : __( 'It did not say why.', 'runlight' );
-			/* translators: %s: what the Runlight said */
-			self::done( sprintf( __( 'Your Runlight would not let this site connect: %s', 'runlight' ), $reason ) );
-		}
-
-		$state    = bin2hex( random_bytes( 16 ) );
-		$verifier = rtrim( strtr( base64_encode( random_bytes( 48 ) ), '+/', '-_' ), '=' ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- PKCE wants base64url.
-		set_transient(
-			self::key( 'connect' ),
-			array(
-				'state'    => $state,
-				'verifier' => $verifier,
-				'client'   => $client['client_id'],
-				'token'    => $meta['token_endpoint'],
-				'address'  => $address,
-			),
-			self::PENDING
-		);
-		$challenge = rtrim( strtr( base64_encode( hash( 'sha256', $verifier, true ) ), '+/', '-_' ), '=' ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- PKCE wants base64url.
-		$to        = add_query_arg(
-			rawurlencode_deep(
-				array(
-					'response_type'         => 'code',
-					'client_id'             => $client['client_id'],
-					'redirect_uri'          => self::back(),
-					'code_challenge'        => $challenge,
-					'code_challenge_method' => 'S256',
-					'scope'                 => 'cms',
-					'state'                 => $state,
-				)
-			),
-			$meta['authorization_endpoint']
-		);
+		set_transient( self::key( 'connect' ), $pending, CmsConnect::WAIT );
 		// The consent page is on the Runlight, which is allowed as a place to send the admin for this one redirect.
 		$host = (string) wp_parse_url( $to, PHP_URL_HOST );
 		add_filter(
@@ -177,67 +147,33 @@ final class Connect {
 		// Each attempt works once, and only for the admin who started it: the state it was sent with proves that.
 		$pending = get_transient( self::key( 'connect' ) );
 		delete_transient( self::key( 'connect' ) );
-		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- the state, kept for this admin and compared below, does a nonce's work.
-		$state = isset( $_GET['state'] ) ? sanitize_text_field( wp_unslash( $_GET['state'] ) ) : '';
-		if ( ! is_array( $pending ) || ! hash_equals( (string) ( $pending['state'] ?? '' ), $state ) ) {
-			self::done( __( 'That connection took too long or was already used. Press Connect again.', 'runlight' ) );
-		}
-		if ( isset( $_GET['error'] ) ) {
-			if ( 'access_denied' === $_GET['error'] ) {
-				self::done( __( 'The connection was not allowed.', 'runlight' ) );
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- the state, kept for this admin and compared in CmsConnect::finish(), does a nonce's work.
+		$query = array();
+		foreach ( array( 'state', 'code', 'error', 'error_description' ) as $name ) {
+			if ( isset( $_GET[ $name ] ) && is_string( $_GET[ $name ] ) ) {
+				$query[ $name ] = sanitize_text_field( wp_unslash( $_GET[ $name ] ) );
 			}
-			$reason = isset( $_GET['error_description'] ) ? sanitize_text_field( wp_unslash( $_GET['error_description'] ) ) : sanitize_text_field( wp_unslash( $_GET['error'] ) );
-			/* translators: %s: what the Runlight said */
-			self::done( sprintf( __( 'Your Runlight did not connect this site: %s', 'runlight' ), $reason ) );
 		}
-		$code = isset( $_GET['code'] ) ? sanitize_text_field( wp_unslash( $_GET['code'] ) ) : '';
 		// phpcs:enable WordPress.Security.NonceVerification.Recommended
-
-		$granted = self::json(
-			wp_remote_post(
-				$pending['token'],
-				array(
-					'timeout'     => 10,
-					'redirection' => 0,
-					'body'        => array(
-						'grant_type'    => 'authorization_code',
-						'code'          => $code,
-						'client_id'     => $pending['client'],
-						'redirect_uri'  => self::back(),
-						'code_verifier' => $pending['verifier'],
-					),
-				)
-			)
-		);
-		if ( null === $granted || ! is_string( $granted['access_token'] ?? null ) || ! is_string( $granted['agents_key'] ?? null ) ) {
-			self::done( __( 'Your Runlight did not give this site its keys. Press Connect again.', 'runlight' ) );
+		[ $granted, $message ] = self::connect()->finish( $query, $pending );
+		if ( null === $granted ) {
+			self::done( $message );
 		}
-		$site   = is_string( $granted['site'] ?? null ) ? $granted['site'] : '';
 		$before = Settings::get();
 		update_option(
 			Settings::OPTION,
 			array(
 				'mode'          => 'remote',
-				'address'       => $pending['address'],
-				'site'          => $site,
-				'observe_key'   => $granted['agents_key'],
-				'dashboard_key' => $granted['access_token'],
+				'address'       => $granted['address'],
+				'site'          => $granted['site'],
+				'observe_key'   => $granted['agentsKey'],
+				'dashboard_key' => $granted['dashboardKey'],
 				'skip_admins'   => $before['skip_admins'],
 				'outbound'      => $before['outbound'],
 				'downloads'     => $before['downloads'],
 				'locations'     => $before['locations'],
 			)
 		);
-		/* translators: %s: the site's id in Runlight */
-		self::done( sprintf( __( 'Connected. Runlight counts this site as %s.', 'runlight' ), $site ), true );
-	}
-
-	/** The scheme, host, and port of an address. */
-	private static function origin( string $address ): string {
-		$parts = wp_parse_url( $address );
-		if ( ! is_array( $parts ) || empty( $parts['scheme'] ) || empty( $parts['host'] ) ) {
-			return '';
-		}
-		return strtolower( $parts['scheme'] . '://' . $parts['host'] . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' ) );
+		self::done( $message, true );
 	}
 }

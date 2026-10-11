@@ -6,17 +6,19 @@ namespace Runlight\Craft;
 
 use Craft;
 use GuzzleHttp\ClientInterface;
+use Runlight\Cms\Connect as CmsConnect;
 use yii\caching\CacheInterface;
 
 /**
- * Connecting to a Runlight without copying keys: the plugin registers itself with the Runlight's OAuth
- * server, sends the admin to its consent page to pick this site, and on the way back swaps the code,
- * checked with PKCE, for the site's dashboard key, agents key, and id. ConnectController saves them.
+ * Connecting to a Runlight without copying keys: the package's Connect (Runlight\Cms\Connect) registers the
+ * plugin with the Runlight's OAuth server, sends the admin to its consent page to pick this site, and on the
+ * way back swaps the code, checked with PKCE, for the site's dashboard key, agents key, and id. This class
+ * gives it Craft's HTTP client, Craft's cache to keep the attempt in, and the plugin's words.
+ * ConnectController saves the keys.
  */
 final class Connect
 {
-    /** How long a connection may wait on the consent page before it has to be started again. */
-    private const WAIT = 15 * 60;
+    private readonly CmsConnect $connect;
 
     /**
      * @param ClientInterface $http Craft's Guzzle client
@@ -25,11 +27,12 @@ final class Connect
      * @param string $back where the Runlight sends the admin back to, which it is registered with
      */
     public function __construct(
-        private readonly ClientInterface $http,
+        ClientInterface $http,
         private readonly CacheInterface $cache,
         private readonly int $user,
-        private readonly string $back,
+        string $back,
     ) {
+        $this->connect = new CmsConnect(new Fetcher($http), $back, self::say(...));
     }
 
     /** The cache key for this admin's attempt only. */
@@ -38,30 +41,31 @@ final class Connect
         return 'runlight-connect-' . $this->user;
     }
 
-    /** Whether a Runlight sends people back to an address: on https, or this computer while trying things out. */
-    public static function returnable(string $back): bool
-    {
-        $parts = parse_url($back);
-        $host = is_array($parts) ? strtolower((string) ($parts['host'] ?? '')) : '';
-        return (is_array($parts) && strtolower((string) ($parts['scheme'] ?? '')) === 'https') || in_array($host, ['localhost', '127.0.0.1', '[::1]'], true);
-    }
-
     /**
-     * JSON from the Runlight.
+     * What to say about each step of connecting, by the package's codes.
      *
-     * @param array<string,mixed> $options Guzzle's request options
-     * @return array{0: array<string,mixed>|null, 1: string} the JSON, or null when it could not be reached or
-     *   did not answer with any, and why it could not be reached
+     * @param array<string,string> $params
      */
-    private function json(string $method, string $url, array $options = []): array
+    private static function say(string $code, array $params): string
     {
-        try {
-            $response = $this->http->request($method, $url, $options + ['timeout' => 10, 'http_errors' => false, 'allow_redirects' => false]);
-        } catch (\Throwable $e) {
-            return [null, $e->getMessage()];
-        }
-        $body = json_decode((string) $response->getBody(), true);
-        return [is_array($body) ? $body : null, ''];
+        return match ($code) {
+            'address' => Craft::t('runlight', 'Enter your Runlight’s address, then press Connect.'),
+            'scheme' => Craft::t('runlight', 'Enter a web address, such as https://stats.example.com.'),
+            'https' => Craft::t('runlight', 'Connecting needs this site’s Control Panel on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.'),
+            'unreachable' => Craft::t('runlight', 'Could not reach a Runlight at {address}: {error}', $params),
+            'unknown' => Craft::t('runlight', 'Could not connect to a Runlight at {address}. Check the address, which is shown in Runlight under Settings, Install.', $params),
+            'older' => Craft::t('runlight', 'Your Runlight is older than this plugin. Update it, or copy the keys from its Settings, Install into the fields below.'),
+            'client' => Craft::t('runlight', 'Craft at {host}', $params),
+            'silent' => Craft::t('runlight', 'It did not say why.'),
+            'refused' => Craft::t('runlight', 'Your Runlight would not let this site connect: {reason}', $params),
+            'expired' => Craft::t('runlight', 'That connection took too long or was already used. Press Connect again.'),
+            'denied' => Craft::t('runlight', 'The connection was not allowed.'),
+            'failed' => Craft::t('runlight', 'Your Runlight did not connect this site: {reason}', $params),
+            'lost' => Craft::t('runlight', 'Could not reach your Runlight to finish connecting: {error}', $params),
+            'keys' => Craft::t('runlight', 'Your Runlight did not give this site its keys. Press Connect again.'),
+            'connected' => Craft::t('runlight', 'Connected. Runlight counts this site as {site}.', $params),
+            default => $code,
+        };
     }
 
     /**
@@ -73,56 +77,11 @@ final class Connect
      */
     public function start(string $address, string $entered): array
     {
-        if (!self::returnable($this->back)) {
-            return [null, Craft::t('runlight', 'Connecting needs this site’s Control Panel on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.')];
+        [$to, $pending, $error] = $this->connect->start($address, $entered);
+        if ($to === null) {
+            return [null, $error];
         }
-        [$meta, $error] = $this->json('GET', $address . '/.well-known/oauth-authorization-server');
-        if ($error !== '') {
-            return [null, Craft::t('runlight', 'Could not reach a Runlight at {address}: {error}', ['address' => $address, 'error' => $error])];
-        }
-        $unknown = Craft::t('runlight', 'Could not connect to a Runlight at {address}. Check the address, which is shown in Runlight under Settings, Install.', ['address' => $address]);
-        if ($meta === null || !is_string($meta['authorization_endpoint'] ?? null) || !is_string($meta['token_endpoint'] ?? null) || !is_string($meta['registration_endpoint'] ?? null)) {
-            return [null, $unknown];
-        }
-        // Its endpoints must be on its own address, so an address cannot send this server's requests elsewhere.
-        $origin = Local::originOf($address);
-        foreach (['authorization_endpoint', 'token_endpoint', 'registration_endpoint'] as $endpoint) {
-            if (Local::originOf($meta[$endpoint]) !== $origin) {
-                return [null, $unknown];
-            }
-        }
-        if (!in_array('cms', (array) ($meta['scopes_supported'] ?? []), true)) {
-            return [null, Craft::t('runlight', 'Your Runlight is older than this plugin. Update it, or copy the keys from its Settings, Install into the fields below.')];
-        }
-
-        // Named for where the Runlight sends the admin back to, which is the address it checks.
-        [$client, $error] = $this->json('POST', $meta['registration_endpoint'], [
-            'json' => ['client_name' => Craft::t('runlight', 'Craft at {host}', ['host' => (string) parse_url($this->back, PHP_URL_HOST)]), 'redirect_uris' => [$this->back]],
-        ]);
-        if ($client === null || !is_string($client['client_id'] ?? null)) {
-            $reason = is_string($client['error_description'] ?? null) ? $client['error_description'] : ($error !== '' ? $error : Craft::t('runlight', 'It did not say why.'));
-            return [null, Craft::t('runlight', 'Your Runlight would not let this site connect: {reason}', ['reason' => $reason])];
-        }
-
-        $state = bin2hex(random_bytes(16));
-        $verifier = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
-        $this->cache->set($this->key(), [
-            'state' => $state,
-            'verifier' => $verifier,
-            'client' => $client['client_id'],
-            'token' => $meta['token_endpoint'],
-            'address' => $entered,
-        ], self::WAIT);
-        $challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
-        $to = $meta['authorization_endpoint'] . (str_contains($meta['authorization_endpoint'], '?') ? '&' : '?') . http_build_query([
-            'response_type' => 'code',
-            'client_id' => $client['client_id'],
-            'redirect_uri' => $this->back,
-            'code_challenge' => $challenge,
-            'code_challenge_method' => 'S256',
-            'scope' => 'cms',
-            'state' => $state,
-        ], '', '&', PHP_QUERY_RFC3986);
+        $this->cache->set($this->key(), $pending, CmsConnect::WAIT);
         return [$to, ''];
     }
 
@@ -138,39 +97,13 @@ final class Connect
     {
         $pending = $this->cache->get($this->key());
         $this->cache->delete($this->key());
-        $state = is_string($query['state'] ?? null) ? $query['state'] : '';
-        if (!is_array($pending) || !hash_equals((string) ($pending['state'] ?? ''), $state)) {
-            return [null, Craft::t('runlight', 'That connection took too long or was already used. Press Connect again.')];
+        [$granted, $message] = $this->connect->finish($query, $pending === false ? null : $pending);
+        if ($granted === null) {
+            return [null, $message];
         }
-        $error = $query['error'] ?? null;
-        if (is_string($error) && $error !== '') {
-            if ($error === 'access_denied') {
-                return [null, Craft::t('runlight', 'The connection was not allowed.')];
-            }
-            $description = $query['error_description'] ?? null;
-            $reason = is_string($description) && $description !== '' ? $description : $error;
-            return [null, Craft::t('runlight', 'Your Runlight did not connect this site: {reason}', ['reason' => $reason])];
-        }
-        $code = is_string($query['code'] ?? null) ? $query['code'] : '';
-        [$granted, $failed] = $this->json('POST', (string) $pending['token'], [
-            'form_params' => [
-                'grant_type' => 'authorization_code',
-                'code' => $code,
-                'client_id' => $pending['client'],
-                'redirect_uri' => $this->back,
-                'code_verifier' => $pending['verifier'],
-            ],
-        ]);
-        if ($failed !== '') {
-            return [null, Craft::t('runlight', 'Could not reach your Runlight to finish connecting: {error}', ['error' => $failed])];
-        }
-        if ($granted === null || !is_string($granted['access_token'] ?? null) || !is_string($granted['agents_key'] ?? null)) {
-            return [null, Craft::t('runlight', 'Your Runlight did not give this site its keys. Press Connect again.')];
-        }
-        $site = is_string($granted['site'] ?? null) ? $granted['site'] : '';
         return [
-            ['address' => (string) $pending['address'], 'site' => $site, 'observeKey' => $granted['agents_key'], 'dashboardKey' => $granted['access_token']],
-            Craft::t('runlight', 'Connected. Runlight counts this site as {site}.', ['site' => $site]),
+            ['address' => $granted['address'], 'site' => $granted['site'], 'observeKey' => $granted['agentsKey'], 'dashboardKey' => $granted['dashboardKey']],
+            $message,
         ];
     }
 }

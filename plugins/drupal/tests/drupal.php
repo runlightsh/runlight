@@ -43,6 +43,22 @@ namespace Drupal\Component\Datetime {
   interface TimeInterface {}
 }
 
+namespace Drupal\Component\Render {
+  interface MarkupInterface extends \Stringable {}
+}
+
+namespace Drupal\Core\Render {
+  final class Markup implements \Drupal\Component\Render\MarkupInterface {
+    private function __construct(private string $text) {}
+    public static function create(string $text): self {
+      return new self($text);
+    }
+    public function __toString(): string {
+      return $this->text;
+    }
+  }
+}
+
 namespace Drupal\Component\FileSecurity {
   final class FileSecurity {
     public static function writeHtaccess(string $path, bool $deny): bool {
@@ -105,7 +121,7 @@ namespace Drupal\Core\KeyValueStore {
 }
 
 namespace Drupal\Core\StringTranslation {
-  final class TranslatableMarkup implements \Stringable {
+  final class TranslatableMarkup implements \Drupal\Component\Render\MarkupInterface {
     public function __construct(private string $text, private array $args = []) {}
     public function __toString(): string {
       return strtr($this->text, array_map('strval', $this->args));
@@ -384,14 +400,34 @@ namespace DrupalTest {
         $headers['content-type'] = 'application/x-www-form-urlencoded';
         $body = http_build_query($options['form_params']);
       }
+      elseif (isset($options['body'])) {
+        $body = (string) $options['body'];
+      }
       $answer = ($this->answer)(new \Runlight\Http\Request($url, $method, $headers, $body));
       return new class ($answer) {
         public function __construct(private \Runlight\Http\Response $answer) {}
         public function getStatusCode(): int {
           return $this->answer->status;
         }
-        public function getBody(): string {
-          return $this->answer->text();
+        public function getHeaders(): array {
+          return $this->answer->headers->all();
+        }
+        public function getBody(): object {
+          return new class ($this->answer->text()) {
+            public function __construct(private string $text) {}
+            public function eof(): bool {
+              return $this->text === '';
+            }
+            public function read(int $length): string {
+              $part = substr($this->text, 0, $length);
+              $this->text = substr($this->text, strlen($part));
+              return $part;
+            }
+            public function close(): void {}
+            public function __toString(): string {
+              return $this->text;
+            }
+          };
         }
       };
     }

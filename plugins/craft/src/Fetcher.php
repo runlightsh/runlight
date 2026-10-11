@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Craft;
 
 use Craft;
+use GuzzleHttp\ClientInterface;
 use GuzzleHttp\TransferStats;
 use Runlight\Http\BodyTooLong;
 use Runlight\Http\Fetcher as RunlightFetcher;
@@ -24,6 +25,11 @@ final class Fetcher implements RunlightFetcher
 {
     /** Redirects followed for one pinned request, as Guzzle's own limit is. */
     private const MAX_REDIRECTS = 20;
+
+    /** @param ClientInterface|null $client Craft's Guzzle client, or a new one for each request */
+    public function __construct(private readonly ?ClientInterface $client = null)
+    {
+    }
 
     /** @param array<string,mixed> $init the request, with the keys fetch() takes */
     public function fetch(string $url, array $init = []): Response
@@ -67,7 +73,7 @@ final class Fetcher implements RunlightFetcher
         if (isset($init['body']) && !in_array($method, ['GET', 'HEAD'], true)) {
             $options['body'] = (string) $init['body'];
         }
-        $client = Craft::createGuzzleClient();
+        $client = $this->client ?? Craft::createGuzzleClient();
         // A pin connects to the address Runlight checked, with the name kept for the certificate. Only cURL can,
         // and only without a proxy, which would look the name up again, so without either the request is refused,
         // as is an address no pin names.

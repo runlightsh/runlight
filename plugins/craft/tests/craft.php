@@ -355,6 +355,8 @@ namespace CraftTest {
             } elseif (isset($options['form_params'])) {
                 $headers['content-type'] = 'application/x-www-form-urlencoded';
                 $body = http_build_query($options['form_params']);
+            } elseif (isset($options['body'])) {
+                $body = (string) $options['body'];
             }
             $answer = ($this->answer)(new \Runlight\Http\Request($url, $method, $headers, $body));
             return new class ($answer) {
@@ -367,9 +369,39 @@ namespace CraftTest {
                     return $this->answer->status;
                 }
 
-                public function getBody(): string
+                public function getHeaders(): array
                 {
-                    return $this->answer->text();
+                    return $this->answer->headers->all();
+                }
+
+                public function getBody(): object
+                {
+                    return new class ($this->answer->text()) {
+                        public function __construct(private string $text)
+                        {
+                        }
+
+                        public function eof(): bool
+                        {
+                            return $this->text === '';
+                        }
+
+                        public function read(int $length): string
+                        {
+                            $part = substr($this->text, 0, $length);
+                            $this->text = substr($this->text, strlen($part));
+                            return $part;
+                        }
+
+                        public function close(): void
+                        {
+                        }
+
+                        public function __toString(): string
+                        {
+                            return $this->text;
+                        }
+                    };
                 }
             };
         }

@@ -4,22 +4,27 @@ declare(strict_types=1);
 
 namespace Drupal\runlight;
 
+use Drupal\Component\Render\MarkupInterface;
 use Drupal\Core\KeyValueStore\KeyValueExpirableFactoryInterface;
 use Drupal\Core\KeyValueStore\KeyValueStoreExpirableInterface;
+use Drupal\Core\Render\Markup;
 use Drupal\Core\Routing\TrustedRedirectResponse;
 use Drupal\Core\Session\AccountInterface;
 use Drupal\Core\StringTranslation\StringTranslationTrait;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\Core\Url;
 use GuzzleHttp\ClientInterface;
+use Runlight\Cms\Connect as CmsConnect;
 
 /**
  * Connecting to a Runlight without copying keys.
  *
- * The module registers itself with the Runlight's OAuth server, sends the
- * admin to its consent page to pick this site, and on the way back swaps the
- * code, checked with PKCE, for the site's dashboard key, agents key, and id,
- * which it keeps in state, never in exported configuration.
+ * The package's Connect (Runlight\Cms\Connect) registers the module with the
+ * Runlight's OAuth server, sends the admin to its consent page to pick this
+ * site, and on the way back swaps the code, checked with PKCE, for the site's
+ * dashboard key, agents key, and id. This class gives it Drupal's HTTP client
+ * and the module's words, keeps the attempt in key-value storage, and keeps
+ * the keys in state, never in exported configuration.
  */
 final class Connect {
 
@@ -29,11 +34,6 @@ final class Connect {
    * The key-value collection holding attempts waiting on the consent page.
    */
   public const PENDING = 'runlight.connect';
-
-  /**
-   * How long an attempt may wait on the consent page, in seconds.
-   */
-  private const WAIT = 15 * 60;
 
   public function __construct(
     private readonly ClientInterface $httpClient,
@@ -57,32 +57,11 @@ final class Connect {
   }
 
   /**
-   * Whether this admin is somewhere a Runlight can send people back to.
-   *
-   * @return bool
-   *   On https, or this computer while trying things out.
-   */
-  public static function possible(): bool {
-    return self::returnable(self::back());
-  }
-
-  /**
-   * Whether a Runlight sends people back to an address.
-   *
-   * @param string $back
-   *   The address.
-   */
-  public static function returnable(string $back): bool {
-    $parts = parse_url($back);
-    $host = strtolower((string) ($parts['host'] ?? ''));
-    $local = ['localhost', '127.0.0.1', '[::1]'];
-    return strtolower((string) ($parts['scheme'] ?? '')) === 'https' || in_array($host, $local, TRUE);
-  }
-
-  /**
    * The scheme, host, and port of an address, as a browser writes its origin.
    *
-   * A default port is left out, so https://x:443 and https://x are the same.
+   * A default port is left out, so https://x:443 and https://x are the same,
+   * as in the package's Connect::origin(). The module keeps its own, so the
+   * dashboard of a Runlight elsewhere opens without the package.
    *
    * @param string $address
    *   The address.
@@ -102,32 +81,46 @@ final class Connect {
   }
 
   /**
-   * JSON from the Runlight.
+   * The package's Connect, with Drupal's HTTP client and this module's words.
    *
-   * @param string $method
-   *   The method.
-   * @param string $url
-   *   The address.
-   * @param array<string, mixed> $options
-   *   Guzzle's request options.
-   *
-   * @return array{0: array<string, mixed>|null, 1: string}
-   *   The JSON, or NULL when it could not be reached or did not answer with
-   *   any, and why it could not be reached.
+   * @return \Runlight\Cms\Connect|null
+   *   The package's Connect, or NULL when Composer did not install the
+   *   package with the module.
    */
-  private function json(string $method, string $url, array $options = []): array {
-    try {
-      $response = $this->httpClient->request($method, $url, $options + [
-        'timeout' => 10,
-        'http_errors' => FALSE,
-        'allow_redirects' => FALSE,
-      ]);
+  private function connect(): ?CmsConnect {
+    if (!class_exists(CmsConnect::class)) {
+      return NULL;
     }
-    catch (\Throwable $e) {
-      return [NULL, $e->getMessage()];
-    }
-    $body = json_decode((string) $response->getBody(), TRUE);
-    return [is_array($body) ? $body : NULL, ''];
+    return new CmsConnect(new Fetcher($this->httpClient), self::back(), fn (string $code, array $params): string => (string) $this->say($code, $params));
+  }
+
+  /**
+   * What to say about each step of connecting, by the package's codes.
+   *
+   * @param string $code
+   *   What happened.
+   * @param array<string, string> $params
+   *   Its details.
+   */
+  private function say(string $code, array $params): TranslatableMarkup|string {
+    return match ($code) {
+      'address' => $this->t('Enter your Runlight’s address, then press Connect.'),
+      'scheme' => $this->t('Enter a web address, such as https://stats.example.com.'),
+      'https' => $this->t('Connecting needs this site’s admin on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.'),
+      'unreachable' => $this->t('Could not reach a Runlight at @address: @error', ['@address' => $params['address'], '@error' => $params['error']]),
+      'unknown' => $this->t('Could not connect to a Runlight at @address. Check the address, which is shown in Runlight under Settings, Install.', ['@address' => $params['address']]),
+      'older' => $this->t('Your Runlight is older than this module. Update it, or copy the keys from its Settings, Install into the fields below.'),
+      'client' => $this->t('Drupal at @host', ['@host' => $params['host']]),
+      'silent' => $this->t('It did not say why.'),
+      'refused' => $this->t('Your Runlight would not let this site connect: @reason', ['@reason' => $params['reason']]),
+      'expired' => $this->t('That connection took too long or was already used. Press Connect again.'),
+      'denied' => $this->t('The connection was not allowed.'),
+      'failed' => $this->t('Your Runlight did not connect this site: @reason', ['@reason' => $params['reason']]),
+      'lost' => $this->t('Could not reach your Runlight to finish connecting: @error', ['@error' => $params['error']]),
+      'keys' => $this->t('Your Runlight did not give this site its keys. Press Connect again.'),
+      'connected' => $this->t('Connected. Runlight counts this site as @site.', ['@site' => $params['site']]),
+      default => $code,
+    };
   }
 
   /**
@@ -136,71 +129,20 @@ final class Connect {
    * @param string $address
    *   The Runlight's address, as entered.
    *
-   * @return \Drupal\Core\Routing\TrustedRedirectResponse|\Drupal\Core\StringTranslation\TranslatableMarkup
+   * @return \Drupal\Core\Routing\TrustedRedirectResponse|\Drupal\Component\Render\MarkupInterface
    *   The way to the Runlight's consent page, or why there is none.
    */
-  public function start(string $address): TrustedRedirectResponse|TranslatableMarkup {
-    if ($address === '') {
-      return $this->t('Enter your Runlight’s address, then press Connect.');
+  public function start(string $address): TrustedRedirectResponse|MarkupInterface {
+    $connect = $this->connect();
+    if ($connect === NULL) {
+      return $this->t('Connecting needs the Runlight PHP library, which Composer installs with the module. Copy the keys from Runlight’s Settings, Install into the fields below instead.');
     }
-    if (!in_array(strtolower((string) parse_url($address, PHP_URL_SCHEME)), ['http', 'https'], TRUE)) {
-      return $this->t('Enter a web address, such as https://stats.example.com.');
+    [$to, $pending, $error] = $connect->start($address);
+    if ($to === NULL) {
+      // Made by say() through t(), which escaped what it put in.
+      return Markup::create($error);
     }
-    if (!self::possible()) {
-      return $this->t('Connecting needs this site’s admin on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.');
-    }
-
-    [$meta, $error] = $this->json('GET', $address . '/.well-known/oauth-authorization-server');
-    if ($error !== '') {
-      return $this->t('Could not reach a Runlight at @address: @error', ['@address' => $address, '@error' => $error]);
-    }
-    $unknown = $this->t('Could not connect to a Runlight at @address. Check the address, which is shown in Runlight under Settings, Install.', ['@address' => $address]);
-    if ($meta === NULL || !is_string($meta['authorization_endpoint'] ?? NULL) || !is_string($meta['token_endpoint'] ?? NULL) || !is_string($meta['registration_endpoint'] ?? NULL)) {
-      return $unknown;
-    }
-    // Its endpoints must be on its own address, so an address cannot send
-    // this server's requests elsewhere.
-    $origin = self::origin($address);
-    foreach (['authorization_endpoint', 'token_endpoint', 'registration_endpoint'] as $endpoint) {
-      if (self::origin($meta[$endpoint]) !== $origin) {
-        return $unknown;
-      }
-    }
-    if (!in_array('cms', (array) ($meta['scopes_supported'] ?? []), TRUE)) {
-      return $this->t('Your Runlight is older than this module. Update it, or copy the keys from its Settings, Install into the fields below.');
-    }
-
-    [$client, $error] = $this->json('POST', $meta['registration_endpoint'], [
-      'json' => [
-        'client_name' => (string) $this->t('Drupal at @host', ['@host' => (string) parse_url(self::back(), PHP_URL_HOST)]),
-        'redirect_uris' => [self::back()],
-      ],
-    ]);
-    if ($client === NULL || !is_string($client['client_id'] ?? NULL)) {
-      $reason = is_string($client['error_description'] ?? NULL) ? $client['error_description'] : ($error !== '' ? $error : $this->t('It did not say why.'));
-      return $this->t('Your Runlight would not let this site connect: @reason', ['@reason' => $reason]);
-    }
-
-    $state = bin2hex(random_bytes(16));
-    $verifier = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
-    $this->pending()->setWithExpire((string) $this->currentUser->id(), [
-      'state' => $state,
-      'verifier' => $verifier,
-      'client' => $client['client_id'],
-      'token' => $meta['token_endpoint'],
-      'address' => $address,
-    ], self::WAIT);
-    $challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, TRUE)), '+/', '-_'), '=');
-    $query = http_build_query([
-      'response_type' => 'code',
-      'client_id' => $client['client_id'],
-      'redirect_uri' => self::back(),
-      'code_challenge' => $challenge,
-      'code_challenge_method' => 'S256',
-      'scope' => 'cms',
-      'state' => $state,
-    ], '', '&', PHP_QUERY_RFC3986);
-    $to = $meta['authorization_endpoint'] . (str_contains($meta['authorization_endpoint'], '?') ? '&' : '?') . $query;
+    $this->pending()->setWithExpire((string) $this->currentUser->id(), $pending, CmsConnect::WAIT);
     // Never cached: the state in it is this admin's, for this one attempt.
     $response = new TrustedRedirectResponse($to);
     $response->getCacheableMetadata()->setCacheMaxAge(0);
@@ -213,7 +155,7 @@ final class Connect {
    * @param array<string, mixed> $query
    *   The query the Runlight sent the admin back with.
    *
-   * @return array{0: bool, 1: \Drupal\Core\StringTranslation\TranslatableMarkup}
+   * @return array{0: bool, 1: \Drupal\Component\Render\MarkupInterface}
    *   Whether it connected, and what to say about it.
    */
   public function finish(array $query): array {
@@ -222,45 +164,26 @@ final class Connect {
     $uid = (string) $this->currentUser->id();
     $pending = $this->pending()->get($uid);
     $this->pending()->delete($uid);
-    $state = is_string($query['state'] ?? NULL) ? $query['state'] : '';
-    if (!is_array($pending) || !hash_equals((string) ($pending['state'] ?? ''), $state)) {
+    $connect = $this->connect();
+    if ($connect === NULL) {
       return [FALSE, $this->t('That connection took too long or was already used. Press Connect again.')];
     }
-    if (isset($query['error'])) {
-      if ($query['error'] === 'access_denied') {
-        return [FALSE, $this->t('The connection was not allowed.')];
-      }
-      $reason = is_string($query['error_description'] ?? NULL) ? $query['error_description'] : (string) $query['error'];
-      return [FALSE, $this->t('Your Runlight did not connect this site: @reason', ['@reason' => $reason])];
+    [$granted, $message] = $connect->finish($query, $pending);
+    // Made by say() through t(), which escaped what it put in.
+    $message = Markup::create($message);
+    if ($granted === NULL) {
+      return [FALSE, $message];
     }
-    $code = is_string($query['code'] ?? NULL) ? $query['code'] : '';
-
-    [$granted, $error] = $this->json('POST', $pending['token'], [
-      'form_params' => [
-        'grant_type' => 'authorization_code',
-        'code' => $code,
-        'client_id' => $pending['client'],
-        'redirect_uri' => self::back(),
-        'code_verifier' => $pending['verifier'],
-      ],
-    ]);
-    if ($error !== '') {
-      return [FALSE, $this->t('Could not reach your Runlight to finish connecting: @error', ['@error' => $error])];
-    }
-    if ($granted === NULL || !is_string($granted['access_token'] ?? NULL) || !is_string($granted['agents_key'] ?? NULL)) {
-      return [FALSE, $this->t('Your Runlight did not give this site its keys. Press Connect again.')];
-    }
-    $site = is_string($granted['site'] ?? NULL) ? $granted['site'] : '';
     // Connecting chooses this Runlight; the counting checkboxes stay as they
     // are.
     $this->setup->save([
       'mode' => 'remote',
-      'address' => (string) $pending['address'],
-      'site' => $site,
-      'observe_key' => $granted['agents_key'],
-      'dashboard_key' => $granted['access_token'],
+      'address' => $granted['address'],
+      'site' => $granted['site'],
+      'observe_key' => $granted['agentsKey'],
+      'dashboard_key' => $granted['dashboardKey'],
     ]);
-    return [TRUE, $this->t('Connected. Runlight counts this site as @site.', ['@site' => $site])];
+    return [TRUE, $message];
   }
 
 }
