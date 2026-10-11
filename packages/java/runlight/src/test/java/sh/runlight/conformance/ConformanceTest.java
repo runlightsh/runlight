@@ -40,7 +40,7 @@ final class ConformanceTest {
   private static void play(String kind, Map<String, Object> scenario) {
     List<Runnable> cleanups = new ArrayList<>();
     try {
-      SqlStore store = Stores.fromDb(db(kind, cleanups));
+      SqlStore store = Stores.fromDb(db(Databases.base(kind), cleanups), Databases.prefix(kind));
       List<Object> answers = new Player().play(scenario, store);
       assertAnswers(scenario, answers, kind);
     } finally {

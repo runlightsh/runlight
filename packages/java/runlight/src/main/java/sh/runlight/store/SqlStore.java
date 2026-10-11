@@ -21,6 +21,7 @@ import sh.runlight.Json;
 import sh.runlight.Query;
 import sh.runlight.db.Db;
 import sh.runlight.db.JdbcDb;
+import sh.runlight.db.Prefixed;
 
 /**
  * Runlight's tables, read and written with the same SQL as store.ts's SqlStore for each dialect, so
@@ -38,7 +39,35 @@ public final class SqlStore implements AutoCloseable {
   public static final long EVENT_TAIL_MS = Sql.EVENT_TAIL_MS;
   public static final String MYSQL_COLLATION = Sql.MYSQL_COLLATION;
 
+  /** What every table and index name starts with, unless a store is given another prefix. */
+  public static final String PREFIX = "rl_";
+
+  /**
+   * Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app
+   * dropping Runlight's tables drops these by name, never every table that starts with the prefix.
+   */
+  public static final List<String> TABLES =
+      List.of(
+          "meta",
+          "sites",
+          "salts",
+          "sessions",
+          "events",
+          "links",
+          "link_domains",
+          "shares",
+          "goals",
+          "settings",
+          "reports",
+          "tokens",
+          "funnels",
+          "rollup_days",
+          "rollups",
+          "users",
+          "invites");
+
   private final Db db;
+  private final String prefix;
   private volatile boolean ready;
   private volatile boolean checkedAll;
 
@@ -46,11 +75,51 @@ public final class SqlStore implements AutoCloseable {
   private final ReentrantLock migrating = new ReentrantLock();
 
   public SqlStore(Db db) {
+    this(db, PREFIX);
+  }
+
+  /**
+   * A store whose table and index names start with {@code prefix} in place of {@code rl_}, so two
+   * apps can each keep Runlight's tables in one database. A Db that is already prefixed keeps its
+   * own.
+   *
+   * @throws IllegalArgumentException for a prefix that is not up to 32 letters, digits, and
+   *     underscores, or that starts with a digit
+   */
+  public SqlStore(Db db, String prefix) {
+    if (db instanceof Prefixed own) {
+      prefix = own.prefix();
+    } else if (!PREFIX.equals(prefix)) {
+      db = new Prefixed(db, prefix);
+    }
     this.db = db;
+    this.prefix = prefix;
   }
 
   public Db db() {
     return db;
+  }
+
+  /** What the store's table and index names start with: {@code rl_} unless it was given another. */
+  public String prefix() {
+    return prefix;
+  }
+
+  /**
+   * The store's tables as named in the database, for an app removing Runlight: each one by name,
+   * since another app's tables may well start with the same letters.
+   */
+  public List<String> tables() {
+    List<String> out = new ArrayList<>();
+    for (String table : TABLES) {
+      out.add(prefix + table);
+    }
+    return out;
+  }
+
+  /** A table or index name as the database has it, under the store's prefix. */
+  private String named(String name) {
+    return name.startsWith(PREFIX) ? prefix + name.substring(PREFIX.length()) : name;
   }
 
   private static String site(Map<String, Object> query) {
@@ -162,9 +231,15 @@ public final class SqlStore implements AutoCloseable {
       List<Map<String, Object>> broken =
           d.all(
               "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid\n"
-                  + "           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace");
+                  + "           WHERE NOT i.indisvalid AND c.relname LIKE '"
+                  + prefix.replace("_", "\\_")
+                  + "%' AND c.relnamespace = current_schema()::regnamespace");
       for (Map<String, Object> row : broken) {
-        d.run("DROP INDEX IF EXISTS \"" + text(row.get("name")).replace("\"", "") + "\"");
+        // The name as the database has it, put back under rl_, since the statement goes through
+        // the prefix again (twice over for a prefix that itself starts rl_).
+        String name = text(row.get("name")).replace("\"", "");
+        String plain = name.startsWith(prefix) ? PREFIX + name.substring(prefix.length()) : name;
+        d.run("DROP INDEX IF EXISTS \"" + plain + "\"");
       }
     }
     for (String statement : statements) {
@@ -175,7 +250,7 @@ public final class SqlStore implements AutoCloseable {
         List<Map<String, Object>> there =
             d.all(
                 "SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
-                List.of(index.group(3), index.group(2)));
+                List.of(named(index.group(3)), named(index.group(2))));
         if (there.isEmpty()) {
           d.run(
               statement.replaceFirst(

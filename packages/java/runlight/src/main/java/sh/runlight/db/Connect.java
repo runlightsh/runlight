@@ -1,12 +1,17 @@
 package sh.runlight.db;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
@@ -28,18 +33,31 @@ public final class Connect {
         "sqlite",
         new JdbcDb.Pool(
             () -> {
-              // A file in a folder that is not there yet gets the folder, as a fresh app's data/
-              // often is.
+              boolean made = false;
               if (!path.isEmpty() && !path.equals(":memory:") && !path.startsWith("file:")) {
+                // A file in a folder that is not there yet gets the folder, as a fresh app's data/
+                // often is, for the owner and group alone as the file is.
                 File parent = new File(path).getAbsoluteFile().getParentFile();
                 if (parent != null && !parent.isDirectory()) {
+                  List<File> missing = new ArrayList<>();
+                  for (File f = parent; f != null && !f.exists(); f = f.getParentFile()) {
+                    missing.add(f);
+                  }
                   parent.mkdirs();
+                  for (File folder : missing) {
+                    ownerAndGroup(folder, "rwxrwx---");
+                  }
                 }
+                made = !new File(path).exists();
               }
               Properties props = new Properties();
               // better-sqlite3 waits up to five seconds for a lock from the moment it opens.
               props.setProperty("busy_timeout", "5000");
               Connection connection = open("jdbc:sqlite:" + path, props);
+              // Before WAL is turned on, so the -wal and -shm files SQLite makes later follow it.
+              if (made) {
+                ownerAndGroup(new File(path), "rw-rw----");
+              }
               try (Statement statement = connection.createStatement()) {
                 statement.execute("PRAGMA journal_mode = WAL");
                 statement.execute("PRAGMA synchronous = NORMAL");
@@ -192,6 +210,20 @@ public final class Connect {
           throw new IllegalArgumentException(
               "Runlight: DATABASE_URL must start with postgres://, mysql://, mariadb://, or sqlite:");
     };
+  }
+
+  /**
+   * A database file just made is for its owner and group alone (0660), whatever the umask: the
+   * visits in it are nobody else's to read, and a scheduled job running as another user of the same
+   * group can still write to it. SQLite gives the -wal and -shm files it makes later the same mode.
+   * Systems without such modes ignore it.
+   */
+  private static void ownerAndGroup(File file, String mode) {
+    try {
+      Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString(mode));
+    } catch (IOException | UnsupportedOperationException | SecurityException e) {
+      // Not a file this process may change, or a system with no such modes.
+    }
   }
 
   private static Connection open(String url, Properties props) throws SQLException {

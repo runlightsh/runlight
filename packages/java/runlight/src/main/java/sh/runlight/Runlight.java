@@ -12,10 +12,15 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
@@ -87,6 +92,11 @@ public final class Runlight
 
   private static final long ROLLUP_DELAY_MS = 2 * 3_600_000L;
 
+  /**
+   * The longest a tracker hit waits for the tables while another process creates or upgrades them.
+   */
+  private static final long TRACKER_WAIT_MS = 10_000;
+
   private static final Pattern SITE_ID =
       Pattern.compile("^[a-z0-9][a-z0-9._-]{0,63}\\z", Pattern.CASE_INSENSITIVE);
   private static final Pattern DOMAIN =
@@ -124,6 +134,10 @@ public final class Runlight
    *       change, or a mailer of the app's own, an {@link AppMailer}, such as a CMS's. The app's
    *       mailer is a default: a service saved in the dashboard takes its place, and removing that
    *       service goes back to it. Without either, the service is set up in Settings.
+   *   <li>mailServices: the ids of the mail services Settings offers and saves, such as every
+   *       service but "smtp" in an app that cannot keep connections of its own open. Default every
+   *       service. A service saved earlier that is not in the list counts as none, so the app's
+   *       mailer, if there is one, sends instead.
    *   <li>secret: encrypts the keys kept in the database. Default the RUNLIGHT_SECRET environment
    *       variable, then RUNLIGHT_TOKEN.
    *   <li>rateLimit: tracker requests allowed per visitor address per minute. Default 120; false or
@@ -147,6 +161,7 @@ public final class Runlight
     public boolean localInstalls;
     public String linkPath = "/go";
     public Object mail;
+    public List<String> mailServices;
     public String secret;
     public LongSupplier now;
     public Fetcher fetcher;
@@ -205,6 +220,12 @@ public final class Runlight
 
     public Options mail(AppMailer value) {
       mail = value;
+      return this;
+    }
+
+    /** The ids of the mail services Settings offers and saves. Default every service. */
+    public Options mailServices(List<String> value) {
+      mailServices = value;
       return this;
     }
 
@@ -275,6 +296,10 @@ public final class Runlight
   private final RateLimit limit;
   private final LongSupplier clock;
   private volatile boolean ready;
+
+  /** init() under way for tracker hits, which wait for it a moment at most; null when none is. */
+  private final AtomicReference<CompletableFuture<Void>> initializing = new AtomicReference<>();
+
   private final ReentrantLock checking = new ReentrantLock();
 
   /** When planner statistics were last gathered. */
@@ -293,6 +318,15 @@ public final class Runlight
 
   /** The app's own mailer, used while no service is saved in the dashboard. Null when none. */
   public final AppMailer appMailer;
+
+  /**
+   * The mail services Settings offers and saves: every one, unless {@code mailServices} names
+   * fewer.
+   */
+  public final List<Map<String, Object>> mailServices;
+
+  /** Whether mailServices was left out, so a saved service is used, whichever it is. */
+  private final boolean everyMailService;
 
   /** Retention work asked for and not yet done: a site's id, or "" for every site. */
   private final ConcurrentLinkedQueue<String> pruning = new ConcurrentLinkedQueue<>();
@@ -369,6 +403,20 @@ public final class Runlight
       this.appMailer = null;
       this.mailInCode = Js.map(options.mail);
     }
+    List<String> offered = options.mailServices;
+    if (offered != null) {
+      for (String id : offered) {
+        if (Transports.SERVICES.stream().noneMatch(s -> s.get("id").equals(id))) {
+          throw new IllegalArgumentException(
+              "Runlight: mailServices names \"" + id + "\", which is not a mail service");
+        }
+      }
+    }
+    this.everyMailService = offered == null;
+    this.mailServices =
+        offered == null
+            ? Transports.SERVICES
+            : Transports.SERVICES.stream().filter(s -> offered.contains(s.get("id"))).toList();
     String secretFromEnv = Env.get("RUNLIGHT_SECRET");
     this.localInstalls = options.localInstalls;
     this.secret =
@@ -461,8 +509,11 @@ public final class Runlight
     init();
     String sealed = store.setting("mail");
     String opened = sealed == null || sealed.isEmpty() ? null : Secret.unseal(sealed, secret);
-    if (opened != null && !opened.isEmpty()) {
-      Map<String, Object> out = new LinkedHashMap<>(Js.map(Json.parse(opened)));
+    Map<String, Object> saved =
+        opened != null && !opened.isEmpty() ? Js.map(Json.parse(opened)) : null;
+    // A service no longer offered counts as none, so it is never sent through.
+    if (saved != null && offered(saved.get("service"))) {
+      Map<String, Object> out = new LinkedHashMap<>(saved);
       out.put("source", "dashboard");
       return out;
     }
@@ -504,6 +555,12 @@ public final class Runlight
     }
     if (service == null) {
       throw new MailError("Pick a mail service", "mail_service", Map.of());
+    }
+    if (!mailServices.contains(service)) {
+      throw new MailError(
+          service.get("name") + " is not offered here. Pick another mail service",
+          "mail_service",
+          Json.object("service", service.get("id")));
     }
     List<Map<String, Object>> fields = maps(service.get("fields"));
     Map<String, Object> settings = new LinkedHashMap<>();
@@ -561,6 +618,19 @@ public final class Runlight
     store.setSetting("mail", Secret.seal(Json.stringify(config), secret));
   }
 
+  /** Whether Settings offers the service with this id. */
+  private boolean offered(Object id) {
+    if (everyMailService) {
+      return true;
+    }
+    for (Map<String, Object> s : mailServices) {
+      if (s.get("id").equals(id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static Object orEmpty(Object value) {
     return value == null || value == Json.UNDEFINED ? "" : value;
   }
@@ -591,7 +661,7 @@ public final class Runlight
       Transports.send(settings, full, fetcher, now());
       return;
     }
-    String via = appMailer.via() == null ? "" : appMailer.via();
+    String via = appMailer.via();
     try {
       appMailer.send().send(full);
     } catch (MailError e) {
@@ -698,6 +768,58 @@ public final class Runlight
                 "<" + unsubscribe + ">",
                 "List-Unsubscribe-Post",
                 "List-Unsubscribe=One-Click")));
+  }
+
+  /**
+   * Whether init() finished within {@code ms}; false while it is still waiting, such as on another
+   * process creating the tables, and it goes on in the background for later requests. Its errors
+   * are thrown.
+   */
+  private boolean readyWithin(long ms) {
+    if (ready) {
+      return true;
+    }
+    CompletableFuture<Void> running = initializing.get();
+    if (running == null) {
+      CompletableFuture<Void> made = new CompletableFuture<>();
+      if (initializing.compareAndSet(null, made)) {
+        Thread.ofVirtual()
+            .name("runlight-init")
+            .start(
+                () -> {
+                  try {
+                    init();
+                    made.complete(null);
+                  } catch (Throwable error) {
+                    made.completeExceptionally(error);
+                  } finally {
+                    // Done, either way: a failure is tried again by the next hit, as init() is.
+                    initializing.compareAndSet(made, null);
+                  }
+                });
+        running = made;
+      } else {
+        return readyWithin(ms);
+      }
+    }
+    try {
+      running.get(ms, TimeUnit.MILLISECONDS);
+      return true;
+    } catch (TimeoutException e) {
+      return false;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof RuntimeException runtime) {
+        throw runtime;
+      }
+      if (cause instanceof Error error) {
+        throw error;
+      }
+      throw new IllegalStateException(cause);
+    }
   }
 
   /** Creates tables and records the configured sites. Runs once. */
@@ -1852,6 +1974,13 @@ public final class Runlight
       return;
     }
     if (limit != null && !limit.allow(clientIp(request, context))) {
+      return;
+    }
+
+    // While another process creates or upgrades the tables (an index on a big table takes a while),
+    // a hit waits a moment at most and is then dropped, rather than holding its request until that
+    // is done.
+    if (!readyWithin(TRACKER_WAIT_MS)) {
       return;
     }
 

@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -209,7 +210,9 @@ public final class JdkFetcher implements Fetcher {
       List<InetAddress> addresses = addresses(pins);
       IOException last = null;
       for (InetAddress address : addresses) {
-        Socket candidate = new Socket();
+        // Never through a proxy (socksProxyHost, or the default ProxySelector's choice): the
+        // connection goes to the address checked, and nowhere a proxy would take it.
+        Socket candidate = new Socket(Proxy.NO_PROXY);
         try {
           candidate.connect(
               new InetSocketAddress(address, port), (int) Math.min(left(), CONNECT_TIMEOUT_MS));

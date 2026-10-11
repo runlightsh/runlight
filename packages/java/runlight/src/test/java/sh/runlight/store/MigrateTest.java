@@ -64,7 +64,7 @@ class MigrateTest {
   }
 
   static List<String> kinds() {
-    return Databases.kinds();
+    return Databases.plainKinds();
   }
 
   static List<String> servers() {

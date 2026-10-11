@@ -21,7 +21,7 @@ import sh.runlight.Json;
 class ParameterLimitTest extends StoreTestCase {
   static List<String> limited() {
     List<String> kinds = Databases.kinds();
-    kinds.remove("postgres");
+    kinds.removeIf(kind -> Databases.base(kind).equals("postgres"));
     return kinds;
   }
 
