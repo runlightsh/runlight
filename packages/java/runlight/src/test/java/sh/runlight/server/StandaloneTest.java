@@ -378,6 +378,9 @@ class StandaloneTest {
             null));
     assertEquals(302, server.handle(req("/sale")).status());
     assertEquals(200, server.handle(req("/login")).status(), "sign-in is still the sign-in page");
+    // Broken percent escapes are a link nobody has, here and at /go/, never an error.
+    assertEquals(404, server.handle(req("/%E0")).status());
+    assertEquals(404, server.handle(req("/go/%zz")).status());
     assertEquals(
         200,
         server.handle(req("/", "GET", Map.of("cookie", cookie))).status(),

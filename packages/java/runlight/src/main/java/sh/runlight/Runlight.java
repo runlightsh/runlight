@@ -10,6 +10,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -2013,8 +2014,12 @@ public final class Runlight
   public Function<Request, Response> linkHandler() {
     return request -> {
       String path = new Url(request.url()).pathname;
+      // A slug with broken escapes is one no link has.
       String slug =
-          path.startsWith(linkPath + "/") ? decode(path.substring(linkPath.length() + 1)) : "";
+          path.startsWith(linkPath + "/")
+              ? Objects.requireNonNullElse(
+                  Routes.decodePart(path.substring(linkPath.length() + 1)), "")
+              : "";
       Response found =
           !slug.isEmpty() && !slug.contains("/") ? redirect(request, slug, "", Map.of()) : null;
       return found != null ? found : notFound();
@@ -2060,7 +2065,7 @@ public final class Runlight
         return null;
       }
     }
-    String slug = decode(url.pathname.substring(1));
+    String slug = Objects.requireNonNullElse(Routes.decodePart(url.pathname.substring(1)), "");
     Response found =
         !slug.isEmpty() && !slug.contains("/") ? redirect(request, slug, host, context) : null;
     return found != null ? found : notFound();
@@ -2068,24 +2073,6 @@ public final class Runlight
 
   private static Response notFound() {
     return new Response("Not found", 404, Headers.of("content-type", "text/plain; charset=utf-8"));
-  }
-
-  /** The error decodeURIComponent throws on a broken escape. */
-  public static final class UriError extends IllegalArgumentException {
-    private static final long serialVersionUID = 1L;
-
-    public UriError() {
-      super("URI malformed");
-    }
-  }
-
-  /** decodeURIComponent, throwing where it throws a URIError. */
-  private static String decode(String text) {
-    String decoded = Js.decodeURIComponent(text);
-    if (decoded == null) {
-      throw new UriError();
-    }
-    return decoded;
   }
 
   /**
