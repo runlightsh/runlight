@@ -1196,7 +1196,8 @@ class Runlight:
 
         def handle(request: Request, context: Mapping[str, Any] | None = None) -> Response:
             path = Url(request.url).pathname
-            slug = _decode(path[len(self.link_path) + 1 :]) if path.startswith(f"{self.link_path}/") else ""
+            # A slug with broken escapes is one no link has.
+            slug = (_js.decode_uri_component(path[len(self.link_path) + 1 :]) or "") if path.startswith(f"{self.link_path}/") else ""
             found = self.redirect(request, slug, "", context) if slug and "/" not in slug else None
             return found if found is not None else _not_found()
 
@@ -1229,7 +1230,7 @@ class Runlight:
         for base in self.route_bases or ["/runlight"]:
             if base != "/" and (url.pathname == base or url.pathname.startswith(f"{base}/")):
                 return None
-        slug = _decode(url.pathname[1:])
+        slug = _js.decode_uri_component(url.pathname[1:]) or ""
         found = self.redirect(request, slug, host, context) if slug and "/" not in slug else None
         return found if found is not None else _not_found()
 
@@ -1464,18 +1465,6 @@ def _or(value: Any, fallback: Any) -> Any:
 
 def _not_found() -> Response:
     return Response("Not found", 404, {"content-type": "text/plain; charset=utf-8"})
-
-
-class UriError(ValueError):
-    """decodeURIComponent threw: URI malformed."""
-
-
-def _decode(text: str) -> str:
-    """decodeURIComponent, raising where it throws a URIError."""
-    decoded = _js.decode_uri_component(text)
-    if decoded is None:
-        raise UriError("URI malformed")
-    return decoded
 
 
 def _json_or_none(answer: Response) -> Any:

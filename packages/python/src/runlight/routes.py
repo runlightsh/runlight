@@ -180,17 +180,10 @@ def _credentials(value: Any) -> dict[str, str]:
     return {k: _js.string(v) for k, v in _entries(value)}
 
 
-class _UriError(Exception):
-    """decodeURIComponent threw. Not a RangeError, so it ends as an internal
-    error, as a URIError does in the TypeScript."""
-
-
-def _decode(text: str) -> str:
-    """decodeURIComponent, which throws on a broken escape."""
-    decoded = _js.decode_uri_component(text)
-    if decoded is None:
-        raise _UriError("URI malformed")
-    return decoded
+def _decode_part(part: str) -> str | None:
+    """One part of a URL path with its percent escapes decoded, or None when they are broken (such as %E0 or
+    %zz). A route answers None as it does a name it does not know, never with an error."""
+    return _js.decode_uri_component(part)
 
 
 def _limit(value: str | None, fallback: int) -> Any:
@@ -808,8 +801,8 @@ class Routes:
 
             check_match = re.fullmatch(r"/api/link-domains/([^/]+)/check", path)
             if check_match and method == "GET":
-                domain = _decode(check_match.group(1))
-                if not any(d["domain"] == domain and d["site"] == site["id"] for d in store.link_domains()):
+                domain = _decode_part(check_match.group(1))
+                if domain is None or not any(d["domain"] == domain and d["site"] == site["id"] for d in store.link_domains()):
                     return coded("Unknown domain", "unknown_domain", 404)
                 # One added before names inside private networks were refused is never fetched.
                 # What the check found, as a code the dashboard says in its own words, beside the English reason.
@@ -851,8 +844,8 @@ class Routes:
 
             domain_match = re.fullmatch(r"/api/link-domains/([^/]+)", path)
             if domain_match and method == "DELETE":
-                domain = _decode(domain_match.group(1))
-                if not any(d["domain"] == domain and d["site"] == site["id"] for d in store.link_domains()):
+                domain = _decode_part(domain_match.group(1))
+                if domain is None or not any(d["domain"] == domain and d["site"] == site["id"] for d in store.link_domains()):
                     return coded("Unknown domain", "unknown_domain", 404)
                 store.remove_link_domain(domain)
                 rl.forget_link_domains()
@@ -1104,9 +1097,9 @@ class Routes:
         if isinstance(site, Response):
             return site
         existing = rl.store.goals(site["id"])
-        id_ = None if path == "/api/goals" else _decode(path[len("/api/goals/") :])
+        id_ = None if path == "/api/goals" else _decode_part(path[len("/api/goals/") :])
         before = next((g for g in existing if g["id"] == id_), None)
-        if id_ is not None and before is None:
+        if path != "/api/goals" and before is None:
             return coded("Unknown goal", "unknown_goal", 404)
         self.trackers.clear()
         if request.method == "DELETE":
@@ -1316,8 +1309,8 @@ class Routes:
                 return json({"share": view(share)}, 201)
             return coded("Method not allowed", "method_not_allowed", 405)
 
-        id_ = _decode(path[len("/api/shares/") :])
-        share = rl.store.share_by_id(id_) if _SHARE_ID.match(id_) else None
+        id_ = _decode_part(path[len("/api/shares/") :])
+        share = rl.store.share_by_id(id_) if id_ is not None and _SHARE_ID.match(id_) else None
         if not share or share["site"] != site["id"]:
             return coded("Unknown share", "unknown_share", 404)
         if request.method == "PATCH":
@@ -1542,7 +1535,7 @@ class Routes:
         if token and token["scope"] == "manage" and manage_path(method, path):
             asked = url.search_params.get("site")
             site_match = re.fullmatch(r"/api/sites/([^/]+)", path)
-            if (asked and asked != token["site"]) or (site_match and _decode(site_match.group(1)) != token["site"]):
+            if (asked and asked != token["site"]) or (site_match and _decode_part(site_match.group(1)) != token["site"]):
                 return coded("Unknown site", "unknown_site", 404)
             if site_match and is_json(request):
                 # Where a site lives stays with its owner: a hub may rename it, never move it.
@@ -1857,8 +1850,11 @@ class Routes:
             access = self._can_read(request)
             if access is not True:
                 return self._denied(access)
+            id_ = _decode_part(site_match.group(1))
+            if id_ is None:
+                return coded("Unknown site", "unknown_site", 404)
             try:
-                rl.delete_site(_decode(site_match.group(1)))
+                rl.delete_site(id_)
                 return json({"ok": True})
             except _js.RangeError as error:
                 return coded(_message(error), "unknown_site", 404) if _message(error) == "Unknown site" else _refused(error, "site_invalid")
@@ -2015,8 +2011,10 @@ class Routes:
         if retention is not _js.UNDEFINED and retention is not None and _js.number(retention) not in RETENTION_MONTHS:
             months = ", ".join(str(m) for m in RETENTION_MONTHS)
             return coded(f"Keep visits for {months} months, or forever", "retention_bad", 400, {"months": months})
+        id_ = _decode_part(raw_id)
+        if id_ is None:
+            return coded("Unknown site", "unknown_site", 404)
         try:
-            id_ = _decode(raw_id)
             remote = rl.remote(id_)
             # How long a connected site keeps visits, and the timezone its days follow, are the install's
             # settings: this server passes them on, and changes its own row only once the install took them.
@@ -2047,7 +2045,7 @@ class Routes:
                 patch["timezone"] = _js.string(body["timezone"])
             if _defined(body, "hostnames") and rl.managed_sites:
                 patch["hostnames"] = body["hostnames"]
-            site = rl.update_site(_decode(raw_id), patch)
+            site = rl.update_site(id_, patch)
             # A connected site answers as the list shows it, so the dashboard keeps its install and domains.
             if remote:
                 site = {**site, "remote": remote["url"], "remoteSite": remote["site"], "manage": remote.get("scope") == "manage", "hostnames": remote["hostnames"]}
