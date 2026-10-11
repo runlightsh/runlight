@@ -8,8 +8,10 @@
 declare(strict_types=1);
 
 use Drupal\Core\Url;
+use Drupal\runlight\Cache;
+use Drupal\runlight\Connect;
 use Drupal\runlight\Local;
-use Drupal\runlight\Storage;
+use Drupal\runlight\StackMiddleware\AgentObserver;
 
 /**
  * Implements hook_install().
@@ -17,7 +19,7 @@ use Drupal\runlight\Storage;
  * Nothing is counted until the admin chooses where Runlight runs.
  */
 function runlight_install(bool $is_syncing): void {
-  if ($is_syncing || Local::setUp(\Drupal::config('runlight.settings'))) {
+  if ($is_syncing || \Drupal::service('runlight.setup')->isSetUp()) {
     return;
   }
   \Drupal::messenger()->addStatus(t('Runlight is installed. <a href=":url">Choose where it runs</a> to start counting visitors.', [':url' => Url::fromRoute('runlight.settings')->toString()]));
@@ -28,9 +30,14 @@ function runlight_install(bool $is_syncing): void {
  *
  * Removes everything the module stored besides its configuration, which
  * Drupal removes itself: when Runlight ran in this Drupal, its numbers, in
- * its own tables or its own folder, with the location data, and its secret.
+ * its own tables or its own folder, with the location data, and its secret;
+ * where it runs, with the address and keys; and what it kept in the cache.
  */
 function runlight_uninstall(bool $is_syncing): void {
   \Drupal::service('runlight.storage')->remove();
-  \Drupal::state()->deleteMultiple([Local::SECRET, Storage::STATE]);
+  \Drupal::service('runlight.setup')->delete();
+  \Drupal::state()->deleteMultiple([Local::SECRET, Local::HOST, Local::CHECKED]);
+  \Drupal::keyValueExpirable(Connect::PENDING)->deleteAll();
+  \Drupal::cache()->deleteMultiple([Cache::COUNTS, Cache::DAY_KEY, AgentObserver::DOWN]);
+  \Drupal::service('cache_tags.invalidator')->invalidateTags([Cache::TAG]);
 }

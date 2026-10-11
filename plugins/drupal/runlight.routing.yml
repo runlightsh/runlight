@@ -21,7 +21,7 @@ runlight.dashboard:
     _controller: '\Drupal\runlight\Controller\DashboardController::open'
     _title: 'Runlight'
   requirements:
-    _permission: 'administer runlight'
+    _permission: 'administer runlight+view runlight'
 
 # Where the Runlight sends the admin back to after Connect. The state kept for
 # the admin who started it does a CSRF token's work, so there is none here.
@@ -41,7 +41,12 @@ runlight.local:
   path: '/runlight'
   defaults:
     _controller: '\Drupal\runlight\Controller\LocalController::serve'
+  # Drupal allows only GET and POST on a route that names none, and the
+  # dashboard also changes things with PATCH and DELETE.
+  methods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
   requirements:
+    # Open: every visitor's page posts its visit here, and Runlight asks for
+    # Administer Runlight or View Runlight before showing or changing anything.
     _access: 'TRUE'
   options:
     no_cache: 'TRUE'
@@ -51,6 +56,7 @@ runlight.link:
   defaults:
     _controller: '\Drupal\runlight\Controller\LocalController::link'
   requirements:
+    # Open: a short link is for anyone who follows it.
     _access: 'TRUE'
   options:
     no_cache: 'TRUE'

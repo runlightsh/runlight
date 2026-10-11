@@ -9,6 +9,8 @@ import { AI_AGENTS } from "../src/data/agents.js";
 // The tests that run PHP skip where it is not installed, except in CI, which
 // installs it (.github/workflows/ci.yml), so there they fail instead.
 const PLUGINS = ["wordpress/includes/Agents.php", "drupal/src/Agents.php", "craft/src/Agents.php"];
+const DRUPAL = new URL("../../../plugins/drupal/", import.meta.url).pathname;
+const CRAFT = new URL("../../../plugins/craft/", import.meta.url).pathname;
 
 test("each CMS plugin knows every AI agent the server records, and no others", () => {
   const expected = AI_AGENTS.map((a) => a.token).sort();
@@ -65,35 +67,17 @@ test("a CMS plugin keeps its saved keys only while its Runlight address stays th
     ["http://10.0.0.5/runlight", ""],
   ]);
 
-  // Drupal's form runs too, with stand-ins for the form base class, its state, and the saved config.
-  const drupal = new URL("../../../plugins/drupal/src/Form/SettingsForm.php", import.meta.url).pathname;
+  // Drupal's form tidies the address and keeps the keys by the same rule.
   const submit = `
-    namespace Drupal\\Core\\Form {
-      interface FormStateInterface { public function getValue($key); }
-      class Config {
-        public array $values = ["address" => "https://stats.example.com/runlight", "observe_key" => "rlo_saved", "dashboard_key" => "rl_saved"];
-        public function get($key) { return $this->values[$key] ?? null; }
-        public function set($key, $value) { $this->values[$key] = $value; return $this; }
-        public function save() { return $this; }
-      }
-      abstract class ConfigFormBase {
-        public static ?Config $saved = null;
-        protected function config($name) { return self::$saved; }
-        public function submitForm(array &$form, FormStateInterface $form_state): void {}
-      }
-    }
+    namespace Drupal\\Core\\Form { abstract class ConfigFormBase {} interface FormStateInterface {} }
     namespace {
-      require ${JSON.stringify(drupal)};
-      class State implements Drupal\\Core\\Form\\FormStateInterface {
-        public function __construct(private array $values) {}
-        public function getValue($key) { return $this->values[$key] ?? ""; }
-      }
+      require ${JSON.stringify(DRUPAL + "tests/drupal.php")};
+      require ${JSON.stringify(DRUPAL + "src/Form/SettingsForm.php")};
+      $saved = ["address" => "https://stats.example.com/runlight", "observe_key" => "rlo_saved", "dashboard_key" => "rl_saved"];
       $keys = [];
-      foreach ([["https://stats.example.com/runlight/", "", ""], ["https://evil.example/runlight", "", ""], ["https://other.example/runlight", "rlo_new", "rl_new"]] as [$address, $key, $dashboard]) {
-        Drupal\\Core\\Form\\ConfigFormBase::$saved = new Drupal\\Core\\Form\\Config();
-        $form = [];
-        (new Drupal\\runlight\\Form\\SettingsForm())->submitForm($form, new State(["address" => $address, "observe_key" => $key, "dashboard_key" => $dashboard]));
-        $keys[] = [Drupal\\Core\\Form\\ConfigFormBase::$saved->values["observe_key"], Drupal\\Core\\Form\\ConfigFormBase::$saved->values["dashboard_key"]];
+      foreach ([["https://stats.example.com/runlight/", "", ""], ["https://evil.example/runlight", "", ""], ["https://other.example/runlight/s.js", "rlo_new", "rl_new"]] as [$address, $key, $dashboard]) {
+        $kept = Drupal\\runlight\\Setup::keys($saved, Drupal\\runlight\\Form\\SettingsForm::tidy($address), $key, $dashboard);
+        $keys[] = [$kept["observe_key"], $kept["dashboard_key"]];
       }
       echo json_encode($keys);
     }
@@ -422,4 +406,249 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
   option("permalink_structure", `""`);
   assert.equal((await fetch(`${home}/index.php/runlight/s.js`)).status, 200);
   assert.equal(await (await fetch(`${home}/runlight/s.js`)).text(), "WordPress");
+});
+
+/** Runs PHP with the Drupal stand-ins loaded, or skips the test where PHP is not installed. */
+function drupalPhp(t: { skip: (message: string) => void }, script: string): string | null {
+  try {
+    return execFileSync("php", ["-r", `namespace { require ${JSON.stringify(DRUPAL + "tests/drupal.php")}; } ${script}`], { encoding: "utf8" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) {
+      t.skip("PHP is not installed");
+      return null;
+    }
+    throw error;
+  }
+}
+
+test("the Drupal module keeps where Runlight runs in state, with settings.php over it and older config moved out", (t) => {
+  const answer = drupalPhp(t, `
+    namespace DrupalTest {
+      $config = new ConfigFactory();
+      // An earlier version saved the address and a key in exported config.
+      $config->configs["runlight.settings"] = new Config(["mode" => "", "address" => "https://stats.example.com", "observe_key" => "rlo_old", "dashboard_key" => "", "outbound" => true]);
+      $state = new State();
+      $setup = new \\Drupal\\runlight\\Setup($config, $state, new Invalidator());
+      $before = [$setup->mode(), $setup->get("observe_key"), $setup->isSetUp()];
+      $setup->save(["dashboard_key" => "rl_new"]);
+      $after = [$setup->all(), $config->configs["runlight.settings"]->saved, $GLOBALS["drupal_test"]["invalidated"]];
+      // settings.php wins, even with an empty value.
+      $config->configs["runlight.settings"]->overrides = ["dashboard_key" => "rl_env", "observe_key" => ""];
+      $override = [$setup->get("dashboard_key"), $setup->get("observe_key"), $setup->get("address")];
+      echo json_encode([$before, $after, $override]);
+    }
+  `);
+  if (answer === null) return;
+  const [before, after, override] = JSON.parse(answer);
+  assert.deepEqual(before, ["remote", "rlo_old", true]);
+  assert.deepEqual(after[0], { mode: "", address: "https://stats.example.com", site: "", observe_key: "rlo_old", dashboard_key: "rl_new" });
+  // Nothing of the connection is left in exported config; the counting settings stay.
+  assert.deepEqual(after[1], { mode: "", address: "", observe_key: "", dashboard_key: "", outbound: true });
+  assert.deepEqual(after[2], ["config:runlight.settings"]);
+  assert.deepEqual(override, ["rl_env", "", "https://stats.example.com"]);
+});
+
+test("the Drupal module keeps its tables under Drupal's prefix, beside anyone else's, and drops only its own by name", (t) => {
+  const run = (tables: string[], options: { prefix?: string; owner?: string | null; kept?: string; type?: string; version?: string; privatePath?: boolean } = {}) =>
+    drupalPhp(t, `
+      namespace DrupalTest {
+        $root = sys_get_temp_dir() . "/runlight-drupal-" . getmypid() . "-" . bin2hex(random_bytes(4));
+        if (${options.privatePath ? "true" : "false"}) {
+          $GLOBALS["drupal_test"]["settings"]["file_private_path"] = $root . "/private";
+        }
+        $config = new ConfigFactory();
+        $config->configs["system.site"] = new Config(["uuid" => "site-1"]);
+        $db = new Database(${JSON.stringify(tables)}, ${JSON.stringify(options.prefix ?? "")}, ${JSON.stringify(options.type ?? "mysql")}, ${JSON.stringify(options.version ?? "8.4.3")}, ${options.owner === undefined ? "null" : JSON.stringify(options.owner)});
+        $state = new State();
+        ${options.kept ? `$state->set("runlight.storage", ["kind" => ${JSON.stringify(options.kept)}, "file" => "x.db"]);` : ""}
+        $logger = new Logger();
+        $storage = new \\Drupal\\runlight\\Storage($state, $db, new FileSystem($root), $config, $logger);
+        $kind = $storage->kind();
+        $clash = $storage->clash();
+        $prefix = $storage->prefix();
+        $storage->remove();
+        echo json_encode(["kind" => $kind, "clash" => $clash, "prefix" => $prefix, "dropped" => $db->dropped, "log" => $logger->lines]);
+      }
+    `);
+  const own = ["meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings", "reports", "tokens", "funnels", "rollup_days", "rollups"].map((n) => `rl_${n}`);
+  const fresh = run(["node", "users", "cache_default"], { prefix: "d_" });
+  if (fresh === null) return;
+  // A new database: Drupal's own, under Drupal's prefix.
+  assert.deepEqual(JSON.parse(fresh), { kind: "mysql", clash: false, prefix: "d_rl_", dropped: [], log: [] });
+  assert.equal(JSON.parse(run(["node"], { type: "pgsql" })!).kind, "postgres");
+  // MySQL before 8.4 and MariaDB before 11.4 lack the collation, so SQLite in the private folder, or nothing without one.
+  assert.equal(JSON.parse(run(["node"], { version: "8.0.36" })!).kind, "");
+  assert.equal(JSON.parse(run(["node"], { version: "10.11.6-MariaDB", privatePath: true })!).kind, "sqlite");
+  assert.equal(JSON.parse(run(["node"], { type: "sqlite", privatePath: true })!).kind, "sqlite");
+  // This site's own tables, left by an earlier install: used again.
+  assert.equal(JSON.parse(run([...own, "node"], { owner: "site-1" })!).kind, "mysql");
+  // A standalone Runlight's tables, or another site's, under the same names: never shared.
+  const standalone = JSON.parse(run([...own, "node"], { owner: null, privatePath: true })!);
+  assert.deepEqual([standalone.kind, standalone.clash], ["sqlite", true]);
+  assert.equal(JSON.parse(run([...own, "node"], { owner: "site-2" })!).kind, "");
+  assert.equal(JSON.parse(run(["rl_events", "rl_meta", "rl_extra"], { owner: "site-1" })!).kind, "");
+  // Uninstalling drops Runlight's tables by name and nothing else, and only this site's.
+  const dropped = JSON.parse(run([...own, "node", "rl_extra_of_someone"], { owner: "site-1", kept: "mysql" })!);
+  assert.deepEqual(dropped.dropped, []);
+  assert.match(dropped.log[0], /left the tables starting rl_ in place/);
+  assert.deepEqual(JSON.parse(run([...own, "node"], { owner: "site-1", kept: "mysql" })!).dropped, own);
+  assert.deepEqual(JSON.parse(run([...own, "node"], { owner: "site-2", kept: "mysql" })!).dropped, []);
+  assert.deepEqual(JSON.parse(run(["node", "rl_events"], { kept: "mysql" })!).dropped, []);
+});
+
+test("the Drupal module counts a visitor by the address Drupal works out, and takes changes only from its own pages", (t) => {
+  const answer = drupalPhp(t, `
+    namespace Symfony\\Component\\HttpFoundation {
+      final class Bag {
+        public function __construct(private array $values) {}
+        public function get(string $key, mixed $default = null): mixed { return $this->values[strtolower($key)] ?? $default; }
+        public function all(): array { return array_map(static fn ($v) => [$v], $this->values); }
+      }
+      /** Symfony's request, trusting X-Forwarded-For only from the proxies Drupal's reverse_proxy settings name. */
+      class Request {
+        public Bag $headers;
+        public Bag $server;
+        public static array $trusted = [];
+        public function __construct(array $headers, string $remote) {
+          $this->headers = new Bag(array_change_key_case($headers));
+          $this->server = new Bag(["remote_addr" => $remote]);
+        }
+        public function getRealMethod(): string { return "POST"; }
+        public function getContent(bool $stream = false): mixed { $s = fopen("php://memory", "r+"); fwrite($s, "{}"); rewind($s); return $s; }
+        public function getRequestUri(): string { return "/runlight/e"; }
+        public function getSchemeAndHttpHost(): string { return "https://www.example.com"; }
+        public function getClientIp(): ?string {
+          $remote = $this->server->get("REMOTE_ADDR");
+          if (!in_array($remote, self::$trusted, true)) return $remote;
+          $chain = array_map("trim", explode(",", (string) $this->headers->get("x-forwarded-for", "")));
+          return $chain[count($chain) - 1] ?: $remote;
+        }
+      }
+      class Response {}
+    }
+    namespace {
+      use Symfony\\Component\\HttpFoundation\\Request;
+      $runlight = new Runlight\\Runlight(["store" => Runlight\\Store\\Stores::sqlite(":memory:"), "site" => ["id" => "default", "hostnames" => []], "secret" => str_repeat("s", 32), "trustProxy" => false]);
+      $address = static function (Request $request) use ($runlight): array {
+        $ours = Drupal\\runlight\\Local::visitorRequest($request);
+        return [$ours->remoteAddress, $runlight->clientIp($ours, ["ip" => $ours->remoteAddress])];
+      };
+      $headers = ["x-forwarded-for" => "198.51.100.23", "cf-connecting-ip" => "198.51.100.24", "content-type" => "application/json"];
+      $out = [];
+      // Nothing in front: a header the visitor wrote counts for nothing.
+      $out[] = $address(new Request($headers, "203.0.113.9"));
+      // A proxy Drupal is told about: the address it passes on.
+      Request::$trusted = ["10.0.0.2"];
+      $out[] = $address(new Request(["x-forwarded-for" => "203.0.113.7"], "10.0.0.2"));
+      // Changes come only from the site's own pages.
+      $same = static fn (string $method, array $headers): bool => Drupal\\runlight\\Local::sameSite(new Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", $method, $headers));
+      $out[] = [
+        $same("POST", ["sec-fetch-site" => "same-origin"]),
+        $same("POST", ["sec-fetch-site" => "cross-site"]),
+        $same("POST", ["sec-fetch-site" => "same-site"]),
+        $same("DELETE", ["origin" => "https://evil.example"]),
+        $same("PATCH", ["origin" => "https://www.example.com"]),
+        $same("POST", []),
+        $same("GET", ["sec-fetch-site" => "cross-site"]),
+      ];
+      echo json_encode($out);
+    }
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [
+    ["203.0.113.9", "203.0.113.9"],
+    ["203.0.113.7", "203.0.113.7"],
+    [true, false, false, false, true, true, true],
+  ]);
+});
+
+test("the Drupal module's Connect gets the site's keys from a Runlight over OAuth, and keeps them in state", (t) => {
+  const answer = drupalPhp(t, `
+    namespace DrupalTest {
+      $rl = new \\Runlight\\Runlight([
+        "store" => \\Runlight\\Store\\Stores::sqlite(":memory:"),
+        "site" => ["id" => "blog", "name" => "Blog", "hostnames" => ["cms.example"]],
+        "secret" => str_repeat("s", 32),
+        "trustProxy" => false,
+      ]);
+      $routes = $rl->routes(["basePath" => "/runlight", "token" => null, "authorize" => static fn (): bool => true]);
+      $client = new Client(static fn (\\Runlight\\Http\\Request $request): \\Runlight\\Http\\Response => $routes->handle($request));
+      $config = new ConfigFactory();
+      $state = new State();
+      $setup = new \\Drupal\\runlight\\Setup($config, $state, new Invalidator());
+      $keyValue = new KeyValue();
+      $connect = new \\Drupal\\runlight\\Connect($client, $keyValue, $setup, new Account(7));
+      $out = [];
+      // A default port makes no difference to where its endpoints must be.
+      $to = $connect->start("https://stats.example:443/runlight");
+      $out[] = get_class($to);
+      $authorize = parse_url($to->getTargetUrl());
+      parse_str($authorize["query"], $asked);
+      // The owner allows it on the consent page, and Runlight sends the admin back.
+      $allowed = $routes->handle(new \\Runlight\\Http\\Request("https://stats.example/runlight/oauth/authorize", "POST", ["content-type" => "application/x-www-form-urlencoded"], http_build_query($asked + ["site" => "blog", "decision" => "allow"])));
+      parse_str((string) parse_url((string) $allowed->headers->get("location"), PHP_URL_QUERY), $back);
+      // The state proves the admin: another one's, or a second use, gets nowhere.
+      $pending = $keyValue->collections["runlight.connect"]["7"];
+      $out[] = (string) $connect->finish(["state" => "nope"] + $back)[1];
+      $keyValue->collections["runlight.connect"]["7"] = $pending;
+      [$ok, $message] = $connect->finish($back);
+      $out[] = [$ok, (string) $message];
+      $out[] = (string) $connect->finish($back)[1];
+      $kept = $setup->all();
+      $out[] = [$kept["mode"], $kept["address"], $kept["site"], str_starts_with($kept["observe_key"], ""), $kept["dashboard_key"] !== ""];
+      // Nothing reached exported config.
+      $out[] = array_filter($config->get("runlight.settings")->saved);
+      // The keys work: the dashboard key opens the dashboard, and the agents key reports agents.
+      $embed = $routes->handle(new \\Runlight\\Http\\Request("https://stats.example/runlight/api/embed", "POST", ["authorization" => "Bearer " . $kept["dashboard_key"], "content-type" => "application/json"], json_encode(["origin" => "https://cms.example"])));
+      $observe = $routes->handle(new \\Runlight\\Http\\Request("https://stats.example/runlight/api/observe", "POST", ["authorization" => "Bearer " . $kept["observe_key"], "content-type" => "application/json"], json_encode(["url" => "https://cms.example/", "userAgent" => "ChatGPT-User/1.0"])));
+      $out[] = [$embed->status, $observe->status];
+      // A Runlight that cannot be reached says why.
+      $client->fail = "cURL error 6: Could not resolve host: stats.example";
+      $out[] = (string) $connect->start("https://stats.example/runlight");
+      echo json_encode($out);
+    }
+  `);
+  if (answer === null) return;
+  const [kind, wrong, finished, again, kept, exported, keys, unreachable] = JSON.parse(answer);
+  assert.equal(kind, "Drupal\\Core\\Routing\\TrustedRedirectResponse");
+  assert.match(wrong, /took too long or was already used/);
+  assert.deepEqual(finished, [true, "Connected. Runlight counts this site as blog."]);
+  assert.match(again, /took too long or was already used/);
+  assert.deepEqual(kept, ["remote", "https://stats.example:443/runlight", "blog", true, true]);
+  assert.deepEqual(exported, []);
+  assert.deepEqual(keys, [201, 204]);
+  assert.match(unreachable, /Could not reach a Runlight at https:\/\/stats\.example\/runlight: cURL error 6/);
+});
+
+test("the Drupal module keeps rate counts in two cache items, however many visitors and minutes, and nothing in files", (t) => {
+  const answer = drupalPhp(t, `
+    namespace DrupalTest {
+      $now = 1_791_288_000_000;
+      $clock = new Clock(intdiv($now, 1000));
+      $backend = new CacheBackend($clock);
+      $limit = new \\Runlight\\RateLimit(120, function () use (&$now): int { return $now; }, "/nonexistent/never-written", true, new \\Drupal\\runlight\\Cache($backend, $clock));
+      $most = 0;
+      for ($minute = 0; $minute < 3 * 1440; $minute += 7) {
+        $now = 1_791_288_000_000 + $minute * 60_000;
+        $clock->now = intdiv($now, 1000);
+        $limit->allow("198.51.100." . ($minute % 250));
+        $most = max($most, count($backend->items));
+      }
+      $allowed = 0;
+      for ($i = 0; $i < 700; $i++) {
+        $allowed += $limit->allow("10.9." . intdiv($i, 250) . "." . ($i % 250)) ? 1 : 0;
+      }
+      $refused = 0;
+      for ($i = 0; $i < 130; $i++) {
+        $refused += $limit->allow("203.0.113.1") ? 0 : 1;
+      }
+      $tags = array_unique(array_merge(...array_column($backend->items, "tags")));
+      // The hourly check clears what is over once its minute and day have passed.
+      $clock->now += 2 * 86400;
+      (new \\Drupal\\runlight\\Cache($backend, $clock))->sweep();
+      echo json_encode(["most" => $most, "allowed" => $allowed, "refused" => $refused, "tags" => array_values($tags), "after" => array_keys($backend->items)]);
+    }
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), { most: 2, allowed: 700, refused: 10, tags: ["runlight"], after: [] });
 });
