@@ -16,7 +16,10 @@ module Runlight
   # The token is an ordinary API token, so it appears in Settings, API and AI,
   # beside the others, and deleting it there disconnects the app. It reads
   # stats, or with the "manage" scope (asked for by a Runlight hub) it also
-  # changes one site's settings.
+  # changes one site's settings. With the "cms" scope (asked for by the
+  # WordPress, Drupal, and Craft plugins) it is the site's dashboard key, which
+  # only opens its read-only dashboard in the CMS, and the answer also carries
+  # the site's agents key, so connecting fills in the plugin's settings.
   #
   # The context the routes pass is a Hash: "runlight", "base", "isOwner" (callable(request) giving a bool), and
   # optionally "signIn" (String), "isReader" (callable(request) giving a bool), "accountOf" (callable(request)
@@ -29,6 +32,7 @@ module Runlight
     REGISTRATIONS_PER_MINUTE = 10
     # The longest client id, which carries the app's name and redirect addresses.
     MAX_CLIENT_ID = 2048
+    SCOPES = %w[read manage cms].freeze
 
     # Where the per-address count of registrations is kept. TypeScript keeps it in memory per install; here it
     # lives in the install's settings, keyed by a hash of the address, so every process shares it.
@@ -41,13 +45,24 @@ module Runlight
     }.freeze
 
     ESCAPES = { "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;", "'" => "&#39;" }.freeze
-    private_constant :REGISTRATIONS, :CORS, :ESCAPES
+    private_constant :REGISTRATIONS, :CORS, :ESCAPES, :SCOPES
 
     module_function
 
     # base64url of SHA-256, as PKCE's S256 method compares.
     def s256(verifier)
       base64url(OpenSSL::Digest::SHA256.digest(verifier))
+    end
+
+    # The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
+    def agents_key(runlight, site, replace = false)
+      name = "observe-key:#{site}"
+      saved = replace ? nil : runlight.store.setting(name)
+      return saved if !saved.nil? && saved != ""
+
+      key = "rlo_#{Hashing.random_id(20)}"
+      runlight.store.set_setting(name, key)
+      key
     end
 
     # The URL that a 401 from the MCP endpoint points clients at, to start OAuth.
@@ -71,7 +86,7 @@ module Runlight
       end
 
       if known.start_with?("/.well-known/oauth-protected-resource")
-        return json({ "resource" => "#{issuer}/mcp", "authorization_servers" => [issuer], "scopes_supported" => %w[read manage], "bearer_methods_supported" => ["header"] })
+        return json({ "resource" => "#{issuer}/mcp", "authorization_servers" => [issuer], "scopes_supported" => SCOPES, "bearer_methods_supported" => ["header"] })
       end
       if known.start_with?("/.well-known/oauth-authorization-server") || known.start_with?("/.well-known/openid-configuration")
         return json({
@@ -83,7 +98,7 @@ module Runlight
           "grant_types_supported" => ["authorization_code"],
           "code_challenge_methods_supported" => ["S256"],
           "token_endpoint_auth_methods_supported" => ["none"],
-          "scopes_supported" => %w[read manage],
+          "scopes_supported" => SCOPES,
         })
       end
 
@@ -141,8 +156,13 @@ module Runlight
           return refuse.call({ "error" => "invalid_request", "error_description" => "PKCE with S256 is required" })
         end
 
-        manage = (form.get("scope") || "").split(/[#{Js::SPACE}]+/o).include?("manage")
+        scopes = (form.get("scope") || "").split(/[#{Js::SPACE}]+/o)
+        cms = scopes.include?("cms")
+        manage = !cms && scopes.include?("manage")
         name = client["name"].to_s
+        # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+        host = site_host(redirect)
+        counting = runlight.sites.select { |s| runlight.remote(s["id"]).nil? && s["hostnames"].include?(host) }
 
         unless ctx["isOwner"].call(request)
           # Someone signed in who may only read would be sent to sign in again and again.
@@ -169,6 +189,27 @@ module Runlight
           end
           # The app names itself, so the page also shows where the answer goes, which it cannot fake.
           sends_to = "<p class=\"note\">Allowing sends you back to <strong>#{esc(Http::Url.new(redirect).host)}</strong>. Only allow it if you started connecting there.</p>"
+          if cms
+            if counting.empty? && !runlight.managed_sites
+              return page("Add this site first",
+                          "<p>No site in this Runlight counts <strong>#{esc(host)}</strong>. Add it to a site's domains in your code, then connect again from #{esc(name)}.</p>", 400)
+            end
+
+            choices = +""
+            counting.each { |s| choices << "<option value=\"#{esc(s["id"])}\">#{esc(s["name"])}</option>" }
+            choices << "<option value=\"new\">A new site for #{esc(host)}</option>" if runlight.managed_sites && counting.empty?
+            return page(
+              "Connect #{esc(name)}",
+              "<p><strong>#{esc(name)}</strong> wants to count <strong>#{esc(host)}</strong> in this Runlight.</p>\n" \
+              "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's " \
+              "read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>\n" \
+              "#{sends_to}\n" \
+              "<form method=\"post\" action=\"#{esc(base)}/oauth/authorize\">#{hidden}\n" \
+              "<label>Site<select name=\"site\">#{choices}</select></label>\n" \
+              "<p class=\"note\">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in #{esc(name)}.</p>\n" \
+              '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+            )
+          end
           sites = runlight.sites
           if manage
             # Changing settings is for one site at a time, so there is no "every site" here.
@@ -209,6 +250,22 @@ module Runlight
         return back.call({ "error" => "access_denied" }) if form.get("decision") != "allow"
 
         site = form.get("site") || ""
+        if cms
+          if site == "new"
+            begin
+              site = if !counting.empty? then counting[0]["id"]
+                     elsif runlight.managed_sites then runlight.add_site({ "hostnames" => [host] })["id"]
+                     else ""
+                     end
+            rescue RangeError => e
+              # Such as an address, which a site cannot count by: there is no new site to make.
+              return back.call({ "error" => "invalid_request", "error_description" => e.message })
+            end
+          elsif counting.none? { |s| s["id"] == site }
+            site = ""
+          end
+          return back.call({ "error" => "invalid_request", "error_description" => "Pick a site that counts #{host}" }) if site == ""
+        end
         return back.call({ "error" => "invalid_request", "error_description" => "Unknown site" }) if site != "" && runlight.site(site).nil?
         if manage && (site == "" || !runlight.remote(site).nil?)
           return back.call({ "error" => "invalid_request", "error_description" => "Pick the site to manage" })
@@ -216,7 +273,7 @@ module Runlight
 
         code = Hashing.random_id(32)
         by = ctx["accountOf"]&.call(request)
-        grant = { "client" => client_id, "redirect" => redirect, "challenge" => challenge, "site" => site, "scope" => manage ? "manage" : "read",
+        grant = { "client" => client_id, "redirect" => redirect, "challenge" => challenge, "site" => site, "scope" => cms ? "cms" : manage ? "manage" : "read",
                   "expires" => runlight.now + CODE_MS }
         grant["by"] = by if !by.nil? && by != ""
         runlight.store.set_setting("oauth-code:#{Hashing.sha256(code)}", Json.encode(grant))
@@ -248,12 +305,16 @@ module Runlight
           runlight.store.set_setting(found["usedKey"], stored_client ? Json.encode(used) : runlight.now.to_s)
         end
         secret = "rl_#{Hashing.random_id(20)}"
-        scope = grant["scope"] == "manage" ? "manage" : "read"
+        scope = if grant["scope"] == "cms" then "cms"
+                elsif grant["scope"] == "manage" then "manage"
+                else "read"
+                end
+        # A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
         row = {
           "id" => Hashing.random_id,
           "name" => Js.slice("#{Js.string(client["name"].nil? ? "An app" : client["name"])} (OAuth)", 0, 100),
           "site" => grant["site"].to_s,
-          "scope" => scope,
+          "scope" => scope == "cms" ? "embed" : scope,
           "hash" => Hashing.sha256(secret),
           "hint" => secret[-4..],
           "createdAt" => runlight.now,
@@ -267,6 +328,11 @@ module Runlight
         end
         # A hub's own address, from where it asked to be sent back, so the picker only ever sends choices there.
         runlight.store.set_setting("token-origin:#{row["id"]}", Http::Url.new(grant["redirect"].to_s).origin) if scope == "manage"
+        # A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+        if scope == "cms"
+          return json({ "access_token" => secret, "token_type" => "Bearer", "scope" => scope, "site" => grant["site"],
+                        "agents_key" => agents_key(runlight, grant["site"].to_s) })
+        end
         # site is not part of OAuth, but a hub needs to know which site it was given.
         answer = { "access_token" => secret, "token_type" => "Bearer", "scope" => scope }
         answer["site"] = grant["site"] if grant["site"] != ""
@@ -312,6 +378,11 @@ module Runlight
       client = { "name" => meta["n"], "redirects" => meta["r"], "createdAt" => meta["t"] }
       client["usedAt"] = Js.number(used) if !used.nil? && used != ""
       { "client" => client, "usedKey" => used_key }
+    end
+
+    # A redirect address's host as a site's domains are kept: lowercase, with no port and no www.
+    def site_host(redirect)
+      Http::Url.new(redirect).hostname.downcase.sub(/\.+\z/, "").sub(/\Awww\./, "")
     end
 
     def constant_time_equal(a, b)
@@ -405,7 +476,7 @@ module Runlight
       )
     end
 
-    private_class_method :base64url, :from_base64url, :client_key, :client_for, :constant_time_equal, :esc, :json, :oauth_error,
+    private_class_method :base64url, :from_base64url, :client_key, :client_for, :site_host, :constant_time_equal, :esc, :json, :oauth_error,
                          :allowed_redirect, :json_form, :allow_registration, :register, :page
   end
 end

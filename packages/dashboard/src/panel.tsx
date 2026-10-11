@@ -9,6 +9,7 @@ import { JourneysSheet } from "./journeys.js";
 import { Empty } from "./empty.js";
 import { Icon, type IconName } from "./icons.js";
 import { useDialogFocus } from "./focus.js";
+import { openInTab, openingIn } from "./open.js";
 
 export interface Tab {
   /** The API dimension. */
@@ -318,13 +319,20 @@ function AllRows({ title, tab, view, onFilter, onClose }: { title: Key; tab: Tab
 }
 
 export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
-  const [active, setActive] = useState(0);
+  /** The box's name in an `?open=` link, such as `panel:pages:all:entry` for every entry page. */
+  const name = `panel:${title.replace(/^panel\./, "")}`;
+  // What a link asks this box to open: "all:<dimension>", "map", "journeys", or "detail:<event>".
+  const [start] = useState(() => openingIn(name) ?? "");
+  const startTab = start.startsWith("all:") ? tabs.findIndex((x) => x.dimension === start.slice(4)) : -1;
+  const [active, setActive] = useState(Math.max(0, startTab));
   const [showMap, setShowMap] = useState(false);
-  const [fullMap, setFullMap] = useState(false);
-  const [journeysOpen, setJourneys] = useState(false);
-  const [showAll, setShowAll] = useState(false);
+  const [fullMap, setFullMap] = useState(start === "map" && Boolean(map));
+  const [journeysOpen, setJourneys] = useState(start === "journeys" && title === "panel.pages");
+  const [showAll, setShowAll] = useState(startTab >= 0);
   /** The event whose properties are open, from the Events panel. */
   const [detail, setDetail] = useState<string | null>(null);
+  // A linked event opens once the rows show it is one, so a mistyped name opens nothing.
+  const [wantedDetail, setWantedDetail] = useState(start.startsWith("detail:") && tabs[0]?.dimension === "event" ? start.slice(7) : "");
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState("");
   /** Set when a reload takes longer than 300 ms, to fade the rows still showing. */
@@ -338,7 +346,14 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
     const timer = setTimeout(() => live && setSlow(true), 300);
     api
       .breakdown(view, tab.dimension, 50)
-      .then((result) => live && setRows(result.rows))
+      .then((result) => {
+        if (!live) return;
+        setRows(result.rows);
+        if (wantedDetail) {
+          if (result.rows.some((r) => r.value === wantedDetail)) setDetail(wantedDetail);
+          setWantedDetail("");
+        }
+      })
       .catch((e: Error) => live && setError(e.message))
       .finally(() => {
         clearTimeout(timer);
@@ -385,7 +400,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
             </nav>
           ) : null}
           {title === "panel.pages" && !empty ? (
-            <button type="button" class="tool" title={t("journeys.open")} aria-label={t("journeys.open")} onClick={() => setJourneys(true)}>
+            <button type="button" class="tool" title={t("journeys.open")} aria-label={t("journeys.open")} onClick={() => openInTab(`${name}:journeys`) || setJourneys(true)}>
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M2 3.5h3.5c2.5 0 2.5 4.5 5 4.5H14M2 12.5h3.5c2.5 0 2.5-4.5 5-4.5M11.5 5.5L14 8l-2.5 2.5" />
               </svg>
@@ -398,7 +413,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
                   <path d="M1.5 3.5l4-1.5 5 2 4-1.5v10l-4 1.5-5-2-4 1.5z M5.5 2v10 M10.5 4v10" />
                 </svg>
               </button>
-              <button type="button" class="tool" aria-label={t("panel.fullMap")} title={t("panel.fullMap")} onClick={() => setFullMap(true)}>
+              <button type="button" class="tool" aria-label={t("panel.fullMap")} title={t("panel.fullMap")} onClick={() => openInTab(`${name}:map`) || setFullMap(true)}>
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" />
                 </svg>
@@ -422,10 +437,10 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
             <Columns tab={tab} />
             {error ? <p class="empty">{error}</p> : null}
             {!rows && !error ? <p class="empty">{t("common.loading")}</p> : null}
-            <Rows rows={all.slice(0, SHORT)} tab={tab} onFilter={onFilter} onDetail={tab.dimension === "event" ? setDetail : undefined} />
+            <Rows rows={all.slice(0, SHORT)} tab={tab} onFilter={onFilter} onDetail={tab.dimension === "event" ? (value) => openInTab(`${name}:detail:${value}`) || setDetail(value) : undefined} />
           </div>
           {all.length > SHORT ? (
-            <button type="button" class="more" onClick={() => setShowAll(true)}>
+            <button type="button" class="more" onClick={() => openInTab(`${name}:all:${tab.dimension}`) || setShowAll(true)}>
               <Icon name="expand" />
               {t("panel.more")}
             </button>

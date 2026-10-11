@@ -2,6 +2,9 @@ runlight.settings:
   type: config_object
   label: 'Runlight settings'
   mapping:
+    mode:
+      type: string
+      label: 'Where Runlight runs'
     address:
       type: string
       label: 'Runlight address'
@@ -10,7 +13,7 @@ runlight.settings:
       label: 'Site id'
     observe_key:
       type: string
-      label: 'Observe key'
+      label: 'Agents key'
     dashboard_key:
       type: string
       label: 'Dashboard key'
@@ -23,3 +26,6 @@ runlight.settings:
     downloads:
       type: boolean
       label: 'Count file downloads'
+    locations:
+      type: boolean
+      label: 'Show countries'

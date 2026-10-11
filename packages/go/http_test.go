@@ -150,3 +150,36 @@ func TestDefaultTrustWarnsOnceAboutDirectPublicAddresses(t *testing.T) {
 		t.Errorf("said once, naming IgnoreProxy: %q", said)
 	}
 }
+
+func TestDashboardNamesTheCMSOnlyWhenSet(t *testing.T) {
+	rl, err := runlight.New(runlight.Options{Store: runlight.NewStore(oneLink{}), Site: &runlight.SiteOptions{Hostnames: []string{"example.com"}}, Logf: func(string, ...any) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cms := range []string{"", `Word"Press`} {
+		routes, err := rl.Routes(runlight.RoutesOptions{CMS: cms})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := httptest.NewRecorder()
+		routes.ServeHTTP(res, httptest.NewRequest("GET", "/runlight", nil))
+		page := res.Body.String()
+		if cms == "" && strings.Contains(page, "data-cms") {
+			t.Errorf("no CMS, but the page names one: %s", page)
+		}
+		if cms != "" && !strings.Contains(page, ` data-cms="Word&#34;Press" data-world=`) {
+			t.Errorf("the page does not name the CMS: %s", page)
+		}
+		// Its own admin may frame the whole dashboard; otherwise nothing may.
+		ancestors, frame := "frame-ancestors 'none'", "DENY"
+		if cms != "" {
+			ancestors, frame = "frame-ancestors 'self'", "SAMEORIGIN"
+		}
+		if csp := res.Header().Get("content-security-policy"); !strings.Contains(csp, ancestors) {
+			t.Errorf("cms %q: the policy is %q, want %s", cms, csp, ancestors)
+		}
+		if got := res.Header().Get("x-frame-options"); got != frame {
+			t.Errorf("cms %q: x-frame-options is %q, want %q", cms, got, frame)
+		}
+	}
+}

@@ -6,6 +6,7 @@ namespace Runlight\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Runlight\Http\FetchError;
+use Runlight\Http\Request;
 use Runlight\Http\Response;
 use Runlight\Json;
 use Runlight\Mail\MailError;
@@ -316,6 +317,91 @@ final class MailTest extends TestCase
         $this->assertSame('mail_failed', $error->code);
         $this->assertSame(['detail' => 'Something'], $error->params);
         $this->assertSame('ses', Transports::SERVICES[0]['id']);
+    }
+
+    public function testTheAppsOwnMailerSendsUntilAServiceSavedInTheDashboardTakesItsPlace(): void
+    {
+        $now = gmmktime(12, 0, 0, 10, 5, 2026) * 1000;
+        $sent = [];
+        $fail = '';
+        $fetcher = self::capture();
+        $rl = new Runlight([
+            'store' => Stores::sqlite(':memory:'),
+            'site' => ['name' => 'Example', 'hostnames' => ['example.com']],
+            'now' => static function () use (&$now): int {
+                return $now;
+            },
+            'fetcher' => $fetcher,
+            'mail' => [
+                'from' => 'site@example.com',
+                'fromName' => 'Example',
+                'via' => 'WordPress (WP Mail SMTP)',
+                'send' => static function (array $message) use (&$sent, &$fail): void {
+                    if ($fail !== '') {
+                        throw new \RuntimeException($fail);
+                    }
+                    $sent[] = $message;
+                },
+            ],
+        ]);
+        $routes = $rl->routes(['token' => 't']);
+        $call = static function (string $method, string $path, mixed $body = null) use ($routes): array {
+            $answer = $routes->handle(new Request("https://stats.example.com/runlight$path", $method, ['authorization' => 'Bearer t', 'content-type' => 'application/json'], $body === null ? '' : Json::encode($body)));
+            return ['status' => $answer->status, 'body' => Json::decode($answer->text(), true)];
+        };
+
+        $app = $call('GET', '/api/mail')['body'];
+        $this->assertSame(
+            ['source' => 'app', 'service' => '', 'from' => 'site@example.com', 'fromName' => 'Example', 'fields' => [], 'saved' => [], 'app' => ['via' => 'WordPress (WP Mail SMTP)', 'from' => 'site@example.com', 'fromName' => 'Example', 'replaced' => false]],
+            ['source' => $app['source'], 'service' => $app['service'], 'from' => $app['from'], 'fromName' => $app['fromName'], 'fields' => $app['fields'], 'saved' => $app['saved'], 'app' => $app['app']],
+        );
+
+        $this->assertSame(200, $call('POST', '/api/mail/test', ['to' => 'jon@example.com'])['status']);
+        $this->assertCount(1, $sent);
+        $this->assertSame(['jon@example.com', 'site@example.com', 'Example'], [$sent[0]['to'], $sent[0]['from'], $sent[0]['fromName']]);
+        $this->assertMatchesRegularExpression('/WordPress \(WP Mail SMTP\)/', $sent[0]['text'], 'the test names the app\'s mailer');
+
+        // Reports go through it too, with the unsubscribe headers.
+        $this->assertSame(201, $call('POST', '/api/reports', ['email' => 'jon@example.com', 'frequency' => 'weekly'])['status']);
+        $now += 7 * 86_400_000;
+        $this->assertSame(['sent' => 1, 'failed' => 0], $rl->sendReports());
+        $this->assertMatchesRegularExpression('#^<https://stats\.example\.com/runlight/unsubscribe/[a-f0-9]{32}>$#', $sent[1]['headers']['List-Unsubscribe']);
+        $this->assertSame('List-Unsubscribe=One-Click', $sent[1]['headers']['List-Unsubscribe-Post']);
+
+        // A failure comes back as a mail error naming the mailer.
+        $fail = 'SMTP connect() failed';
+        $failed = $call('POST', '/api/mail/test', ['to' => 'jon@example.com']);
+        $this->assertSame(400, $failed['status']);
+        $this->assertSame(['error' => 'WordPress (WP Mail SMTP) could not send it: SMTP connect() failed', 'code' => 'mail_app_failed', 'params' => ['via' => 'WordPress (WP Mail SMTP)', 'detail' => 'SMTP connect() failed']], $failed['body']);
+        $fail = '';
+
+        // A service saved in the dashboard takes its place.
+        $this->assertSame(200, $call('PUT', '/api/mail', ['service' => 'resend', 'apiKey' => 're_live_key', 'from' => 'reports@example.com'])['status']);
+        $replaced = $call('GET', '/api/mail')['body'];
+        $this->assertSame(['dashboard', 'resend', 'reports@example.com', ['via' => 'WordPress (WP Mail SMTP)', 'from' => 'site@example.com', 'fromName' => 'Example', 'replaced' => true]], [$replaced['source'], $replaced['service'], $replaced['from'], $replaced['app']]);
+        $this->assertSame(200, $call('POST', '/api/mail/test', ['to' => 'jon@example.com'])['status']);
+        $this->assertCount(1, $fetcher->requests, 'through the saved service');
+        $this->assertCount(2, $sent, 'and not the app\'s mailer');
+
+        // Removing it goes back to the app's mailer.
+        $this->assertSame(200, $call('DELETE', '/api/mail')['status']);
+        $this->assertSame('app', $call('GET', '/api/mail')['body']['source']);
+        $this->assertSame(200, $call('POST', '/api/mail/test', ['to' => 'jon@example.com'])['status']);
+        $this->assertCount(3, $sent);
+    }
+
+    public function testTheAppsMailerNeedsAFromAddressAndWithoutOneTheAnswerHasNoApp(): void
+    {
+        try {
+            new Runlight(['store' => Stores::sqlite(':memory:'), 'mail' => ['from' => '', 'via' => 'Drupal', 'send' => static function (array $m): void {}]]);
+            $this->fail('no from address');
+        } catch (\InvalidArgumentException $error) {
+            $this->assertMatchesRegularExpression('/from address/', $error->getMessage());
+        }
+        $rl = new Runlight(['store' => Stores::sqlite(':memory:')]);
+        $answer = Json::decode($rl->routes(['token' => 't'])->handle(new Request('https://stats.example.com/runlight/api/mail', 'GET', ['authorization' => 'Bearer t']))->text(), true);
+        $this->assertNull($answer['source']);
+        $this->assertArrayNotHasKey('app', $answer, 'an install without an app mailer answers as before');
     }
 
     private function assertThrowsMatching(string $pattern, \Closure $run): void

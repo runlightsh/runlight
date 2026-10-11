@@ -11,7 +11,10 @@ resource and the authorization server:
 The token is an ordinary API token, so it appears in Settings, API and AI,
 beside the others, and deleting it there disconnects the app. It reads
 stats, or with the "manage" scope (asked for by a Runlight hub) it also
-changes one site's settings.
+changes one site's settings. With the "cms" scope (asked for by the
+WordPress, Drupal, and Craft plugins) it is the site's dashboard key, which
+only opens its read-only dashboard in the CMS, and the answer also carries
+the site's agents key, so connecting fills in the plugin's settings.
 
 The context the routes pass is a dict: runlight, base, isOwner (a function of the request giving a bool), and
 optionally signIn (text), isReader (a function of the request), accountOf (a function of the request giving an
@@ -32,6 +35,26 @@ from typing import Any
 from . import _js
 from .hash import hmac, random_id, sha256
 from .http import Request, Response, SearchParams, Url
+
+SCOPES = ["read", "manage", "cms"]
+
+
+def agents_key(runlight: Any, site: str, replace: bool = False) -> str:
+    """The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+    replaces it."""
+    name = f"observe-key:{site}"
+    saved = None if replace else runlight.store.setting(name)
+    if saved:
+        return saved
+    key = f"rlo_{random_id(20)}"
+    runlight.store.set_setting(name, key)
+    return key
+
+
+def _site_host(redirect: str) -> str:
+    """A redirect address's host as a site's domains are kept: lowercase, with no port and no www."""
+    return re.sub(r"^www\.", "", re.sub(r"\.+$", "", Url(redirect).hostname.lower()))
+
 
 CODE_MS = 5 * 60_000
 # An app stored before client ids were signed, which never finished connecting within a day, is removed.
@@ -178,7 +201,7 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         return Response("", 204, CORS)
 
     if known.startswith("/.well-known/oauth-protected-resource"):
-        return _json({"resource": f"{issuer}/mcp", "authorization_servers": [issuer], "scopes_supported": ["read", "manage"], "bearer_methods_supported": ["header"]})
+        return _json({"resource": f"{issuer}/mcp", "authorization_servers": [issuer], "scopes_supported": SCOPES, "bearer_methods_supported": ["header"]})
     if known.startswith("/.well-known/oauth-authorization-server") or known.startswith("/.well-known/openid-configuration"):
         return _json({
             "issuer": issuer,
@@ -189,7 +212,7 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
             "grant_types_supported": ["authorization_code"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": ["read", "manage"],
+            "scopes_supported": SCOPES,
         })  # fmt: skip
 
     if path == "/oauth/register" and request.method == "POST":
@@ -247,7 +270,12 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         challenge = form.get("code_challenge") or ""
         if form.get("code_challenge_method") != "S256" or not _CHALLENGE.match(challenge):
             return refuse({"error": "invalid_request", "error_description": "PKCE with S256 is required"})
-        manage = "manage" in _js.SPACES.split(form.get("scope") or "")
+        scopes = _js.SPACES.split(form.get("scope") or "")
+        cms = "cms" in scopes
+        manage = not cms and "manage" in scopes
+        # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+        host = _site_host(redirect)
+        counting = [s for s in runlight.sites if not runlight.remote(s["id"]) and host in s["hostnames"]]
 
         if not ctx["isOwner"](request):
             # Someone signed in who may only read would be sent to sign in again and again.
@@ -279,6 +307,30 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
                 f'<p class="note">Allowing sends you back to <strong>{_esc(Url(redirect).host)}</strong>. '
                 "Only allow it if you started connecting there.</p>"
             )
+            if cms:
+                if not counting and not runlight.managed_sites:
+                    return _page(
+                        "Add this site first",
+                        f"<p>No site in this Runlight counts <strong>{_esc(host)}</strong>. "
+                        f"Add it to a site's domains in your code, then connect again from {_esc(name)}.</p>",
+                        400,
+                    )
+                choices = "".join(f'<option value="{_esc(s["id"])}">{_esc(s["name"])}</option>' for s in counting) + (
+                    f'<option value="new">A new site for {_esc(host)}</option>' if runlight.managed_sites and not counting else ""
+                )
+                return _page(
+                    f"Connect {_esc(name)}",
+                    f"<p><strong>{_esc(name)}</strong> wants to count <strong>{_esc(host)}</strong> in this Runlight.</p>\n"
+                    "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, "
+                    "and a dashboard key, to show the site's read-only dashboard in its admin pages. "
+                    "It cannot change anything here or read other sites.</p>\n"
+                    f"{sends_to}\n"
+                    f'<form method="post" action="{_esc(base)}/oauth/authorize">{hidden}\n'
+                    f'<label>Site<select name="site">{choices}</select></label>\n'
+                    f'<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in {_esc(name)}.</p>\n'
+                    '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button>'
+                    '<button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                )
             sites = runlight.sites
             if manage:
                 # Changing settings is for one site at a time, so there is no "every site" here.
@@ -319,6 +371,22 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         if form.get("decision") != "allow":
             return back({"error": "access_denied"})
         site = form.get("site") or ""
+        if cms:
+            if site == "new":
+                if counting:
+                    site = counting[0]["id"]
+                elif runlight.managed_sites:
+                    try:
+                        site = runlight.add_site({"hostnames": [host]})["id"]
+                    except _js.RangeError as error:
+                        # Such as an address, which a site cannot count by: there is no new site to make.
+                        return back({"error": "invalid_request", "error_description": str(error)})
+                else:
+                    site = ""
+            elif not any(s["id"] == site for s in counting):
+                site = ""
+            if not site:
+                return back({"error": "invalid_request", "error_description": f"Pick a site that counts {host}"})
         if site and not runlight.site(site):
             return back({"error": "invalid_request", "error_description": "Unknown site"})
         if manage and (not site or runlight.remote(site)):
@@ -330,7 +398,7 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
             "redirect": redirect,
             "challenge": challenge,
             "site": site,
-            "scope": "manage" if manage else "read",
+            "scope": "cms" if cms else "manage" if manage else "read",
             "expires": runlight.now() + CODE_MS,
         }
         if by:
@@ -363,13 +431,14 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
                 found["usedKey"], _js.dumps({**found["client"], "usedAt": runlight.now()}) if stored_client else _js.string(runlight.now())
             )
         secret = f"rl_{random_id(20)}"
-        scope = "manage" if grant.get("scope") == "manage" else "read"
+        scope = "cms" if grant.get("scope") == "cms" else "manage" if grant.get("scope") == "manage" else "read"
         client_name = client.get("name")
         row = {
             "id": random_id(),
             "name": _js.cut(f"{'An app' if client_name is None else _js.string(client_name)} (OAuth)", 100),
             "site": grant["site"],
-            "scope": scope,
+            # A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
+            "scope": "embed" if scope == "cms" else scope,
             "hash": sha256(secret),
             "hint": secret[-4:],
             "createdAt": runlight.now(),
@@ -383,6 +452,9 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         # A hub's own address, from where it asked to be sent back, so the picker only ever sends choices there.
         if scope == "manage":
             runlight.store.set_setting(f"token-origin:{row['id']}", Url(grant["redirect"]).origin)
+        # A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+        if scope == "cms":
+            return _json({"access_token": secret, "token_type": "Bearer", "scope": scope, "site": grant["site"], "agents_key": agents_key(runlight, grant["site"])})
         # site is not part of OAuth, but a hub needs to know which site it was given.
         answer: dict[str, Any] = {"access_token": secret, "token_type": "Bearer", "scope": scope}
         if grant["site"]:

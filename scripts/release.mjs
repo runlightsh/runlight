@@ -55,6 +55,11 @@ export const VERSIONED = [
   { file: "plugins/wordpress/runlight.php", pattern: /^( \* Version: +)(\S+)()$/m },
   { file: "plugins/wordpress/runlight.php", pattern: /^(define\( 'RUNLIGHT_PLUGIN_VERSION', ')([^']+)(' \);)$/m },
   { file: "plugins/wordpress/readme.txt", pattern: /^(Stable tag: )(\S+)()$/m },
+  // The Drupal and Craft plugins take their own version from the tag
+  // (drupal.org stamps it into the packaged .info.yml; Packagist and the Craft
+  // Plugin Store read the tag), and run Runlight inside the CMS with the PHP
+  // package of their own release.
+  ...["plugins/drupal/composer.json", "plugins/craft/composer.json"].map((file) => ({ file, pattern: /^(\s+"runlight\/runlight": "\^)([^"]+)(")/m })),
   // The Python package: pyproject.toml for PyPI, and build.json, which
   // scripts/python-assets.mts writes from the SDK's VERSION and the package
   // reports as its own.
@@ -125,8 +130,6 @@ export const VERSIONED = [
 export const UNVERSIONED = {
   "packages/dashboard": "built into the SDK, never published on its own",
   "packages/tracker": "built into the SDK, never published on its own",
-  "plugins/drupal": "drupal.org stamps the version from the tag into the packaged .info.yml, and it talks to Runlight over HTTP rather than requiring a release of it",
-  "plugins/craft": "Packagist and the Craft Plugin Store take the version from the tag, and it talks to Runlight over HTTP rather than requiring a release of it",
 };
 
 /**

@@ -8,6 +8,7 @@ import { label } from "./panel.js";
 import { Empty } from "./empty.js";
 import { Icon, type IconName } from "./icons.js";
 import { useDialogFocus } from "./focus.js";
+import { openInTab, opening, openingIn } from "./open.js";
 
 /**
  * The address people click: at the root of the link's domain while that
@@ -542,7 +543,9 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
   const [links, setLinks] = useState<Link[] | null>(null);
   const [prefix, setPrefix] = useState("");
   const [domains, setDomains] = useState<string[]>([]);
-  const [open, setOpen] = useState<"new" | "manage" | { id: string } | null>(null);
+  const [open, setOpen] = useState<"new" | "manage" | { id: string } | null>(() => (opening("links:manage") ? "manage" : !readOnly && opening("links:new") ? "new" : null));
+  // A linked link opens once the list shows it is one, so a mistyped id opens nothing.
+  const [wanted, setWanted] = useState(() => openingIn("links:link") ?? "");
   const [version, setVersion] = useState(0);
   const [order, setOrder] = useState<"newest" | "clicks">("newest");
 
@@ -555,6 +558,10 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
         setLinks(r.links);
         setPrefix(r.prefix);
         setDomains(r.domains);
+        if (wanted) {
+          if (r.links.some((l) => l.id === wanted)) setOpen({ id: wanted });
+          setWanted("");
+        }
       })
       .catch(() => live && setLinks([]));
     return () => {
@@ -596,12 +603,12 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
           {readOnly ? null : (
             <>
               {links?.length ? (
-                <button type="button" class="box-button" onClick={() => setOpen("manage")}>
+                <button type="button" class="box-button" onClick={() => openInTab("links:manage") || setOpen("manage")}>
                   <Icon name="list" />
                   {t("links.manage")}
                 </button>
               ) : null}
-              <button type="button" class="box-button solid" onClick={() => setOpen("new")}>
+              <button type="button" class="box-button solid" onClick={() => openInTab("links:new") || setOpen("new")}>
                 <Icon name="plus" />
                 {t("links.new")}
               </button>
@@ -621,7 +628,7 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
         {top.map((l) => (
           <li>
             <span class="bar" style={{ width: `${((l.clicks ?? 0) / max) * 100}%` }} />
-            <button type="button" class="name" title={display(shortUrl(l, prefix, domains))} onClick={() => setOpen({ id: l.id })}>
+            <button type="button" class="name" title={display(shortUrl(l, prefix, domains))} onClick={() => openInTab(`links:link:${l.id}`) || setOpen({ id: l.id })}>
               <span class="name-text">{l.name}</span>
               <span class="link-slug">/{l.slug}</span>
             </button>
@@ -632,7 +639,7 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
       </div>
       )}
       {links && links.length > top.length ? (
-        <button type="button" class="more" onClick={() => setOpen("manage")}>
+        <button type="button" class="more" onClick={() => openInTab("links:manage") || setOpen("manage")}>
           <Icon name="expand" />
           {t("panel.more")}
         </button>

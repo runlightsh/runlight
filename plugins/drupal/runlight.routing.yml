@@ -22,3 +22,35 @@ runlight.dashboard:
     _title: 'Runlight'
   requirements:
     _permission: 'administer runlight'
+
+# Where the Runlight sends the admin back to after Connect. The state kept for
+# the admin who started it does a CSRF token's work, so there is none here.
+runlight.connected:
+  path: '/admin/config/system/runlight/connected'
+  defaults:
+    _controller: '\Drupal\runlight\Controller\ConnectController::finish'
+  requirements:
+    _permission: 'administer runlight'
+  options:
+    no_cache: 'TRUE'
+
+# Runlight running in this Drupal: everything under /runlight comes here, by
+# way of the path processor, and only answers while Runlight runs here.
+# Runlight checks who may read its numbers itself, from the signed-in user.
+runlight.local:
+  path: '/runlight'
+  defaults:
+    _controller: '\Drupal\runlight\Controller\LocalController::serve'
+  requirements:
+    _access: 'TRUE'
+  options:
+    no_cache: 'TRUE'
+
+runlight.link:
+  path: '/go/{slug}'
+  defaults:
+    _controller: '\Drupal\runlight\Controller\LocalController::link'
+  requirements:
+    _access: 'TRUE'
+  options:
+    no_cache: 'TRUE'

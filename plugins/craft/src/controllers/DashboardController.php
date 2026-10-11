@@ -7,12 +7,14 @@ namespace Runlight\Craft\controllers;
 use Craft;
 use craft\helpers\UrlHelper;
 use craft\web\Controller;
+use Runlight\Craft\Local;
 use Runlight\Craft\Plugin;
 use yii\web\Response;
 
 /**
- * The Control Panel's Runlight item: this site's dashboard, framed from your
- * Runlight with a ticket the plugin asks for on every visit to the page.
+ * The Control Panel's Runlight item: this site's dashboard, framed from
+ * Runlight here, or from Runlight elsewhere with a ticket the plugin asks for
+ * on every visit to the page.
  */
 final class DashboardController extends Controller
 {
@@ -20,17 +22,30 @@ final class DashboardController extends Controller
     {
         $this->requirePermission('accessPlugin-runlight');
         $settings = Plugin::getInstance()->getSettings();
-        $address = $settings->getAddress();
-        $key = $settings->getDashboardKey();
-        $ticket = $address !== '' && $key !== '' ? self::ticket($address, $key) : null;
-        $site = is_array($ticket) && $ticket['site'] !== '' ? $ticket['site'] : $settings->getSite();
+        $mode = $settings->getMode();
+        if ($mode === 'local') {
+            // Runlight here is on this site, signed in with this login, so the whole dashboard shows, not a share view.
+            $address = Local::active() ? Local::address() : '';
+            $ticket = $address !== '' ? ['url' => $address . '/'] : Local::missing();
+            $hasKey = true;
+            $full = $address !== '' ? $address . '/' : '';
+        } else {
+            $address = $mode === 'remote' ? $settings->getAddress() : '';
+            $key = $settings->getDashboardKey();
+            $hasKey = $key !== '';
+            $ticket = $address !== '' && $hasKey ? self::ticket($address, $key) : null;
+            $site = is_array($ticket) && $ticket['site'] !== '' ? $ticket['site'] : $settings->getSite();
+            $full = $address !== '' ? $address . '/' . ($site !== '' ? '?site=' . rawurlencode($site) : '') : '';
+        }
         return $this->renderTemplate('runlight/_dashboard.twig', [
+            'setUp' => $settings->isSetUp(),
+            'local' => $mode === 'local',
             'address' => $address,
-            'hasKey' => $key !== '',
+            'hasKey' => $hasKey,
             'frame' => is_array($ticket) ? $ticket['url'] : null,
             'error' => is_string($ticket) ? $ticket : null,
             'origin' => self::originOf($address),
-            'full' => $address !== '' ? $address . '/' . ($site !== '' ? '?site=' . rawurlencode($site) : '') : '',
+            'full' => $full,
             'settingsUrl' => 'settings/plugins/runlight',
         ]);
     }
@@ -84,7 +99,7 @@ final class DashboardController extends Controller
         $code = $response->getStatusCode();
         if ($code !== 201 || !is_array($body) || !is_string($body['ticket'] ?? null)) {
             if ($code === 401) {
-                return Craft::t('runlight', 'Your Runlight does not know this dashboard key. Make a new one in Runlight’s Settings, Install, and enter it in the settings.');
+                return Craft::t('runlight', 'Your Runlight does not know this dashboard key. Connect again in the settings, or make a new key in Runlight under Settings, Install.');
             }
             $reason = is_array($body) && is_string($body['error'] ?? null) ? $body['error'] : Craft::t('runlight', 'It answered {code}.', ['code' => $code]);
             return Craft::t('runlight', 'Your Runlight would not open the dashboard here: {reason}', ['reason' => $reason]);

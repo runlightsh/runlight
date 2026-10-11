@@ -65,7 +65,7 @@ final class Dashboard {
 		$code = (int) wp_remote_retrieve_response_code( $response );
 		if ( 201 !== $code || ! is_array( $body ) || ! is_string( $body['ticket'] ?? null ) ) {
 			if ( 401 === $code ) {
-				return __( 'Your Runlight does not know this dashboard key. Make a new one in Runlight’s Settings, Install, and enter it in the settings.', 'runlight' );
+				return __( 'Your Runlight does not know this dashboard key. Connect again in the settings, or make a new key in Runlight under Settings, Install.', 'runlight' );
 			}
 			$reason = is_array( $body ) && is_string( $body['error'] ?? null ) ? $body['error'] : sprintf( /* translators: %d: the HTTP status */ __( 'It answered %d.', 'runlight' ), $code );
 			/* translators: %s: what the Runlight said */
@@ -83,9 +83,17 @@ final class Dashboard {
 		}
 		$settings = Settings::get();
 		$setup    = admin_url( 'options-general.php?page=runlight' );
-		$ticket   = '' !== $settings['address'] && '' !== $settings['dashboard_key'] ? self::ticket( $settings ) : null;
-		$site     = is_array( $ticket ) && '' !== $ticket['site'] ? $ticket['site'] : $settings['site'];
-		$full     = '' !== $settings['address'] ? $settings['address'] . '/' . ( '' !== $site ? '?site=' . rawurlencode( $site ) : '' ) : '';
+		$local    = 'local' === $settings['mode'];
+		$address  = Settings::address();
+		if ( $local ) {
+			// Runlight here is on this site, signed in with this login, so the whole dashboard shows, not a share view.
+			$ticket = '' !== $address ? array( 'url' => $address . '/' ) : Library::missing();
+			$full   = '' !== $address ? $address . '/' : '';
+		} else {
+			$ticket = '' !== $address && '' !== $settings['dashboard_key'] ? self::ticket( $settings ) : null;
+			$site   = is_array( $ticket ) && '' !== $ticket['site'] ? $ticket['site'] : $settings['site'];
+			$full   = '' !== $address ? $address . '/' . ( '' !== $site ? '?site=' . rawurlencode( $site ) : '' ) : '';
+		}
 		?>
 		<div class="wrap runlight-dashboard">
 			<h1 class="wp-heading-inline"><?php esc_html_e( 'Runlight', 'runlight' ); ?></h1>
@@ -93,12 +101,21 @@ final class Dashboard {
 				<a class="page-title-action" href="<?php echo esc_url( $full ); ?>" target="_blank" rel="noopener"><?php esc_html_e( 'Open in Runlight', 'runlight' ); ?></a>
 			<?php endif; ?>
 			<hr class="wp-header-end">
-			<?php if ( '' === $settings['address'] ) : ?>
+			<?php $notice = Connect::notice(); ?>
+			<?php if ( null !== $notice ) : ?>
+				<div class="notice inline <?php echo $notice[0] ? 'notice-success' : 'notice-error'; ?>"><p><?php echo esc_html( $notice[1] ); ?></p></div>
+			<?php endif; ?>
+			<?php if ( ! Settings::set_up() ) : ?>
+				<div class="notice notice-info inline"><p>
+					<?php esc_html_e( 'Runlight is not counting yet.', 'runlight' ); ?>
+					<a href="<?php echo esc_url( $setup ); ?>"><?php esc_html_e( 'Set up Runlight', 'runlight' ); ?></a>
+				</p></div>
+			<?php elseif ( ! $local && '' === $address ) : ?>
 				<div class="notice notice-info inline"><p>
 					<?php
 					printf(
 						/* translators: %s: link to the settings page */
-						esc_html__( 'Enter your Runlight’s address and a dashboard key on the %s to see this site’s numbers here.', 'runlight' ),
+						esc_html__( 'Connect this site to your Runlight on the %s to see its numbers here.', 'runlight' ),
 						'<a href="' . esc_url( $setup ) . '">' . esc_html__( 'settings page', 'runlight' ) . '</a>'
 					);
 					?>
@@ -108,7 +125,7 @@ final class Dashboard {
 					<?php
 					printf(
 						/* translators: %s: link to the settings page */
-						esc_html__( 'To see this site’s numbers here, make a dashboard key in your Runlight under Settings, Install, Key for the dashboard in your CMS, and enter it on the %s.', 'runlight' ),
+						esc_html__( 'To see this site’s numbers here, press Connect on the %s, or make a dashboard key in Runlight under Settings, Install and enter it there.', 'runlight' ),
 						'<a href="' . esc_url( $setup ) . '">' . esc_html__( 'settings page', 'runlight' ) . '</a>'
 					);
 					?>
@@ -119,15 +136,16 @@ final class Dashboard {
 					<a href="<?php echo esc_url( $setup ); ?>"><?php esc_html_e( 'Check the settings', 'runlight' ); ?></a>
 				</p></div>
 			<?php else : ?>
-				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $settings['address'] ) ); ?>" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads" style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
+				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $address ) ); ?>" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads<?php echo $local ? ' allow-forms allow-modals' : ''; ?>" style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
 			<?php endif; ?>
 		</div>
 		<?php
 	}
 
 	/**
-	 * Fits the frame to the window below it, and reloads the page when the
-	 * dashboard asks, which it does once its session has run out.
+	 * Grows the frame to the dashboard's height, tells the dashboard which
+	 * part of it is on screen, and reloads the page when the dashboard asks,
+	 * which it does once its session has run out.
 	 */
 	public static function scripts( string $hook ): void {
 		if ( 'toplevel_page_' . self::PAGE !== $hook ) {
@@ -144,14 +162,41 @@ final class Dashboard {
   var frame = document.getElementById("runlight-embed");
   if (!frame) return;
   var origin = frame.getAttribute("data-runlight-origin");
+  // Until the dashboard says how tall it is, the frame fills the window below it; an older Runlight never says.
+  var sized = false;
   function fit() {
+    if (sized) return;
     var top = frame.getBoundingClientRect().top + window.scrollY;
     frame.style.height = Math.max(600, window.innerHeight - top - 24) + "px";
   }
+  // Tells the dashboard which slice of the frame is on screen, so its drawers and sheets cover just that.
+  var queued = false;
+  function viewport() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(function () {
+      queued = false;
+      var rect = frame.getBoundingClientRect();
+      var top = Math.max(rect.top, 0);
+      var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - top);
+      if (frame.contentWindow) frame.contentWindow.postMessage({ type: "runlight:viewport", top: top - rect.top, height: height }, origin);
+    });
+  }
   fit();
-  window.addEventListener("resize", fit);
+  window.addEventListener("resize", function () {
+    fit();
+    viewport();
+  });
+  window.addEventListener("scroll", viewport, { passive: true, capture: true });
+  frame.addEventListener("load", viewport);
   window.addEventListener("message", function (event) {
-    if (event.origin === origin && event.source === frame.contentWindow && event.data && event.data.type === "runlight:reload") location.reload();
+    if (event.origin !== origin || event.source !== frame.contentWindow || !event.data) return;
+    if (event.data.type === "runlight:reload") location.reload();
+    if (event.data.type === "runlight:height" && typeof event.data.height === "number" && isFinite(event.data.height)) {
+      sized = true;
+      frame.style.height = Math.max(600, Math.ceil(event.data.height)) + "px";
+      viewport();
+    }
   });
 })();
 JS;

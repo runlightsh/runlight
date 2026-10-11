@@ -516,6 +516,21 @@ class RoutesRoutesTest < RoutesTestCase
     refute_includes Routes.dashboard("/runlight"), "data-share"
   end
 
+  def test_the_dashboard_names_the_cms_only_when_one_is_set
+    html = Routes.dashboard("/runlight", "", "", false, true, "", { "session" => "s", "origin" => "https://a.example" }, "Word<Press")
+    assert_includes html, 'data-accounts="" data-cms="Word&#60;Press" data-embed="s"'
+    refute_includes Routes.dashboard("/runlight"), "data-cms"
+    inside = RoutesMake.runlight.routes({ "token" => nil, "cms" => "WordPress" }).handle(req("/runlight/"))
+    assert_includes inside.text, 'data-cms="WordPress"'
+    # Its own admin may frame the whole dashboard; otherwise nothing may.
+    assert_includes inside.headers.get("content-security-policy") || "", "frame-ancestors 'self'"
+    assert_equal "SAMEORIGIN", inside.headers.get("x-frame-options")
+    alone = RoutesMake.runlight.routes({ "token" => nil }).handle(req("/runlight/"))
+    refute_includes alone.text, "data-cms"
+    assert_includes alone.headers.get("content-security-policy") || "", "frame-ancestors 'none'"
+    assert_equal "DENY", alone.headers.get("x-frame-options")
+  end
+
   def test_rack_answers_as_handle_does_and_a_head_has_no_body
     routes = RoutesMake.runlight.routes({ "token" => "secret" })
     env = { "REQUEST_METHOD" => "GET", "rack.url_scheme" => "https", "HTTP_HOST" => "example.com", "SCRIPT_NAME" => "",

@@ -48,7 +48,7 @@ func (rt *Routes) embedAPI(c *call) (*Response, error) {
 		return denied(canNo), nil
 	}
 	if token.Scope != "embed" {
-		return Coded("Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403, nil), nil
+		return Coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403, nil), nil
 	}
 	site, known := r.Site(token.Site)
 	if !known {
@@ -361,7 +361,7 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 		return jsonAnswer(result, 200), nil
 	}
 
-	// Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+	// Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
 	if (path == "/api/observe-key" && request.Method == "GET") || (path == "/api/observe-key/new" && request.Method == "POST") {
 		if access := rt.canRead(c); access != canFull {
 			return denied(access), nil
@@ -373,19 +373,9 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 		if refused != nil {
 			return refused, nil
 		}
-		name := "observe-key:" + site.ID
-		key := ""
-		if !strings.HasSuffix(path, "/new") {
-			var err error
-			if key, _, err = r.Store.Setting(ctx, name); err != nil {
-				return nil, err
-			}
-		}
-		if key == "" {
-			key = "rlo_" + randomID(20)
-			if err := r.Store.SetSetting(ctx, name, &key); err != nil {
-				return nil, err
-			}
+		key, err := agentsKey(ctx, r, site.ID, strings.HasSuffix(path, "/new"))
+		if err != nil {
+			return nil, err
 		}
 		return jsonAnswer(js.NewObject("key", key), 200), nil
 	}
@@ -1546,7 +1536,7 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 		if session != "" {
 			status = 200
 		}
-		return web.NewResponse(status, []byte(dashboardPage(rt.base, "", "", rt.options.GeoCredit, false, "", &embedded{session: session, origin: origin})),
+		return web.NewResponse(status, []byte(dashboardPage(rt.base, "", "", rt.options.GeoCredit, false, "", &embedded{session: session, origin: origin}, "")),
 			"content-type", "text/html; charset=utf-8", "cache-control", "no-store",
 			"content-security-policy", strings.Replace(dashboardCSP, "frame-ancestors 'none'", "frame-ancestors "+origin, 1),
 			"referrer-policy", "no-referrer", "x-robots-tag", "noindex"), nil
@@ -1566,7 +1556,7 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 			tr := NewTranslator(acceptedLanguage(request))
 			return smallPage(tr.Lang, "<h1>"+escapeHTML(tr.T("share.goneTitle", nil))+"</h1><p>"+escapeHTML(tr.T("share.gone", nil))+"</p>", 404), nil
 		}
-		return web.NewResponse(200, []byte(dashboardPage(rt.base, share.ID, "", rt.options.GeoCredit, false, "", nil)),
+		return web.NewResponse(200, []byte(dashboardPage(rt.base, share.ID, "", rt.options.GeoCredit, false, "", nil, "")),
 			"content-type", "text/html; charset=utf-8", "cache-control", "no-store", "content-security-policy", dashboardCSP, "x-frame-options", "DENY",
 			// The share id is the key; never send it on to another site.
 			"referrer-policy", "no-referrer", "x-robots-tag", "noindex"), nil
@@ -1585,8 +1575,13 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 				"set-cookie", tokenCookie+"="+cookieValue(rt.token)+"; Path="+firstNonEmpty(rt.base, "/")+"; HttpOnly; SameSite=Lax; Max-Age=2592000"+secure), nil
 		}
 		// The page itself holds no data; the API it calls checks access and the page explains how to sign in when it is refused.
-		return web.NewResponse(200, []byte(dashboardPage(rt.base, "", rt.signOut, rt.options.GeoCredit, rt.web != nil, rt.signIn, nil)),
-			"content-type", "text/html; charset=utf-8", "cache-control", "no-store", "content-security-policy", dashboardCSP, "x-frame-options", "DENY", "referrer-policy", "same-origin"), nil
+		// Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+		csp, frame := dashboardCSP, "DENY"
+		if rt.options.CMS != "" {
+			csp, frame = strings.Replace(dashboardCSP, "frame-ancestors 'none'", "frame-ancestors 'self'", 1), "SAMEORIGIN"
+		}
+		return web.NewResponse(200, []byte(dashboardPage(rt.base, "", rt.signOut, rt.options.GeoCredit, rt.web != nil, rt.signIn, nil, rt.options.CMS)),
+			"content-type", "text/html; charset=utf-8", "cache-control", "no-store", "content-security-policy", csp, "x-frame-options", frame, "referrer-policy", "same-origin"), nil
 	}
 	return Coded("Not found", "not_found", 404, nil), nil
 }

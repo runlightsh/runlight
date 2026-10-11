@@ -18747,7 +18747,7 @@
               "x-content-type-options": "nosniff"
             },
             "body": {
-              "error": "A key for the dashboard in a CMS is for one site. Pick the site.",
+              "error": "A dashboard key is for one site. Pick the site.",
               "code": "embed_site"
             }
           }
@@ -19076,7 +19076,7 @@
               "x-content-type-options": "nosniff"
             },
             "body": {
-              "error": "Use a key for the dashboard in a CMS, made in Settings, Install",
+              "error": "Use the site's dashboard key, made in Settings, Install",
               "code": "embed_token"
             }
           }
@@ -24963,7 +24963,8 @@
               ],
               "scopes_supported": [
                 "read",
-                "manage"
+                "manage",
+                "cms"
               ],
               "bearer_methods_supported": [
                 "header"
@@ -24991,7 +24992,8 @@
               ],
               "scopes_supported": [
                 "read",
-                "manage"
+                "manage",
+                "cms"
               ],
               "bearer_methods_supported": [
                 "header"
@@ -25031,7 +25033,8 @@
               ],
               "scopes_supported": [
                 "read",
-                "manage"
+                "manage",
+                "cms"
               ]
             }
           }
@@ -25067,7 +25070,8 @@
               ],
               "scopes_supported": [
                 "read",
-                "manage"
+                "manage",
+                "cms"
               ]
             }
           }
@@ -26495,6 +26499,627 @@
             "body": {
               "error": "Not found",
               "code": "not_found"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "OAuth: a CMS plugin connects and gets its site's keys",
+      "site": {
+        "hostnames": [],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "managedSites": true,
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/.well-known/oauth-authorization-server",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "issuer": "https://example.com/runlight",
+              "authorization_endpoint": "https://example.com/runlight/oauth/authorize",
+              "token_endpoint": "https://example.com/runlight/oauth/token",
+              "registration_endpoint": "https://example.com/runlight/oauth/register",
+              "response_types_supported": [
+                "code"
+              ],
+              "grant_types_supported": [
+                "authorization_code"
+              ],
+              "code_challenge_methods_supported": [
+                "S256"
+              ],
+              "token_endpoint_auth_methods_supported": [
+                "none"
+              ],
+              "scopes_supported": [
+                "read",
+                "manage",
+                "cms"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "Blog",
+            "hostnames": "blog.example.com"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": {
+                "id": "blog.example.com",
+                "name": "Blog",
+                "hostnames": [
+                  "blog.example.com"
+                ],
+                "timezone": "UTC"
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "Shop",
+            "hostnames": "shop.example.com"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": {
+                "id": "shop.example.com",
+                "name": "Shop",
+                "hostnames": [
+                  "shop.example.com"
+                ],
+                "timezone": "UTC"
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "WordPress at www.blog.example.com",
+            "redirect_uris": [
+              "https://www.blog.example.com/wp-admin/options-general.php?page=runlight"
+            ]
+          },
+          "capture": {
+            "wp": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiV29yZFByZXNzIGF0IHd3dy5ibG9nLmV4YW1wbGUuY29tIiwiciI6WyJodHRwczovL3d3dy5ibG9nLmV4YW1wbGUuY29tL3dwLWFkbWluL29wdGlvbnMtZ2VuZXJhbC5waHA_cGFnZT1ydW5saWdodCJdLCJ0IjoxNzkxMjg4MDAwMDAwfQ.<hex>",
+              "client_name": "WordPress at www.blog.example.com",
+              "redirect_uris": [
+                "https://www.blog.example.com/wp-admin/options-general.php?page=runlight"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{wp}}&redirect_uri=https%3A%2F%2Fwww.blog.example.com%2Fwp-admin%2Foptions-general.php%3Fpage%3Drunlight&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=cms&state=c1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "wants to count <strong>blog.example.com</strong>",
+            "<option value=\"blog.example.com\">",
+            "agents key",
+            "dashboard key"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              true,
+              true,
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "shop.example.com"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&error=invalid_request&error_description=Pick+a+site+that+counts+blog.example.com&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": ""
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&error=invalid_request&error_description=Pick+a+site+that+counts+blog.example.com&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "blog.example.com"
+          },
+          "capture": {
+            "wpCode": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&code=<value>&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{wpCode}}",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "capture": {
+            "dashboardKey": "access_token",
+            "agentsKey": "agents_key"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "cms",
+              "site": "blog.example.com",
+              "agents_key": "<agents_key>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/observe-key?site=blog.example.com",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "key": "<key>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/embed",
+          "headers": {
+            "authorization": "Bearer {{dashboardKey}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://www.blog.example.com"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>",
+              "site": "blog.example.com",
+              "expiresAt": 1791288300000,
+              "path": "/runlight/embed?ticket=<value>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?site=blog.example.com&period=today",
+          "headers": {
+            "authorization": "Bearer {{dashboardKey}}"
+          },
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "This key only opens the dashboard inside a CMS",
+              "code": "token_embed_only"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/tokens",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "tokens": [
+                {
+                  "id": "<id>",
+                  "name": "WordPress at www.blog.example.com (OAuth)",
+                  "site": "blog.example.com",
+                  "scope": "embed",
+                  "hint": "<hint>",
+                  "createdAt": 1791288000000,
+                  "lastUsedAt": 1791288000000
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "Drupal at new.example.org",
+            "redirect_uris": [
+              "https://new.example.org/admin/settings/runlight"
+            ]
+          },
+          "capture": {
+            "drupal": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiRHJ1cGFsIGF0IG5ldy5leGFtcGxlLm9yZyIsInIiOlsiaHR0cHM6Ly9uZXcuZXhhbXBsZS5vcmcvYWRtaW4vc2V0dGluZ3MvcnVubGlnaHQiXSwidCI6MTc5MTI4ODAwMDAwMH0.<hex>",
+              "client_name": "Drupal at new.example.org",
+              "redirect_uris": [
+                "https://new.example.org/admin/settings/runlight"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{drupal}}&redirect_uri=https%3A%2F%2Fnew.example.org%2Fadmin%2Fsettings%2Frunlight&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=cms&state=c1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "<option value=\"new\">A new site for new.example.org</option>"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{drupal}}",
+            "redirect_uri": "https://new.example.org/admin/settings/runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "new"
+          },
+          "capture": {
+            "newCode": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://new.example.org/admin/settings/runlight?code=<value>&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{newCode}}",
+            "client_id": "{{drupal}}",
+            "redirect_uri": "https://new.example.org/admin/settings/runlight",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "cms",
+              "site": "new.example.org",
+              "agents_key": "<agents_key>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "sites": [
+                {
+                  "id": "blog.example.com",
+                  "name": "Blog",
+                  "hostnames": [
+                    "blog.example.com"
+                  ],
+                  "timezone": "UTC",
+                  "lastSeen": null,
+                  "retentionMonths": null
+                },
+                {
+                  "id": "new.example.org",
+                  "name": "new.example.org",
+                  "hostnames": [
+                    "new.example.org"
+                  ],
+                  "timezone": "UTC",
+                  "lastSeen": null,
+                  "retentionMonths": null
+                },
+                {
+                  "id": "shop.example.com",
+                  "name": "Shop",
+                  "hostnames": [
+                    "shop.example.com"
+                  ],
+                  "timezone": "UTC",
+                  "lastSeen": null,
+                  "retentionMonths": null
+                }
+              ],
+              "managed": true
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "WordPress at 127.0.0.1",
+            "redirect_uris": [
+              "http://127.0.0.1:9400/wp-admin/options-general.php?page=runlight"
+            ]
+          },
+          "capture": {
+            "ip": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiV29yZFByZXNzIGF0IDEyNy4wLjAuMSIsInIiOlsiaHR0cDovLzEyNy4wLjAuMTo5NDAwL3dwLWFkbWluL29wdGlvbnMtZ2VuZXJhbC5waHA_cGFnZT1ydW5saWdodCJdLCJ0IjoxNzkxMjg4MDAwMDAwfQ.<hex>",
+              "client_name": "WordPress at 127.0.0.1",
+              "redirect_uris": [
+                "http://127.0.0.1:9400/wp-admin/options-general.php?page=runlight"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{ip}}",
+            "redirect_uri": "http://127.0.0.1:9400/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "new"
+          },
+          "capture": {
+            "ipFirst": "header:location~error=([a-z_]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "http://127.0.0.1:9400/wp-admin/options-general.php?page=runlight&error=invalid_request&error_description=%22127.0.0.1%22+is+not+a+domain+name&state=c1"
             }
           }
         }

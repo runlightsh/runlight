@@ -1449,7 +1449,7 @@ button.name:hover {
     top: calc(100% + 8px);
     left: 0;
     right: 0;
-    max-height: 75vh;
+    max-height: calc(75 * var(--vh));
     overflow: auto;
     flex-direction: column;
   }
@@ -1594,6 +1594,19 @@ body.locked {
   overflow: hidden;
 }
 
+/*
+ * Framed in a CMS's admin page, the frame is as tall as the dashboard and the admin page scrolls, so the frame's
+ * viewport is the whole dashboard. The admin page reports the slice of the frame on screen, and overlays cover
+ * that slice and size themselves to it, through --vh, a hundredth of whatever counts as the window.
+ */
+:root {
+  --vh: 1vh;
+}
+
+.framed {
+  --vh: calc(var(--frame-height, 100vh) / 100);
+}
+
 .scrim {
   position: fixed;
   inset: 0;
@@ -1604,6 +1617,12 @@ body.locked {
   -webkit-backdrop-filter: blur(5px);
   backdrop-filter: blur(5px);
   animation: fade 0.15s ease-out;
+}
+
+.framed .scrim {
+  bottom: auto;
+  top: var(--frame-top, 0);
+  height: var(--frame-height, 100%);
 }
 
 .drawer {
@@ -2138,7 +2157,7 @@ select.value:focus {
   display: flex;
   flex-direction: column;
   width: min(760px, 100%);
-  height: min(82vh, 900px);
+  height: min(calc(82 * var(--vh)), 900px);
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--card);
@@ -2438,9 +2457,17 @@ h1 .home:hover {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  min-height: 0;
   padding: 22px 12px;
   background: var(--sunk);
   border-right: 1px solid var(--line);
+  /* In a short window, such as the dashboard framed in a CMS, the sections scroll on their own. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.settings-nav > * {
+  flex-shrink: 0;
 }
 
 .settings-nav h2 {
@@ -2710,7 +2737,7 @@ h1 .home:hover {
 }
 
 .section-flyout {
-  max-height: min(480px, calc(100vh - 160px));
+  max-height: min(480px, calc(100 * var(--vh) - 160px));
 }
 
 .section-flyout-site {
@@ -2750,7 +2777,7 @@ h1 .home:hover {
 .list-sheet.small {
   width: min(560px, 100%);
   height: auto;
-  max-height: 90vh;
+  max-height: calc(90 * var(--vh));
 }
 
 .link-form {
@@ -4095,7 +4122,7 @@ button.live:hover {
 }
 
 .props-body .rows {
-  max-height: 60vh;
+  max-height: calc(60 * var(--vh));
   overflow-y: auto;
   margin: 0;
   padding: 0;

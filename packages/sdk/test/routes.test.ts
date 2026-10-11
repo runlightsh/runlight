@@ -462,3 +462,19 @@ test("goal, funnel, site, and assistant refusals carry their own codes and param
   assert.deepEqual(await send("POST", "/api/funnels?site=blog.example.com", { name: "F", steps: [{ kind: "page", match: "/" }] }), { code: "funnel_short", params: {} });
   assert.deepEqual(await send("PUT", "/api/assistant", { provider: "nope" }), { code: "assistant_provider", params: {} });
 });
+
+test("inside a CMS, the dashboard names it and its own admin may frame the whole dashboard; otherwise nothing may", async () => {
+  const page = async (cms?: string) => {
+    const rl = runlight({ store: sqlite({ path: ":memory:" }), site: { hostnames: ["example.com"] } });
+    const { GET } = rl.routes({ token: null, ...(cms ? { cms } : {}) });
+    return GET(new Request("https://example.com/runlight/"));
+  };
+  const inside = await page("WordPress");
+  assert.match(await inside.text(), /data-cms="WordPress"/);
+  assert.match(inside.headers.get("content-security-policy") ?? "", /frame-ancestors 'self'/);
+  assert.equal(inside.headers.get("x-frame-options"), "SAMEORIGIN");
+  const alone = await page();
+  assert.doesNotMatch(await alone.text(), /data-cms/);
+  assert.match(alone.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.equal(alone.headers.get("x-frame-options"), "DENY");
+});

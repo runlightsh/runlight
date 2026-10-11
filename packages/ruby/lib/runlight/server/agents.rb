@@ -191,7 +191,7 @@ module Runlight
           raise SendError, e.message
         end
         if answer.status == 401
-          raise SendError, "Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins."
+          raise SendError, "Runlight refused the key. Use the site's agents key from Settings, Install."
         end
         raise SendError, "Runlight answered #{answer.status}: #{Js.slice(Js.scrub(answer.text), 0, 200)}" unless answer.ok?
 

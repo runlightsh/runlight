@@ -10,7 +10,7 @@ import { EMAIL, LINK_DOMAIN_CHECK, RETENTION_MONTHS, envValue as env, type Reque
 import { mcpResponse } from "./mcp.js";
 import { readablePath } from "./sources.js";
 import { decodePart } from "./path.js";
-import { oauthResponse, resourceMetadataUrl } from "./oauth.js";
+import { agentsKey, oauthResponse, resourceMetadataUrl } from "./oauth.js";
 import { csv, zip } from "./zip.js";
 import { GoalError, clickRules, goalFrom } from "./goals.js";
 import { FunnelError, funnelFrom } from "./funnels.js";
@@ -74,6 +74,12 @@ export interface RoutesOptions {
   accounts?: boolean | AccountsWeb;
   /** Credits DB-IP in the dashboard's footer, as its free location data asks. The standalone server sets it. */
   geoCredit?: boolean;
+  /**
+   * The CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
+   * dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's
+   * own admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+   */
+  cms?: string;
   /**
    * The address people open the app at, such as https://example.com. A link
    * domain can never be its host, and links in email reports point there,
@@ -359,7 +365,7 @@ interface Embedded {
   origin: string;
 }
 
-const DASHBOARD = (base: string, share = "", signOut = "", geoCredit = false, accounts = false, signIn = "", embed: Embedded | null = null) => `<!doctype html>
+const DASHBOARD = (base: string, share = "", signOut = "", geoCredit = false, accounts = false, signIn = "", embed: Embedded | null = null, cms = "") => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -370,7 +376,7 @@ const DASHBOARD = (base: string, share = "", signOut = "", geoCredit = false, ac
 <link rel="stylesheet" href="${escapeAttr(base)}/assets/app.${DASHBOARD_HASH}.css">
 </head>
 <body>
-<div id="app" data-base="${escapeAttr(base)}"${share ? ` data-share="${escapeAttr(share)}"` : ""}${signOut ? ` data-sign-out="${escapeAttr(signOut)}"` : ""}${signIn ? ` data-sign-in="${escapeAttr(signIn)}"` : ""}${geoCredit ? ` data-geo-credit=""` : ""}${accounts ? ` data-accounts=""` : ""}${embed ? ` data-embed="${escapeAttr(embed.session)}" data-embed-origin="${escapeAttr(embed.origin)}"` : ""} data-world="${escapeAttr(base)}/assets/world.${WORLD_HASH}.json" data-locales="${escapeAttr(localeUrls(base))}"></div>
+<div id="app" data-base="${escapeAttr(base)}"${share ? ` data-share="${escapeAttr(share)}"` : ""}${signOut ? ` data-sign-out="${escapeAttr(signOut)}"` : ""}${signIn ? ` data-sign-in="${escapeAttr(signIn)}"` : ""}${geoCredit ? ` data-geo-credit=""` : ""}${accounts ? ` data-accounts=""` : ""}${cms ? ` data-cms="${escapeAttr(cms)}"` : ""}${embed ? ` data-embed="${escapeAttr(embed.session)}" data-embed-origin="${escapeAttr(embed.origin)}"` : ""} data-world="${escapeAttr(base)}/assets/world.${WORLD_HASH}.json" data-locales="${escapeAttr(localeUrls(base))}"></div>
 <script type="module" src="${escapeAttr(base)}/assets/app.${DASHBOARD_HASH}.js"></script>
 </body>
 </html>
@@ -931,7 +937,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (path === "/api/mail") {
         if (request.method === "GET") {
           const settings = await runlight.mailSettings();
-          const service = SERVICES.find((x) => x.id === settings?.service);
+          const service = settings?.source === "app" ? undefined : SERVICES.find((x) => x.id === settings?.service);
           // Secret fields come back only as "saved", never as their value.
           const fields: Record<string, string> = {};
           const saved: string[] = [];
@@ -942,15 +948,18 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
           }
           // A hub with a manage token learns which service sends the reports and from where, nothing more.
           const viaManage = managed.has(request);
+          // The app's own mailer, named only when there is one, so the answer without it stays as it was.
+          const app = runlight.appMailer;
           return json({
             source: settings?.source ?? null,
-            service: settings?.service ?? "",
+            service: settings?.source === "app" ? "" : (settings?.service ?? ""),
             from: settings?.from ?? "",
             fromName: settings?.fromName ?? "",
             fields: viaManage ? {} : fields,
             saved: viaManage ? [] : saved,
             encrypted: runlight.secret !== null,
             services: SERVICES,
+            ...(app ? { app: { via: app.via, from: app.from, fromName: app.fromName ?? "", replaced: settings?.source !== "app" } } : {}),
           });
         }
         if (request.method === "PUT") {
@@ -974,7 +983,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         const settings = await runlight.mailSettings();
         if (!settings) return coded("Set up a mail service first", "mail_unset", 400);
         const { t } = translator(String(body.lang ?? "en"));
-        const name = SERVICES.find((x) => x.id === settings.service)?.name ?? "";
+        const name = settings.source === "app" ? (settings.via ?? "") : (SERVICES.find((x) => x.id === settings.service)?.name ?? "");
         await runlight.sendMail({ to, subject: t("email.test.subject"), text: t("email.test.body", { service: name }), html: `<p style="font-family:sans-serif;font-size:15px">${escapeHtml(t("email.test.body", { service: name }))}</p>` });
         return json({ ok: true });
       }
@@ -1147,7 +1156,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (site && !runlight.sites.some((s) => s.id === site)) return coded("Unknown site", "unknown_site", 404);
       const scope = body.scope === "manage" ? "manage" : body.scope === "embed" ? "embed" : "read";
       if (scope === "manage" && !site) return coded("A token that changes settings is for one site. Pick the site.", "token_site", 400);
-      if (scope === "embed" && !site) return coded("A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400);
+      if (scope === "embed" && !site) return coded("A dashboard key is for one site. Pick the site.", "embed_site", 400);
       const secret = `${TOKEN_PREFIX}${randomId(20)}`;
       const row: TokenRow = { id: randomId(), name, site, scope, hash: await sha256(secret), hint: secret.slice(-4), createdAt: runlight.now(), lastUsedAt: null };
       await runlight.store.insertToken(row);
@@ -1235,7 +1244,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (path === "/api/embed" && request.method === "POST") {
       const token = await apiToken(request);
       if (!token) return denied(false);
-      if (token.scope !== "embed") return coded("Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403);
+      if (token.scope !== "embed") return coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403);
       const site = runlight.site(token.site);
       if (!site) return coded("Unknown site", "unknown_site", 404);
       const body = await readJson(request);
@@ -1389,20 +1398,14 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       }
     }
 
-    // Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+    // Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
     if ((path === "/api/observe-key" && request.method === "GET") || (path === "/api/observe-key/new" && request.method === "POST")) {
       const access = await canRead(request);
       if (access !== true) return denied(access);
       await runlight.init();
       const site = await querySite(url);
       if (site instanceof Response) return site;
-      const name = `observe-key:${site.id}`;
-      let key = path.endsWith("/new") ? null : await runlight.store.setting(name);
-      if (!key) {
-        key = `rlo_${randomId(20)}`;
-        await runlight.store.setSetting(name, key);
-      }
-      return json({ key });
+      return json({ key: await agentsKey(runlight, site.id, path.endsWith("/new")) });
     }
 
     // Making, changing, and deleting funnels; reading them is with the other reports.
@@ -2166,12 +2169,14 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         }
         // The page itself holds no data; the API it calls checks access and
         // the page explains how to sign in when it is refused.
-        return new Response(DASHBOARD(base, "", signOut, options.geoCredit, Boolean(web), signIn), {
+        // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+        const framed = Boolean(options.cms);
+        return new Response(DASHBOARD(base, "", signOut, options.geoCredit, Boolean(web), signIn, null, options.cms ?? ""), {
           headers: {
             "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store",
-            "content-security-policy": DASHBOARD_CSP,
-            "x-frame-options": "DENY",
+            "content-security-policy": framed ? DASHBOARD_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") : DASHBOARD_CSP,
+            "x-frame-options": framed ? "SAMEORIGIN" : "DENY",
             "referrer-policy": "same-origin",
           },
         });

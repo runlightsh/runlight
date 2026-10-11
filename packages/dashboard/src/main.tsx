@@ -1,6 +1,6 @@
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
-import { ApiError, accounts, api, base, download, embedLive, embedOrigin, install, onEmbedExpired, share, shared, viewParams, type Person, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
+import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, install, onEmbedExpired, share, shared, viewParams, type Person, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
 import { Chart, asSeries } from "./chart.js";
 import { change, exact } from "./format.js";
 import { FilterDrawer, MAX_FILTERS, fieldName, opName } from "./filters.js";
@@ -15,7 +15,8 @@ import { Panel, Rhythm, bounce, label, timeOnPage, type Tab } from "./panel.js";
 import { ComparePicker, DEFAULT_PERIOD, PERIODS, Picker, rangeText, type CompareMode } from "./picker.js";
 import { RealtimeModal } from "./realtime.js";
 import { ConversionsPanel } from "./goals.js";
-import { Install, SettingsModal, type Section } from "./settings.js";
+import { Install, SettingsModal, isSection, type Section } from "./settings.js";
+import { fitFrame, openInTab, opening, openingIn } from "./open.js";
 import { applyTheme, isDark, onThemeChange, setTheme, themeChoice, type ThemeChoice } from "./theme.js";
 import "./style.css";
 
@@ -135,7 +136,7 @@ function Live({ site, ready }: { site: string; ready: boolean }) {
       clearInterval(timer);
     };
   }, [site]);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => opening("live"));
   if (n === null) return null;
   if (!ready) {
     return (
@@ -147,7 +148,7 @@ function Live({ site, ready }: { site: string; ready: boolean }) {
   }
   return (
     <>
-      <button type="button" class="live" title={t("app.live.title")} onClick={() => setOpen(true)}>
+      <button type="button" class="live" title={t("app.live.title")} onClick={() => openInTab("live") || setOpen(true)}>
         <span class={n > 0 ? "beat on" : "beat"} aria-hidden="true" />
         {tn("app.live", n, { n: exact(n) })}
       </button>
@@ -207,8 +208,13 @@ function App() {
     return code === null ? null : { key: (/^[a-z]+$/.test(code) && hasKey(`sites.connectError.${code}`) ? `sites.connectError.${code}` : "sites.connectError.failed") as Key, error: true };
   });
   const [filtering, setFiltering] = useState(false);
-  const [asking, setAsking] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState<Section | null>(() => (new URLSearchParams(location.search).get("settings") === "general" ? "general" : null));
+  const [asking, setAsking] = useState(() => opening("assistant"));
+  // Coming back from connecting another Runlight, the server's redirect asks for settings with ?settings=general.
+  const [settingsOpen, setSettingsOpen] = useState<Section | null>(() => {
+    const section = openingIn("settings");
+    return section !== null ? (isSection(section) ? section : null) : new URLSearchParams(location.search).get("settings") === "general" ? "general" : null;
+  });
+  const openSettings = (section: Section) => openInTab(`settings:${section}`) || setSettingsOpen(section);
   const [addingSite, setAddingSite] = useState(false);
   /** Who is signed in, on the standalone server. */
   const [me, setMe] = useState<Person | null>(null);
@@ -314,7 +320,8 @@ function App() {
 
   // A site with no visits yet shows the install steps, and checks every few seconds for its first visit.
   // A connected site is counted by its own install, so it never waits here for setup.
-  const waiting = Boolean(site && site.lastSeen == null && !shared && !site.remote);
+  // Inside a CMS that adds the script itself, the dashboard shows its zeros rather than the steps to add it.
+  const waiting = Boolean(site && site.lastSeen == null && !shared && !site.remote && !cms);
   /** Counted by another install: its numbers show here and nothing about it can be changed. */
   // A connected site whose install only lets this server read it.
   const elsewhere = Boolean(site?.remote && !site.manage);
@@ -388,7 +395,7 @@ function App() {
               {site ? <Live site={site.id} ready={site.lastSeen != null} /> : null}
             </div>
             {site && !readOnly ? (
-              <button type="button" class="gear" aria-label={t("settings.open")} title={t("settings.open")} onClick={() => setSettingsOpen("general")}>
+              <button type="button" class="gear" aria-label={t("settings.open")} title={t("settings.open")} onClick={() => openSettings("general")}>
                 <svg viewBox="0 0 20 20" aria-hidden="true">
                   <circle cx="10" cy="10" r="2.6" />
                   <path d="M10 1.8l1.3 2.3 2.6-.6.8 2.5 2.5.8-.6 2.6 2.3 1.3-2.3 1.3.6 2.6-2.5.8-.8 2.5-2.6-.6L10 18.2l-1.3-2.3-2.6.6-.8-2.5-2.5-.8.6-2.6L1.8 10l2.3-1.3-.6-2.6 2.5-.8.8-2.5 2.6.6z" />
@@ -404,10 +411,11 @@ function App() {
               </button>
             )}
             {site && !shared ? (
-              <button type="button" class="filter-button assistant-button" aria-label={t("assistant.open")} title={t("assistant.open")} onClick={() => setAsking(true)}>
+              <button type="button" class="filter-button assistant-button" aria-label={t("assistant.open")} title={t("assistant.open")} onClick={() => openInTab("assistant") || setAsking(true)}>
                 <Icon name="robot" />
               </button>
             ) : null}
+            {/* Filters open in place even framed in a CMS, since they change the view in that frame. */}
             <button type="button" class={view.filters.length ? "filter-button on" : "filter-button"} onClick={() => setFiltering(true)}>
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M2.5 3.5h11M4.5 8h7M6.5 12.5h3" />
@@ -534,7 +542,7 @@ function App() {
           owner={isOwner}
           onSetup={() => {
             setAsking(false);
-            setSettingsOpen("assistant");
+            openSettings("assistant");
           }}
           onClose={() => setAsking(false)}
         />
@@ -602,11 +610,11 @@ function App() {
         {/* The last row, Links wide and Conversions narrow, so the zigzag of the rows above carries on. A viewer
             reads the links without changing them, and a share never shows them. */}
         {site && !shared && !elsewhere ? <LinksPanel view={view} site={site.id} readOnly={readOnly} /> : null}
-        {site ? <ConversionsPanel view={view} readOnly={readOnly || elsewhere} onAdd={() => setSettingsOpen("goals")} /> : null}
+        {site ? <ConversionsPanel view={view} readOnly={readOnly || elsewhere} onAdd={() => openSettings("goals")} /> : null}
       </div>
 
       <footer class="foot">
-        <a href="https://runlight.sh" class="powered" {...(embedOrigin ? { target: "_blank", rel: "noopener" } : {})}>
+        <a href="https://runlight.sh" class="powered" target="_blank" rel="noopener">
           <svg class="powered-mark" viewBox="0 0 32 32" aria-hidden="true">
             <rect x="2.5" y="2.5" width="27" height="27" rx="7" />
             <path d="M11 23V9h6.2a4.3 4.3 0 0 1 0 8.6H11m6 0 5 5.4" />
@@ -789,6 +797,7 @@ function Theme() {
 }
 
 applyTheme();
+fitFrame();
 const root = document.getElementById("app")!;
 setLocale(initialLocale())
   .catch(() => setLocale("en"))

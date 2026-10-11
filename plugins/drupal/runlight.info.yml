@@ -1,6 +1,7 @@
 name: Runlight
 type: module
-description: 'Counts visitors with Runlight: privacy friendly analytics with no cookies, kept in your own database. Adds the script, reports AI agents that read your pages, and shows your dashboard in the admin.'
+description: 'Counts visitors with Runlight: privacy friendly analytics with no cookies, kept in your own database. Runs Runlight inside this site, or sends to one you run elsewhere, records AI agents that read your pages, and shows your dashboard in the admin.'
 package: Statistics
 core_version_requirement: ^10.3 || ^11
+php: 8.2
 configure: runlight.settings

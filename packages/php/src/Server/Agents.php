@@ -209,7 +209,7 @@ final class Agents
             throw new SendError($error->getMessage(), 0, $error);
         }
         if ($answer->status === 401) {
-            throw new SendError("Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins.");
+            throw new SendError("Runlight refused the key. Use the site's agents key from Settings, Install.");
         }
         if (!$answer->ok()) {
             throw new SendError("Runlight answered {$answer->status}: " . Js::slice(Js::scrub($answer->text()), 0, 200));

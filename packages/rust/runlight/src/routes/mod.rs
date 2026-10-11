@@ -70,6 +70,10 @@ pub struct RoutesOptions {
     pub accounts: bool,
     /// Credits DB-IP in the dashboard's footer.
     pub geo_credit: bool,
+    /// The CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
+    /// dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's
+    /// own admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+    pub cms: Option<String>,
     /// The address people open the app at, such as https://example.com.
     pub origin: Option<String>,
     /// What the standalone server adds: more names the dashboard is reached at, and its accounts' hooks.
@@ -331,6 +335,7 @@ struct Embedded<'a> {
     origin: &'a str,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dashboard_page(
     base: &str,
     share: &str,
@@ -339,6 +344,7 @@ fn dashboard_page(
     accounts: bool,
     sign_in: &str,
     embed: Option<Embedded<'_>>,
+    cms: &str,
 ) -> String {
     let b = escape_attr(base);
     let hash = &BUILD_INFO.dashboard_hash;
@@ -357,6 +363,9 @@ fn dashboard_page(
     }
     if accounts {
         attrs.push_str(" data-accounts=\"\"");
+    }
+    if !cms.is_empty() {
+        attrs.push_str(&format!(" data-cms=\"{}\"", escape_attr(cms)));
     }
     if let Some(embed) = embed {
         attrs.push_str(&format!(
@@ -1126,6 +1135,7 @@ impl Routes {
                 false,
                 "",
                 Some(Embedded { session: &session, origin: &origin }),
+                "",
             );
             return Ok(Response::new(
                 page,
@@ -1162,7 +1172,7 @@ impl Routes {
                 ));
             };
             return Ok(Response::new(
-                dashboard_page(&self.0.base, &share.id, "", self.0.options.geo_credit, false, "", None),
+                dashboard_page(&self.0.base, &share.id, "", self.0.options.geo_credit, false, "", None, ""),
                 200,
                 Headers::new()
                     .with("content-type", "text/html; charset=utf-8")
@@ -1198,6 +1208,9 @@ impl Routes {
                 ));
             }
             // The page itself holds no data; the API it calls checks access.
+            // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+            let cms = self.0.options.cms.as_deref().unwrap_or("");
+            let framed = !cms.is_empty();
             return Ok(Response::new(
                 dashboard_page(
                     &self.0.base,
@@ -1207,13 +1220,21 @@ impl Routes {
                     self.0.web.is_some(),
                     self.0.sign_in.as_deref().unwrap_or(""),
                     None,
+                    cms,
                 ),
                 200,
                 Headers::new()
                     .with("content-type", "text/html; charset=utf-8")
                     .with("cache-control", "no-store")
-                    .with("content-security-policy", DASHBOARD_CSP)
-                    .with("x-frame-options", "DENY")
+                    .with(
+                        "content-security-policy",
+                        if framed {
+                            DASHBOARD_CSP.replacen("frame-ancestors 'none'", "frame-ancestors 'self'", 1)
+                        } else {
+                            DASHBOARD_CSP.to_string()
+                        },
+                    )
+                    .with("x-frame-options", if framed { "SAMEORIGIN" } else { "DENY" })
                     .with("referrer-policy", "same-origin"),
             ));
         }
@@ -1265,5 +1286,18 @@ pub(crate) fn read_json(request: &Request) -> Result<js::Object, Response> {
     match request.json() {
         Ok(Value::Object(o)) => Ok(o),
         _ => Err(coded("Send a JSON object", "send_object", 400, None)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_names_the_cms_only_when_set() {
+        let plain = dashboard_page("/rl", "", "", false, true, "", None, "");
+        assert!(!plain.contains("data-cms"));
+        let page = dashboard_page("/rl", "", "", false, true, "", None, "Word\"Press");
+        assert!(page.contains(" data-accounts=\"\" data-cms=\"Word&#34;Press\" data-world="));
     }
 }

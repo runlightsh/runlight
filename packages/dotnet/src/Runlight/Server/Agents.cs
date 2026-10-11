@@ -328,7 +328,7 @@ public static partial class Agents
         }
         if (answer.Status == 401)
         {
-            throw new SendError("Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins.");
+            throw new SendError("Runlight refused the key. Use the site's agents key from Settings, Install.");
         }
         string text = await answer.TextAsync().ConfigureAwait(false);
         if (!answer.Ok)

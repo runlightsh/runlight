@@ -14,6 +14,7 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import sh.runlight.CodedError.SettingsError;
 import sh.runlight.http.Headers;
 import sh.runlight.http.Request;
 import sh.runlight.http.Response;
@@ -35,7 +36,10 @@ import sh.runlight.store.SqlStore;
  *
  * <p>The token is an ordinary API token, so it appears in Settings, API and AI, beside the others,
  * and deleting it there disconnects the app. It reads stats, or with the "manage" scope (asked for
- * by a Runlight hub) it also changes one site's settings.
+ * by a Runlight hub) it also changes one site's settings. With the "cms" scope (asked for by the
+ * WordPress, Drupal, and Craft plugins) it is the site's dashboard key, which only opens its
+ * read-only dashboard in the CMS, and the answer also carries the site's agents key, so connecting
+ * fills in the plugin's settings.
  */
 public final class OAuth {
   private OAuth() {}
@@ -63,6 +67,16 @@ public final class OAuth {
 
     /** The connected install a site is read from, or null for a site of this install's own. */
     Object remote(String id);
+
+    /** Whether sites are added, changed, and deleted in the dashboard. */
+    default boolean managedSites() {
+      return false;
+    }
+
+    /** Adds a site, when sites are managed in the dashboard; a SettingsError when it cannot. */
+    default Map<String, Object> addSite(Map<String, Object> input) {
+      throw new SettingsError("Sites are set in code", "sites_in_code");
+    }
   }
 
   /**
@@ -90,6 +104,31 @@ public final class OAuth {
     }
   }
 
+  private static final List<String> SCOPES = List.of("read", "manage", "cms");
+
+  /**
+   * The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new
+   * one that replaces it.
+   */
+  public static String agentsKey(Install runlight, String site, boolean replace) {
+    String name = "observe-key:" + site;
+    String saved = replace ? null : runlight.store().setting(name);
+    if (saved != null && !saved.isEmpty()) {
+      return saved;
+    }
+    String key = "rlo_" + Hash.randomId(20);
+    runlight.store().setSetting(name, key);
+    return key;
+  }
+
+  /** A redirect address's host as a site's domains are kept: lowercase, with no port and no www. */
+  private static String siteHost(String redirect) {
+    return TRAILING_DOTS
+        .matcher(Js.lower(new Url(redirect).hostname))
+        .replaceFirst("")
+        .replaceFirst("^www\\.", "");
+  }
+
   public static final long CODE_MS = 5 * 60_000L;
 
   /**
@@ -111,6 +150,7 @@ public final class OAuth {
   private static final Pattern HTTPS = Pattern.compile("^https://[^/]+");
   private static final Pattern LOOPBACK =
       Pattern.compile("^http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?/");
+  private static final Pattern TRAILING_DOTS = Pattern.compile("\\.+$");
   private static final Pattern SPACES = Pattern.compile("[" + Js.SPACE + "]+");
 
   /** Per install, the per-address limit on registrations. */
@@ -304,7 +344,7 @@ public final class OAuth {
               "authorization_servers",
               List.of(issuer),
               "scopes_supported",
-              List.of("read", "manage"),
+              SCOPES,
               "bearer_methods_supported",
               List.of("header")));
     }
@@ -329,7 +369,7 @@ public final class OAuth {
               "token_endpoint_auth_methods_supported",
               List.of("none"),
               "scopes_supported",
-              List.of("read", "manage")));
+              SCOPES));
     }
 
     if (path.equals("/oauth/register") && method.equals("POST")) {
@@ -427,7 +467,20 @@ public final class OAuth {
       return refuse.apply(
           ordered("error", "invalid_request", "error_description", "PKCE with S256 is required"));
     }
-    boolean manage = List.of(SPACES.split(orEmpty(form.get("scope")), -1)).contains("manage");
+    List<String> scopes = List.of(SPACES.split(orEmpty(form.get("scope")), -1));
+    boolean cms = scopes.contains("cms");
+    boolean manage = !cms && scopes.contains("manage");
+    // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a
+    // new one for it.
+    String host = siteHost(redirect);
+    List<Map<String, Object>> counting = new ArrayList<>();
+    for (Map<String, Object> s : runlight.sites()) {
+      if (runlight.remote(Js.string(s.get("id"))) == null
+          && s.get("hostnames") instanceof List<?> hostnames
+          && hostnames.contains(host)) {
+        counting.add(s);
+      }
+    }
 
     if (!ctx.isOwner.test(request)) {
       // Someone signed in who may only read would be sent to sign in again and again.
@@ -495,6 +548,58 @@ public final class OAuth {
               + " class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\""
               + " value=\"allow\">Allow</button></div></form>";
       String formStart = "<form method=\"post\" action=\"" + esc(base) + "/oauth/authorize\">";
+      if (cms) {
+        if (counting.isEmpty() && !runlight.managedSites()) {
+          return page(
+              "Add this site first",
+              "<p>No site in this Runlight counts <strong>"
+                  + esc(host)
+                  + "</strong>. Add it to a site's domains in your code, then connect again from "
+                  + esc(name)
+                  + ".</p>",
+              400);
+        }
+        StringBuilder choices = new StringBuilder();
+        for (Map<String, Object> s : counting) {
+          choices
+              .append("<option value=\"")
+              .append(esc(s.get("id")))
+              .append("\">")
+              .append(esc(s.get("name")))
+              .append("</option>");
+        }
+        if (runlight.managedSites() && counting.isEmpty()) {
+          choices
+              .append("<option value=\"new\">A new site for ")
+              .append(esc(host))
+              .append("</option>");
+        }
+        return page(
+            "Connect " + esc(name),
+            "<p><strong>"
+                + esc(name)
+                + "</strong> wants to count <strong>"
+                + esc(host)
+                + "</strong> in this Runlight.</p>\n"
+                + "<p>It will get the site's agents key, to report AI agents such as ChatGPT and"
+                + " Claude reading its pages, and a dashboard key, to show the site's read-only"
+                + " dashboard in its admin pages. It cannot change anything here or read other"
+                + " sites.</p>\n"
+                + sendsTo
+                + "\n"
+                + formStart
+                + hidden
+                + "\n"
+                + "<label>Site<select name=\"site\">"
+                + choices
+                + "</select></label>\n"
+                + "<p class=\"note\">Its dashboard key appears in Settings, API and AI, where"
+                + " deleting it stops the dashboard in "
+                + esc(name)
+                + ".</p>\n"
+                + buttons,
+            200);
+      }
       if (manage) {
         // Changing settings is for one site at a time, so there is no "every site" here.
         String wanted = orEmpty(form.get("site"));
@@ -578,6 +683,36 @@ public final class OAuth {
       return back.apply(ordered("error", "access_denied"));
     }
     String site = orEmpty(form.get("site"));
+    if (cms) {
+      if (site.equals("new")) {
+        try {
+          site =
+              !counting.isEmpty()
+                  ? Js.string(counting.get(0).get("id"))
+                  : runlight.managedSites()
+                      ? Js.string(
+                          runlight.addSite(Json.object("hostnames", List.of(host))).get("id"))
+                      : "";
+        } catch (SettingsError | RangeError error) {
+          // Such as an address, which a site cannot count by: there is no new site to make.
+          return back.apply(
+              ordered("error", "invalid_request", "error_description", error.getMessage()));
+        }
+      } else {
+        String picked = site;
+        if (counting.stream().noneMatch(s -> picked.equals(s.get("id")))) {
+          site = "";
+        }
+      }
+      if (site.isEmpty()) {
+        return back.apply(
+            ordered(
+                "error",
+                "invalid_request",
+                "error_description",
+                "Pick a site that counts " + host));
+      }
+    }
     if (!site.isEmpty() && runlight.site(site) == null) {
       return back.apply(ordered("error", "invalid_request", "error_description", "Unknown site"));
     }
@@ -598,7 +733,7 @@ public final class OAuth {
             "site",
             site,
             "scope",
-            manage ? "manage" : "read",
+            cms ? "cms" : manage ? "manage" : "read",
             "expires",
             runlight.now() + CODE_MS);
     if (by != null && !by.isEmpty()) {
@@ -650,7 +785,10 @@ public final class OAuth {
               found.usedKey(), storedClient ? Json.stringify(used) : Long.toString(runlight.now()));
     }
     String secret = "rl_" + Hash.randomId(20);
-    String scope = "manage".equals(grant.get("scope")) ? "manage" : "read";
+    String scope =
+        "cms".equals(grant.get("scope"))
+            ? "cms"
+            : "manage".equals(grant.get("scope")) ? "manage" : "read";
     Object clientName = client.get("name");
     Map<String, Object> row =
         Json.object(
@@ -661,7 +799,9 @@ public final class OAuth {
             "site",
             grant.get("site"),
             "scope",
-            scope,
+            // A CMS plugin's token is the site's dashboard key, which only opens its read-only
+            // dashboard there.
+            scope.equals("cms") ? "embed" : scope,
             "hash",
             Hash.sha256(secret),
             "hint",
@@ -685,6 +825,23 @@ public final class OAuth {
           .store()
           .setSetting(
               "token-origin:" + row.get("id"), new Url(Js.string(grant.get("redirect"))).origin());
+    }
+    // A CMS plugin gets the site's agents key too, so connecting fills in every key its settings
+    // ask for.
+    if (scope.equals("cms")) {
+      String site = Js.string(grant.get("site"));
+      return json(
+          Json.object(
+              "access_token",
+              secret,
+              "token_type",
+              "Bearer",
+              "scope",
+              scope,
+              "site",
+              site,
+              "agents_key",
+              agentsKey(runlight, site, false)));
     }
     // site is not part of OAuth, but a hub needs to know which site it was given.
     Map<String, Object> answer =

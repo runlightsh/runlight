@@ -703,6 +703,11 @@ public final class Runlight
     return routes(new Routes.Options());
   }
 
+  @Override
+  public boolean managedSites() {
+    return managedSites;
+  }
+
   /** The sites, with any settings changed in the dashboard applied. */
   @Override
   public List<Map<String, Object>> sites() {
@@ -1118,6 +1123,7 @@ public final class Runlight
    * Adds a site, when sites are managed in the dashboard: one counted here (name, hostnames, and
    * timezone), or one connected from another install (remote: url, token, and site).
    */
+  @Override
   public Map<String, Object> addSite(Map<String, Object> input) {
     init();
     if (!managedSites) {

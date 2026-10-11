@@ -19,6 +19,9 @@ answers every request under the base path. Options take the TypeScript names:
 - signOut, signIn: links the dashboard shows. The standalone server sets them.
 - accounts: True for sign-in accounts for the dashboard, or an accounts web object of your own.
 - geoCredit: credits DB-IP in the dashboard's footer, as its free location data asks.
+- cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
+  dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's own
+  admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
 - origin: the address people open the app at, such as https://example.com. A link domain can never be its host,
   and links in email reports point there, whatever Host header a request carries.
 - ownHosts: a callable giving more names the dashboard is reached at, which can never be link domains either.
@@ -396,7 +399,7 @@ def _locale_urls(base: str) -> str:
 
 
 def dashboard(
-    base: str, share: str = "", sign_out: str = "", geo_credit: bool = False, accounts: bool = False, sign_in: str = "", embed: Mapping[str, str] | None = None
+    base: str, share: str = "", sign_out: str = "", geo_credit: bool = False, accounts: bool = False, sign_in: str = "", embed: Mapping[str, str] | None = None, cms: str = ""
 ) -> str:
     """The dashboard's page, which holds no data: the API it calls checks access. `embed` is the dashboard inside a
     CMS's admin pages: its session (empty once its ticket was used or ran out) and the admin origin that frames it."""
@@ -408,6 +411,7 @@ def dashboard(
         + (f' data-sign-in="{_escape_attr(sign_in)}"' if sign_in else "")
         + (' data-geo-credit=""' if geo_credit else "")
         + (' data-accounts=""' if accounts else "")
+        + (f' data-cms="{_escape_attr(cms)}"' if cms else "")
         + (f' data-embed="{_escape_attr(embed["session"])}" data-embed-origin="{_escape_attr(embed["origin"])}"' if embed is not None else "")
     )
     return (
@@ -1416,7 +1420,7 @@ class Routes:
             if scope == "manage" and not site:
                 return coded("A token that changes settings is for one site. Pick the site.", "token_site", 400)
             if scope == "embed" and not site:
-                return coded("A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400)
+                return coded("A dashboard key is for one site. Pick the site.", "embed_site", 400)
             secret = f"{TOKEN_PREFIX}{random_id(20)}"
             row = {"id": random_id(), "name": name, "site": site, "scope": scope, "hash": sha256(secret), "hint": secret[-4:], "createdAt": rl.now(), "lastUsedAt": None}
             rl.store.insert_token(row)
@@ -1528,7 +1532,7 @@ class Routes:
             if not token:
                 return self._denied(False)
             if token["scope"] != "embed":
-                return coded("Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403)
+                return coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403)
             site = rl.site(token["site"])
             if not site:
                 return coded("Unknown site", "unknown_site", 404)
@@ -1647,7 +1651,7 @@ class Routes:
             except ImporterError as error:
                 return _refused(error, "import_failed")
 
-        # Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+        # Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
         if (path == "/api/observe-key" and method == "GET") or (path == "/api/observe-key/new" and method == "POST"):
             access = self._can_read(request)
             if access is not True:
@@ -1656,12 +1660,9 @@ class Routes:
             site = self._query_site(url)
             if isinstance(site, Response):
                 return site
-            name = f"observe-key:{site['id']}"
-            key = None if path.endswith("/new") else rl.store.setting(name)
-            if not key:
-                key = f"rlo_{random_id(20)}"
-                rl.store.set_setting(name, key)
-            return json({"key": key})
+            from .oauth import agents_key
+
+            return json({"key": agents_key(rl, site["id"], path.endswith("/new"))})
 
         # Making, changing, and deleting funnels; reading them is with the other reports.
         if (path == "/api/funnels" and method == "POST") or (re.fullmatch(r"/api/funnels/[a-f0-9]{24}", path) and method in ("PATCH", "DELETE")):
@@ -2600,14 +2601,16 @@ class Routes:
                 )
             # The page itself holds no data; the API it calls checks access and
             # the page explains how to sign in when it is refused.
+            # Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+            cms = str(self.options.get("cms") or "")
             return Response(
-                dashboard(base, "", self.sign_out or "", _js.truthy(self.options.get("geoCredit")), self.web is not None, self.sign_in or ""),
+                dashboard(base, "", self.sign_out or "", _js.truthy(self.options.get("geoCredit")), self.web is not None, self.sign_in or "", None, cms),
                 200,
                 {
                     "content-type": "text/html; charset=utf-8",
                     "cache-control": "no-store",
-                    "content-security-policy": DASHBOARD_CSP,
-                    "x-frame-options": "DENY",
+                    "content-security-policy": DASHBOARD_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") if cms else DASHBOARD_CSP,
+                    "x-frame-options": "SAMEORIGIN" if cms else "DENY",
                     "referrer-policy": "same-origin",
                 },
             )

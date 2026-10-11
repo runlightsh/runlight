@@ -1,6 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, api, base, download, install, type Person, type Site, type View } from "./api.js";
+import { accounts, api, base, cms, download, install, type Person, type Site, type View } from "./api.js";
 import { People } from "./account.js";
 import { AssistantSettings } from "./assistant.js";
 import { EmailReports, EmailService } from "./email.js";
@@ -33,6 +33,9 @@ const SECTIONS: Array<[Section, Key]> = [
   ["data", "settings.data"],
   ["assistant", "settings.assistant"],
 ];
+
+/** Whether a name from a link is one of the sections, so a mistyped one opens nothing. */
+export const isSection = (name: string): name is Section => name === "people" || SECTIONS.some(([id]) => id === name);
 
 /** On a phone the tabs give way to the section's name as a menu of every section. */
 function SectionMenu({ sections, section, site, onPick }: { sections: Array<[Section, Key]>; section: Section; site: string; onPick: (id: Section) => void }) {
@@ -240,6 +243,7 @@ function General({ site, admin, onSaved, onLanguage, onDeleted }: { site: Site; 
           <span class="field-hint">{t("settings.languageHint")}</span>
         </div>
       </div>
+      <OwnVisits site={site} />
       {install.managed && admin ? (
         <div class="settings-group">
           <div class="field-row">
@@ -408,72 +412,80 @@ function RemoteCallout({ site }: { site: Site }) {
   );
 }
 
-/** The key a WordPress, Drupal, or Craft plugin uses to report AI agents reading this site's pages. */
-function PluginKey({ site }: { site: Site }) {
-  const [key, setKey] = useState("");
-  const [error, setError] = useState("");
-  useEffect(() => {
-    api
-      .observeKey(site.id)
-      .then((r) => setKey(r.key))
-      .catch((e: Error) => setError(e.message));
-  }, [site.id]);
-  const replace = () =>
-    api
-      .newObserveKey(site.id)
-      .then((r) => setKey(r.key))
-      .catch((e: Error) => setError(e.message));
+/** One of the plugin's settings, under the label the plugin gives it, with a hint below. */
+function PluginSetting({ label, hint, children }: { label: string; hint: string; children: ComponentChildren }) {
   return (
-    <div class="settings-group">
-      <p class="settings-text">
-        <strong>{t("pluginKey.title")}</strong>
-      </p>
-      <p class="settings-text">{t("pluginKey.intro")}</p>
-      {key ? <Code>{key}</Code> : null}
-      <div class="settings-actions start">
-        <button type="button" class="ghost" onClick={() => void replace()}>
-          <Icon name="refresh" />
-          {t("pluginKey.replace")}
-        </button>
-      </div>
-      {error ? <span class="settings-error">{error}</span> : null}
+    <div class="field-row">
+      <span class="field-label">{label}</span>
+      {children}
+      <span class="field-hint">{hint}</span>
     </div>
   );
 }
 
 /**
- * A key the WordPress, Drupal, and Craft plugins use to show this site's dashboard inside the CMS's admin pages:
- * an API token that only gets tickets for this site's read-only view, shown once.
+ * What the WordPress, Drupal, and Craft plugins ask for, each under the label their settings use: the address,
+ * the site id, the key that reports AI agents reading the site's pages, and the key that shows its dashboard in
+ * the CMS's admin pages (an API token that only gets tickets for this site's read-only view, shown once).
  */
-function EmbedKey({ site }: { site: Site }) {
-  const [secret, setSecret] = useState("");
+function PluginSettings({ site }: { site: Site }) {
+  const [agentsKey, setAgentsKey] = useState("");
+  const [dashboardKey, setDashboardKey] = useState("");
   const [error, setError] = useState("");
+  useEffect(() => {
+    api
+      .observeKey(site.id)
+      .then((r) => setAgentsKey(r.key))
+      .catch((e: Error) => setError(e.message));
+  }, [site.id]);
+  const replace = () =>
+    api
+      .newObserveKey(site.id)
+      .then((r) => setAgentsKey(r.key))
+      .catch((e: Error) => setError(e.message));
   const make = () =>
     api
-      .createToken(t("embedKey.name"), site.id, "embed")
+      .createToken(t("plugin.dashboardKeyName"), site.id, "embed")
       .then((r) => {
         setError("");
-        setSecret(r.secret);
+        setDashboardKey(r.secret);
       })
       .catch((e: Error) => setError(e.message));
   return (
     <div class="settings-group">
       <p class="settings-text">
-        <strong>{t("embedKey.title")}</strong>
+        <strong>{t("plugin.title")}</strong>
       </p>
-      <p class="settings-text">{t("embedKey.intro")}</p>
-      {secret ? (
-        <>
-          <p class="settings-text">{t("tokens.once")}</p>
-          <Code>{secret}</Code>
-        </>
-      ) : null}
-      <div class="settings-actions start">
-        <button type="button" class="ghost" onClick={() => void make()}>
-          <Icon name="key" />
-          {t(secret ? "embedKey.another" : "embedKey.make")}
-        </button>
-      </div>
+      <p class="settings-text">{t("plugin.intro")}</p>
+      <PluginSetting label={t("plugin.address")} hint={t("plugin.addressHint")}>
+        <Code>{`${location.origin}${base}`}</Code>
+      </PluginSetting>
+      <PluginSetting label={t("plugin.site")} hint={t("plugin.siteHint")}>
+        <Code>{site.id}</Code>
+      </PluginSetting>
+      <PluginSetting label={t("plugin.agentsKey")} hint={t("plugin.agentsKeyHint")}>
+        {agentsKey ? <Code>{agentsKey}</Code> : null}
+        <div class="settings-actions start">
+          <button type="button" class="ghost" onClick={() => void replace()}>
+            <Icon name="refresh" />
+            {t("plugin.replace")}
+          </button>
+        </div>
+      </PluginSetting>
+      <PluginSetting label={t("plugin.dashboardKey")} hint={t("plugin.dashboardKeyHint")}>
+        {dashboardKey ? (
+          <>
+            <p class="settings-text">{t("tokens.once")}</p>
+            <Code>{dashboardKey}</Code>
+          </>
+        ) : null}
+        <div class="settings-actions start">
+          <button type="button" class="ghost" onClick={() => void make()}>
+            <Icon name="key" />
+            {t(dashboardKey ? "plugin.another" : "plugin.make")}
+          </button>
+        </div>
+      </PluginSetting>
       {error ? <span class="settings-error">{error}</span> : null}
     </div>
   );
@@ -496,7 +508,8 @@ function Import({ site }: { site: Site }) {
   );
 }
 
-export function Install({ site, sites }: { site: Site; sites: Site[] }) {
+/** Settings, General: leaving out your own visits, in this browser or, for a site on another domain, from a link on it. */
+function OwnVisits({ site }: { site: Site }) {
   const [ignored, setIgnored] = useState(() => {
     try {
       return localStorage.getItem("runlight_ignore") === "1";
@@ -504,15 +517,8 @@ export function Install({ site, sites }: { site: Site; sites: Site[] }) {
       return false;
     }
   });
-  const origin = location.origin;
-  // The standalone server always names the site, since its script serves many.
-  const several = sites.length > 1 || install.managed;
-  // The standalone server's script names its site, so it carries only that site's click rules.
-  const src = `${origin}${base}/s.js${install.managed ? `?site=${encodeURIComponent(site.id)}` : ""}`;
-  const script = `<script defer src="${src}"${several ? ` data-site="${site.id}"` : ""}></script>`;
   const host = site.hostnames[0];
   const ignoreLink = host ? `https://${host}/?runlight=ignore` : "";
-
   const toggle = () => {
     try {
       if (ignored) localStorage.removeItem("runlight_ignore");
@@ -520,6 +526,46 @@ export function Install({ site, sites }: { site: Site; sites: Site[] }) {
       setIgnored(!ignored);
     } catch {}
   };
+  return (
+    <div class="settings-group">
+      <div class="field-row">
+        <span class="field-label">{t("install.ignore")}</span>
+        {install.managed ? null : (
+          <>
+            <span class="settings-text">{t(ignored ? "install.ignored" : "install.counted")}</span>
+            <div>
+              <button type="button" class="ghost" onClick={toggle}>
+                <Icon name={ignored ? "refresh" : "x"} />
+                {t(ignored ? "install.trackButton" : "install.ignoreButton")}
+              </button>
+            </div>
+          </>
+        )}
+        {ignoreLink ? (
+          <span class={install.managed ? "settings-text" : "field-hint"}>
+            {/* The server's dashboard is never on the site's own domain, so the setting has to be made there. */}
+            {rich(install.managed ? "install.ignoreServer" : "install.ignoreElsewhere", {
+              link: (
+                <a href={ignoreLink} target="_blank" rel="noopener">
+                  {ignoreLink}
+                </a>
+              ),
+            })}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function Install({ site, sites }: { site: Site; sites: Site[] }) {
+  const origin = location.origin;
+  // The standalone server always names the site, since its script serves many.
+  const several = sites.length > 1 || install.managed;
+  // The standalone server's script names its site, so it carries only that site's click rules.
+  const src = `${origin}${base}/s.js${install.managed ? `?site=${encodeURIComponent(site.id)}` : ""}`;
+  const script = `<script defer src="${src}"${several ? ` data-site="${site.id}"` : ""}></script>`;
+  const host = site.hostnames[0];
 
   return (
     <>
@@ -527,24 +573,32 @@ export function Install({ site, sites }: { site: Site; sites: Site[] }) {
         <span class={site.lastSeen ? "beat on" : "beat"} aria-hidden="true" />
         {site.lastSeen ? t("install.live", { when: ago(site.lastSeen) }) : t("install.none")}
       </p>
-      <div class="prompt-row">
-        <span class="callout-icon" aria-hidden="true">
-          <Icon name="sparkle" />
-        </span>
-        <span class="callout-text settings-text">
-          <strong>{t("prompt.title")}</strong>
-          {t("prompt.installHint")}
-        </span>
-        <Copy class="prompt-button" label={t("prompt.copy")} text={install.managed ? scriptPrompt({ script, host }) : installPrompt({ origin: location.origin, base, site: several ? site.id : undefined })} />
-      </div>
+      {cms ? (
+        <p class="settings-text">{t("install.cms", { cms })}</p>
+      ) : (
+        <div class="prompt-row">
+          <span class="callout-icon" aria-hidden="true">
+            <Icon name="sparkle" />
+          </span>
+          <span class="callout-text settings-text">
+            <strong>{t("prompt.title")}</strong>
+            {t("prompt.installHint")}
+          </span>
+          <Copy class="prompt-button" label={t("prompt.copy")} text={install.managed ? scriptPrompt({ script, host }) : installPrompt({ origin: location.origin, base, site: several ? site.id : undefined })} />
+        </div>
+      )}
       <div class="settings-group">
-        <p class="settings-text">{rich("install.script", { tag: <code>{"</head>"}</code> })}</p>
-        <Code>{script}</Code>
+        {cms ? null : (
+          <>
+            <p class="settings-text">{rich("install.script", { tag: <code>{"</head>"}</code> })}</p>
+            <Code>{script}</Code>
+          </>
+        )}
         <p class="settings-text">{t("install.events")}</p>
         <Code>{`<button data-runlight="Signup" data-runlight-plan="pro">Sign up</button>`}</Code>
         <p class="settings-text">{t("install.eventsJs")}</p>
         <Code>{`runlight("Newsletter signup", { source: "footer" })`}</Code>
-        {install.managed ? null : (
+        {install.managed || cms ? null : (
           <>
             <p class="settings-text">{t("install.agents")}</p>
             <Code>{`// proxy.ts, in Next.js 16 and later
@@ -562,36 +616,7 @@ export const config = { runtime: "nodejs" };`}</Code>
           </>
         )}
       </div>
-      <PluginKey site={site} />
-      <EmbedKey site={site} />
-      <div class="settings-group">
-        <div class="field-row">
-          <span class="field-label">{t("install.ignore")}</span>
-          {install.managed ? null : (
-            <>
-              <span class="settings-text">{t(ignored ? "install.ignored" : "install.counted")}</span>
-              <div>
-                <button type="button" class="ghost" onClick={toggle}>
-                  <Icon name={ignored ? "refresh" : "x"} />
-                  {t(ignored ? "install.trackButton" : "install.ignoreButton")}
-                </button>
-              </div>
-            </>
-          )}
-          {ignoreLink ? (
-            <span class={install.managed ? "settings-text" : "field-hint"}>
-              {/* The server's dashboard is never on the site's own domain, so the setting has to be made there. */}
-              {rich(install.managed ? "install.ignoreServer" : "install.ignoreElsewhere", {
-                link: (
-                  <a href={ignoreLink} target="_blank" rel="noopener">
-                    {ignoreLink}
-                  </a>
-                ),
-              })}
-            </span>
-          ) : null}
-        </div>
-      </div>
+      {cms ? null : <PluginSettings site={site} />}
     </>
   );
 }

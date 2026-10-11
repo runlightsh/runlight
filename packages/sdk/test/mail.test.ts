@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import { afterEach, test } from "node:test";
-import { runlight } from "../src/index.js";
+import { runlight, type MailMessage } from "../src/index.js";
 import { seal, unseal } from "../src/mail/secret.js";
 import { signV4 } from "../src/mail/ses.js";
 import { mime, smtpReplies, smtpSend } from "../src/mail/smtp.js";
@@ -308,4 +308,76 @@ test("the server has every language, English included", async () => {
   assert.equal(translator("en").t("email.open"), "Open the dashboard");
   assert.equal(translator("xx").t("email.open"), "Open the dashboard", "an unknown language falls back to English");
   assert.equal(translator("de").tn("headline.who", 1, { n: "1" }), "1 Person");
+});
+
+test("the app's own mailer sends until a service saved in the dashboard takes its place", async () => {
+  let now = Date.UTC(2026, 9, 5, 12);
+  const sent: MailMessage[] = [];
+  let fail = "";
+  const rl = runlight({
+    store: sqlite({ path: ":memory:" }),
+    site: { name: "Example", hostnames: ["example.com"] },
+    now: () => now,
+    mail: {
+      from: "site@example.com",
+      fromName: "Example",
+      via: "WordPress (WP Mail SMTP)",
+      send: async (m) => {
+        if (fail) throw new Error(fail);
+        sent.push(m);
+      },
+    },
+  });
+  const { GET, PUT, POST, DELETE } = rl.routes({ token: "t" });
+  const auth = { authorization: "Bearer t", "content-type": "application/json" };
+  const call = (method: string, path: string, body?: unknown) =>
+    ({ GET, PUT, POST, DELETE })[method as "GET"](new Request(`https://stats.example.com/runlight${path}`, { method, headers: auth, body: body === undefined ? undefined : JSON.stringify(body) }));
+
+  const app = await (await call("GET", "/api/mail")).json();
+  assert.deepEqual(
+    { source: app.source, service: app.service, from: app.from, fromName: app.fromName, fields: app.fields, saved: app.saved, app: app.app },
+    { source: "app", service: "", from: "site@example.com", fromName: "Example", fields: {}, saved: [], app: { via: "WordPress (WP Mail SMTP)", from: "site@example.com", fromName: "Example", replaced: false } },
+  );
+
+  assert.equal((await call("POST", "/api/mail/test", { to: "jon@example.com" })).status, 200);
+  assert.equal(sent.length, 1);
+  assert.deepEqual([sent[0]!.to, sent[0]!.from, sent[0]!.fromName], ["jon@example.com", "site@example.com", "Example"]);
+  assert.match(sent[0]!.text, /WordPress \(WP Mail SMTP\)/, "the test names the app's mailer");
+
+  // Reports go through it too, with the unsubscribe headers.
+  assert.equal((await call("POST", "/api/reports", { email: "jon@example.com", frequency: "weekly" })).status, 201);
+  now += 7 * 86_400_000;
+  assert.deepEqual(await rl.sendReports(), { sent: 1, failed: 0 });
+  assert.match(sent[1]!.headers!["List-Unsubscribe"]!, /^<https:\/\/stats\.example\.com\/runlight\/unsubscribe\/[a-f0-9]{32}>$/);
+  assert.equal(sent[1]!.headers!["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+
+  // A failure comes back as a mail error naming the mailer.
+  fail = "SMTP connect() failed";
+  const failed = await call("POST", "/api/mail/test", { to: "jon@example.com" });
+  assert.equal(failed.status, 400);
+  assert.deepEqual(await failed.json(), { error: "WordPress (WP Mail SMTP) could not send it: SMTP connect() failed", code: "mail_app_failed", params: { via: "WordPress (WP Mail SMTP)", detail: "SMTP connect() failed" } });
+  fail = "";
+
+  // A service saved in the dashboard takes its place.
+  assert.equal((await call("PUT", "/api/mail", { service: "resend", apiKey: "re_live_key", from: "reports@example.com" })).status, 200);
+  const replaced = await (await call("GET", "/api/mail")).json();
+  assert.deepEqual([replaced.source, replaced.service, replaced.from, replaced.app], ["dashboard", "resend", "reports@example.com", { via: "WordPress (WP Mail SMTP)", from: "site@example.com", fromName: "Example", replaced: true }]);
+  const calls = capture();
+  assert.equal((await call("POST", "/api/mail/test", { to: "jon@example.com" })).status, 200);
+  assert.equal(calls.length, 1, "through the saved service");
+  assert.equal(sent.length, 2, "and not the app's mailer");
+
+  // Removing it goes back to the app's mailer.
+  assert.equal((await call("DELETE", "/api/mail")).status, 200);
+  assert.equal((await (await call("GET", "/api/mail")).json()).source, "app");
+  assert.equal((await call("POST", "/api/mail/test", { to: "jon@example.com" })).status, 200);
+  assert.equal(sent.length, 3);
+});
+
+test("the app's mailer needs a from address, and without one the answer has no app", async () => {
+  assert.throws(() => runlight({ store: sqlite({ path: ":memory:" }), mail: { from: "", via: "Drupal", send: async () => {} } }), /from address/);
+  const rl = runlight({ store: sqlite({ path: ":memory:" }) });
+  const answer = await (await rl.routes({ token: "t" }).GET(new Request("https://stats.example.com/runlight/api/mail", { headers: { authorization: "Bearer t" } }))).json();
+  assert.equal(answer.source, null);
+  assert.ok(!("app" in answer), "an install without an app mailer answers as before");
 });

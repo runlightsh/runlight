@@ -39,8 +39,13 @@ use Runlight\Store\SqlStore;
  *   behind Cloudflare and another proxy. False reads only the connection's address, for an app nothing sits
  *   in front of.
  * - linkPath: where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go".
- * - mail: the mail service for email reports, in code (a Transports config plus `from` and `fromName`).
- *   When set, the dashboard shows it and cannot change it. Otherwise it is set up in Settings.
+ * - mail: how email reports, invites, and sign-in links are sent. Either a mail service in code (a Transports
+ *   config plus `from` and `fromName`), which the dashboard shows and cannot change, or a mailer of the app's
+ *   own, such as a CMS's: `['send' => callable(array $message): void, 'from' => ..., 'fromName' => ...,
+ *   'via' => ...]`. The app's mailer is a default: a service saved in the dashboard takes its place, and
+ *   removing that service goes back to it. `via` names it there, such as "WordPress (WP Mail SMTP)". The
+ *   message has to, from, fromName (when there is one), subject, html, text, and headers; `send` throws to
+ *   say it failed. Without either, the service is set up in Settings.
  * - secret: encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens
  *   for connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
  * - rateLimit: tracker requests allowed per visitor address per minute. Default 120, which a real visitor
@@ -137,6 +142,8 @@ final class Runlight
     /** @var array<string, array{day: string, today: string, yesterday: ?string}> each timezone's salts for its current day, so a lookup is a map read until midnight there */
     private array $salts = [];
     private ?array $mailInCode;
+    /** @var array{send: callable(array<string, mixed>): void, from: string, fromName?: string, via: string}|null the app's own mailer, used while no service is saved in the dashboard */
+    public readonly ?array $appMailer;
     /** @var list<?string> retention work asked for and not yet done: a site's id, or null for every site */
     private array $pruning = [];
     /** @var list<callable(): void> work to do once the answer is sent, such as an email whose timing must not show in the answer */
@@ -176,7 +183,22 @@ final class Runlight
         $this->localInstalls = (bool) ($options['localInstalls'] ?? false);
         $this->links = new Links($this);
         $this->linkPath = '/' . preg_replace('#^/+|/+$#', '', (string) ($options['linkPath'] ?? '/go'));
-        $this->mailInCode = $options['mail'] ?? null;
+        $mail = $options['mail'] ?? null;
+        if (is_array($mail) && isset($mail['send']) && is_callable($mail['send'])) {
+            if (!preg_match(self::EMAIL, Js::string($mail['from'] ?? ''))) {
+                throw new \InvalidArgumentException("Runlight: the app's mailer needs a from address, like reports@example.com");
+            }
+            $this->appMailer = [
+                'send' => $mail['send'],
+                'from' => (string) $mail['from'],
+                ...(Js::string($mail['fromName'] ?? '') !== '' ? ['fromName' => (string) $mail['fromName']] : []),
+                'via' => Js::string($mail['via'] ?? ''),
+            ];
+            $this->mailInCode = null;
+        } else {
+            $this->appMailer = null;
+            $this->mailInCode = $mail;
+        }
         $this->secret = array_key_exists('secret', $options) && $options['secret'] !== null ? (string) $options['secret'] : (Env::get('RUNLIGHT_SECRET') ?? Env::get('RUNLIGHT_TOKEN'));
     }
 
@@ -206,7 +228,11 @@ final class Runlight
         return (int) ($this->clock)();
     }
 
-    /** The mail service: from code, or as saved in the dashboard. Null when there is none. */
+    /**
+     * The mail Runlight sends with: a service from code, or as saved in the
+     * dashboard, or else the app's own mailer, as service "app" with its
+     * `via`. Null when there is none.
+     */
     public function mailSettings(): ?array
     {
         if ($this->mailInCode !== null) {
@@ -214,14 +240,15 @@ final class Runlight
         }
         $this->init();
         $sealed = $this->store->setting('mail');
-        if ($sealed === null || $sealed === '') {
+        $opened = $sealed === null || $sealed === '' ? null : Secret::unseal($sealed, $this->secret);
+        if ($opened !== null && $opened !== '') {
+            return [...Json::decode($opened, true), 'source' => 'dashboard'];
+        }
+        $app = $this->appMailer;
+        if ($app === null) {
             return null;
         }
-        $opened = Secret::unseal($sealed, $this->secret);
-        if ($opened === null || $opened === '') {
-            return null;
-        }
-        return [...Json::decode($opened, true), 'source' => 'dashboard'];
+        return ['service' => 'app', 'from' => $app['from'], ...(isset($app['fromName']) ? ['fromName' => $app['fromName']] : []), 'via' => $app['via'], 'source' => 'app'];
     }
 
     /**
@@ -239,7 +266,8 @@ final class Runlight
             $this->store->setSetting('mail', null);
             return;
         }
-        $before = $this->mailSettings();
+        $current = $this->mailSettings();
+        $before = ($current['source'] ?? null) === 'dashboard' ? $current : null;
         $service = null;
         foreach (Transports::SERVICES as $s) {
             if ($s['id'] === ($input['service'] ?? null)) {
@@ -288,7 +316,7 @@ final class Runlight
     }
 
     /**
-     * Sends one email through the mail service.
+     * Sends one email through the mail service, or the app's own mailer when no service is saved.
      *
      * @param array{to: string, subject: string, html: string, text: string, headers?: array<string, string>} $message
      */
@@ -302,7 +330,19 @@ final class Runlight
         if (isset($settings['fromName'])) {
             $full['fromName'] = $settings['fromName'];
         }
-        Transports::send($settings, $full, $this->fetcher, $this->now());
+        if ($settings['source'] !== 'app') {
+            Transports::send($settings, $full, $this->fetcher, $this->now());
+            return;
+        }
+        try {
+            ($this->appMailer['send'])([...$full, 'headers' => $message['headers'] ?? []]);
+        } catch (MailError $error) {
+            throw $error;
+        } catch (\Throwable $error) {
+            $detail = $error->getMessage();
+            $via = $settings['via'];
+            throw new MailError("$via could not send it" . ($detail !== '' ? ": $detail" : ''), 'mail_app_failed', ['via' => $via, 'detail' => $detail]);
+        }
     }
 
     /**
