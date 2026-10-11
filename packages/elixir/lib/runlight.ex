@@ -1457,21 +1457,17 @@ defmodule Runlight do
     path = Url.new(request.url).pathname
     prefix = rl.link_path <> "/"
 
+    # A slug with broken escapes is one no link has.
     slug =
       if String.starts_with?(path, prefix),
-        do: JS.decode_uri_component(binary_part(path, byte_size(prefix), byte_size(path) - byte_size(prefix))),
+        do: JS.decode_uri_component(binary_part(path, byte_size(prefix), byte_size(path) - byte_size(prefix))) || "",
         else: ""
-
-    if slug == nil, do: raise(uri_error())
 
     found = if slug != "" and not String.contains?(slug, "/"), do: redirect(rl, request, slug, "")
     found || not_found()
   end
 
   defp not_found, do: Response.new("Not found", 404, [{"content-type", "text/plain; charset=utf-8"}])
-
-  # decodeURIComponent throws a URIError for a malformed escape, which the routes answer as an internal error.
-  defp uri_error, do: %RuntimeError{message: "URI malformed"}
 
   @doc """
   For middleware: when a request arrives on a link domain added in Settings,
@@ -1503,8 +1499,7 @@ defmodule Runlight do
         nil
 
       true ->
-        slug = JS.decode_uri_component(JS.slice(url.pathname, 1))
-        if slug == nil, do: raise(uri_error())
+        slug = JS.decode_uri_component(JS.slice(url.pathname, 1)) || ""
         found = if slug != "" and not String.contains?(slug, "/"), do: redirect(rl, request, slug, host)
         found || not_found()
     end

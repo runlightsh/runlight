@@ -820,13 +820,13 @@ defmodule Runlight.Routes do
         end
 
       check && method == "GET" ->
-        domain = JS.decode_uri_component(Enum.at(check, 1)) || raise "URI malformed"
-        check_link_domain(routes, url, site, domain)
+        check_link_domain(routes, url, site, JS.decode_uri_component(Enum.at(check, 1)))
 
       domain_match && method == "DELETE" ->
-        domain = JS.decode_uri_component(Enum.at(domain_match, 1)) || raise "URI malformed"
+        domain = JS.decode_uri_component(Enum.at(domain_match, 1))
 
-        if Enum.any?(Store.link_domains(rl.store), &(&1["domain"] == domain and &1["site"] == site["id"])) do
+        if domain != nil and
+             Enum.any?(Store.link_domains(rl.store), &(&1["domain"] == domain and &1["site"] == site["id"])) do
           Store.remove_link_domain(rl.store, domain)
           Runlight.forget_link_domains(rl)
           json(JS.obj(ok: true))
@@ -1090,7 +1090,7 @@ defmodule Runlight.Routes do
   defp check_link_domain(routes, url, site, domain) do
     rl = routes.rl
 
-    if Enum.any?(Store.link_domains(rl.store), &(&1["domain"] == domain and &1["site"] == site["id"])) do
+    if domain != nil and Enum.any?(Store.link_domains(rl.store), &(&1["domain"] == domain and &1["site"] == site["id"])) do
       # Where the domain should point, for the setup steps: this server's name, and its public addresses.
       own = if routes.origin, do: Url.new(routes.origin).hostname, else: url.hostname
       target = JS.obj(host: own, addresses: Runlight.Safefetch.public_addresses(own))
@@ -1317,10 +1317,11 @@ defmodule Runlight.Routes do
     with {:ok, site} <- query_site(routes, url) do
       existing = Store.goals(rl.store, site["id"])
 
+      # An id with broken escapes is one no goal has.
       id =
         if path == "/api/goals",
           do: nil,
-          else: JS.decode_uri_component(binary_part(path, 11, byte_size(path) - 11)) || raise("URI malformed")
+          else: JS.decode_uri_component(binary_part(path, 11, byte_size(path) - 11)) || :broken
 
       cond do
         id != nil and not Enum.any?(existing, &(&1["id"] == id)) ->
@@ -1641,8 +1642,8 @@ defmodule Runlight.Routes do
             coded("Method not allowed", "method_not_allowed", 405)
         end
       else
-        id = JS.decode_uri_component(binary_part(path, 12, byte_size(path) - 12)) || raise("URI malformed")
-        share = if Regex.match?(~r/\A[a-f0-9]{32}\z/, id), do: Store.share_by_id(rl.store, id)
+        id = JS.decode_uri_component(binary_part(path, 12, byte_size(path) - 12))
+        share = if id != nil and Regex.match?(~r/\A[a-f0-9]{32}\z/, id), do: Store.share_by_id(rl.store, id)
 
         cond do
           share == nil or share["site"] != site["id"] ->
@@ -2386,30 +2387,32 @@ defmodule Runlight.Routes do
 
       Regex.match?(~r/\A\/api\/sites\/[^\/]+\z/, path) and method == "DELETE" ->
         access = can_read(routes, request)
+        id = JS.decode_uri_component(binary_part(path, 11, byte_size(path) - 11))
 
-        if access != true do
-          denied(access)
-        else
-          try do
-            Runlight.delete_site(
-              rl,
-              JS.decode_uri_component(binary_part(path, 11, byte_size(path) - 11)) || raise("URI malformed")
-            )
+        cond do
+          access != true ->
+            denied(access)
 
-            json(JS.obj(ok: true))
-          rescue
-            error ->
-              cond do
-                Errors.range?(error) and Exception.message(error) == "Unknown site" ->
-                  coded("Unknown site", "unknown_site", 404)
+          id == nil ->
+            coded("Unknown site", "unknown_site", 404)
 
-                Errors.range?(error) ->
-                  refused(error, "site_invalid")
+          true ->
+            try do
+              Runlight.delete_site(rl, id)
+              json(JS.obj(ok: true))
+            rescue
+              error ->
+                cond do
+                  Errors.range?(error) and Exception.message(error) == "Unknown site" ->
+                    coded("Unknown site", "unknown_site", 404)
 
-                true ->
-                  reraise error, __STACKTRACE__
-              end
-          end
+                  Errors.range?(error) ->
+                    refused(error, "site_invalid")
+
+                  true ->
+                    reraise error, __STACKTRACE__
+                end
+            end
         end
 
       Regex.match?(~r/\A\/api\/sites\/[^\/]+\z/, path) and method == "PATCH" ->
@@ -2774,6 +2777,7 @@ defmodule Runlight.Routes do
       timezone = JS.prop(body, "timezone")
       retention = JS.prop(body, "retentionMonths")
       choices = Enum.join(Runlight.retention_months(), ", ")
+      id = JS.decode_uri_component(binary_part(path, 11, byte_size(path) - 11))
 
       cond do
         # Every field is checked before any changes, since a shorter retention deletes visits at once.
@@ -2788,9 +2792,11 @@ defmodule Runlight.Routes do
         retention not in [:undefined, nil] and JS.number(retention) not in Runlight.retention_months() ->
           coded("Keep visits for #{choices} months, or forever", "retention_bad", 400, %{"months" => choices})
 
+        id == nil ->
+          coded("Unknown site", "unknown_site", 404)
+
         true ->
           try do
-            id = JS.decode_uri_component(binary_part(path, 11, byte_size(path) - 11)) || raise("URI malformed")
             remote = Runlight.remote(rl, id)
             current_zone = (Runlight.site(rl, id) || %{})["timezone"]
             # How long a connected site keeps visits, and the timezone its days follow, are the install's settings:
