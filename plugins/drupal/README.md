@@ -41,10 +41,10 @@ own it, and people with View Runlight see the same dashboard without changing
 anything. Short links answer at `/go/{name}`.
 
 Runlight keeps its numbers in Drupal's own database, when that is Postgres, or
-MySQL 8.0.20 or MariaDB 11.4 or later, in tables named after Drupal's table prefix
-and `rl_`, such as `rl_events`, marked as this site's. Tables of those names
-that are not this site's Runlight's, such as a standalone Runlight's, are left
-alone. It opens a connection of its own through Drupal's database driver, from
+MySQL 8.0.20 or MariaDB 11.4 or later, in tables named after Drupal's table
+prefix and `rl_`, such as `rl_events`, marked as this site's. Tables of those
+names that are not this site's Runlight's, such as a standalone Runlight's, are
+left alone. It opens a connection of its own through Drupal's database driver, from
 Drupal's connection settings, `pdo` options and `init_commands` included.
 Otherwise it keeps them in a SQLite file in the private files folder, which
 needs `$settings['file_private_path']`. Nothing goes under public files. The
