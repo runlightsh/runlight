@@ -25,7 +25,9 @@ defmodule Runlight.Fetch do
       just before.
 
   `httpc/2` is the default, on Erlang's own `:httpc` with certificates
-  verified against the system's.
+  verified against the system's. A public fetch goes through an `:httpc`
+  profile of Runlight's own, which never has a proxy, whatever an app sets on
+  the default profile.
   """
 
   alias Runlight.Http.Response
@@ -33,16 +35,36 @@ defmodule Runlight.Fetch do
 
   @type fetcher :: (String.t(), keyword() -> {:ok, Response.t()} | {:error, term()})
 
+  # The httpc profile public fetches go through. A proxy, such as one an app sets on the default profile, would
+  # look the name up again itself, so the checked address would not be the one used; this profile never has one.
+  @public_profile :runlight_public
+
   @doc "Fetches through `:httpc`."
   @spec httpc(String.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
   def httpc(url, opts \\ []) do
-    case pin(url, Keyword.get(opts, :public, false)) do
-      {:ok, target, host, socket_opts} -> httpc(url, target, host, socket_opts, opts)
+    public = Keyword.get(opts, :public, false)
+
+    case pin(url, public) do
+      {:ok, target, host, socket_opts} -> httpc(url, target, host, socket_opts, opts, profile(public))
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp httpc(url, target, host, socket_opts, opts) do
+  @doc false
+  # The httpc profile a fetch goes through: Runlight's own, with no proxy, for a public one.
+  @spec profile(boolean()) :: atom()
+  def profile(false), do: :default
+
+  def profile(true) do
+    ensure_started()
+
+    case :inets.start(:httpc, profile: @public_profile) do
+      {:ok, _} -> @public_profile
+      {:error, {:already_started, _}} -> @public_profile
+    end
+  end
+
+  defp httpc(url, target, host, socket_opts, opts, profile) do
     ensure_started()
     method = opts |> Keyword.get(:method, "GET") |> String.downcase() |> String.to_existing_atom()
     given = Keyword.get(opts, :headers, [])
@@ -74,13 +96,14 @@ defmodule Runlight.Fetch do
     request_opts = [sync: false, stream: :self, body_format: :binary] ++ body_cap ++ socket_opts
 
     limits = %{
+      profile: profile,
       deadline: System.monotonic_time(:millisecond) + timeout,
       max_bytes: max_bytes,
       truncate: truncate,
       sent: byte_size(IO.iodata_to_binary(Keyword.get(opts, :body) || ""))
     }
 
-    case :httpc.request(method, request, http_opts, request_opts) do
+    case :httpc.request(method, request, http_opts, request_opts, profile) do
       {:ok, id} -> collect(id, limits, nil, [], 0)
       {:error, reason} -> {:error, reason}
     end
@@ -121,7 +144,7 @@ defmodule Runlight.Fetch do
   @weigh_every 50
 
   defp collect(id, limits, head, acc, size) do
-    %{deadline: deadline, max_bytes: max_bytes, truncate: truncate} = limits
+    %{profile: profile, deadline: deadline, max_bytes: max_bytes, truncate: truncate} = limits
     left = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
@@ -138,7 +161,7 @@ defmodule Runlight.Fetch do
         size = size + byte_size(chunk)
 
         if max_bytes && size > max_bytes do
-          :httpc.cancel_request(id)
+          :httpc.cancel_request(id, profile)
 
           if truncate do
             body = IO.iodata_to_binary(Enum.reverse([chunk | acc]))
@@ -165,11 +188,11 @@ defmodule Runlight.Fetch do
       min(left, @weigh_every) ->
         cond do
           System.monotonic_time(:millisecond) >= deadline ->
-            :httpc.cancel_request(id)
+            :httpc.cancel_request(id, profile)
             {:error, :timeout}
 
-          head == nil and max_bytes != nil and holding(id) > max_bytes + limits.sent ->
-            :httpc.cancel_request(id)
+          head == nil and max_bytes != nil and holding(id, profile) > max_bytes + limits.sent ->
+            :httpc.cancel_request(id, profile)
             {:error, :too_long}
 
           true ->
@@ -183,8 +206,10 @@ defmodule Runlight.Fetch do
   # arrived, the process reading the answer is weighed by the largest binary it holds, which is the body so far (or
   # the request's own body, which the cap is raised by). httpc's table of requests is internal; without it, nothing
   # is weighed.
-  defp holding(id) do
-    with table when table != :undefined <- :ets.whereis(:httpc_manager__handler_db),
+  defp holding(id, profile) do
+    manager = if profile == :default, do: "httpc_manager", else: "httpc_#{profile}"
+
+    with table when table != :undefined <- :ets.whereis(String.to_existing_atom(manager <> "__handler_db")),
          [{^id, pid, _} | _] <- :ets.lookup(table, id),
          {:binary, binaries} <- Process.info(pid, :binary) do
       Enum.reduce(binaries, 0, fn {_, bytes, _}, most -> max(bytes, most) end)

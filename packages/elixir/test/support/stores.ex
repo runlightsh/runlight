@@ -19,21 +19,33 @@ defmodule Runlight.Test.Stores do
   # schema of its own when RUNLIGHT_TEST_PG is set, and an emptied MySQL or
   # MariaDB database when RUNLIGHT_TEST_MYSQL or RUNLIGHT_TEST_MARIADB is set.
   # Each variable holds a connection URL, such as
-  # postgres://joncphillips@127.0.0.1:5432/runlight_test_elixir.
+  # postgres://joncphillips@127.0.0.1:5432/runlight_test_elixir. Each kind also
+  # runs once more with its tables under another prefix (the "+prefix" kinds,
+  # as the SDK's helpers.ts has them).
   #
-  # A MySQL or MariaDB database is used as it is, its rl_ tables dropped before
-  # each test, so the tests that use one run one at a time.
+  # A MySQL or MariaDB database is used as it is, its rl_ and wp_rl_ tables
+  # dropped before each test, so the tests that use one run one at a time.
 
   alias Runlight.Test.MyRepo
   alias Runlight.Test.PgRepo
   alias Runlight.Test.SqliteRepo
 
-  @doc "The kinds of store to test on, each with its URL (nil for SQLite)."
+  @doc "The table prefix the \"+prefix\" stores use in place of rl_, as WordPress would give one."
+  def test_prefix, do: "wp_rl_"
+
+  @doc "The kinds of store to test on, each with its URL (nil for SQLite), and each again under a prefix."
   def kinds do
-    [{:sqlite, nil}] ++
-      for {kind, var} <- [postgres: "RUNLIGHT_TEST_PG", mysql: "RUNLIGHT_TEST_MYSQL", mariadb: "RUNLIGHT_TEST_MARIADB"],
-          url = env(var),
-          do: {kind, url}
+    plain =
+      [{:sqlite, nil}] ++
+        for {kind, var} <- [
+              postgres: "RUNLIGHT_TEST_PG",
+              mysql: "RUNLIGHT_TEST_MYSQL",
+              mariadb: "RUNLIGHT_TEST_MARIADB"
+            ],
+            url = env(var),
+            do: {kind, url}
+
+    plain ++ for {kind, url} <- plain, do: {String.to_atom("#{kind}+prefix"), url}
   end
 
   defp env(name) do
@@ -50,14 +62,20 @@ defmodule Runlight.Test.Stores do
   """
   def store(kind, url \\ nil, repo_opts \\ [])
 
-  def store(:sqlite, _url, _repo_opts) do
+  def store(kind, url, repo_opts)
+      when kind in [:"sqlite+prefix", :"postgres+prefix", :"mysql+prefix", :"mariadb+prefix"] do
+    plain = kind |> Atom.to_string() |> String.replace_suffix("+prefix", "") |> String.to_existing_atom()
+    store(plain, url, Keyword.put(repo_opts, :prefix, test_prefix()))
+  end
+
+  def store(:sqlite, _url, repo_opts) do
     {:ok, pid} = SqliteRepo.start_link(name: nil, database: ":memory:", pool_size: 1, log: false)
     Process.unlink(pid)
-    store = Runlight.Store.ecto(repo: SqliteRepo, dynamic_repo: pid)
+    store = Runlight.Store.ecto(repo: SqliteRepo, dynamic_repo: pid, prefix: repo_opts[:prefix])
     {store, fn -> stop(pid) end}
   end
 
-  def store(:postgres, url, _repo_opts) do
+  def store(:postgres, url, repo_opts) do
     name = "rl_test_" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
     config = parse(url)
     {:ok, admin} = Postgrex.start_link(config)
@@ -65,7 +83,7 @@ defmodule Runlight.Test.Stores do
     Postgrex.query!(admin, ~s(CREATE SCHEMA "#{name}"), [])
     {:ok, pid} = PgRepo.start_link([name: nil, pool_size: 2, log: false, parameters: [search_path: name]] ++ config)
     Process.unlink(pid)
-    store = Runlight.Store.ecto(repo: PgRepo, dynamic_repo: pid)
+    store = Runlight.Store.ecto(repo: PgRepo, dynamic_repo: pid, prefix: repo_opts[:prefix])
 
     {store,
      fn ->
@@ -78,12 +96,13 @@ defmodule Runlight.Test.Stores do
 
   def store(kind, url, repo_opts) when kind in [:mysql, :mariadb] do
     config = parse(url)
+    {prefix, repo_opts} = Keyword.pop(repo_opts, :prefix)
     {:ok, pid} = MyRepo.start_link([name: nil, pool_size: 2, log: false] ++ repo_opts ++ config)
     Process.unlink(pid)
     previous = MyRepo.put_dynamic_repo(pid)
     empty_mysql()
     MyRepo.put_dynamic_repo(previous)
-    store = Runlight.Store.ecto(repo: MyRepo, dynamic_repo: pid)
+    store = Runlight.Store.ecto(repo: MyRepo, dynamic_repo: pid, prefix: prefix)
 
     {store,
      fn ->
@@ -97,7 +116,7 @@ defmodule Runlight.Test.Stores do
   defp empty_mysql do
     %{rows: rows} =
       MyRepo.query!(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'rl!_%' ESCAPE '!'",
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND (table_name LIKE 'rl!_%' ESCAPE '!' OR table_name LIKE 'wp!_rl!_%' ESCAPE '!')",
         [],
         log: false
       )
@@ -113,7 +132,8 @@ defmodule Runlight.Test.Stores do
     :exit, _ -> :ok
   end
 
-  defp parse(url) do
+  @doc "A connection URL as Postgrex and MyXQL options."
+  def parse(url) do
     uri = URI.parse(url)
 
     {user, pass} =

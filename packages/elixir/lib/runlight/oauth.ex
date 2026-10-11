@@ -249,8 +249,13 @@ defmodule Runlight.OAuth do
       # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
       host = site_host(redirect)
 
+      # As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+      local = Enum.filter(Runlight.sites(rl), &(Runlight.remote(rl, &1["id"]) == nil))
+
       counting =
-        Enum.filter(Runlight.sites(rl), &(Runlight.remote(rl, &1["id"]) == nil and host in (&1["hostnames"] || [])))
+        if match?([_], local) and (hd(local)["hostnames"] || []) == [],
+          do: local,
+          else: Enum.filter(local, &(host in (&1["hostnames"] || [])))
 
       cond do
         get.("response_type") != "code" ->

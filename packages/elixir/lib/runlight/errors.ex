@@ -53,6 +53,26 @@ defmodule Runlight.RangeError do
   defexception [:message]
 end
 
+defmodule Runlight.TablesBusyError do
+  @moduledoc """
+  Another process held the lock for creating tables past the lock wait (30
+  seconds), such as one building an index on a big table after an upgrade.
+  The request that waited fails with this, rather than waiting for good.
+  """
+  defexception [:message]
+
+  @impl true
+  def exception(opts) do
+    waited = Keyword.get(opts, :waited, 30_000)
+
+    %__MODULE__{
+      message:
+        "Runlight: another process is creating or upgrading the tables, and had not finished after " <>
+          "#{round(waited / 1000)} seconds. Try again in a minute."
+    }
+  end
+end
+
 defmodule Runlight.Errors do
   @moduledoc false
   # Internal. Which errors the routes treat as JavaScript's RangeError: the

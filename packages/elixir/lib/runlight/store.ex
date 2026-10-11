@@ -8,7 +8,10 @@ defmodule Runlight.Store do
 
       Runlight.Store.ecto(repo: MyApp.Repo)
 
-  or over any `Runlight.Db` with `new/1`.
+  or over any `Runlight.Db` with `new/2`. Either takes `prefix:`, what every
+  table and index name starts with in place of `rl_`, so two apps sharing one
+  database each keep a set of their own: up to 32 letters, digits, and
+  underscores, not starting with a digit.
   """
 
   alias Runlight.Db
@@ -20,19 +23,96 @@ defmodule Runlight.Store do
   import Runlight.Store.Sql,
     only: [num: 1, str: 1, str: 2, bounce: 0, visit_sql: 0, duration: 0, live_views: 0, built_days: 0, event_tail_ms: 0]
 
-  defstruct [:db]
+  @prefix "rl_"
 
-  @type t :: %__MODULE__{db: Db.t()}
+  # Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app dropping Runlight's
+  # tables drops these by name, never every table that starts with the prefix.
+  @tables ~w(meta sites salts sessions events links link_domains shares goals settings reports tokens funnels
+             rollup_days rollups users invites)
 
-  @doc "A store over a `Runlight.Db`."
-  @spec new(Db.t()) :: t()
-  def new(%Db{} = db), do: %__MODULE__{db: db}
+  # The longest a process waits for another one creating or upgrading the tables before it gives up.
+  @lock_wait_ms 30_000
+
+  defstruct [:db, prefix: @prefix]
+
+  @typedoc "A store. `prefix` is what its table and index names start with: `rl_` unless it was given another."
+  @type t :: %__MODULE__{db: Db.t(), prefix: String.t()}
+
+  @doc "What every table and index name starts with, unless a store is given another prefix in its place."
+  @spec default_prefix() :: String.t()
+  def default_prefix, do: @prefix
+
+  @doc "Runlight's tables, after the prefix."
+  @spec table_names() :: [String.t()]
+  def table_names, do: @tables
+
+  @doc """
+  A store over a `Runlight.Db`. `prefix:` takes the place of `rl_` at the
+  start of every table and index name, so two apps can each keep Runlight's
+  tables in one database. A Db that is already prefixed keeps its own.
+  """
+  @spec new(Db.t(), keyword()) :: t()
+  def new(%Db{} = db, opts \\ []) do
+    prefix = Keyword.get(opts, :prefix) || @prefix
+
+    case Db.Prefixed.prefix_of(db) do
+      nil when prefix == @prefix -> %__MODULE__{db: db}
+      nil -> %__MODULE__{db: Db.Prefixed.new(db, prefix), prefix: prefix}
+      own -> %__MODULE__{db: db, prefix: own}
+    end
+  end
 
   if Code.ensure_loaded?(Ecto.Adapters.SQL) do
-    @doc "A store over an app's Ecto repo; see `Runlight.Db.Ecto` for the options."
+    @doc """
+    A store over an app's Ecto repo; see `Runlight.Db.Ecto` for the options,
+    and `new/2` for `prefix:`.
+    """
     @spec ecto(keyword()) :: t()
-    def ecto(opts), do: new(Runlight.Db.Ecto.new(opts))
+    def ecto(opts) do
+      {prefix, opts} = Keyword.pop(opts, :prefix)
+      new(Runlight.Db.Ecto.new(opts), prefix: prefix)
+    end
   end
+
+  @doc "What the store's table and index names start with: `rl_` unless it was given another."
+  @spec prefix(t()) :: String.t()
+  def prefix(%__MODULE__{prefix: prefix}), do: prefix
+
+  @doc """
+  The store's tables as named in the database, for an app removing Runlight:
+  each one by name, since another app's tables may well start with the same
+  letters.
+  """
+  @spec tables(t()) :: [String.t()]
+  def tables(%__MODULE__{prefix: prefix}), do: Enum.map(@tables, &(prefix <> &1))
+
+  # A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_.
+  defp unnamed(%__MODULE__{prefix: prefix}, name) do
+    if String.starts_with?(name, prefix),
+      do: @prefix <> binary_part(name, byte_size(prefix), byte_size(name) - byte_size(prefix)),
+      else: name
+  end
+
+  # A table or index name as the database has it, under the store's prefix.
+  defp named(%__MODULE__{prefix: prefix}, @prefix <> rest), do: prefix <> rest
+  defp named(_store, name), do: name
+
+  @doc """
+  How long the stores wait for the lock for creating tables, in milliseconds:
+  30 seconds, unless a test has set another with `lock_wait_in_tests/1`.
+  """
+  @spec lock_wait_ms() :: pos_integer()
+  def lock_wait_ms, do: :persistent_term.get({__MODULE__, :lock_wait_ms}, @lock_wait_ms)
+
+  @doc false
+  # For tests: the stores wait this long for the lock instead, or 30 seconds again with nil.
+  @spec lock_wait_in_tests(pos_integer() | nil) :: :ok
+  def lock_wait_in_tests(nil) do
+    _ = :persistent_term.erase({__MODULE__, :lock_wait_ms})
+    :ok
+  end
+
+  def lock_wait_in_tests(ms) when is_integer(ms) and ms > 0, do: :persistent_term.put({__MODULE__, :lock_wait_ms}, ms)
 
   defp dialect(%__MODULE__{db: db}), do: Db.dialect(db)
   defp all(%__MODULE__{db: db}, sql, params \\ []), do: Db.all(db, sql, params)
@@ -87,12 +167,15 @@ defmodule Runlight.Store do
           store,
           """
           SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-                     WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace\
+                     WHERE NOT i.indisvalid AND c.relname LIKE '#{String.replace(store.prefix, "_", "\\_")}%' AND c.relnamespace = current_schema()::regnamespace\
           """,
           []
         )
 
-      for row <- broken, do: run(store, ~s(DROP INDEX IF EXISTS "#{String.replace(str(row["name"]), "\"", "")}"))
+      # The name comes back as the database has it, so it goes back under rl_ before the prefix is put on again,
+      # which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
+      for row <- broken,
+          do: run(store, ~s(DROP INDEX IF EXISTS "#{String.replace(unnamed(store, str(row["name"])), "\"", "")}"))
     end
 
     for statement <- statements do
@@ -103,7 +186,7 @@ defmodule Runlight.Store do
             all(
               store,
               "SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
-              [table, name]
+              [named(store, table), named(store, name)]
             )
 
           if there == [],

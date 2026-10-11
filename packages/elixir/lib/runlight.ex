@@ -25,6 +25,8 @@ defmodule Runlight do
   The options are the SDK's, in snake case:
 
     * `:store` - `{Runlight.Store, repo: MyApp.Repo}`, or a `Runlight.Store`.
+      Add `prefix: "wp_rl_"` to name the tables with another prefix than
+      `rl_`, so two apps sharing one database each keep a set of their own.
     * `:site` - the site this install counts: `id` (default "default"),
       `name`, `hostnames` (without www; empty means any host), and `timezone`
       (an IANA name, default "UTC").
@@ -52,6 +54,11 @@ defmodule Runlight do
       only when there is one, `headers` a list of `{name, value}`), and
       raises or answers `{:error, reason}` to say it failed. Without either,
       the service is set up in Settings.
+    * `:mail_services` - the ids of the mail services Settings offers and
+      saves, such as every service but "smtp" in an app that cannot keep
+      connections of its own open. Default every service. A service saved
+      earlier that is not in the list counts as none, so the app's mailer, if
+      there is one, sends instead.
     * `:secret` - encrypts the keys kept in the database; default
       `RUNLIGHT_SECRET`, then `RUNLIGHT_TOKEN`.
     * `:rate_limit` - tracker requests per address per minute, default 120;
@@ -99,6 +106,7 @@ defmodule Runlight do
     :link_path,
     :mail,
     :app_mailer,
+    :mail_services,
     :secret,
     :fetcher,
     :local_installs,
@@ -115,6 +123,8 @@ defmodule Runlight do
   @rollup_batch 10
   @metered_rollup_batch 4
   @rollup_delay_ms 2 * 3_600_000
+  # The longest a tracker hit waits for the tables while another process creates or upgrades them.
+  @tracker_wait_ms 10_000
   # The most a connected install's list of sites may weigh; a real one is a few kilobytes.
   @remote_max_bytes 2 * 1024 * 1024
   # Read one byte past it, so an answer that long reads as too long rather than as unreachable.
@@ -186,6 +196,7 @@ defmodule Runlight do
 
     link_path = "/" <> String.replace(Keyword.get(opts, :link_path, "/go"), ~r/^\/+|\/+$/, "")
     {mail, app_mailer} = mail_option(Keyword.get(opts, :mail))
+    mail_services = mail_services_option(Keyword.get(opts, :mail_services))
 
     %__MODULE__{
       name: Keyword.get(opts, :name, __MODULE__),
@@ -201,6 +212,8 @@ defmodule Runlight do
       mail: mail,
       # The app's own mailer, used while no service is saved in the dashboard. Nil when there is none.
       app_mailer: app_mailer,
+      # The mail services Settings offers and saves: every one, unless `:mail_services` names fewer.
+      mail_services: mail_services,
       secret: Keyword.get(opts, :secret) || env("RUNLIGHT_SECRET") || env("RUNLIGHT_TOKEN"),
       fetcher: Keyword.get(opts, :fetcher) || (&Runlight.Fetch.httpc/2),
       local_installs: Keyword.get(opts, :local_installs, false) == true,
@@ -244,6 +257,19 @@ defmodule Runlight do
   end
 
   defp mail_option(mail), do: {mail, nil}
+
+  defp mail_services_option(nil), do: Runlight.Mail.services()
+
+  defp mail_services_option(ids) do
+    ids = Enum.map(ids, &to_string/1)
+    known = Runlight.Mail.services()
+
+    for id <- ids,
+        not Enum.any?(known, &(&1["id"] == id)),
+        do: raise(ArgumentError, ~s(Runlight: mail_services names "#{id}", which is not a mail service))
+
+    Enum.filter(known, &(&1["id"] in ids))
+  end
 
   defp site_row(options, index) do
     options = Map.new(options, fn {k, v} -> {to_string(k), v} end)
@@ -297,7 +323,9 @@ defmodule Runlight do
 
       with sealed when is_binary(sealed) <- Store.setting(rl.store, "mail"),
            opened when is_binary(opened) <- Crypto.unseal(sealed, rl.secret),
-           {:ok, %Object{} = settings} <- JS.parse(opened) do
+           {:ok, %Object{} = settings} <- JS.parse(opened),
+           # A service no longer offered counts as none, so it is never sent through.
+           true <- Enum.any?(rl.mail_services, &(&1["id"] == settings["service"])) do
         Object.put(settings, "source", "dashboard")
       else
         _ -> app_settings(rl.app_mailer)
@@ -333,6 +361,14 @@ defmodule Runlight do
 
       if service == nil,
         do: raise(Runlight.MailError, message: "Pick a mail service", code: "mail_service", params: %{})
+
+      unless service in rl.mail_services,
+        do:
+          raise(Runlight.MailError,
+            message: "#{service["name"]} is not offered here. Pick another mail service",
+            code: "mail_service",
+            params: [{"service", service["id"]}]
+          )
 
       fields = service["fields"]
       text = fn name -> input |> JS.prop(name) |> JS.nullish("") |> JS.string() |> JS.trim() end
@@ -519,6 +555,72 @@ defmodule Runlight do
       end)
 
       :ok
+    end
+  end
+
+  # Whether init/1 finished within `ms`; false while it is still waiting, such as on another process creating the
+  # tables, which it goes on doing for the requests after this one. Its errors are raised.
+  defp ready_within?(%__MODULE__{table: table} = rl, ms) do
+    if State.get(table, :ready), do: true, else: wait_ready(rl, System.monotonic_time(:millisecond) + ms)
+  end
+
+  defp wait_ready(%__MODULE__{table: table} = rl, deadline) do
+    watch = Process.monitor(starter(rl))
+
+    receive do
+      {:DOWN, ^watch, :process, _, :normal} ->
+        true
+
+      {:DOWN, ^watch, :process, _, {:init_failed, error, stack}} ->
+        reraise error, stack
+
+      # Done before it was watched, or stopped some other way: the tables are there, or another start is due.
+      {:DOWN, ^watch, :process, _, _} ->
+        State.get(table, :ready) == true or
+          (System.monotonic_time(:millisecond) < deadline and wait_ready(rl, deadline))
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        Process.demonitor(watch, [:flush])
+        false
+    end
+  end
+
+  # The process running init/1 for the tracker hits waiting on it, which they share, so a long wait for another
+  # process's tables starts one more process here, not one for every hit. It outlives the hit that started it.
+  defp starter(%__MODULE__{table: table} = rl) do
+    case State.get(table, :starter) do
+      pid when is_pid(pid) ->
+        # One killed outright left its entry behind.
+        if Process.alive?(pid) do
+          pid
+        else
+          :ets.delete_object(table, {:starter, pid})
+          starter(rl)
+        end
+
+      nil ->
+        pid =
+          spawn(fn ->
+            receive do
+              :go -> :ok
+            end
+
+            try do
+              init(rl)
+            rescue
+              error -> exit({:init_failed, error, __STACKTRACE__})
+            after
+              :ets.delete_object(table, {:starter, self()})
+            end
+          end)
+
+        if :ets.insert_new(table, {:starter, pid}) do
+          send(pid, :go)
+          pid
+        else
+          Process.exit(pid, :kill)
+          starter(rl)
+        end
     end
   end
 
@@ -1339,7 +1441,10 @@ defmodule Runlight do
          %{} = payload <- Payload.parse(Request.text(request)),
          ua = Request.header(request, "user-agent") || "",
          false <- Ua.ai_agent(ua) != nil or Ua.bot?(ua),
-         true <- rl.limit == nil or RateLimit.allow?(rl.limit, client_ip(rl, request), now(rl)) do
+         true <- rl.limit == nil or RateLimit.allow?(rl.limit, client_ip(rl, request), now(rl)),
+         # While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+         # waits a moment at most and is then dropped, rather than holding its request until that is done.
+         true <- ready_within?(rl, @tracker_wait_ms) do
       now = now(rl)
       record_with_retries(rl, payload, request, now, 1)
     else

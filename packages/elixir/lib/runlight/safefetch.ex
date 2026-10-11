@@ -274,6 +274,84 @@ defmodule Runlight.Safefetch do
     end
   end
 
+  # Headers that describe a body, dropped with it when a redirect turns a request into a GET.
+  @body_headers ~w(content-type content-length content-encoding content-language content-location)
+  # Credentials, dropped when a redirect leads to another origin.
+  @credential_headers ~w(authorization proxy-authorization cookie)
+
+  @doc """
+  Fetches from a service someone set up, such as an AI model's API or a mail
+  webhook, which may well be on this computer or a private network, but is
+  never at a link-local or cloud metadata address. `fetch` is the fetcher
+  (`fn url, opts -> ... end`) and `opts` its options. The address is checked,
+  and so is every redirect's, up to `redirects:` of them (default 5), each
+  followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes
+  on as a GET with no body, and a redirect to another origin goes without the
+  credentials. A redirect past the last one comes back as it is. `timeout:`
+  is for all of them together. Answers `{:error, {:address_refused, host}}`
+  for an address it refuses, before anything is asked there.
+  """
+  @spec service_fetch((String.t(), keyword() -> {:ok, Response.t()} | {:error, term()}), String.t(), keyword()) ::
+          {:ok, Response.t()} | {:error, term()}
+  def service_fetch(fetch, target, opts) do
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, 30_000)
+
+    case Url.parse(target) do
+      nil ->
+        {:error, :invalid_url}
+
+      url ->
+        method = opts |> Keyword.get(:method, "GET") |> String.upcase()
+        ask = %{method: method, headers: Keyword.get(opts, :headers, []), body: Keyword.get(opts, :body)}
+        service_hop(fetch, url, ask, Keyword.drop(opts, [:method, :headers, :body, :redirects]), deadline, opts, 0)
+    end
+  end
+
+  defp service_hop(fetch, url, ask, rest, deadline, opts, hop) do
+    host = String.replace(url.hostname, ~r/^\[|\]$/, "")
+    left = deadline - System.monotonic_time(:millisecond)
+
+    cond do
+      metadata_host?(host) ->
+        {:error, {:address_refused, host}}
+
+      left <= 0 ->
+        {:error, :timeout}
+
+      true ->
+        sent =
+          [method: ask.method, headers: ask.headers] ++
+            if(ask.body == nil, do: [], else: [body: ask.body]) ++
+            Keyword.merge(rest, redirect: :manual, timeout: left)
+
+        with {:ok, answer} <- fetch.(Url.href(url), sent) do
+          location = Response.header(answer, "location")
+          next = location && Url.parse(location, url)
+
+          if answer.status < 300 or answer.status >= 400 or next == nil or hop >= Keyword.get(opts, :redirects, 5) do
+            {:ok, answer}
+          else
+            service_hop(fetch, next, redirected(ask, answer.status, url, next), rest, deadline, opts, hop + 1)
+          end
+        end
+    end
+  end
+
+  defp redirected(ask, status, from, to) do
+    ask =
+      if status == 303 or (status in [301, 302] and ask.method == "POST"),
+        do: %{
+          method: if(ask.method == "HEAD", do: "HEAD", else: "GET"),
+          body: nil,
+          headers: Enum.reject(ask.headers, fn {name, _} -> String.downcase(name) in @body_headers end)
+        },
+        else: ask
+
+    if Url.origin(to) != Url.origin(from),
+      do: %{ask | headers: Enum.reject(ask.headers, fn {name, _} -> String.downcase(name) in @credential_headers end)},
+      else: ask
+  end
+
   # An install on this machine: http://localhost or http://127.0.0.1, with any port.
   @local_install ~r/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/
 

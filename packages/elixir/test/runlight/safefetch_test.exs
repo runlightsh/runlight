@@ -4,6 +4,7 @@ defmodule Runlight.SafefetchTest do
 
   alias Runlight.Http.Response
   alias Runlight.Icon
+  alias Runlight.JS
   alias Runlight.Safefetch
   alias Runlight.Test.FakeFetcher
   alias Runlight.Test.Fixtures
@@ -353,5 +354,107 @@ defmodule Runlight.SafefetchTest do
     {rl, _} = instance(fetcher)
     assert Icon.fetch_icon(rl, "https://192.168.1.1") == nil
     assert FakeFetcher.requests(agent) == []
+  end
+
+  # A service someone set up, standing in for a local server: each path answers with a status and where it goes.
+  defp service(routes) do
+    FakeFetcher.new(fn url, _ ->
+      case Map.get(routes, url) do
+        {status, location} -> {:ok, Response.new("", status, [{"location", location}])}
+        nil -> {:ok, Response.new("ok", 200)}
+      end
+    end)
+  end
+
+  test "a service fetch checks every redirect's address, and refuses a link-local or metadata one before asking it" do
+    for {to, host} <- [
+          {"http://169.254.169.254/latest", "169.254.169.254"},
+          {"http://[fd00:ec2::254]/", "fd00:ec2::254"}
+        ] do
+      {fetcher, agent} = service(%{"http://127.0.0.1:8080/hook" => {302, to}})
+      opts = [method: "POST", headers: [{"content-type", "application/json"}], body: "{}", timeout: 5_000]
+      assert Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/hook", opts) == {:error, {:address_refused, host}}
+      assert Enum.map(FakeFetcher.requests(agent), & &1["url"]) == ["http://127.0.0.1:8080/hook"], "nothing asked there"
+    end
+
+    {fetcher, agent} = service(%{})
+
+    assert Safefetch.service_fetch(fetcher, "http://169.254.169.254/", timeout: 5_000) ==
+             {:error, {:address_refused, "169.254.169.254"}}
+
+    assert FakeFetcher.requests(agent) == []
+  end
+
+  test "a service fetch follows a redirect as fetch does, and stops after the last one" do
+    sent = [
+      method: "POST",
+      headers: [{"content-type", "application/json"}, {"authorization", "Bearer k"}, {"cookie", "a=1"}],
+      body: ~s({"a":1}),
+      timeout: 5_000
+    ]
+
+    # A 303 goes on as a GET with no body and nothing that describes one, and keeps the credentials on the same origin.
+    {fetcher, agent} = service(%{"http://127.0.0.1:8080/a" => {303, "/b"}})
+    assert {:ok, %Response{status: 200}} = Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/a", sent)
+    [_, second] = FakeFetcher.requests(agent)
+    assert {second["method"], second["url"], second["body"]} == {"GET", "http://127.0.0.1:8080/b", ""}
+    assert second["headers"] == JS.obj(authorization: "Bearer k", cookie: "a=1")
+    assert Keyword.get(List.last(FakeFetcher.inits(agent)), :redirect) == :manual
+
+    # A 307 keeps the method and the body.
+    {fetcher, agent} = service(%{"http://127.0.0.1:8080/a" => {307, "/b"}})
+    assert {:ok, _} = Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/a", sent)
+    [_, second] = FakeFetcher.requests(agent)
+    assert {second["method"], second["body"]} == {"POST", ~s({"a":1})}
+    assert second["headers"]["content-type"] == "application/json"
+
+    # Another origin gets no credentials.
+    {fetcher, agent} = service(%{"http://127.0.0.1:8080/a" => {307, "http://localhost:8080/b"}})
+    assert {:ok, _} = Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/a", sent)
+    [_, second] = FakeFetcher.requests(agent)
+    assert second["url"] == "http://localhost:8080/b"
+    assert second["headers"] == JS.obj("content-type": "application/json")
+
+    # A loop stops after five redirects, and the last answer comes back as it is.
+    {fetcher, agent} = service(%{"http://127.0.0.1:8080/loop" => {302, "/loop"}})
+
+    assert {:ok, %Response{status: 302}} =
+             Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/loop", timeout: 5_000)
+
+    assert length(FakeFetcher.requests(agent)) == 6
+  end
+
+  test "the assistant's list of models and a mail webhook refuse a redirect to a metadata address" do
+    {fetcher, _} = service(%{"http://127.0.0.1:11434/v1/models" => {302, "http://169.254.169.254/latest"}})
+    {rl, _} = instance(fetcher)
+
+    error =
+      assert_raise Runlight.AssistantError, fn ->
+        Runlight.Assistant.list_models(rl, JS.obj(provider: "custom", baseUrl: "http://127.0.0.1:11434/v1", key: ""))
+      end
+
+    assert {error.code, error.params} == {"address_refused", [{"host", "169.254.169.254"}]}
+
+    assert error.message ==
+             "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to"
+
+    {fetcher, _} = service(%{"http://127.0.0.1:8080/hook" => {307, "http://[fd00:ec2::254]/hook"}})
+    message = %{to: "a@example.com", from: "r@example.com", subject: "Hi", html: "<p>Hi</p>", text: "Hi", headers: []}
+
+    error =
+      assert_raise Runlight.MailError, fn ->
+        Runlight.Mail.deliver(fetcher, JS.obj(service: "webhook", url: "http://127.0.0.1:8080/hook"), message)
+      end
+
+    assert {error.code, error.params} == {"address_refused", [{"host", "fd00:ec2::254"}]}
+  end
+
+  test "a public fetch goes through an httpc profile of its own, which has no proxy" do
+    # A proxy, such as one an app sets on httpc's default profile, would look the name up again itself.
+    assert Runlight.Fetch.profile(false) == :default
+    assert Runlight.Fetch.profile(true) == :runlight_public
+
+    assert :httpc.get_options([:proxy, :https_proxy], :runlight_public) ==
+             {:ok, [proxy: {:undefined, []}, https_proxy: {:undefined, []}]}
   end
 end
