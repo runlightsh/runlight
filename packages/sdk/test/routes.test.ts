@@ -102,6 +102,41 @@ test("the element picker sends its choice only to the dashboard its ticket names
   assert.equal(await target(hub.ticket), "https://hub.example.net");
 });
 
+test("broken percent escapes in a path answer as a name nobody has, never an error", async () => {
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), sites: [{ id: "blog", hostnames: ["blog.example.com"] }] });
+  const { handler } = rl.routes({ token: "secret" });
+  const call = (method: string, path: string, body?: unknown, auth = "Bearer secret") =>
+    handler(req(path, { method, headers: { authorization: auth, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+  const cases: Array<[string, string, string, unknown?]> = [
+    ["PATCH", "/runlight/api/goals/%E0?site=blog", "unknown_goal", { name: "X", kind: "event", match: "X" }],
+    ["DELETE", "/runlight/api/goals/%zz?site=blog", "unknown_goal"],
+    ["PATCH", "/runlight/api/shares/%E0%A4?site=blog", "unknown_share", { name: "X" }],
+    ["DELETE", "/runlight/api/shares/%?site=blog", "unknown_share"],
+    ["PATCH", "/runlight/api/sites/%E0", "unknown_site", { name: "X" }],
+    ["DELETE", "/runlight/api/sites/%zz", "unknown_site"],
+    ["GET", "/runlight/api/link-domains/%E0/check?site=blog", "unknown_domain"],
+    ["DELETE", "/runlight/api/link-domains/%zz?site=blog", "unknown_domain"],
+  ];
+  for (const [method, path, code, body] of cases) {
+    const answer = await call(method, path, body);
+    assert.equal(answer.status, 404, `${method} ${path}`);
+    assert.equal(((await answer.json()) as any).code, code, `${method} ${path}`);
+  }
+  // A hub's manage token, checked against its one site before anything else.
+  const made = (await (await call("POST", "/runlight/api/tokens", { name: "Hub", scope: "manage", site: "blog" })).json()) as any;
+  const hub = await call("PATCH", "/runlight/api/sites/%E0", { name: "X" }, `Bearer ${made.secret}`);
+  assert.equal(hub.status, 404);
+  // Public pages and short links: the share page, unsubscribing, the app's link path, and a link domain.
+  assert.equal((await handler(req("/runlight/share/%E0"))).status, 404);
+  assert.equal((await handler(req("/runlight/unsubscribe/%E0"))).status, 404);
+  assert.equal((await handler(req("/runlight/assets/app.%E0.js"))).status, 404);
+  assert.equal((await rl.linkHandler()(req("/go/%E0"))).status, 404);
+  await rl.store.addLinkDomain("go.example.net", "blog", Date.now());
+  rl.forgetLinkDomains();
+  const linked = await rl.linkDomainResponse(new Request("https://go.example.net/%E0"));
+  assert.equal(linked?.status, 404);
+});
+
 test("the check endpoint takes the cron secret", async () => {
   const { POST } = make().routes({ token: "secret", cronSecret: "cron" });
   assert.equal((await POST(req("/runlight/api/check", { method: "POST", headers: { "content-type": "application/json" } }))).status, 401);

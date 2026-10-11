@@ -199,11 +199,8 @@ export function shortLinks(runlight: Runlight): (req: IncomingMessage, res: Serv
       const context = { ip: req.socket?.remoteAddress ?? "" };
       let answer = await runlight.linkDomainResponse(request, context);
       if (!answer && request.method === "GET" && own.test(new URL(request.url).pathname)) {
-        // A slug that is not valid percent-encoding is no link, so it is the app's too.
-        const followed = await follow(request, context).catch((error: unknown) => {
-          if (error instanceof URIError) return null;
-          throw error;
-        });
+        // A slug that is not valid percent-encoding is no link (a 404), so it is the app's too.
+        const followed = await follow(request, context);
         if (followed && followed.status !== 404) answer = followed;
       }
       if (answer) {

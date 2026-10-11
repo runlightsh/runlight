@@ -9,6 +9,7 @@ import { DIMENSIONS, isDimension, isSessionDimension, MAX_FILTERS, parseFilter, 
 import { EMAIL, LINK_DOMAIN_CHECK, RETENTION_MONTHS, envValue as env, type RequestContext, type Runlight } from "./runlight.js";
 import { mcpResponse } from "./mcp.js";
 import { readablePath } from "./sources.js";
+import { decodePart } from "./path.js";
 import { oauthResponse, resourceMetadataUrl } from "./oauth.js";
 import { csv, zip } from "./zip.js";
 import { GoalError, clickRules, goalFrom } from "./goals.js";
@@ -624,8 +625,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       }
       const checkMatch = /^\/api\/link-domains\/([^/]+)\/check$/.exec(path);
       if (checkMatch && request.method === "GET") {
-        const domain = decodeURIComponent(checkMatch[1]!);
-        if (!(await runlight.store.linkDomains()).some((d) => d.domain === domain && d.site === site.id)) return coded("Unknown domain", "unknown_domain", 404);
+        const domain = decodePart(checkMatch[1]!);
+        if (domain === null || !(await runlight.store.linkDomains()).some((d) => d.domain === domain && d.site === site.id)) return coded("Unknown domain", "unknown_domain", 404);
         // One added before names inside private networks were refused is never fetched.
         // What the check found, as a code the dashboard says in its own words, beside the English reason.
         // Where the domain should point, for the setup steps: this server's name, and its public addresses
@@ -650,8 +651,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
 
       const domainMatch = /^\/api\/link-domains\/([^/]+)$/.exec(path);
       if (domainMatch && request.method === "DELETE") {
-        const domain = decodeURIComponent(domainMatch[1]!);
-        if (!(await runlight.store.linkDomains()).some((d) => d.domain === domain && d.site === site.id)) return coded("Unknown domain", "unknown_domain", 404);
+        const domain = decodePart(domainMatch[1]!);
+        if (domain === null || !(await runlight.store.linkDomains()).some((d) => d.domain === domain && d.site === site.id)) return coded("Unknown domain", "unknown_domain", 404);
         await runlight.store.removeLinkDomain(domain);
         runlight.forgetLinkDomains();
         return json({ ok: true });
@@ -883,8 +884,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     const site = await querySite(url);
     if (site instanceof Response) return site;
     const existing = await runlight.store.goals(site.id);
-    const id = path === "/api/goals" ? undefined : decodeURIComponent(path.slice("/api/goals/".length));
-    if (id !== undefined && !existing.some((g) => g.id === id)) return coded("Unknown goal", "unknown_goal", 404);
+    const id = path === "/api/goals" ? undefined : decodePart(path.slice("/api/goals/".length));
+    if (id !== undefined && (id === null || !existing.some((g) => g.id === id))) return coded("Unknown goal", "unknown_goal", 404);
     trackers.clear();
     if (request.method === "DELETE") {
       await runlight.store.deleteGoal(id!);
@@ -1062,8 +1063,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       return coded("Method not allowed", "method_not_allowed", 405);
     }
 
-    const id = decodeURIComponent(path.slice("/api/shares/".length));
-    const share = SHARE_ID.test(id) ? await runlight.store.shareById(id) : null;
+    const id = decodePart(path.slice("/api/shares/".length));
+    const share = id !== null && SHARE_ID.test(id) ? await runlight.store.shareById(id) : null;
     if (!share || share.site !== site.id) return coded("Unknown share", "unknown_share", 404);
     if (request.method === "PATCH") {
       const body = await readJson(request);
@@ -1241,7 +1242,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (token?.scope === "manage" && managePath(request.method, path)) {
       const asked = url.searchParams.get("site");
       const siteMatch = /^\/api\/sites\/([^/]+)$/.exec(path);
-      if ((asked && asked !== token.site) || (siteMatch && decodeURIComponent(siteMatch[1]!) !== token.site)) return coded("Unknown site", "unknown_site", 404);
+      if ((asked && asked !== token.site) || (siteMatch && decodePart(siteMatch[1]!) !== token.site)) return coded("Unknown site", "unknown_site", 404);
       if (siteMatch && isJson(request)) {
         // Where a site lives stays with its owner: a hub may rename it, never move it.
         const body = (await request.clone().json().catch(() => null)) as Record<string, unknown> | null;
@@ -1628,8 +1629,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (siteMatch && request.method === "DELETE") {
       const access = await canRead(request);
       if (access !== true) return denied(access);
+      const id = decodePart(siteMatch[1]!);
+      if (id === null) return coded("Unknown site", "unknown_site", 404);
       try {
-        await runlight.deleteSite(decodeURIComponent(siteMatch[1]!));
+        await runlight.deleteSite(id);
         return json({ ok: true });
       } catch (error) {
         if (error instanceof RangeError) return error.message === "Unknown site" ? coded(error.message, "unknown_site", 404) : refused(error, "site_invalid");
@@ -1649,8 +1652,9 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (body.retentionMonths !== undefined && body.retentionMonths !== null && !RETENTION_MONTHS.includes(Number(body.retentionMonths))) {
         return coded(`Keep visits for ${RETENTION_MONTHS.join(", ")} months, or forever`, "retention_bad", 400, { months: RETENTION_MONTHS.join(", ") });
       }
+      const id = decodePart(siteMatch[1]!);
+      if (id === null) return coded("Unknown site", "unknown_site", 404);
       try {
-        const id = decodeURIComponent(siteMatch[1]!);
         const remote = runlight.remote(id);
         // How long a connected site keeps visits, and the timezone its days follow, are the install's
         // settings: this server passes them on, and changes its own row only once the install took them.
@@ -1672,7 +1676,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         } else if (!remote && body.retentionMonths !== undefined) {
           await runlight.setRetention(id, body.retentionMonths === null ? null : Number(body.retentionMonths));
         }
-        const site = await runlight.updateSite(decodeURIComponent(siteMatch[1]!), {
+        const site = await runlight.updateSite(id, {
           ...(body.name !== undefined ? { name: String(body.name) } : {}),
           ...(body.timezone !== undefined ? { timezone: String(body.timezone) } : {}),
           ...(body.hostnames !== undefined && runlight.managedSites ? { hostnames: body.hostnames } : {}),

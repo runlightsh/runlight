@@ -1569,4 +1569,36 @@ const FIRST: Scenario[] = [
   },
 ];
 
-export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT];
+/** Escapes that decode to no text at all (%E0 alone is half a character), which every HTTP stack still passes on. */
+const ESCAPES: Scenario[] = [
+  {
+    name: "broken percent escapes in a path answer as a name nobody has",
+    site: { hostnames: ["blog.example.com"], timezone: "UTC" },
+    sites: [{ id: "blog", hostnames: ["blog.example.com"], timezone: "UTC" }],
+    start: Date.UTC(2026, 9, 7, 12, 0),
+    token: "conformance",
+    steps: [
+      patch("/api/goals/%E0?site=blog", { name: "X", kind: "event", match: "X" }),
+      del("/api/goals/%C3%28?site=blog"),
+      patch("/api/shares/%E0%A4?site=blog", { name: "X" }),
+      del("/api/shares/%FF?site=blog"),
+      patch("/api/sites/%E0", { name: "X" }),
+      del("/api/sites/%E0"),
+      get("/api/link-domains/%E0/check?site=blog"),
+      del("/api/link-domains/%E0?site=blog"),
+      // A hub's manage token, checked against its one site first.
+      { ...post("/api/tokens", { name: "Hub", scope: "manage", site: "blog" }), capture: { hub: "secret" } },
+      patch("/api/sites/%E0", { name: "X" }, asJson("{{hub}}")),
+      // Public pages, assets, and short links.
+      { method: "GET", path: "/share/%E0" },
+      { method: "GET", path: "/unsubscribe/%E0" },
+      { method: "GET", path: "/assets/app.%E0.js" },
+      { method: "GET", path: "/assets/locale.%E0.json" },
+      { to: "links", method: "GET", path: "/go/%E0", headers: { "user-agent": CHROME } },
+      post("/api/link-domains?site=blog", { domain: "go.runlight-conformance.com" }),
+      { to: "linkDomain", host: "go.runlight-conformance.com", method: "GET", path: "/%E0", headers: { "user-agent": CHROME } },
+    ],
+  },
+];
+
+export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...ESCAPES];

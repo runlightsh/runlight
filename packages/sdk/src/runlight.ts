@@ -9,6 +9,7 @@ import { PROVIDERS, type AssistantSettings } from "./assistant.js";
 import { readJsonCapped } from "./body.js";
 import { installAddress, installFetch, metadataHost, publicAddress } from "./safefetch.js";
 import { RateLimit } from "./limit.js";
+import { decodePart } from "./path.js";
 import { createRoutes, type Routes, type RoutesOptions } from "./routes.js";
 import { attribute, parsePage, stripWww, type Page } from "./sources.js";
 import { EVENT_TAIL_MS, type ReportRow, type SiteOverrides, type SiteRow, type SqlStore } from "./store.js";
@@ -994,7 +995,8 @@ export class Runlight {
   linkHandler(): (request: Request, context?: RequestContext) => Promise<Response> {
     return async (request, context = {}) => {
       const path = new URL(request.url).pathname;
-      const slug = path.startsWith(`${this.linkPath}/`) ? decodeURIComponent(path.slice(this.linkPath.length + 1)) : "";
+      // A slug with broken escapes is one no link has.
+      const slug = path.startsWith(`${this.linkPath}/`) ? (decodePart(path.slice(this.linkPath.length + 1)) ?? "") : "";
       const found = slug && !slug.includes("/") ? await this.redirect(request, slug, "", context) : null;
       return found ?? new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
     };
@@ -1022,7 +1024,7 @@ export class Runlight {
     for (const base of this.routeBases.size ? this.routeBases : ["/runlight"]) {
       if (base !== "/" && (url.pathname === base || url.pathname.startsWith(`${base}/`))) return null;
     }
-    const slug = decodeURIComponent(url.pathname.slice(1));
+    const slug = decodePart(url.pathname.slice(1)) ?? "";
     const found = slug && !slug.includes("/") ? await this.redirect(request, slug, host, context) : null;
     return found ?? new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
   }
