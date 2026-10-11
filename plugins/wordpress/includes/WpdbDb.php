@@ -14,6 +14,7 @@
 namespace Runlight\WordPress;
 
 use Runlight\Db\Db;
+use Runlight\Db\TablesBusy;
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
@@ -88,18 +89,29 @@ final class WpdbDb implements Db {
 
 	/**
 	 * Runs `$fn` holding a lock on the database, so two requests starting at once do not race to create the same tables.
+	 * Waits for the lock at most TablesBusy::wait() seconds, so a request does not wait on a long index build for good.
 	 *
 	 * @param callable $fn What to run.
+	 * @throws TablesBusy When another request held the lock all that time.
 	 */
 	public function exclusive( callable $fn ): mixed {
-		// Not got within five seconds means another request is creating the tables: ask again.
-		do {
-			$ok = $this->wpdb->get_var( 'SELECT GET_LOCK(' . self::LOCK . ', 5)' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- a fixed statement taking Runlight's own lock.
+		$wait  = TablesBusy::wait();
+		$until = microtime( true ) + $wait;
+		for ( ;; ) {
+			$left = max( 1, min( 5, (int) ceil( $until - microtime( true ) ) ) );
+			$ok   = $this->wpdb->get_var( 'SELECT GET_LOCK(' . self::LOCK . ', ' . $left . ')' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- a fixed statement taking Runlight's own lock, with a whole number of seconds.
 			$this->check();
 			if ( null === $ok ) {
 				throw new \RuntimeException( 'Runlight: MySQL refused the lock for creating tables' );
 			}
-		} while ( 1 !== (int) $ok );
+			if ( 1 === (int) $ok ) {
+				break;
+			}
+			// Not got in time: another request is creating the tables. Ask again, until the wait is up.
+			if ( microtime( true ) >= $until ) {
+				throw new TablesBusy( $wait ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- never printed: Routes answers it with a fixed JSON error.
+			}
+		}
 		try {
 			return $fn( $this );
 		} finally {
