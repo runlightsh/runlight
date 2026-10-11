@@ -145,7 +145,31 @@ function is_admin(): bool {
 	return false;
 }
 function is_multisite(): bool {
-	return false;
+	return isset( $GLOBALS['wp_test']['blogs'] );
+}
+
+// A network, when a test sets $GLOBALS['wp_test']['blogs'] to id => uploads folder: each site has options and
+// uploads of its own, and the options of the sites not current wait in 'parked'.
+function get_sites( $args = array() ): array {
+	return array_keys( $GLOBALS['wp_test']['blogs'] ?? array() );
+}
+function get_current_blog_id(): int {
+	return $GLOBALS['wp_test']['blog'] ?? 1;
+}
+function switch_to_blog( $id ): bool {
+	$GLOBALS['wp_test']['stack'][] = get_current_blog_id();
+	wp_test_blog( (int) $id );
+	return true;
+}
+function restore_current_blog(): bool {
+	wp_test_blog( (int) array_pop( $GLOBALS['wp_test']['stack'] ) );
+	return true;
+}
+function wp_test_blog( int $id ): void {
+	$GLOBALS['wp_test']['parked'][ get_current_blog_id() ] = wp_test_options();
+	$GLOBALS['wp_test']['blog']                         = $id;
+	$GLOBALS['wp_test']['options']                      = $GLOBALS['wp_test']['parked'][ $id ] ?? array();
+	$GLOBALS['wp_test']['uploads']                      = $GLOBALS['wp_test']['blogs'][ $id ];
 }
 function is_404(): bool {
 	return false;

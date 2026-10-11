@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import vm from "node:vm";
 import { AI_AGENTS } from "../src/data/agents.js";
 
 // The tests that run PHP skip where it is not installed, except in CI, which
@@ -695,9 +696,9 @@ test("the Craft plugin keeps its tables under Craft's prefix, beside anyone else
   assert.deepEqual(JSON.parse(fresh), { kind: "craft", clash: false, prefix: "craft_rl_", dropped: [], removed: 0, log: [] });
   assert.equal(JSON.parse(run(["entries"], { driver: "pgsql" })!).kind, "craft");
   assert.equal(JSON.parse(run(["entries"], { version: "10.11.6-MariaDB" })!).kind, "sqlite");
-  // This install's own tables: used, whether or not its folder is here.
   assert.equal(JSON.parse(run(["entries"], { version: "8.0.19" })!).kind, "sqlite");
   assert.equal(JSON.parse(run(["entries"], { version: "8.0.20" })!).kind, "craft");
+  // This install's own tables: used, whether or not its folder is here.
   assert.equal(JSON.parse(run([...own(""), "entries"], { owner: "install-1" })!).kind, "craft");
   // A SQLite file already made stays the choice.
   assert.equal(JSON.parse(run(["entries"], { sqlite: true })!).kind, "sqlite");
@@ -844,4 +845,295 @@ test("the Craft plugin keeps rate counts in two cache entries, however many visi
   `);
   if (answer === null) return;
   assert.deepEqual(JSON.parse(answer), { most: 2, refused: 10, after: [] });
+});
+
+test("every CMS plugin frames the dashboard with the one script in the PHP package", () => {
+  const read = (file: string) => readFileSync(new URL(`../../../${file}`, import.meta.url), "utf8");
+  const script = read("packages/php/assets/frame.js");
+  // Drupal loads it as a library, so it keeps a copy in the module.
+  assert.equal(read("plugins/drupal/js/frame.js"), script, "plugins/drupal/js/frame.js differs from packages/php/assets/frame.js: copy it over");
+  assert.match(read("plugins/drupal/js/embed.js"), /forEach\(window\.runlightFrame\)/);
+  // WordPress and Craft put the package's own on the page.
+  assert.match(read("plugins/wordpress/includes/Dashboard.php"), /wp_add_inline_script\( 'runlight-dashboard', Frame::run\(\) \)/);
+  assert.match(read("plugins/craft/src/controllers/DashboardController.php"), /'frameScript' => Frame::run\(\)/);
+  for (const file of ["plugins/wordpress/includes/Dashboard.php", "plugins/craft/src/templates/_dashboard.twig", "plugins/drupal/src/Controller/DashboardController.php"]) {
+    const source = read(file);
+    assert.match(source, /data-runlight-bars/, `${file} names its admin bars`);
+    assert.match(source, /data-runlight-gap/, `${file} says how much room to leave`);
+    assert.doesNotMatch(source, /postMessage/, `${file} keeps a copy of the frame script`);
+  }
+});
+
+test("the frame script grows the frame, says what is on screen, and listens to its own dashboard alone", () => {
+  const script = readFileSync(new URL("../../../packages/php/assets/frame.js", import.meta.url), "utf8");
+  const listeners: Record<string, ((event: any) => void)[]> = {};
+  const posted: unknown[] = [];
+  const reloads: number[] = [];
+  const dashboard = { postMessage: (message: unknown, origin: string) => posted.push([message, origin]) };
+  const attributes: Record<string, string> = { "data-runlight-origin": "https://stats.example", "data-runlight-bars": "#bar", "data-runlight-gap": "24" };
+  const frame = {
+    style: {} as Record<string, string>,
+    contentWindow: dashboard,
+    getAttribute: (name: string) => attributes[name] ?? null,
+    getBoundingClientRect: () => ({ top: 100, bottom: 100 + parseInt(frame.style.height ?? "0", 10) }),
+    addEventListener: (type: string, fn: (event: any) => void) => (listeners[`frame:${type}`] ??= []).push(fn),
+  };
+  // The admin's bar is fixed at the top, 32 pixels tall.
+  const bar = { getBoundingClientRect: () => ({ top: 0, bottom: 32, height: 32 }) };
+  const window: Record<string, unknown> = {
+    innerHeight: 800,
+    scrollY: 0,
+    addEventListener: (type: string, fn: (event: any) => void) => (listeners[type] ??= []).push(fn),
+  };
+  const context = {
+    window,
+    document: { querySelectorAll: (selector: string) => (selector === "#bar" ? [bar] : []) },
+    getComputedStyle: () => ({ position: "fixed" }),
+    requestAnimationFrame: (fn: () => void) => fn(),
+    location: { reload: () => reloads.push(1) },
+    Number,
+    Math,
+    isFinite,
+  };
+  vm.runInNewContext(script, context);
+  (window.runlightFrame as (frame: unknown) => void)(frame);
+  // Until the dashboard says how tall it is, the frame fills the window below it, less the gap.
+  assert.equal(frame.style.height, "676px");
+  const send = (data: unknown, origin = "https://stats.example", source: unknown = dashboard) => listeners.message!.forEach((fn) => fn({ data, origin, source }));
+  send({ type: "runlight:height", height: 1500.2 });
+  assert.equal(frame.style.height, "1501px");
+  // The slice on screen starts below the bar: 100 is the frame's top, so nothing of it is covered.
+  // Objects made in the script's own context, so compared as JSON.
+  assert.deepEqual(JSON.parse(JSON.stringify(posted.at(-1))), [{ type: "runlight:viewport", top: 0, height: 700 }, "https://stats.example"]);
+  // Another page, another frame, or a height that is no number changes nothing.
+  send({ type: "runlight:height", height: 3000 }, "https://evil.example");
+  send({ type: "runlight:height", height: 3000 }, "https://stats.example", {});
+  send({ type: "runlight:height", height: Infinity });
+  send({ type: "runlight:height", height: "3000" });
+  assert.equal(frame.style.height, "1501px");
+  send({ type: "runlight:reload" }, "https://evil.example");
+  assert.equal(reloads.length, 0);
+  send({ type: "runlight:reload" });
+  assert.equal(reloads.length, 1);
+  // Once sized, a resize leaves the height to the dashboard.
+  listeners.resize!.forEach((fn) => fn({}));
+  assert.equal(frame.style.height, "1501px");
+  // No frame on the page, no harm.
+  (window.runlightFrame as (frame: unknown) => void)(null);
+});
+
+test("deleting the WordPress plugin removes what it kept, on every site of a network", (t) => {
+  const base = mkdtempSync(path.join(tmpdir(), "runlight-wp-uninstall-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const answer = wordpressPhp(t, `
+    define("WP_UNINSTALL_PLUGIN", "runlight/runlight.php");
+    class wpdb {
+      public $prefix = "wp_";
+      public $options = "wp_options";
+      public array $queries = [];
+      public function esc_like($text) { return addcslashes($text, "_%\\\\"); }
+      public function prepare($sql, ...$args) { foreach ($args as $arg) { $sql = preg_replace("/%s/", "'" . $arg . "'", $sql, 1); } return $sql; }
+      public function query($sql) { $this->queries[] = get_current_blog_id() . ": " . $sql; return 1; }
+    }
+    $GLOBALS["wpdb"] = new wpdb();
+    $base = ${JSON.stringify(base)};
+    $GLOBALS["wp_test"]["blogs"] = [1 => "$base/uploads", 2 => "$base/uploads/sites/2"];
+    foreach ($GLOBALS["wp_test"]["blogs"] as $id => $uploads) {
+      mkdir("$uploads/runlight/geo", 0777, true);
+      foreach (["runlight-$id.db", "runlight-$id.db-wal", "index.php", ".htaccess", "geo/dbip.mmdb"] as $file) {
+        touch("$uploads/runlight/$file");
+      }
+      // Someone else's file in uploads stays.
+      touch("$uploads/photo.jpg");
+      $GLOBALS["wp_test"]["parked"][$id] = [
+        "runlight_settings" => ["mode" => "local"],
+        "runlight_secret" => "s$id",
+        "runlight_checked" => 1,
+        "runlight_storage" => ["kind" => "sqlite", "file" => "runlight-$id.db"],
+        "cron:runlight_check" => 123,
+        "_transient_runlight_icon" => "x",
+        "blogname" => "Site $id",
+      ];
+    }
+    $GLOBALS["wp_test"]["blog"] = 1;
+    $GLOBALS["wp_test"]["options"] = $GLOBALS["wp_test"]["parked"][1];
+    $GLOBALS["wp_test"]["uploads"] = "$base/uploads";
+    require ${JSON.stringify(WORDPRESS + "uninstall.php")};
+    $GLOBALS["wp_test"]["parked"][get_current_blog_id()] = wp_test_options();
+    $left = [];
+    foreach ($GLOBALS["wp_test"]["blogs"] as $id => $uploads) {
+      $left[$id] = ["options" => array_keys($GLOBALS["wp_test"]["parked"][$id]), "runlight" => is_dir("$uploads/runlight"), "photo" => is_file("$uploads/photo.jpg")];
+    }
+    echo json_encode(["blog" => get_current_blog_id(), "left" => $left, "queries" => $GLOBALS["wpdb"]->queries]);
+  `);
+  if (answer === null) return;
+  const { blog, left, queries } = JSON.parse(answer);
+  assert.equal(blog, 1, "back on the site it started on");
+  // The transients go by a query, which the stand-in only records; every other row and file of Runlight's is gone.
+  const kept = { options: ["_transient_runlight_icon", "blogname"], runlight: false, photo: true };
+  assert.deepEqual(left, { 1: kept, 2: kept });
+  assert.equal(queries.length, 2);
+  assert.match(queries[0], /^1: DELETE FROM wp_options WHERE option_name LIKE '\\_transient\\_runlight\\_%' OR option_name LIKE '\\_transient\\_timeout\\_runlight\\_%'$/);
+  assert.match(queries[1], /^2: DELETE FROM/);
+});
+
+test("the WordPress plugin sends Runlight's email through WordPress only when a real mailer is set up", (t) => {
+  const run = (setup: string) =>
+    wordpressPhp(t, `
+      define("WPINC", "wp-includes");
+      ${setup}
+      require ${JSON.stringify(WORDPRESS + "includes/Mailer.php")};
+      $option = Runlight\\WordPress\\Mailer::option();
+      echo json_encode($option === null ? null : array_diff_key($option, ["send" => 1]));
+    `);
+  const none = run(`update_option("admin_email", "admin@example.com");`);
+  if (none === null) return;
+  // WordPress alone sends with PHP's mail(), which Runlight does not count as a mailer.
+  assert.equal(JSON.parse(none), null);
+  assert.deepEqual(JSON.parse(run(`update_option("admin_email", "admin@example.com"); update_option("active_plugins", ["akismet/akismet.php", "wp-mail-smtp/wp_mail_smtp.php"]);`)!), {
+    from: "admin@example.com",
+    fromName: "Test site",
+    via: "WordPress (WP Mail SMTP)",
+  });
+  // A plugin it does not know, which hooks WordPress's mailer.
+  assert.equal(JSON.parse(run(`update_option("admin_email", "admin@example.com"); add_action("phpmailer_init", "strlen");`)!).via, "WordPress");
+  assert.equal(JSON.parse(run(`update_option("admin_email", "admin@example.com"); add_filter("pre_wp_mail", "strlen");`)!).via, "WordPress");
+  // No address to send from: none.
+  assert.equal(JSON.parse(run(`update_option("admin_email", "not an address"); update_option("active_plugins", ["fluent-smtp/fluent-smtp.php"]);`)!), null);
+});
+
+test("the Drupal module sends Runlight's email through Drupal only when a real mailer is set up", (t) => {
+  const run = (mail: Record<string, unknown>, definitions: Record<string, unknown>, mailsystem: Record<string, unknown> = {}) =>
+    drupalPhp(t, `
+      namespace DrupalTest {
+        final class Mail implements \\Drupal\\Core\\Mail\\MailManagerInterface {
+          public function __construct(private array $definitions) {}
+          public function hasDefinition(string $id): bool { return isset($this->definitions[$id]); }
+          public function getDefinition(string $id): array { return $this->definitions[$id]; }
+        }
+        $config = new ConfigFactory();
+        $config->configs["system.site"] = new Config(["mail" => "site@example.com", "name" => "<em>Test</em> site"]);
+        $config->configs["system.mail"] = new Config(${phpArray(mail)});
+        $config->configs["mailsystem.settings"] = new Config(${phpArray(mailsystem)});
+        $option = \\Drupal\\runlight\\Mailer::option($config, new Mail(${phpArray(definitions)}), "en");
+        echo json_encode($option === null ? null : array_diff_key($option, ["send" => 1]));
+      }
+    `);
+  const symfony = { symfony_mailer: { provider: "core", label: "Symfony mailer" }, php_mail: { provider: "core", label: "PHP mailer" } };
+  const plain = run({ interface: { default: "php_mail" } }, symfony);
+  if (plain === null) return;
+  assert.equal(JSON.parse(plain), null);
+  // Core's Symfony mailer counts only with a transport other than the server's sendmail.
+  assert.equal(JSON.parse(run({ interface: { default: "symfony_mailer" }, "mailer_dsn.scheme": "sendmail" }, symfony)!), null);
+  assert.deepEqual(JSON.parse(run({ interface: { default: "symfony_mailer" }, "mailer_dsn.scheme": "smtp" }, symfony)!), { from: "site@example.com", fromName: "Test site", via: "Drupal (SMTP)" });
+  // A module's sender, picked for Runlight alone, or by the Mail System module.
+  const smtp = { ...symfony, SMTPMailSystem: { provider: "smtp", label: "SMTP Mailer" } };
+  assert.equal(JSON.parse(run({ interface: { default: "php_mail", runlight: "SMTPMailSystem" } }, smtp)!).via, "Drupal (SMTP Mailer)");
+  assert.equal(JSON.parse(run({ interface: { default: "php_mail" } }, smtp, { "defaults.sender": "SMTPMailSystem" })!).via, "Drupal (SMTP Mailer)");
+  // A sender whose module is gone sends nothing.
+  assert.equal(JSON.parse(run({ interface: { default: "SMTPMailSystem" } }, symfony)!), null);
+});
+
+test("the Craft plugin sends Runlight's email through Craft only when a real mailer is set up", (t) => {
+  const run = (transport: string, fromEmail = "site@example.com") =>
+    craftPhp(t, `
+      namespace craft\\mail\\transportadapters {
+        interface TransportAdapterInterface {}
+        final class Sendmail implements TransportAdapterInterface {}
+      }
+      namespace CraftTest {
+        final class Smtp implements \\craft\\mail\\transportadapters\\TransportAdapterInterface {
+          public static function displayName(): string { return "SMTP"; }
+        }
+        final class Gone {}
+      }
+      namespace craft\\helpers {
+        final class App {
+          public static function mailSettings(): object {
+            return (object) ["transportType" => ${JSON.stringify(transport)}, "fromEmail" => '$MAIL_FROM', "fromName" => " Test site "];
+          }
+          public static function parseEnv(?string $value): ?string {
+            return $value === '$MAIL_FROM' ? ${JSON.stringify(fromEmail)} : $value;
+          }
+        }
+      }
+      namespace {
+        $option = \\Runlight\\Craft\\Mailer::option();
+        echo json_encode($option === null ? null : array_diff_key($option, ["send" => 1]));
+      }
+    `);
+  const sendmail = run("craft\\mail\\transportadapters\\Sendmail");
+  if (sendmail === null) return;
+  // Craft's default, the server's sendmail, is not counted as a mailer.
+  assert.equal(JSON.parse(sendmail), null);
+  assert.deepEqual(JSON.parse(run("CraftTest\\Smtp")!), { from: "site@example.com", fromName: "Test site", via: "Craft (SMTP)" });
+  // A transport whose plugin is gone, or none at all, or no address to send from.
+  assert.equal(JSON.parse(run("CraftTest\\Gone")!), null);
+  assert.equal(JSON.parse(run("")!), null);
+  assert.equal(JSON.parse(run("CraftTest\\Smtp", "nobody")!), null);
+});
+
+/** A value as PHP source, through JSON. */
+function phpArray(value: unknown): string {
+  return `json_decode(${JSON.stringify(JSON.stringify(value))}, true)`;
+}
+
+test("each CMS plugin counts nothing until a choice is made, and reads an older install's address as a Runlight elsewhere", (t) => {
+  // Each case: what is saved, then where Runlight runs and whether it is set up.
+  const cases: [Record<string, string>, string, boolean][] = [
+    [{}, "", false],
+    // Saved before there was a choice: an address means a Runlight elsewhere.
+    [{ address: "https://stats.example.com" }, "remote", true],
+    [{ mode: "local" }, "local", true],
+    [{ mode: "local", address: "https://stats.example.com" }, "local", true],
+    // "Elsewhere" with nothing entered is no choice yet; a key alone is one.
+    [{ mode: "remote" }, "remote", false],
+    [{ mode: "remote", dashboard_key: "rl_x" }, "remote", true],
+    [{ mode: "nonsense" }, "", false],
+  ];
+  const wordpress = wordpressPhp(t, `
+    require ${JSON.stringify(WORDPRESS + "includes/Settings.php")};
+    $out = [];
+    foreach (${phpArray(cases.map((c) => c[0]))} as $saved) {
+      update_option("runlight_settings", $saved);
+      $out[] = [Runlight\\WordPress\\Settings::get()["mode"], Runlight\\WordPress\\Settings::set_up()];
+    }
+    echo json_encode($out);
+  `);
+  if (wordpress === null) return;
+  const expected = cases.map((c) => [c[1], c[2]]);
+  assert.deepEqual(JSON.parse(wordpress), expected, "WordPress");
+  const drupal = drupalPhp(t, `
+    namespace DrupalTest {
+      $out = [];
+      foreach (${phpArray(cases.map((c) => c[0]))} as $saved) {
+        $setup = new \\Drupal\\runlight\\Setup(new ConfigFactory(), new State(), new Invalidator());
+        $setup->save($saved + ["mode" => ""]);
+        $out[] = [$setup->mode(), $setup->isSetUp()];
+      }
+      echo json_encode($out);
+    }
+  `);
+  assert.deepEqual(JSON.parse(drupal!), expected, "Drupal");
+  const craft = craftPhp(t, `
+    namespace craft\\base {
+      class Model {
+        public function __construct(array $config = []) { foreach ($config as $name => $value) { $this->$name = $value; } }
+      }
+    }
+    namespace craft\\helpers {
+      class App {
+        public static function parseEnv($value) { return $value; }
+      }
+    }
+    namespace {
+      $out = [];
+      foreach (${phpArray(cases.map((c) => Object.fromEntries(Object.entries(c[0]).map(([k, v]) => [k === "dashboard_key" ? "dashboardKey" : k, v]))))} as $saved) {
+        $settings = new \\Runlight\\Craft\\models\\Settings($saved);
+        $out[] = [$settings->getMode(), $settings->isSetUp()];
+      }
+      echo json_encode($out);
+    }
+  `);
+  assert.deepEqual(JSON.parse(craft!), expected, "Craft");
 });
