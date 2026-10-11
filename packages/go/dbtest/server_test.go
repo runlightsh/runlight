@@ -155,7 +155,7 @@ func TestServerALinkDomainNeverTakesOverTheDashboard(t *testing.T) {
 	for _, c := range []struct {
 		path, cookie string
 		status       int
-	}{{"/sale", "", 302}, {"/login", "", 200}, {"/%E0", "", 404}, {"/go/%zz", "", 404}, {"/", cookie, 200}, {"/", "", 404}} {
+	}{{"/sale", "", 302}, {"/login", "", 200}, {"/pick-return", "", 200}, {"/pick-return.js", "", 200}, {"/%E0", "", 404}, {"/go/%zz", "", 404}, {"/", cookie, 200}, {"/", "", 404}} {
 		if r := s.do("GET", c.path, "", "", "cookie", c.cookie); r.Status != c.status {
 			t.Errorf("%s %q: %d", c.path, c.cookie, r.Status)
 		}

@@ -488,6 +488,18 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 		if !originPattern.MatchString(origin) {
 			return Coded("Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400, nil), nil
 		}
+		// Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+		// listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+		var back *pickBack
+		_, hasReturn := body.Get("return")
+		_, hasNonce := body.Get("nonce")
+		if hasReturn || hasNonce {
+			address, nonce := field(body, "return"), field(body, "nonce")
+			if len(hexText(address)) > 2048 || !pickReturnPattern.MatchString(address) || !strings.HasPrefix(address, origin+"/") || !pickNoncePattern.MatchString(nonce) {
+				return Coded("Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits", "pick_return", 400, nil), nil
+			}
+			back = &pickBack{address, nonce}
+		}
 		// A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
 		if c.managed != nil {
 			saved, has, err := r.Store.Setting(ctx, "token-origin:"+c.managed.ID)
@@ -498,7 +510,7 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 				return Coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403, nil), nil
 			}
 		}
-		ticket, err := rt.pickTicket(ctx, origin, site.ID)
+		ticket, err := rt.pickTicket(ctx, origin, site.ID, back)
 		if err != nil {
 			return nil, err
 		}
@@ -1418,35 +1430,43 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 		// The picker sends what it picked only to the dashboard its ticket names; without a good ticket it does
 		// nothing. It also runs only on the pages of the site the ticket names.
 		ticket, _ := queryValue(u, "runlight_ticket")
-		origin, siteID, found, err := rt.pickTarget(ctx, ticket)
+		target, err := rt.pickTarget(ctx, ticket)
 		if err != nil {
 			return nil, err
 		}
-		var hosts []string
-		haveHosts := true
-		if found {
+		// What the picker is told is empty unless this install knows the site the ticket names.
+		hosts := []string{}
+		origin, back, nonce := "", "", ""
+		if target != nil {
 			if err := r.Init(ctx); err != nil {
 				return nil, err
 			}
-			site, known := r.Site(siteID)
-			if known {
-				hosts = site.Hostnames
-			} else {
-				haveHosts = false
+			if site, known := r.Site(target.site); known {
+				if site.Hostnames != nil {
+					hosts = site.Hostnames
+				}
+				origin = target.origin
+				if target.back != nil {
+					back, nonce = target.back.url, target.back.nonce
+				}
 			}
-		} else {
-			hosts = []string{}
 		}
-		target := ""
-		if haveHosts {
-			target = origin
-		}
-		if hosts == nil {
-			hosts = []string{}
-		}
-		script := strings.Replace(assets.Picker, pickTargetPlaceholder, js.Stringify(target), 1)
+		script := strings.Replace(assets.Picker, pickTargetPlaceholder, js.Stringify(origin), 1)
 		script = strings.Replace(script, pickHostsPlaceholder, js.Stringify(js.Stringify(hosts)), 1)
+		script = strings.Replace(script, pickReturnPlaceholder, js.Stringify(back), 1)
+		script = strings.Replace(script, pickNoncePlaceholder, js.Stringify(nonce), 1)
 		return web.NewResponse(200, []byte(script), "content-type", "application/javascript; charset=utf-8", "cache-control", "no-store"), nil
+	}
+	// The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+	// script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+	if path == "/pick-return" && request.Method == "GET" {
+		tr := NewTranslator(acceptedLanguage(request))
+		body := `<div id="done" hidden><h1>` + escapeHTML(tr.T("pick.doneTitle", nil)) + `</h1><p>` + escapeHTML(tr.T("pick.done", nil)) + `</p></div>` +
+			`<div id="gone" hidden><h1>` + escapeHTML(tr.T("pick.goneTitle", nil)) + `</h1><p>` + escapeHTML(tr.T("pick.gone", nil)) + `</p></div>`
+		return smallPageScript(tr.Lang, body, 200, rt.base+"/pick-return.js"), nil
+	}
+	if path == "/pick-return.js" && request.Method == "GET" {
+		return web.NewResponse(200, []byte(assets.PickRelay), "content-type", "application/javascript; charset=utf-8", "cache-control", "no-store"), nil
 	}
 	if path == "/assets/world."+assets.Build.WorldHash+".json" && request.Method == "GET" {
 		return web.NewResponse(200, []byte(assets.WorldJSON), "content-type", "application/json; charset=utf-8", "cache-control", "public, max-age=31536000, immutable"), nil
