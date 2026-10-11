@@ -4,7 +4,8 @@ so this port serves the very same bytes. Each is read on first use.
 
 DASHBOARD_JS, DASHBOARD_CSS, DASHBOARD_HASH, WORLD_JSON, WORLD_HASH, LOCALES (language to its messages as JSON
 text, English left out), LOCALES_HASH, ENGLISH (the English messages as JSON text), TRACKER, TRACKER_HASH,
-PICKER, and BUILD (assets/build.json: the versions, the hashes, and the icon).
+PICKER, PICK_RELAY (the picker's relay page script), and BUILD (assets/build.json: the versions, the hashes, and
+the icon).
 """
 
 from __future__ import annotations
@@ -48,6 +49,8 @@ def __getattr__(name: str) -> Any:
         return _text("tracker.js")
     if name == "PICKER":
         return _text("picker.js")
+    if name == "PICK_RELAY":
+        return _text("pick-return.js")
     if name == "ENGLISH":
         return _locales()["en"]
     if name == "LOCALES":
