@@ -54,6 +54,17 @@ export interface Answer {
   pass?: true;
   /** The requests the step made to other servers, in order. */
   fetched?: Fetched[];
+  /** The messages the step handed the app's own mailer, in order. */
+  mailed?: Mailed[];
+}
+
+/** A message the app's own mailer was handed. */
+export interface Mailed {
+  to: string;
+  from: string;
+  fromName?: string;
+  subject: string;
+  text: string;
 }
 
 export interface Fetched {
@@ -87,6 +98,12 @@ export interface ScenarioOptions {
   cronSecret?: string;
   /** Tracker requests allowed per address per minute. Default 120; false for no limit. */
   rateLimit?: number | false;
+  /** The CMS the dashboard is shown inside, routes({ cms }). Without it there is none. */
+  cms?: string;
+  /** A mailer of the app's own, the mail option's { send, from, fromName, via }, whose send records each message, or fails with `fail` as its error's message. */
+  appMailer?: { via: string; from: string; fromName?: string; fail?: string };
+  /** The ids of the mail services Settings offers, runlight({ mailServices }). Default every one. */
+  mailServices?: string[];
 }
 
 export interface Scenario {
@@ -219,11 +236,27 @@ export async function play(scenario: Scenario, store: SqlStore = sqlite({ path: 
 async function steps(scenario: Scenario, store: SqlStore, takeFetched: () => Array<{ seen: Fetched; text: string }>): Promise<Answer[]> {
   let now = scenario.start;
   const options = scenario.options ?? {};
+  let mailed: Mailed[] = [];
+  const app = options.appMailer;
   const rl = runlight({
     store,
     ...(options.managedSites ? { managedSites: true } : scenario.sites ? { sites: scenario.sites } : { site: scenario.site }),
     ...(options.secret ? { secret: options.secret } : {}),
     ...(options.rateLimit !== undefined ? { rateLimit: options.rateLimit } : {}),
+    ...(options.mailServices ? { mailServices: options.mailServices } : {}),
+    ...(app
+      ? {
+          mail: {
+            from: app.from,
+            ...(app.fromName !== undefined ? { fromName: app.fromName } : {}),
+            via: app.via,
+            async send(message) {
+              if (app.fail !== undefined) throw new Error(app.fail);
+              mailed.push({ to: message.to, from: message.from, ...(message.fromName ? { fromName: message.fromName } : {}), subject: message.subject, text: message.text });
+            },
+          },
+        }
+      : {}),
     now: () => now,
   });
   const { handler } = rl.routes({
@@ -232,6 +265,7 @@ async function steps(scenario: Scenario, store: SqlStore, takeFetched: () => Arr
     cronSecret: options.cronSecret ?? "",
     ...(options.accounts ? { accounts: true } : {}),
     ...(options.origin ? { origin: options.origin } : {}),
+    ...(options.cms ? { cms: options.cms } : {}),
   });
   const links = rl.linkHandler();
   const kept: Record<string, string> = {};
@@ -266,13 +300,15 @@ async function steps(scenario: Scenario, store: SqlStore, takeFetched: () => Arr
     const prefix = to === "routes" && !step.absolute ? "/runlight" : "";
     const request = new Request(`https://${step.host ?? "example.com"}${prefix}${await fillTotp(step.path)}`, { method: step.method, headers, ...(body === undefined ? {} : { body }) });
     takeFetched();
+    mailed = [];
     const answer = to === "links" ? await links(request) : to === "linkDomain" ? await rl.linkDomainResponse(request) : await handler(request);
     // Work the request started after answering (retention) finishes before the next one, as it would between real requests.
     await rl.idle();
     const sentOut = takeFetched();
     const outbound = sentOut.map((f) => normalize(f.seen) as Fetched);
+    const handed = mailed.map((m) => normalize(m) as Mailed);
     if (!answer) {
-      answers.push({ pass: true, ...(outbound.length ? { fetched: outbound } : {}) });
+      answers.push({ pass: true, ...(outbound.length ? { fetched: outbound } : {}), ...(handed.length ? { mailed: handed } : {}) });
       continue;
     }
     const bytes = new Uint8Array(await answer.arrayBuffer());
@@ -325,6 +361,7 @@ async function steps(scenario: Scenario, store: SqlStore, takeFetched: () => Arr
       ...(type === "application/zip" ? { files: unzip(bytes).map((f) => ({ name: f.name, text: normalize(f.text) as string })) } : {}),
       ...(step.look ? { found: step.look.map((s) => text.includes(s)) } : {}),
       ...(outbound.length ? { fetched: outbound } : {}),
+      ...(handed.length ? { mailed: handed } : {}),
     });
   }
   return answers;
@@ -333,11 +370,11 @@ async function steps(scenario: Scenario, store: SqlStore, takeFetched: () => Arr
 /** How the file is read, written into it for the other implementations' runners. */
 export const FORMAT = [
   "HTTP requests to a fresh Runlight on a fixed clock, and the answers every implementation must give. Each scenario runs on an empty database with the scenario's site (or sites, each with its id, in place of site), its token as the routes' token (an empty string for none, null to leave them open), and its options, then plays its steps in order. Nothing from the environment counts: no RUNLIGHT_TOKEN, RUNLIGHT_SECRET, CRON_SECRET, RUNLIGHT_OBSERVE_KEY, or NODE_ENV.",
-  "Scenario options: accounts (sign-in accounts on, as routes({ accounts: true }), with the token as the key the first account is made with), managedSites (sites are kept in the database and managed through the API; site and sites are ignored), origin (the install's own address), secret (encrypts saved keys and signs sessions; none without it), observeKey (the install-wide key for POST /api/observe; none without it), cronSecret (the bearer secret POST and GET /api/check also take; none without it), and rateLimit (tracker requests per address per minute, default 120, false for none).",
+  "Scenario options: accounts (sign-in accounts on, as routes({ accounts: true }), with the token as the key the first account is made with), managedSites (sites are kept in the database and managed through the API; site and sites are ignored), origin (the install's own address), secret (encrypts saved keys and signs sessions; none without it), observeKey (the install-wide key for POST /api/observe; none without it), cronSecret (the bearer secret POST and GET /api/check also take; none without it), rateLimit (tracker requests per address per minute, default 120, false for none), cms (the CMS the dashboard is shown inside, as routes({ cms })), mailServices (the ids of the mail services Settings offers, as runlight({ mailServices })), and appMailer (a mailer of the app's own as the mail option, with its via, from, and fromName when given, whose send records each message it is handed, or, when fail is given, throws an error with fail as its message).",
   "Before each step the clock moves by advance milliseconds, and work a request starts after answering (such as deleting visits past a shorter retention) is finished before the next step. A step is method, path, headers, and a body: body is a JSON value sent as JSON text (with no content type unless headers name one), or a string sent as it is; form is fields sent as application/x-www-form-urlencoded. The request goes to https://{host}/runlight{path}, where host is the step's host or example.com. A step's to picks the entry point: routes (the default), links (the app's own short-link path, linkHandler(), with path from the host's root such as /go/sale), or linkDomain (the middleware for link domains, linkDomainResponse(), with path from the host's root). absolute: true sends a routes path from the host's root instead of under /runlight, as for /.well-known/ at the site's root.",
   "Cookies: each scenario has cookie jars, named by a step's jar (default main; false sends and keeps none). Every Set-Cookie in an answer goes into the step's jar (an empty value or Max-Age=0 removes it), and a request sends its jar's cookies as one Cookie header (name=value pairs joined by '; ') unless its headers give a cookie.",
   "Templates: {{name}} in a path, a header, a body string, or a form field is a value captured earlier (empty when nothing was), and {{totp:name}} is the six-digit TOTP code (RFC 6238: SHA-1, 30 second steps, base32 secret) for the captured secret at the step's clock. capture keeps values from an answer: a dotted path into its JSON body (a.b.0.c), header:<name> for a response header (all of its Set-Cookie lines joined by newlines for set-cookie), text for the raw body, or fetched for the bodies of the requests the step made to other servers, joined by newlines; any of them followed by ~<regex> keeps the regex's first group instead. Captures read the answer as sent, before it is normalized.",
-  "Answers: status, headers, body, text, files, found, fetched, or pass. headers holds those of content-type (its media type only), cache-control, location, set-cookie (a list, one per cookie, with each value written <value> unless it is empty), www-authenticate, allow, content-disposition, content-security-policy, x-frame-options, referrer-policy, x-content-type-options, x-robots-tag, and the access-control-allow-origin, -methods, -headers, and -max-age headers that the answer sends, and none it does not. body is a JSON answer's body. text is a text/plain or text/csv answer's body. files lists a ZIP answer's files in order, each with its name and text. A step's look lists text to find in an answer that is not JSON, such as a page or a script, and found says which of them it holds. pass: true means the link-domain middleware let the request through to the app.",
+  "Answers: status, headers, body, text, files, found, fetched, mailed, or pass. headers holds those of content-type (its media type only), cache-control, location, set-cookie (a list, one per cookie, with each value written <value> unless it is empty), www-authenticate, allow, content-disposition, content-security-policy, x-frame-options, referrer-policy, x-content-type-options, x-robots-tag, and the access-control-allow-origin, -methods, -headers, and -max-age headers that the answer sends, and none it does not. body is a JSON answer's body. text is a text/plain or text/csv answer's body. files lists a ZIP answer's files in order, each with its name and text. A step's look lists text to find in an answer that is not JSON, such as a page or a script, and found says which of them it holds. pass: true means the link-domain middleware let the request through to the app. mailed lists the messages a step handed the app's own mailer, in order, each with its to, from, fromName (only when it is not empty), subject, and text.",
   "Other servers: upstream lists servers the scenario stands in for. A request the implementation makes to another server goes to the first upstream whose url its URL starts with (and whose method matches, when one is given), which answers with that status (default 200), headers, and body (a JSON value sent as JSON with application/json, or a string sent as it is). A request no upstream matches fails as a network error does. fetched lists every such request a step made, in order, each with its method, url, the headers the implementation set (lowercased, sorted), and its body (parsed as JSON, or as form fields when it is application/x-www-form-urlencoded, else text).",
-  "Normalizing, applied to bodies, text, files, header values, and fetched requests alike: a string whose key is token, secret, hint, version, library, language, ticket, or recovery, or that is a whole rl_ or rlo_ token or 24 hex digits, becomes <k>, where k is its key's name (value for a string with no key). In other strings, the value of a code, ticket, secret, or code_challenge query parameter becomes <value>, every run of 24 or more lowercase hex digits not next to another letter or digit becomes <hex>, and every rl_ or rlo_ token of 20 or more characters becomes <key>.",
+  "Normalizing, applied to bodies, text, files, header values, fetched requests, and mailed messages alike: a string whose key is token, secret, hint, version, library, language, ticket, or recovery, or that is a whole rl_ or rlo_ token or 24 hex digits, becomes <k>, where k is its key's name (value for a string with no key). In other strings, the value of a code, ticket, secret, or code_challenge query parameter becomes <value>, every run of 24 or more lowercase hex digits not next to another letter or digit becomes <hex>, and every rl_ or rlo_ token of 20 or more characters becomes <key>.",
 ].join("\n\n");
