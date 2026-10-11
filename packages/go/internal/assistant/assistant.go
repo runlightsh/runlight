@@ -12,6 +12,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"sort"
 	"strings"
@@ -255,36 +256,33 @@ func readJSON(answer *web.Response) any {
 	return data
 }
 
-// RefuseMetadata refuses a service at a link-local or cloud metadata address. One on this computer (Ollama,
-// LM Studio) or a private network is allowed, as the person setting it up means it to be.
-func RefuseMetadata(ctx context.Context, url string) error {
-	u, err := whatwg.Parse(url)
-	if err != nil {
-		return &TypeError{"Invalid URL"}
+// refused is a service at a link-local or cloud metadata address, refused there or at a redirect. One on this
+// computer (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
+func refused(err error) (*Error, bool) {
+	var m *web.MetadataAddressError
+	if !errors.As(err, &m) {
+		return nil, false
 	}
-	if web.MetadataHost(ctx, u.Hostname) {
-		return fail(u.Hostname+" is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", "host", u.Hostname)
-	}
-	return nil
+	return fail(m.Error(), "address_refused", "host", m.Host), true
 }
 
 func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Headers, body any, deadline int64, now clock) (any, error) {
 	if err := inTime(ctx, deadline, now); err != nil {
 		return nil, err
 	}
-	if err := RefuseMetadata(ctx, url); err != nil {
-		return nil, err
-	}
 	left := deadline - now()
 	all := web.NewHeaders("content-type", "application/json")
 	headers.Each(func(name, value string) { all.Set(name, value) })
-	answer, err := fetcher.Fetch(ctx, url, web.FetchInit{
+	answer, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{
 		Method:  "POST",
 		Headers: all,
 		Body:    []byte(js.Stringify(body)),
 		Timeout: time.Duration(min(90_000, left)) * time.Millisecond,
-	})
+	}, 5)
 	if err != nil {
+		if e, ok := refused(err); ok {
+			return nil, e
+		}
 		h, herr := host(url)
 		if herr != nil {
 			return nil, herr
@@ -612,11 +610,11 @@ func ListModels(ctx context.Context, fetcher web.Fetcher, settings Settings) ([]
 	} else if settings.Key != "" {
 		headers.Set("authorization", "Bearer "+settings.Key)
 	}
-	if err := RefuseMetadata(ctx, base); err != nil {
-		return nil, err
-	}
-	answer, err := fetcher.Fetch(ctx, url, web.FetchInit{Method: "GET", Headers: headers, Timeout: 20 * time.Second})
+	answer, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{Method: "GET", Headers: headers, Timeout: 20 * time.Second}, 5)
 	if err != nil {
+		if e, ok := refused(err); ok {
+			return nil, e
+		}
 		h, herr := host(base)
 		if herr != nil {
 			return nil, herr

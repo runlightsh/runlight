@@ -415,10 +415,21 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	manage := !cms && contains(scopes, "manage")
 	// A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
 	host := siteHost(redirect)
-	var counting []SiteRow
+	// As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+	var local []SiteRow
 	for _, s := range r.Sites() {
-		if _, remote := r.Remote(s.ID); !remote && contains(s.Hostnames, host) {
-			counting = append(counting, s)
+		if _, remote := r.Remote(s.ID); !remote {
+			local = append(local, s)
+		}
+	}
+	var counting []SiteRow
+	if len(local) == 1 && len(local[0].Hostnames) == 0 {
+		counting = local
+	} else {
+		for _, s := range local {
+			if contains(s.Hostnames, host) {
+				counting = append(counting, s)
+			}
 		}
 	}
 

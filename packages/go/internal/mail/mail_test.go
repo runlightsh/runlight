@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -404,5 +406,20 @@ func TestCheckConfigAndBadInput(t *testing.T) {
 		if err := CheckConfig(Config{"service": "webhook", "url": url}); err == nil || err.(*MailError).Code != "mail_url" {
 			t.Error(url, err)
 		}
+	}
+}
+
+// A webhook that redirects to a metadata address is refused with the address it led to.
+func TestAWebhookRedirectingToAMetadataAddressIsRefused(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("location", "http://169.254.169.254/latest/meta-data/")
+		w.WriteHeader(302)
+	}))
+	defer server.Close()
+	url := strings.Replace(server.URL, "127.0.0.1", "localhost", 1) + "/metadata"
+	err := Send(context.Background(), web.HTTPFetcher{}, Config{"service": "webhook", "url": url}, message)
+	var e *MailError
+	if !errors.As(err, &e) || e.Code != "address_refused" || e.Message != "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to" || js.Stringify(e.Params) != `{"host":"169.254.169.254"}` {
+		t.Fatalf("%v", err)
 	}
 }
