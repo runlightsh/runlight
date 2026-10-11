@@ -1723,7 +1723,8 @@ public sealed partial class Runlight
     {
         ArgumentNullException.ThrowIfNull(request);
         string path = new Url(request.Url).Pathname;
-        string slug = path.StartsWith(LinkPath + "/", StringComparison.Ordinal) ? Decode(path[(LinkPath.Length + 1)..]) : "";
+        // A slug with broken escapes is one no link has.
+        string slug = path.StartsWith(LinkPath + "/", StringComparison.Ordinal) ? (Js.DecodeURIComponent(path[(LinkPath.Length + 1)..]) ?? "") : "";
         var found = slug.Length > 0 && !slug.Contains('/', StringComparison.Ordinal) ? await RedirectAsync(request, slug, "", ip, cancellationToken).ConfigureAwait(false) : null;
         return found ?? NotFound();
     };
@@ -1758,15 +1759,12 @@ public sealed partial class Runlight
                 return null;
             }
         }
-        string slug = Decode(url.Pathname[1..]);
+        string slug = Js.DecodeURIComponent(url.Pathname[1..]) ?? "";
         var found = slug.Length > 0 && !slug.Contains('/', StringComparison.Ordinal) ? await RedirectAsync(request, slug, host, ip, cancellationToken).ConfigureAwait(false) : null;
         return found ?? NotFound();
     }
 
     private static Response NotFound() => new("Not found", 404, new Headers { ["content-type"] = "text/plain; charset=utf-8" });
-
-    /// <summary>decodeURIComponent, throwing where it throws a URIError.</summary>
-    private static string Decode(string text) => Js.DecodeURIComponent(text) ?? throw new UriFormatException("URI malformed");
 
     /// <summary>
     /// Answers a request for a short link: a redirect to its destination, with the click recorded like a visit
