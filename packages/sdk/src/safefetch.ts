@@ -214,7 +214,9 @@ function once(node: NonNullable<ReturnType<typeof builtins>>, url: URL, ask: Ask
   };
   return new Promise((resolve, reject) => {
     const headers = ask.body === undefined ? ask.headers : { ...ask.headers, "content-length": String(new TextEncoder().encode(ask.body).byteLength) };
-    const request = node.https.request(url, { method: ask.method, headers, signal, lookup: lookup as never }, (answer) => {
+    // An agent of its own, never the global one: with NODE_USE_ENV_PROXY that one goes through a proxy, which
+    // looks the name up again itself, so the checked address would not be the one used.
+    const request = node.https.request(url, { method: ask.method, headers, signal, lookup: lookup as never, agent: false }, (answer) => {
       const back = new Headers();
       for (const [name, value] of Object.entries(answer.headers)) {
         for (const one of Array.isArray(value) ? value : value === undefined ? [] : [value]) back.append(name, one);
@@ -302,6 +304,51 @@ export async function publicFetch(
     if (answer.status < 300 || answer.status >= 400 || !location || hop >= redirects) return answer;
     await answer.body?.cancel().catch(() => {});
     url = new URL(location, url);
+  }
+}
+
+/** Refused before anything was fetched, because the address is link-local or a cloud's metadata service. */
+export class MetadataAddressError extends Error {
+  constructor(readonly host: string) {
+    super(`${host} is a link-local or cloud metadata address, which Runlight never connects to`);
+    this.name = "MetadataAddressError";
+  }
+}
+
+/** Headers that describe a body, dropped with it when a redirect turns a request into a GET. */
+const BODY_HEADERS = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
+/** Credentials, dropped when a redirect leads to another origin. */
+const CREDENTIAL_HEADERS = ["authorization", "proxy-authorization", "cookie"];
+
+/**
+ * Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
+ * this computer or a private network, but is never at a link-local or cloud metadata address. The address
+ * is checked, and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch
+ * follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body, and a redirect to
+ * another origin goes without the credentials. A redirect past the last one comes back as it is. Throws a
+ * MetadataAddressError for an address it refuses.
+ */
+export async function serviceFetch(target: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal; redirects?: number }): Promise<Response> {
+  const redirects = init.redirects ?? 5;
+  let url = new URL(target);
+  let method = (init.method ?? "GET").toUpperCase();
+  let headers: Record<string, string> = { ...init.headers };
+  let body = init.body;
+  for (let hop = 0; ; hop++) {
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    if (await metadataHost(host)) throw new MetadataAddressError(host);
+    const answer = await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), redirect: "manual", ...(init.signal ? { signal: init.signal } : {}) });
+    const location = answer.headers.get("location");
+    if (answer.status < 300 || answer.status >= 400 || !location || hop >= redirects) return answer;
+    await answer.body?.cancel().catch(() => {});
+    const next = new URL(location, url);
+    if (answer.status === 303 || ((answer.status === 301 || answer.status === 302) && method === "POST")) {
+      method = method === "HEAD" ? "HEAD" : "GET";
+      body = undefined;
+      headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !BODY_HEADERS.includes(name.toLowerCase())));
+    }
+    if (next.origin !== url.origin) headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !CREDENTIAL_HEADERS.includes(name.toLowerCase())));
+    url = next;
   }
 }
 

@@ -212,7 +212,9 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     const manage = !cms && scopes.includes("manage");
     // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
     const host = siteHost(redirect);
-    const counting = runlight.sites.filter((s) => !runlight.remote(s.id) && s.hostnames.includes(host));
+    // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+    const local = runlight.sites.filter((s) => !runlight.remote(s.id));
+    const counting = local.length === 1 && local[0]!.hostnames.length === 0 ? local : local.filter((s) => s.hostnames.includes(host));
 
     if (!(await ctx.isOwner(request))) {
       // Someone signed in who may only read would be sent to sign in again and again.

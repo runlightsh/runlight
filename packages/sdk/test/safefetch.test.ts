@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { PrivateAddressError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, resolvesPrivately } from "../src/safefetch.js";
+import { MetadataAddressError, PrivateAddressError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, resolvesPrivately, serviceFetch } from "../src/safefetch.js";
 
 test("link-local and cloud metadata addresses are told apart from loopback and private ones", async () => {
   for (const ip of ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe"]) {
@@ -81,5 +81,57 @@ test("another install is only fetched at a public https address, with no redirec
     assert.equal(reached, 1);
   } finally {
     inside.close();
+  }
+});
+
+test("a service's redirects are followed only while each one stays off link-local and metadata addresses", async () => {
+  const seen: Array<{ method: string; url: string; body: string; authorization: string; type: string }> = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    seen.push({ method: String(req.method), url: String(req.url), body, authorization: String(req.headers.authorization ?? ""), type: String(req.headers["content-type"] ?? "") });
+    const port = (server.address() as { port: number }).port;
+    if (req.url === "/metadata") return res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" }).end();
+    if (req.url === "/metadata-v6") return res.writeHead(307, { location: "http://[fd00:ec2::254]/" }).end();
+    if (req.url === "/see-other") return res.writeHead(303, { location: "/landed" }).end();
+    if (req.url === "/keep") return res.writeHead(307, { location: "/landed" }).end();
+    if (req.url === "/elsewhere") return res.writeHead(307, { location: `http://localhost:${port}/landed` }).end();
+    if (req.url === "/loop") return res.writeHead(302, { location: "/loop" }).end();
+    res.end("ok");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const ask = { method: "POST", headers: { authorization: "Bearer key", "content-type": "application/json" }, body: "{}" };
+  try {
+    // A service on this computer is fine; a redirect to a metadata address is refused before it is asked.
+    await assert.rejects(serviceFetch(`${base}/metadata`, ask), (error: Error) => error instanceof MetadataAddressError && (error as MetadataAddressError).host === "169.254.169.254");
+    await assert.rejects(serviceFetch(`${base}/metadata-v6`, ask), (error: Error) => error instanceof MetadataAddressError && (error as MetadataAddressError).host === "fd00:ec2::254");
+    await assert.rejects(serviceFetch("http://169.254.169.254/v1/models", {}), MetadataAddressError);
+    // Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and the key
+    // goes no further than the origin it was meant for.
+    seen.length = 0;
+    assert.equal(await (await serviceFetch(`${base}/see-other`, ask)).text(), "ok");
+    assert.deepEqual(seen[1], { method: "GET", url: "/landed", body: "", authorization: "Bearer key", type: "" });
+    seen.length = 0;
+    await serviceFetch(`${base}/keep`, ask);
+    assert.deepEqual(seen[1], { method: "POST", url: "/landed", body: "{}", authorization: "Bearer key", type: "application/json" });
+    seen.length = 0;
+    await serviceFetch(`${base}/elsewhere`, ask);
+    assert.deepEqual(seen[1], { method: "POST", url: "/landed", body: "{}", authorization: "", type: "application/json" });
+    // Past the last redirect, the redirect comes back as it is.
+    seen.length = 0;
+    assert.equal((await serviceFetch(`${base}/loop`, { redirects: 2 })).status, 302);
+    assert.equal(seen.length, 3);
+    // The AI assistant and a mail webhook refuse such a redirect with the address it led to.
+    const { listModels } = await import("../src/assistant.js");
+    await assert.rejects(listModels({ provider: "custom", baseUrl: `${base}/metadata#`, key: "" }), (error: Error & { code?: string; params?: Record<string, string> }) => error.code === "address_refused");
+    const { send, MailError } = await import("../src/mail/transports.js");
+    const message = { to: "me@example.com", from: "reports@example.com", subject: "Hi", html: "<p>Hi</p>", text: "Hi" };
+    await assert.rejects(
+      send({ service: "webhook", url: `http://localhost:${(server.address() as { port: number }).port}/metadata` }, message),
+      (error: Error) => error instanceof MailError && error.code === "address_refused" && error.message === "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to",
+    );
+  } finally {
+    server.close();
   }
 });
