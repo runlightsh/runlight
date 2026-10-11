@@ -222,6 +222,64 @@ module Runlight
       end
     end
 
+    # Headers that describe a body, dropped with it when a redirect turns a request into a GET.
+    BODY_HEADERS = %w[content-type content-length content-encoding content-language content-location].freeze
+    # Credentials, dropped when a redirect leads to another origin.
+    CREDENTIAL_HEADERS = %w[authorization proxy-authorization cookie].freeze
+
+    # Fetches from a service someone set up, such as an AI model's API or a
+    # mail webhook, which may well be on this computer or a private network,
+    # but is never at a link-local or cloud metadata address. The address is
+    # checked, and so is every redirect's, up to "redirects" of them (default
+    # 5), each followed as fetch follows it: a 303, or a 301 or 302 answering a
+    # POST, goes on as a GET with no body, and a redirect to another origin goes
+    # without the credentials. A redirect past the last one comes back as it
+    # is. Raises a MetadataAddressError for an address it refuses.
+    #
+    # init: a Hash with optionally "method", "headers" (a Hash), "body", "timeoutMs" (for every hop together),
+    # and "redirects".
+    def service_fetch(target, init, fetcher = nil)
+      fetcher ||= Http::NetFetcher.new
+      redirects = init["redirects"] || 5
+      url = Http::Url.parse(target)
+      raise Http::FetchError, "Invalid URL" if url.nil?
+
+      method = (init["method"] || "GET").to_s.upcase
+      headers = (init["headers"] || {}).to_h
+      body = init["body"]
+      until_ns = init["timeoutMs"] && monotonic + (init["timeoutMs"] * 1_000_000)
+      hop = 0
+      loop do
+        host = url.hostname.sub(/\A\[/, "").sub(/\]\z/, "")
+        raise MetadataAddressError, host if metadata_host?(host)
+
+        options = { "method" => method, "headers" => headers, "redirect" => "manual" }
+        options["body"] = body unless body.nil?
+        unless until_ns.nil?
+          # The whole limit for the first hop, and what is left of it for each redirect.
+          left = hop.zero? ? init["timeoutMs"] : (until_ns - monotonic).div(1_000_000)
+          raise timed_out if left <= 0
+
+          options["timeoutMs"] = left
+        end
+        answer = fetcher.fetch(url.href, options)
+        location = answer.headers.get("location")
+        return answer if answer.status < 300 || answer.status >= 400 || location.nil? || location == "" || hop >= redirects
+
+        following = Http::Url.parse(location, url.href)
+        raise Http::FetchError, "Invalid URL" if following.nil?
+
+        if answer.status == 303 || ([301, 302].include?(answer.status) && method == "POST")
+          method = "GET" unless method == "HEAD"
+          body = nil
+          headers = headers.reject { |name, _| BODY_HEADERS.include?(name.to_s.downcase) }
+        end
+        headers = headers.reject { |name, _| CREDENTIAL_HEADERS.include?(name.to_s.downcase) } if following.origin != url.origin
+        url = following
+        hop += 1
+      end
+    end
+
     # An install on this machine: http://localhost or http://127.0.0.1, with any port.
     LOCAL_INSTALL = %r{\Ahttp://(localhost|127\.0\.0\.1)(:\d+)?(/|\z)}
 

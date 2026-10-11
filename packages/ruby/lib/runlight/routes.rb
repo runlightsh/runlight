@@ -541,6 +541,8 @@ module Runlight
       if base != "" && oauth_document?(url.pathname)
         begin
           return OAuth.oauth_response(@oauth, request, url.pathname, url, context) || coded("Not found", "not_found", 404)
+        rescue TablesBusyError
+          return tables_busy
         rescue StandardError => e
           warn("Runlight: #{e.full_message(highlight: false)}")
           return coded("Internal error", "internal", 500)
@@ -553,6 +555,8 @@ module Runlight
 
       begin
         route(request, path, url, context)
+      rescue TablesBusyError
+        tables_busy
       rescue StandardError => e
         warn("Runlight: #{e.full_message(highlight: false)}")
         coded("Internal error", "internal", 500)
@@ -578,6 +582,11 @@ module Runlight
     end
 
     private
+
+    # Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+    def tables_busy
+      coded("Runlight is creating or upgrading its tables. Try again in a minute.", "tables_busy", 503, nil, { "retry-after" => "30" })
+    end
 
     def sites
       @rl.sites
@@ -1196,7 +1205,7 @@ module Runlight
               "fields" => via_manage ? {} : fields,
               "saved" => via_manage ? [] : saved,
               "encrypted" => !@rl.secret.nil?,
-              "services" => Mail::Transports::SERVICES,
+              "services" => @rl.mail_services,
             }
             # The app's own mailer, named only when there is one, so the answer without it stays as it was.
             app = @rl.app_mailer

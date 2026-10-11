@@ -22,6 +22,23 @@ module Runlight
       # Arbitrary but fixed, so every Runlight process takes the same lock to create tables.
       MIGRATION_LOCK = 7_331_906
 
+      # The longest a process waits for another one creating or upgrading the tables before it gives up.
+      LOCK_WAIT_MS = 30_000
+
+      @lock_wait = LOCK_WAIT_MS
+
+      class << self
+        # How long the lock for creating tables is waited for: LOCK_WAIT_MS, unless a test has set another.
+        def lock_wait_ms
+          @lock_wait
+        end
+
+        # For tests: the lock is waited for this long instead, or LOCK_WAIT_MS again with nil.
+        def lock_wait_in_tests(ms)
+          @lock_wait = ms || LOCK_WAIT_MS
+        end
+      end
+
       # One lock per MySQL database, so installs sharing a server do not wait on each other. Lock names are 64
       # characters at most.
       MYSQL_LOCK = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))"
@@ -106,7 +123,8 @@ module Runlight
       end
 
       # Runs the block while holding a database-wide lock, so two processes starting at once do not race to
-      # create the same tables. Yields this database.
+      # create the same tables. Waits for the lock at most LOCK_WAIT_MS, then raises a TablesBusyError. Yields
+      # this database.
       def exclusive(&block)
         connection do |c|
           @held += 1
@@ -298,7 +316,14 @@ module Runlight
         if dialect == "postgres"
           # Asked for again and again rather than waited on: a waiting statement would hold up an index being
           # built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
-          sleep 0.1 until truthy(value(c, "SELECT pg_try_advisory_lock(#{MIGRATION_LOCK}) AS ok"))
+          # Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+          wait = self.class.lock_wait_ms
+          until_at = monotonic_ms + wait
+          until truthy(value(c, "SELECT pg_try_advisory_lock(#{MIGRATION_LOCK}) AS ok"))
+            raise TablesBusyError, wait if monotonic_ms >= until_at
+
+            sleep 0.1
+          end
           begin
             return yield(self)
           ensure
@@ -309,11 +334,16 @@ module Runlight
             end
           end
         end
+        # Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+        wait = self.class.lock_wait_ms
+        until_at = monotonic_ms + wait
         loop do
-          ok = value(c, "SELECT GET_LOCK(#{MYSQL_LOCK}, 5) AS ok")
+          left = ((until_at - monotonic_ms) / 1000.0).ceil.clamp(1, 5)
+          ok = value(c, "SELECT GET_LOCK(#{MYSQL_LOCK}, #{left}) AS ok")
           raise "Runlight: MySQL refused the lock for creating tables" if ok.nil?
           break if ok.to_i == 1
-          # Not got within 5 seconds: another process is creating the tables. Ask again.
+          # Not got in time: another process is creating the tables. Ask again, until the wait is up.
+          raise TablesBusyError, wait if monotonic_ms >= until_at
         end
         begin
           # An index on a big table takes a while to build, so the build may run past the statement timeout.
@@ -328,6 +358,10 @@ module Runlight
             # A lost connection ends its session, and the lock with it.
           end
         end
+      end
+
+      def monotonic_ms
+        Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond)
       end
 
       # The first column of a statement's first row, always asked of the database. select_value goes through

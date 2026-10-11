@@ -28,12 +28,31 @@ module Runlight
       EVENT_TAIL_MS = Sql::EVENT_TAIL_MS
       MYSQL_COLLATION = Sql::MYSQL_COLLATION
 
-      attr_reader :db
+      PREFIX = Sql::PREFIX
+      TABLES = Sql::TABLES
 
-      def initialize(db)
+      attr_reader :db,
+                  # What the store's table and index names start with: `rl_` unless it was given another.
+                  :prefix
+
+      # `prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
+      # Runlight's tables in one database. A database that is already prefixed keeps its own.
+      def initialize(db, prefix = PREFIX)
+        if db.is_a?(Db::Prefixed)
+          prefix = db.prefix
+        elsif prefix != PREFIX
+          db = Db::Prefixed.new(db, prefix)
+        end
         @db = db
+        @prefix = prefix
         @ready = false
         @checked_all = false
+      end
+
+      # The store's tables as named in the database, for an app removing Runlight: each one by name, since
+      # another app's tables may well start with the same letters.
+      def tables
+        TABLES.map { |table| "#{@prefix}#{table}" }
       end
 
       # Creates the tables on first use. Safe to call any number of times.
@@ -1358,16 +1377,18 @@ module Runlight
           # A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
           broken = db.all(
             "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace",
+           WHERE NOT i.indisvalid AND c.relname LIKE '#{@prefix.gsub("_", "\\\\_")}%' AND c.relnamespace = current_schema()::regnamespace",
           )
-          broken.each { |row| db.run("DROP INDEX IF EXISTS \"#{Sql.string(row["name"]).delete('"')}\"") }
+          # The name comes back as the database has it, so it goes back under rl_ before the prefix is put on
+          # again, which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
+          broken.each { |row| db.run("DROP INDEX IF EXISTS \"#{unnamed(Sql.string(row["name"])).delete('"')}\"") }
         end
         statements.each do |statement|
           index = statement.match(/\ACREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (\w+)/)
           if db.dialect == "mysql" && index
             # MySQL has no CREATE INDEX IF NOT EXISTS, so it is looked for first.
             unique, name, table = index.captures
-            there = db.all("SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1", [table, name])
+            there = db.all("SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1", [named(table), named(name)])
             db.run(statement.sub(/\ACREATE (UNIQUE )?INDEX IF NOT EXISTS/, "CREATE #{unique}INDEX")) if there.empty?
           else
             db.run(postgres ? statement.sub(/\ACREATE (UNIQUE )?INDEX IF NOT EXISTS/) { "CREATE #{Regexp.last_match(1)}INDEX CONCURRENTLY IF NOT EXISTS" } : statement)
@@ -1388,6 +1409,16 @@ module Runlight
         return unless found.nil? || Sql.string(found["value"]) != Sql::SCHEMA_VERSION.to_s
 
         db.run(Sql.upsert(db.dialect, "rl_meta", ['"key"', "value"], ['"key"'], ["value"]), ["schema", Sql::SCHEMA_VERSION.to_s])
+      end
+
+      # A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_.
+      def unnamed(name)
+        name.start_with?(@prefix) ? "#{PREFIX}#{name[@prefix.length..]}" : name
+      end
+
+      # A table or index name as the database has it, under the store's prefix.
+      def named(name)
+        name.start_with?(PREFIX) ? "#{@prefix}#{name[PREFIX.length..]}" : name
       end
 
       # When a site's oldest row at or after `from` is (nil for no lower bound), or nil when there is none.

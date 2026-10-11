@@ -192,4 +192,100 @@ class SafefetchTest < Minitest::Test
     target&.close
     proxy&.close
   end
+
+  def test_a_pin_that_cannot_be_applied_refuses_rather_than_fetching_unpinned
+    target, seen = local_server("target")
+    port = target.addr[1]
+    fetcher = Runlight::Http::NetFetcher.new
+    [["elsewhere.example:#{port}:127.0.0.1"], ["localhost:#{port + 1}:127.0.0.1"]].each do |pin|
+      assert_raises(FetchError, pin.first) { fetcher.fetch("http://localhost:#{port}/", { "resolve" => pin, "timeoutMs" => 3000 }) }
+    end
+    assert_equal 0, seen.size
+  ensure
+    target&.close
+  end
+
+  # A server on a local port that records each request and answers it as `answer` says, with a status, headers,
+  # and a body.
+  def service_server(&answer)
+    server = TCPServer.new("127.0.0.1", 0)
+    seen = []
+    Thread.new do
+      loop do
+        client = server.accept
+        method, path = client.gets.to_s.split(" ")
+        headers = {}
+        while (line = client.gets) && line != "\r\n"
+          name, value = line.chomp.split(":", 2)
+          headers[name.downcase] = value.to_s.strip
+        end
+        body = headers["content-length"].to_i.positive? ? client.read(headers["content-length"].to_i) : ""
+        seen << { "method" => method, "url" => path, "body" => body, "authorization" => headers["authorization"].to_s,
+                  "type" => headers["content-type"].to_s }
+        status, sent, text = answer.call(path, server.addr[1])
+        lines = sent.merge("content-length" => text.bytesize, "connection" => "close").map { |k, v| "#{k}: #{v}\r\n" }.join
+        client.write("HTTP/1.1 #{status} X\r\n#{lines}\r\n#{text}")
+        client.close
+      end
+    rescue IOError
+      nil
+    end
+    [server, seen]
+  end
+
+  def test_a_services_redirects_are_followed_only_while_each_one_stays_off_link_local_and_metadata_addresses
+    server, seen = service_server do |path, port|
+      case path
+      when "/metadata" then [302, { "location" => "http://169.254.169.254/latest/meta-data/" }, ""]
+      when "/metadata-v6" then [307, { "location" => "http://[fd00:ec2::254]/" }, ""]
+      when "/see-other" then [303, { "location" => "/landed" }, ""]
+      when "/keep" then [307, { "location" => "/landed" }, ""]
+      when "/elsewhere" then [307, { "location" => "http://localhost:#{port}/landed" }, ""]
+      when "/loop" then [302, { "location" => "/loop" }, ""]
+      else [200, {}, "ok"]
+      end
+    end
+    base = "http://127.0.0.1:#{server.addr[1]}"
+    ask = { "method" => "POST", "headers" => { "authorization" => "Bearer key", "content-type" => "application/json" }, "body" => "{}" }
+
+    # A service on this computer is fine; a redirect to a metadata address is refused before it is asked.
+    error = assert_raises(Runlight::MetadataAddressError) { Safefetch.service_fetch("#{base}/metadata", ask) }
+    assert_equal "169.254.169.254", error.host
+    assert_equal "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to", error.message
+    assert_equal "fd00:ec2::254", assert_raises(Runlight::MetadataAddressError) { Safefetch.service_fetch("#{base}/metadata-v6", ask) }.host
+    assert_raises(Runlight::MetadataAddressError) { Safefetch.service_fetch("http://169.254.169.254/v1/models", {}) }
+    assert_equal %w[/metadata /metadata-v6], seen.map { |r| r["url"] }, "nothing was asked at the metadata address"
+
+    # Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and the key
+    # goes no further than the origin it was meant for.
+    seen.clear
+    assert_equal "ok", Safefetch.service_fetch("#{base}/see-other", ask).text
+    assert_equal({ "method" => "GET", "url" => "/landed", "body" => "", "authorization" => "Bearer key", "type" => "" }, seen[1])
+    seen.clear
+    Safefetch.service_fetch("#{base}/keep", ask)
+    assert_equal({ "method" => "POST", "url" => "/landed", "body" => "{}", "authorization" => "Bearer key", "type" => "application/json" }, seen[1])
+    seen.clear
+    Safefetch.service_fetch("#{base}/elsewhere", ask)
+    assert_equal({ "method" => "POST", "url" => "/landed", "body" => "{}", "authorization" => "", "type" => "application/json" }, seen[1])
+
+    # Past the last redirect, the redirect comes back as it is.
+    seen.clear
+    assert_equal 302, Safefetch.service_fetch("#{base}/loop", { "redirects" => 2 }).status
+    assert_equal 3, seen.length
+
+    # The AI assistant and a mail webhook refuse such a redirect with the address it led to.
+    refused = assert_raises(Runlight::AssistantError) do
+      Runlight::Assistant.list_models({ "provider" => "custom", "baseUrl" => "#{base}/metadata#", "key" => "" })
+    end
+    assert_equal ["address_refused", { "host" => "169.254.169.254" }], [refused.code, refused.params]
+    message = { "to" => "me@example.com", "from" => "reports@example.com", "subject" => "Hi", "html" => "<p>Hi</p>", "text" => "Hi" }
+    mailed = assert_raises(Runlight::Mail::MailError) do
+      Runlight::Mail::Transports.deliver({ "service" => "webhook", "url" => "http://localhost:#{server.addr[1]}/metadata" }, message)
+    end
+    assert_equal "address_refused", mailed.code
+    assert_equal({ "host" => "169.254.169.254" }, mailed.params)
+    assert_equal "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to", mailed.message
+  ensure
+    server&.close
+  end
 end

@@ -85,26 +85,24 @@ module Runlight
       message.is_a?(String) ? message : ""
     end
 
-    # Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
-    # private network is allowed, as the person setting it up means it to be.
-    def refuse_metadata(url)
-      host = Http::Url.new(url).hostname
-      return unless Safefetch.metadata_host?(host)
-
-      raise AssistantError.new("#{host} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", { "host" => host })
+    # A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+    # (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
+    def refused(error)
+      AssistantError.new(error.message, "address_refused", { "host" => error.host })
     end
 
     def post(fetcher, url, headers, body, deadline, now, cancelled)
       in_time(deadline, now, cancelled)
-      refuse_metadata(url)
       left = deadline - now.call
       begin
-        answer = fetcher.fetch(url, {
+        answer = Safefetch.service_fetch(url, {
           "method" => "POST",
           "headers" => { "content-type" => "application/json" }.merge(headers),
           "body" => Json.encode(body),
           "timeoutMs" => [90_000, left].min,
-        })
+        }, fetcher)
+      rescue MetadataAddressError => e
+        raise refused(e)
       rescue StandardError => e
         host = Http::Url.new(url).host
         raise AssistantError.new("Could not reach #{host}: it took too long to answer", "assistant_timeout", { "host" => host }) if e.is_a?(Http::FetchError) && e.timed_out?
@@ -303,9 +301,11 @@ module Runlight
                 elsif key != "" then { "authorization" => "Bearer #{key}" }
                 else {}
                 end
-      refuse_metadata(base)
       begin
-        answer = fetcher.fetch("#{base}/models#{provider["protocol"] == "anthropic" ? "?limit=100" : ""}", { "headers" => headers, "timeoutMs" => 20_000 })
+        answer = Safefetch.service_fetch("#{base}/models#{provider["protocol"] == "anthropic" ? "?limit=100" : ""}", { "headers" => headers, "timeoutMs" => 20_000 },
+                                         fetcher)
+      rescue MetadataAddressError => e
+        raise refused(e)
       rescue StandardError
         host = Http::Url.new(base).host
         raise AssistantError.new("Could not reach #{host}", "unreachable", { "host" => host })
@@ -389,6 +389,6 @@ module Runlight
     end
 
     private_class_method :provider, :system_prompt, :in_time, :service_message, :post, :tool_text, :clock, :first_message, :unreadable, :blank?,
-                         :locale_compare, :collation_key
+                         :locale_compare, :collation_key, :refused
   end
 end

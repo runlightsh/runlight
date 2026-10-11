@@ -38,6 +38,7 @@ module Runlight
   autoload :Mcp, "runlight/mcp"
   autoload :McpError, "runlight/mcp_error"
   autoload :Messages, "runlight/messages"
+  autoload :MetadataAddressError, "runlight/metadata_address_error"
   autoload :Mmdb, "runlight/mmdb"
   autoload :OAuth, "runlight/oauth"
   autoload :Options, "runlight/options"
@@ -51,6 +52,7 @@ module Runlight
   autoload :Safefetch, "runlight/safefetch"
   autoload :SettingsError, "runlight/settings_error"
   autoload :Sources, "runlight/sources"
+  autoload :TablesBusyError, "runlight/tables_busy_error"
   autoload :Ua, "runlight/ua"
   autoload :Zip, "runlight/zip"
 
@@ -73,6 +75,7 @@ module Runlight
     autoload :Connect, "runlight/db/connect"
     autoload :Database, "runlight/db/db"
     autoload :Pools, "runlight/db/connect"
+    autoload :Prefixed, "runlight/db/prefixed"
   end
 
   module Http

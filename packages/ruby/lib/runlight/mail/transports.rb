@@ -84,7 +84,10 @@ module Runlight
       # POSTs to a service, with the errors the dashboard shows. init: "headers" and "body".
       def post(fetcher, url, init, explains = true)
         begin
-          response = fetcher.fetch(url, { "method" => "POST", "headers" => init["headers"], "body" => init["body"], "timeoutMs" => 20_000 })
+          # A webhook can be at any address, so it and each redirect are checked, as for every service.
+          response = Safefetch.service_fetch(url, { "method" => "POST", "headers" => init["headers"], "body" => init["body"], "timeoutMs" => 20_000 }, fetcher)
+        rescue MetadataAddressError => e
+          raise MailError.new(e.message, "address_refused", { "host" => e.host })
         rescue Http::FetchError => e
           host = Http::Url.new(url).host
           raise MailError.new("Could not reach #{host}: #{e.message}", "mail_unreachable", { "host" => host, "detail" => e.message })

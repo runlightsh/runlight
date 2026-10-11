@@ -10,7 +10,7 @@ module Conformance
   # Plays a scenario from conformance/http.json exactly as play() in
   # packages/sdk/test/http-conformance.ts does, and returns each step's answer,
   # normalized, in the shape of the file's `expect`: Hashes with status,
-  # headers, body, text, files, found, fetched, or pass.
+  # headers, body, text, files, found, fetched, mailed, or pass.
   #
   # The scenario's options become the Ruby options the port conventions name,
   # and a Target (the core, or a fake) takes the requests. Keep this file in step
@@ -18,7 +18,7 @@ module Conformance
   # description of the format changes.
   class Player
     # The SHA-256 of http.json's description this runner was written against.
-    FORMAT_SHA256 = "87a6f2d7f8acd8026aa4c9ede697d21457a0b9c1a2bfc01488aa2d9598def68f"
+    FORMAT_SHA256 = "9721f5d81842e566cbe725d3823b9e1b02580936b9366e0e7ea316d4f49c3acb"
 
     # Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.
     ENV_NAMES = %w[RUNLIGHT_TOKEN RUNLIGHT_SECRET CRON_SECRET RUNLIGHT_OBSERVE_KEY NODE_ENV].freeze
@@ -34,6 +34,8 @@ module Conformance
 
     def initialize
       @now = 0
+      # The messages the app's own mailer was handed during the step being played.
+      @mailed = []
     end
 
     # Runs a scenario's steps and returns each answer, normalized.
@@ -64,6 +66,7 @@ module Conformance
       end
       out["secret"] = options["secret"] if !options["secret"].nil? && options["secret"] != ""
       out["rateLimit"] = options["rateLimit"] if options.key?("rateLimit")
+      out["mailServices"] = options["mailServices"] unless options["mailServices"].nil?
       out
     end
 
@@ -78,7 +81,23 @@ module Conformance
       }
       out["accounts"] = true if filled?(options["accounts"])
       out["origin"] = options["origin"] if filled?(options["origin"])
+      out["cms"] = options["cms"] if filled?(options["cms"])
       out
+    end
+
+    # The mail option for a scenario's appMailer, { via, from, fromName?, fail? }: a mailer of the app's own whose
+    # send records each message it is handed in `mailed`, or, with fail, raises an error with fail as its message.
+    def self.app_mailer(app, mailed)
+      mail = { "from" => app["from"], "via" => app["via"] }
+      mail["fromName"] = app["fromName"] unless app["fromName"].nil?
+      mail["send"] = lambda do |message|
+        raise app["fail"] unless app["fail"].nil?
+
+        handed = { "to" => message["to"], "from" => message["from"] }
+        handed["fromName"] = message["fromName"] unless message["fromName"].nil? || message["fromName"] == ""
+        mailed << handed.merge("subject" => message["subject"], "text" => message["text"])
+      end
+      mail
     end
 
     # A value kept from an answer: a dotted path into its JSON body, header:<name>, text, or fetched, any of
@@ -192,6 +211,8 @@ module Conformance
       runlight_options = (store.nil? ? {} : { "store" => store })
                          .merge(self.class.runlight_options(scenario))
                          .merge("now" => -> { @now }, "fetcher" => fetcher)
+      app = (scenario["options"] || {})["appMailer"]
+      runlight_options["mail"] = self.class.app_mailer(app, @mailed) unless app.nil?
       target = make_target.call(runlight_options, self.class.routes_options(scenario))
       kept = {}
       jars = {}
@@ -245,6 +266,7 @@ module Conformance
       request = Runlight::Http::Request.new(url, method: step["method"].to_s, headers: headers, body: body || "",
                                                  remote_address: "")
       fetcher.take
+      @mailed.clear
       answer =
         case to
         when "links" then target.links(request)
@@ -256,12 +278,14 @@ module Conformance
       target.idle
       sent_out = fetcher.take
       outbound = sent_out.map { |f| Normalizer.normalize(f["seen"]) }
+      handed = @mailed.map { |m| Normalizer.normalize(m) }
       if answer.nil?
         out = { "pass" => true }
         out["fetched"] = outbound unless outbound.empty?
+        out["mailed"] = handed unless handed.empty?
         return out
       end
-      answer(step, answer, sent_out, outbound, kept, jar)
+      answer(step, answer, sent_out, outbound, kept, jar).tap { |out| out["mailed"] = handed unless handed.empty? }
     end
 
     def answer(step, answer, sent_out, outbound, kept, jar)

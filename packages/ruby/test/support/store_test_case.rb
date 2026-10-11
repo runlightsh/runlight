@@ -60,8 +60,9 @@ class StoreTestCase < Minitest::Test
   # Date.UTC(2026, 9, 6, 12), the clock the TypeScript tests start from.
   NOW = 1_791_288_000_000
 
-  # Defines one test per database kind, as a PHPUnit data provider gives one case per kind.
-  def self.on_each(name, kinds = Databases.kinds, &body)
+  # Defines one test per database kind, as a PHPUnit data provider gives one case per kind: by default each
+  # kind, and each again with its tables under another prefix.
+  def self.on_each(name, kinds = Databases.store_kinds, &body)
     kinds.each do |kind|
       define_method("test_#{name}_on_#{kind}") { instance_exec(kind, &body) }
     end
