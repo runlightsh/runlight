@@ -62,12 +62,9 @@ final class HttpFoundation
         $answer = $rl->linkDomainResponse($ours, $context);
         $path = (string) parse_url($ours->url, PHP_URL_PATH);
         if ($answer === null && $ours->method === 'GET' && preg_match('#^' . preg_quote($rl->linkPath, '#') . '/[^/]+$#D', $path)) {
-            try {
-                $followed = ($rl->linkHandler())($ours, $context);
-                $answer = $followed->status === 404 ? null : $followed;
-            } catch (\UnexpectedValueException) {
-                // A slug that is not valid percent-encoding is no link, so it is the app's too.
-            }
+            // A slug that is not valid percent-encoding is no link (a 404), so it is the app's too.
+            $followed = ($rl->linkHandler())($ours, $context);
+            $answer = $followed->status === 404 ? null : $followed;
         }
         return $answer === null ? null : self::response($answer);
     }

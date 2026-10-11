@@ -611,14 +611,13 @@ final class Routes
         return (bool) preg_match('#^https?://[^/?\#' . Js::SPACE . ']+\z#u', Js::scrub($value));
     }
 
-    /** decodeURIComponent, which throws on a broken escape, as the TypeScript does (an internal error there). */
-    private static function decode(string $text): string
+    /**
+     * One part of a URL path with its percent escapes decoded, or null when they are broken (such as %E0 or
+     * %zz). A route answers null as it does a name it does not know, never with an error.
+     */
+    private static function decodePart(string $part): ?string
     {
-        $decoded = Js::decodeURIComponent($text);
-        if ($decoded === null) {
-            throw new \InvalidArgumentException('URI malformed');
-        }
-        return $decoded;
+        return Js::decodeURIComponent($part);
     }
 
     /** `String(body[key] ?? fallback)`. */
@@ -926,8 +925,8 @@ final class Routes
                 }
             }
             if (preg_match('#^/api/link-domains/([^/]+)/check\z#', $path, $checkMatch) && $request->method === 'GET') {
-                $domain = self::decode($checkMatch[1]);
-                if (!in_array($domain, $ownDomains(), true)) {
+                $domain = self::decodePart($checkMatch[1]);
+                if ($domain === null || !in_array($domain, $ownDomains(), true)) {
                     return self::coded('Unknown domain', 'unknown_domain', 404);
                 }
                 // One added before names inside private networks were refused is never fetched.
@@ -971,8 +970,8 @@ final class Routes
             }
 
             if (preg_match('#^/api/link-domains/([^/]+)\z#', $path, $domainMatch) && $request->method === 'DELETE') {
-                $domain = self::decode($domainMatch[1]);
-                if (!in_array($domain, $ownDomains(), true)) {
+                $domain = self::decodePart($domainMatch[1]);
+                if ($domain === null || !in_array($domain, $ownDomains(), true)) {
                     return self::coded('Unknown domain', 'unknown_domain', 404);
                 }
                 $store->removeLinkDomain($domain);
@@ -1280,7 +1279,11 @@ final class Routes
             return $site;
         }
         $existing = $this->store()->goals($site['id']);
-        $id = $path === '/api/goals' ? null : self::decode(substr($path, strlen('/api/goals/')));
+        $id = $path === '/api/goals' ? null : self::decodePart(substr($path, strlen('/api/goals/')));
+        // A goal id with broken escapes is one no goal has.
+        if ($path !== '/api/goals' && $id === null) {
+            return self::coded('Unknown goal', 'unknown_goal', 404);
+        }
         $before = null;
         foreach ($existing as $g) {
             if ($g['id'] === $id) {
@@ -1535,8 +1538,8 @@ final class Routes
             return self::coded('Method not allowed', 'method_not_allowed', 405);
         }
 
-        $id = self::decode(substr($path, strlen('/api/shares/')));
-        $share = preg_match(self::SHARE_ID, $id) ? $this->store()->shareById($id) : null;
+        $id = self::decodePart(substr($path, strlen('/api/shares/')));
+        $share = $id !== null && preg_match(self::SHARE_ID, $id) ? $this->store()->shareById($id) : null;
         if ($share === null || $share['site'] !== $site['id']) {
             return self::coded('Unknown share', 'unknown_share', 404);
         }
@@ -1800,7 +1803,7 @@ final class Routes
         if ($token !== null && $token['scope'] === 'manage' && self::managePath($method, $path)) {
             $asked = $url->searchParams()->get('site');
             $siteMatch = preg_match('#^/api/sites/([^/]+)\z#', $path, $sm) ? $sm : null;
-            if (($asked !== null && $asked !== '' && $asked !== $token['site']) || ($siteMatch !== null && self::decode($siteMatch[1]) !== $token['site'])) {
+            if (($asked !== null && $asked !== '' && $asked !== $token['site']) || ($siteMatch !== null && self::decodePart($siteMatch[1]) !== $token['site'])) {
                 return self::coded('Unknown site', 'unknown_site', 404);
             }
             if ($siteMatch !== null && self::isJson($request)) {
@@ -2181,8 +2184,12 @@ final class Routes
             if ($access !== true) {
                 return self::denied($access);
             }
+            $id = self::decodePart($siteMatch[1]);
+            if ($id === null) {
+                return self::coded('Unknown site', 'unknown_site', 404);
+            }
             try {
-                $rl->deleteSite(self::decode($siteMatch[1]));
+                $rl->deleteSite($id);
                 return self::json(['ok' => true]);
             } catch (\RangeException $error) {
                 return $error->getMessage() === 'Unknown site' ? self::coded($error->getMessage(), 'unknown_site', 404) : self::refused($error, 'site_invalid');
@@ -2374,8 +2381,11 @@ final class Routes
             $months = implode(', ', self::RETENTION_MONTHS);
             return self::coded("Keep visits for $months months, or forever", 'retention_bad', 400, ['months' => $months]);
         }
+        $id = self::decodePart($rawId);
+        if ($id === null) {
+            return self::coded('Unknown site', 'unknown_site', 404);
+        }
         try {
-            $id = self::decode($rawId);
             $remote = $rl->remote($id);
             // How long a connected site keeps visits, and the timezone its days follow, are the install's
             // settings: this server passes them on, and changes its own row only once the install took them.
@@ -2413,7 +2423,7 @@ final class Routes
             if (self::defined($body, 'hostnames') && $rl->managedSites) {
                 $patch['hostnames'] = self::plain(Js::get($body, 'hostnames'));
             }
-            $site = $rl->updateSite(self::decode($rawId), $patch);
+            $site = $rl->updateSite($id, $patch);
             // A connected site answers as the list shows it, so the dashboard keeps its install and domains.
             if ($remote !== null) {
                 $site['remote'] = $remote['url'];

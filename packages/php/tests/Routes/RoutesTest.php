@@ -140,6 +140,39 @@ final class RoutesTest extends TestCase
         $this->assertSame('https://hub.example.net', $target($hub));
     }
 
+    public function testBrokenPercentEscapesInAPathAnswerAsANameNobodyHasNeverAnError(): void
+    {
+        Make::needsCore($this);
+        $rl = Make::runlight(['sites' => [['id' => 'blog', 'hostnames' => ['blog.example.com']]]]);
+        $routes = $rl->routes(['token' => 'secret']);
+        $cases = [
+            ['PATCH', '/runlight/api/goals/%E0?site=blog', 'unknown_goal', ['name' => 'X', 'kind' => 'event', 'match' => 'X']],
+            ['DELETE', '/runlight/api/goals/%zz?site=blog', 'unknown_goal', null],
+            ['PATCH', '/runlight/api/shares/%E0%A4?site=blog', 'unknown_share', ['name' => 'X']],
+            ['DELETE', '/runlight/api/shares/%?site=blog', 'unknown_share', null],
+            ['PATCH', '/runlight/api/sites/%E0', 'unknown_site', ['name' => 'X']],
+            ['DELETE', '/runlight/api/sites/%zz', 'unknown_site', null],
+            ['GET', '/runlight/api/link-domains/%E0/check?site=blog', 'unknown_domain', null],
+            ['DELETE', '/runlight/api/link-domains/%zz?site=blog', 'unknown_domain', null],
+        ];
+        foreach ($cases as [$method, $path, $code, $body]) {
+            $answer = $routes->handle(Make::owner($path, $method, $body));
+            $this->assertSame(404, $answer->status, "$method $path");
+            $this->assertSame($code, Make::body($answer)['code'], "$method $path");
+        }
+        // A hub's manage token, checked against its one site before anything else.
+        $made = Make::body($routes->handle(Make::owner('/runlight/api/tokens', 'POST', ['name' => 'Hub', 'scope' => 'manage', 'site' => 'blog'])));
+        $this->assertSame(404, $routes->handle(Make::owner('/runlight/api/sites/%E0', 'PATCH', ['name' => 'X'], $made['secret']))->status);
+        // Public pages and short links: the share page, unsubscribing, the app's link path, and a link domain.
+        $this->assertSame(404, $routes->handle(self::req('/runlight/share/%E0'))->status);
+        $this->assertSame(404, $routes->handle(self::req('/runlight/unsubscribe/%E0'))->status);
+        $this->assertSame(404, $routes->handle(self::req('/runlight/assets/app.%E0.js'))->status);
+        $this->assertSame(404, ($rl->linkHandler())(self::req('/go/%E0'))->status);
+        $rl->store->addLinkDomain('go.example.net', 'blog', 1_780_000_000_000);
+        $rl->forgetLinkDomains();
+        $this->assertSame(404, $rl->linkDomainResponse(new Request('https://go.example.net/%E0'))?->status);
+    }
+
     public function testTheCheckEndpointTakesTheCronSecret(): void
     {
         $routes = Make::runlight()->routes(['token' => 'secret', 'cronSecret' => 'cron']);
@@ -415,11 +448,15 @@ final class RoutesTest extends TestCase
 
     public function testAnErrorInsideARouteIsAnInternalErrorThatSaysNothingMore(): void
     {
-        $routes = Make::runlight(['sites' => [['id' => 'blog', 'hostnames' => ['blog.example.com']]]])->routes(['token' => null]);
+        $broken = false;
+        $clock = static function () use (&$broken): int {
+            return $broken ? throw new \RuntimeException('the clock stopped') : 1_780_000_000_000;
+        };
+        $routes = Make::runlight(['sites' => [['id' => 'blog', 'hostnames' => ['blog.example.com']]], 'now' => $clock])->routes(['token' => null]);
         $log = ini_set('error_log', '/dev/null');
         try {
-            // A broken escape in a path makes decodeURIComponent throw, as it does in TypeScript.
-            $answer = $routes->handle(self::req('/runlight/api/goals/%E0%A4%A?site=blog', 'DELETE'));
+            $broken = true;
+            $answer = $routes->handle(self::req('/runlight/api/shares?site=blog', 'POST', ['content-type' => 'application/json'], '{"name":"X"}'));
         } finally {
             ini_set('error_log', (string) $log);
         }
