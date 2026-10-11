@@ -42,7 +42,9 @@ final class DbIpDisk implements DbIpFiles
 
     public function move(string $from, string $to): void
     {
-        rename($from, $to);
+        if (!@rename($from, $to)) {
+            throw new \RuntimeException("could not move $from");
+        }
     }
 
     public function delete(string $file): void
