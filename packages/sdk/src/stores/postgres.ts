@@ -1,5 +1,5 @@
 import pg from "pg";
-import { SqlStore, type Db } from "../store.js";
+import { SqlStore, TablesBusyError, lockWaitMs, type Db } from "../store.js";
 
 export interface PostgresOptions {
   /** A connection string, such as process.env.DATABASE_URL. */
@@ -13,6 +13,11 @@ export interface PostgresOptions {
    * huge range cannot hold a connection for good. Default 120000. 0 means no limit.
    */
   statementTimeout?: number;
+  /**
+   * What every table and index name starts with, in place of `rl_`, so two apps sharing one database each
+   * keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+   */
+  prefix?: string;
 }
 
 /** Arbitrary but fixed, so every Runlight process takes the same lock to create tables. */
@@ -60,7 +65,7 @@ function driver(query: (sql: string, params: unknown[]) => Promise<pg.QueryResul
 }
 
 /**
- * Runlight's tables in Postgres, through pg. Tables are prefixed `rl_`, so
+ * Runlight's tables in Postgres, through pg. Tables are prefixed `rl_` (or `prefix`), so
  * the database can be the app's own. Counts and BIGINT columns arrive as
  * strings from pg; the store turns them into numbers.
  */
@@ -110,7 +115,11 @@ export function postgres(options: PostgresOptions): SqlStore {
       return withClient(async (client) => {
         // Asked for again and again rather than waited on: a waiting statement would hold up an index being
         // built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
+        // Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+        const wait = lockWaitMs();
+        const until = Date.now() + wait;
         while (!(await client.query("SELECT pg_try_advisory_lock($1) AS ok", [MIGRATION_LOCK])).rows[0]?.ok) {
+          if (Date.now() >= until) throw new TablesBusyError(wait);
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
         try {
@@ -138,5 +147,5 @@ export function postgres(options: PostgresOptions): SqlStore {
       if (owned) await pool.end();
     },
   };
-  return new SqlStore(db);
+  return new SqlStore(db, options.prefix);
 }

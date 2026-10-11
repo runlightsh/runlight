@@ -12,7 +12,9 @@ const { description, scenarios } = JSON.parse(readFileSync(new URL("../../../con
 for (const kind of STORES) {
   for (const scenario of scenarios) {
     test(`conformance (${kind}): ${scenario.name}`, async () => {
-      const answers = await play(scenario, freshStore(kind));
+      // Each scenario's database goes when it is done, so they do not add up to more connections than a server takes.
+      const store = freshStore(kind);
+      const answers = await play(scenario, store).finally(() => store.close());
       scenario.steps.forEach((step, i) => {
         assert.deepEqual(answers[i], step.expect, `${step.method} ${step.path} (step ${i + 1}). If this change is on purpose, run npm run conformance.`);
       });

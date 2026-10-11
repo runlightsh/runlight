@@ -13,6 +13,11 @@ interface D1PreparedStatement {
 export interface D1Options {
   /** The D1 binding from your Worker's environment, such as env.DB. */
   database: D1Database;
+  /**
+   * What every table and index name starts with, in place of `rl_`, so two apps sharing one database each
+   * keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+   */
+  prefix?: string;
 }
 
 /**
@@ -43,5 +48,5 @@ export function d1(options: D1Options): SqlStore {
       return fn(db);
     },
   };
-  return new SqlStore(db);
+  return new SqlStore(db, options.prefix);
 }

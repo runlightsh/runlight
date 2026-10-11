@@ -1,7 +1,7 @@
 import { AssistantError, PROVIDERS, chat, listModels } from "./assistant.js";
 import { ConnectError, finishConnect, startConnect } from "./connect.js";
 import { PAGES_PER_VISIT, journeys } from "./journeys.js";
-import { JOURNEY_VISITS, type ReportRow, type ShareRow, type SiteRow, type TokenRow } from "./store.js";
+import { JOURNEY_VISITS, TablesBusyError, type ReportRow, type ShareRow, type SiteRow, type TokenRow } from "./store.js";
 import { DASHBOARD_CSS, DASHBOARD_HASH, DASHBOARD_JS, LOCALES, LOCALES_HASH, WORLD_HASH, WORLD_JSON } from "./generated/dashboard.js";
 import { PICKER, PICK_RELAY, TRACKER, TRACKER_HASH } from "./generated/tracker.js";
 import { hmac, randomId, sha256 } from "./hash.js";
@@ -2184,6 +2184,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
 
       return coded("Not found", "not_found", 404);
     } catch (error) {
+      // Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+      if (error instanceof TablesBusyError) return coded("Runlight is creating or upgrading its tables. Try again in a minute.", "tables_busy", 503, undefined, { "retry-after": "30" });
       console.error("Runlight:", error);
       return coded("Internal error", "internal", 500);
     }
