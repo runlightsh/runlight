@@ -413,12 +413,10 @@ module Runlight
         Js.scrub(value).match?(ORIGIN)
       end
 
-      # decodeURIComponent, which throws on a broken escape, as the TypeScript does (an internal error there).
-      def decode(text)
-        decoded = Js.decode_uri_component(text)
-        raise ArgumentError, "URI malformed" if decoded.nil?
-
-        decoded
+      # One part of a URL path with its percent escapes decoded, or nil when they are broken (such as %E0 or
+      # %zz). A route answers nil as it does a name it does not know, never with an error.
+      def decode_part(text)
+        Js.decode_uri_component(text)
       end
 
       # `String(body[key] ?? fallback)`.
@@ -838,8 +836,8 @@ module Runlight
           end
         end
         if (check_match = path.match(%r{\A/api/link-domains/([^/]+)/check\z})) && request.method == "GET"
-          domain = decode(check_match[1])
-          return coded("Unknown domain", "unknown_domain", 404) unless own_domains.call.include?(domain)
+          domain = decode_part(check_match[1])
+          return coded("Unknown domain", "unknown_domain", 404) if domain.nil? || !own_domains.call.include?(domain)
 
           # One added before names inside private networks were refused is never fetched.
           # What the check found, as a code the dashboard says in its own words, beside the English reason.
@@ -879,8 +877,8 @@ module Runlight
         end
 
         if (domain_match = path.match(%r{\A/api/link-domains/([^/]+)\z})) && request.method == "DELETE"
-          domain = decode(domain_match[1])
-          return coded("Unknown domain", "unknown_domain", 404) unless own_domains.call.include?(domain)
+          domain = decode_part(domain_match[1])
+          return coded("Unknown domain", "unknown_domain", 404) if domain.nil? || !own_domains.call.include?(domain)
 
           store.remove_link_domain(domain)
           @rl.forget_link_domains
@@ -1120,10 +1118,10 @@ module Runlight
       return site if site.is_a?(Http::Response)
 
       existing = store.goals(site["id"])
-      id = path == "/api/goals" ? nil : decode(path["/api/goals/".length..])
+      id = path == "/api/goals" ? nil : decode_part(path["/api/goals/".length..])
       before = nil
       existing.each { |g| before = g if g["id"] == id }
-      return coded("Unknown goal", "unknown_goal", 404) if !id.nil? && before.nil?
+      return coded("Unknown goal", "unknown_goal", 404) if path != "/api/goals" && (id.nil? || before.nil?)
 
       @trackers = {}
       if request.method == "DELETE"
@@ -1332,8 +1330,8 @@ module Runlight
         return coded("Method not allowed", "method_not_allowed", 405)
       end
 
-      id = decode(path["/api/shares/".length..])
-      share = id.match?(SHARE_ID) ? store.share_by_id(id) : nil
+      id = decode_part(path["/api/shares/".length..])
+      share = !id.nil? && id.match?(SHARE_ID) ? store.share_by_id(id) : nil
       return coded("Unknown share", "unknown_share", 404) if share.nil? || share["site"] != site["id"]
 
       if request.method == "PATCH"
@@ -1568,7 +1566,7 @@ module Runlight
       if !token.nil? && token["scope"] == "manage" && manage_path(method, path)
         asked = url.search_params.get("site")
         site_match = path.match(%r{\A/api/sites/([^/]+)\z})
-        if (!asked.nil? && asked != "" && asked != token["site"]) || (!site_match.nil? && decode(site_match[1]) != token["site"])
+        if (!asked.nil? && asked != "" && asked != token["site"]) || (!site_match.nil? && decode_part(site_match[1]) != token["site"])
           return coded("Unknown site", "unknown_site", 404)
         end
 
@@ -1901,8 +1899,11 @@ module Runlight
         access = can_read(request)
         return denied(access) if access != true
 
+        id = decode_part(site_match[1])
+        return coded("Unknown site", "unknown_site", 404) if id.nil?
+
         begin
-          rl.delete_site(decode(site_match[1]))
+          rl.delete_site(id)
           return json({ "ok" => true })
         rescue RangeError => e
           return e.message == "Unknown site" ? coded(e.message, "unknown_site", 404) : refused(e, "site_invalid")
@@ -2068,8 +2069,10 @@ module Runlight
         months = RETENTION_MONTHS.join(", ")
         return coded("Keep visits for #{months} months, or forever", "retention_bad", 400, { "months" => months })
       end
+      id = decode_part(raw_id)
+      return coded("Unknown site", "unknown_site", 404) if id.nil?
+
       begin
-        id = decode(raw_id)
         remote = rl.remote(id)
         # How long a connected site keeps visits, and the timezone its days follow, are the install's
         # settings: this server passes them on, and changes its own row only once the install took them.
@@ -2097,7 +2100,7 @@ module Runlight
         patch["name"] = Js.string(Js.get(body, "name")) if given?(body, "name")
         patch["timezone"] = Js.string(Js.get(body, "timezone")) if given?(body, "timezone")
         patch["hostnames"] = plain(Js.get(body, "hostnames")) if given?(body, "hostnames") && rl.managed_sites
-        site = rl.update_site(decode(raw_id), patch).dup
+        site = rl.update_site(id, patch).dup
         # A connected site answers as the list shows it, so the dashboard keeps its install and domains.
         unless remote.nil?
           site["remote"] = remote["url"]

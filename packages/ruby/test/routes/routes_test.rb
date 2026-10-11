@@ -103,6 +103,37 @@ class RoutesRoutesTest < RoutesTestCase
     assert_equal "https://hub.example.net", target.call(hub)
   end
 
+  def test_broken_percent_escapes_in_a_path_answer_as_a_name_nobody_has_never_an_error
+    rl = RoutesMake.runlight({ "sites" => [{ "id" => "blog", "hostnames" => ["blog.example.com"] }] })
+    routes = rl.routes({ "token" => "secret" })
+    [
+      ["PATCH", "/runlight/api/goals/%E0?site=blog", "unknown_goal", { "name" => "X", "kind" => "event", "match" => "X" }],
+      ["DELETE", "/runlight/api/goals/%zz?site=blog", "unknown_goal"],
+      ["PATCH", "/runlight/api/shares/%E0%A4?site=blog", "unknown_share", { "name" => "X" }],
+      ["DELETE", "/runlight/api/shares/%?site=blog", "unknown_share"],
+      ["PATCH", "/runlight/api/sites/%E0", "unknown_site", { "name" => "X" }],
+      ["DELETE", "/runlight/api/sites/%zz", "unknown_site"],
+      ["GET", "/runlight/api/link-domains/%E0/check?site=blog", "unknown_domain"],
+      ["DELETE", "/runlight/api/link-domains/%zz?site=blog", "unknown_domain"],
+    ].each do |method, path, code, body|
+      answer = routes.handle(RoutesMake.owner(path, method, body))
+      assert_equal 404, answer.status, "#{method} #{path}"
+      assert_equal code, RoutesMake.body(answer)["code"], "#{method} #{path}"
+    end
+    # A hub's manage token, checked against its one site before anything else.
+    made = RoutesMake.body(routes.handle(RoutesMake.owner("/runlight/api/tokens", "POST", { "name" => "Hub", "scope" => "manage", "site" => "blog" })))
+    assert_equal 404, routes.handle(RoutesMake.owner("/runlight/api/sites/%E0", "PATCH", { "name" => "X" }, made["secret"])).status
+    # Public pages and short links: the share page, unsubscribing, the app's link path, and a link domain.
+    assert_equal 404, routes.handle(req("/runlight/share/%E0")).status
+    assert_equal 404, routes.handle(req("/runlight/unsubscribe/%E0")).status
+    assert_equal 404, routes.handle(req("/runlight/assets/app.%E0.js")).status
+    assert_equal 404, rl.link_handler.call(req("/go/%E0")).status
+    rl.store.add_link_domain("go.example.net", "blog", (Time.now.to_f * 1000).floor)
+    rl.forget_link_domains
+    linked = rl.link_domain_response(Runlight::Http::Request.new("https://go.example.net/%E0"))
+    assert_equal 404, linked&.status
+  end
+
   def test_the_check_endpoint_takes_the_cron_secret
     routes = RoutesMake.runlight.routes({ "token" => "secret", "cronSecret" => "cron" })
     assert_equal 401, routes.handle(req("/runlight/api/check", "POST", { "content-type" => "application/json" })).status
@@ -387,11 +418,13 @@ class RoutesRoutesTest < RoutesTestCase
   end
 
   def test_an_error_inside_a_route_is_an_internal_error_that_says_nothing_more
-    routes = RoutesMake.runlight({ "sites" => [{ "id" => "blog", "hostnames" => ["blog.example.com"] }] }).routes({ "token" => nil })
+    rl = RoutesMake.runlight({ "sites" => [{ "id" => "blog", "hostnames" => ["blog.example.com"] }] })
+    routes = rl.routes({ "token" => nil })
+    rl.init
+    rl.store.define_singleton_method(:goals) { |_site| raise "the database went away" }
     answer = nil
     RoutesMake.quietly do
-      # A broken escape in a path makes decodeURIComponent throw, as it does in TypeScript.
-      answer = routes.handle(req("/runlight/api/goals/%E0%A4%A?site=blog", "DELETE"))
+      answer = routes.handle(req("/runlight/api/goals/nope?site=blog", "DELETE"))
     end
     assert_equal 500, answer.status
     assert_equal({ "error" => "Internal error", "code" => "internal" }, RoutesMake.body(answer))

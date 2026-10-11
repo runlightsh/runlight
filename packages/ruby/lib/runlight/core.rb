@@ -758,7 +758,8 @@ module Runlight
     def link_handler
       lambda do |request, context = {}|
         path = Http::Url.new(request.url).pathname
-        slug = path.start_with?("#{@link_path}/") ? decode(path[(@link_path.length + 1)..]) : ""
+        # A slug with broken escapes is one no link has.
+        slug = path.start_with?("#{@link_path}/") ? Js.decode_uri_component(path[(@link_path.length + 1)..]) || "" : ""
         found = slug != "" && !slug.include?("/") ? redirect(request, slug, "", context) : nil
         found || not_found
       end
@@ -785,7 +786,7 @@ module Runlight
       (@route_bases.empty? ? ["/runlight"] : @route_bases).each do |base|
         return nil if base != "/" && (url.pathname == base || url.pathname.start_with?("#{base}/"))
       end
-      slug = decode(url.pathname[1..].to_s)
+      slug = Js.decode_uri_component(url.pathname[1..].to_s) || ""
       found = slug != "" && !slug.include?("/") ? redirect(request, slug, host, context) : nil
       found || not_found
     end
@@ -952,11 +953,6 @@ module Runlight
 
     def not_found
       Http::Response.new("Not found", status: 404, headers: { "content-type" => "text/plain; charset=utf-8" })
-    end
-
-    # decodeURIComponent, raising where it throws a URIError.
-    def decode(text)
-      Js.decode_uri_component(text) || raise(ArgumentError, "URI malformed")
     end
 
     # True for a database that could not take a statement just now and may a moment later.
