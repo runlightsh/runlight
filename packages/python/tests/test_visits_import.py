@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 import pytest
-from support.databases import kinds
+from support.databases import store_kinds
 from support.store import WatchedDb
 from test_import_step import Router
 
@@ -150,7 +150,7 @@ def test_umami_is_asked_only_at_a_public_https_address_and_follows_no_redirect()
     assert router.requests == [], "nothing is asked of an address off the public internet, nor asked again"
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_umami_visit_history_pageviews_and_events_become_visits_with_sources_places_and_devices(databases: Any, kind: str) -> None:
     router = umami(fake_events(), SESSIONS)
     assert umami_websites(CREDENTIALS, router) == [{"id": "w1", "name": "Blog", "domain": "blog.example.com"}]
@@ -254,7 +254,7 @@ def ev(session: str, iso: str, path: str, name: str | None = None) -> dict[str, 
     return row
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_an_imported_visit_that_runs_past_midnight_keeps_one_visitor_on_all_its_rows(databases: Any, kind: str) -> None:
     events = [
         ev("s1", "2026-03-01T23:50:00Z", "/a"), ev("s1", "2026-03-02T00:05:00Z", "/b"), ev("s1", "2026-03-02T00:06:00Z", "/b", "Signup"),
@@ -278,7 +278,7 @@ def test_an_imported_visit_that_runs_past_midnight_keeps_one_visitor_on_all_its_
     assert raw["events"] == [["Signup", 2]]
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_a_visit_that_crosses_into_the_next_import_step_has_its_first_day_built_again(databases: Any, kind: str) -> None:
     events = [ev("s0", "2026-03-02T10:00:00Z", "/"), ev("s1", "2026-03-14T23:50:00Z", "/a"), ev("s1", "2026-03-15T00:10:00Z", "/b"), ev("s2", "2026-03-20T10:00:00Z", "/")]
     t = harness(store_of(databases, kind), umami(events, [], "2026-03-01T00:00:00.000Z"), at("2026-03-25T12:00:00Z"))

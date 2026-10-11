@@ -25,6 +25,9 @@ Options, with the TS names (as a dict, or as keyword arguments in snake_case, `r
   there, such as "WordPress (WP Mail SMTP)". The message is a dict of to, from, fromName (when there is one),
   subject, html, text, and headers (when there are any); `send` raises to say it failed. Without either, the
   service is set up in Settings.
+- mailServices: the ids of the mail services Settings offers and saves, such as every service but "smtp" in an app
+  that cannot keep connections of its own open. Default every service. A service saved earlier that is not in the
+  list counts as none, so the app's mailer, if there is one, sends instead.
 - secret: encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens for
   connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
 - rateLimit: tracker requests allowed per visitor address per minute. Default 120, which a real visitor never
@@ -77,6 +80,8 @@ REMOTE_MAX_BYTES = 2 * 1024 * 1024
 # On a database that caps statements per request (Cloudflare D1), fewer days a check, about 30 statements.
 METERED_ROLLUP_BATCH = 4
 ROLLUP_DELAY_MS = 2 * 3_600_000
+# The longest a tracker hit waits for the tables while another process creates or upgrades them.
+TRACKER_WAIT_MS = 10_000
 
 _SITE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z", re.I)
 _DOMAIN = re.compile(r"(?=.{1,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z")
@@ -229,6 +234,14 @@ class Runlight:
             }
         else:
             self._mail_in_code = mail
+        from .mail.transports import SERVICES
+
+        offered = opts.get("mailServices")
+        for id in offered or []:
+            if not any(s["id"] == id for s in SERVICES):
+                raise ValueError(f'Runlight: mail_services names "{id}", which is not a mail service')
+        # The mail services Settings offers and saves: every one, unless `mailServices` names fewer.
+        self.mail_services: list[dict[str, Any]] = SERVICES if offered is None else [s for s in SERVICES if s["id"] in offered]
         # Encrypts the keys kept in the database; None leaves them readable, and the dashboard says so.
         secret = opts.get("secret")
         self.secret: str | None = str(secret) if secret is not None else (env_value("RUNLIGHT_SECRET") or env_value("RUNLIGHT_TOKEN"))
@@ -237,6 +250,10 @@ class Runlight:
         self.route_bases: list[str] = []
         self._ready = False
         self._ready_lock = threading.RLock()
+        # The init() a tracker hit started on a thread of its own and waits on for a moment at most, shared by the
+        # hits that come while it runs.
+        self._initializing: dict[str, Any] | None = None
+        self._initializing_lock = threading.Lock()
         self._check_lock = threading.Lock()
         self._checking: threading.Event | None = None
         self._check_thread: int | None = None
@@ -269,14 +286,17 @@ class Runlight:
         """The mail Runlight sends with: a service from code, or as saved in the dashboard, or else the app's own
         mailer, as service "app" with its `via`. None when there is none."""
         from .mail.secret import unseal
+        from .mail.transports import SERVICES
 
         if self._mail_in_code is not None:
             return {**self._mail_in_code, "source": "code"}
         self.init()
         sealed = self.store.setting("mail")
         opened = unseal(sealed, self.secret) if sealed else None
-        if opened:
-            return {**_js.loads(opened), "source": "dashboard"}
+        saved = _js.loads(opened) if opened else None
+        # A service no longer offered counts as none, so it is never sent through.
+        if saved is not None and (self.mail_services is SERVICES or any(s["id"] == saved.get("service") for s in self.mail_services)):
+            return {**saved, "source": "dashboard"}
         app = self._app_mailer
         if app is None:
             return None
@@ -304,6 +324,8 @@ class Runlight:
         service = next((s for s in SERVICES if s["id"] == input.get("service")), None)
         if service is None:
             raise MailError("Pick a mail service", "mail_service", {})
+        if service not in self.mail_services:
+            raise MailError(f"{service['name']} is not offered here. Pick another mail service", "mail_service", {"service": service["id"]})
         settings: dict[str, Any] = {"service": service["id"]}
         for f in service["fields"]:
             if not f.get("secret"):
@@ -444,6 +466,34 @@ class Runlight:
                 elif zone != site["timezone"]:
                     self._zone_changed(site["id"], site["timezone"])
             self._ready = True
+
+    def _ready_within(self, ms: int) -> bool:
+        """Whether init() finished within `ms`; False while it is still waiting, such as on another process creating
+        the tables. Its errors are raised. The init runs on a thread of its own, which goes on after a hit stops
+        waiting for it, so the tables are there for later requests."""
+        if self._ready:
+            return True
+        with self._initializing_lock:
+            running = self._initializing
+            if running is None:
+                running = self._initializing = {"done": threading.Event(), "error": None}
+
+                def run(state: dict[str, Any] = running) -> None:
+                    try:
+                        self.init()
+                    except BaseException as error:  # noqa: BLE001
+                        state["error"] = error
+                    finally:
+                        with self._initializing_lock:
+                            self._initializing = None
+                        state["done"].set()
+
+                threading.Thread(target=run, name="runlight-init", daemon=True).start()
+        if not running["done"].wait(ms / 1000):
+            return False
+        if running["error"] is not None:
+            raise running["error"]
+        return True
 
     def routes(self, options: Mapping[str, Any] | None = None, **kwargs: Any) -> Any:
         """The dashboard and API (routes.py). Options with the TS RoutesOptions names, as a dict or in snake_case
@@ -1060,6 +1110,11 @@ class Runlight:
         if ai_agent(ua) is not None or is_bot(ua):
             return
         if self._limit is not None and not self._limit.allow(self.client_ip(request, context)):
+            return
+
+        # While another process creates or upgrades the tables (an index on a big table takes a while), a hit waits a
+        # moment at most and is then dropped, rather than holding its request until that is done.
+        if not self._ready_within(TRACKER_WAIT_MS):
             return
         # A database too busy to take the hit right now (every pooled connection held by long reports, or another
         # process writing the SQLite file) gets it a little later, at the time it arrived.

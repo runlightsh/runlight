@@ -282,6 +282,76 @@ def public_fetch(target: str, init: dict[str, Any], fetcher: Fetcher | None = No
         hop += 1
 
 
+class MetadataAddressError(Exception):
+    """Refused before anything was fetched, because the address is link-local or a cloud's metadata service."""
+
+    def __init__(self, host: str) -> None:
+        super().__init__(f"{host} is a link-local or cloud metadata address, which Runlight never connects to")
+        self.name = "MetadataAddressError"
+        self.host = host
+
+
+# Headers that describe a body, dropped with it when a redirect turns a request into a GET.
+_BODY_HEADERS = ("content-type", "content-length", "content-encoding", "content-language", "content-location")
+# Credentials, dropped when a redirect leads to another origin.
+_CREDENTIAL_HEADERS = ("authorization", "proxy-authorization", "cookie")
+
+
+def service_fetch(target: str, init: dict[str, Any], fetcher: Fetcher | None = None) -> Response:
+    """Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on this
+    computer or a private network, but is never at a link-local or cloud metadata address. The address is checked,
+    and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch follows it: a 303, or a
+    301 or 302 answering a POST, goes on as a GET with no body, and a redirect to another origin goes without the
+    credentials. A redirect past the last one comes back as it is. Raises a MetadataAddressError for an address it
+    refuses.
+
+    `init` holds method, headers, body, timeoutMs (for every hop together), maxBytes, truncate, redirects, and
+    lookup, which stands in for DNS in tests."""
+    fetcher = fetcher or UrllibFetcher()
+    redirects = 5 if init.get("redirects") is None else int(init["redirects"])
+    url = Url(target)
+    method = str(init.get("method") or "GET").upper()
+    headers: dict[str, str] = dict(init.get("headers") or {})
+    body = init.get("body")
+    timeout = init.get("timeoutMs")
+    # The whole wait, from the first hop's request on, as one signal would time it.
+    until: float | None = None
+    hop = 0
+    while True:
+        host = _BRACKETS.sub("", url.hostname)
+        if metadata_host(host, init.get("lookup")):
+            raise MetadataAddressError(host)
+        options: dict[str, Any] = {"method": method, "headers": headers, "redirect": "manual"}
+        if body is not None:
+            options["body"] = body
+        if timeout is not None and until is None:
+            until = time.monotonic() + timeout / 1000
+            options["timeoutMs"] = timeout
+        elif until is not None:
+            left = int((until - time.monotonic()) * 1000)
+            if left <= 0:
+                raise _timed_out()
+            options["timeoutMs"] = left
+        for key in ("maxBytes", "truncate"):
+            if init.get(key) is not None:
+                options[key] = init[key]
+        answer = fetcher.fetch(url.href, options)
+        location = answer.headers.get("location")
+        if answer.status < 300 or answer.status >= 400 or not location or hop >= redirects:
+            return answer
+        following = Url.parse(location, url.href)
+        if following is None:
+            raise FetchError("Invalid URL")
+        if answer.status == 303 or (answer.status in (301, 302) and method == "POST"):
+            method = "HEAD" if method == "HEAD" else "GET"
+            body = None
+            headers = {name: value for name, value in headers.items() if name.lower() not in _BODY_HEADERS}
+        if following.origin != url.origin:
+            headers = {name: value for name, value in headers.items() if name.lower() not in _CREDENTIAL_HEADERS}
+        url = following
+        hop += 1
+
+
 def _timed_out() -> FetchError:
     return FetchError("The operation was aborted due to timeout", True)
 

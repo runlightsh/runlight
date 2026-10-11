@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import select
 import socket
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from support import fixtures
 from support.fake_fetcher import FakeFetcher
 
-from runlight.http import FetchError, Response
-from runlight.safefetch import PrivateAddressError, public_address, public_addresses, public_fetch
+from runlight.assistant import AssistantError, list_models
+from runlight.http import FetchError, Response, UrllibFetcher
+from runlight.mail.transports import MailError, send
+from runlight.safefetch import MetadataAddressError, PrivateAddressError, public_address, public_addresses, public_fetch, service_fetch
 from runlight.safefetch import install_address, install_fetch, metadata_address, metadata_host, resolves_privately
 
 
@@ -195,3 +199,124 @@ def test_an_install_on_this_machine_only_when_code_allows_it() -> None:
     for url, local in [("http://127.0.0.1:3000/api/sites", False), ("https://127.0.0.1:3000/api/sites", True)]:
         with pytest.raises(PrivateAddressError):
             install_fetch(url, {"timeoutMs": 2000, "local": local}, hops([]))
+
+
+class _Services(BaseHTTPRequestHandler):
+    """A service on this computer that redirects, recording every request it is asked."""
+
+    seen: list[dict[str, str]] = []
+
+    def _answer(self) -> None:
+        length = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        self.seen.append(
+            {
+                "method": self.command,
+                "url": self.path,
+                "body": body,
+                "authorization": self.headers.get("authorization") or "",
+                "type": self.headers.get("content-type") or "",
+            }
+        )
+        port = self.server.server_address[1]
+        moves = {
+            "/metadata": (302, "http://169.254.169.254/latest/meta-data/"),
+            "/metadata-v6": (307, "http://[fd00:ec2::254]/"),
+            "/see-other": (303, "/landed"),
+            "/keep": (307, "/landed"),
+            "/elsewhere": (307, f"http://localhost:{port}/landed"),
+            "/loop": (302, "/loop"),
+        }
+        path = self.path.split("?")[0]
+        if path in moves:
+            status, location = moves[path]
+            self.send_response(status)
+            self.send_header("location", location)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("content-length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    do_GET = do_POST = do_HEAD = _answer
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def services() -> Iterator[str]:
+    _Services.seen = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Services)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_services_redirects_are_followed_only_while_each_one_stays_off_link_local_and_metadata_addresses(services: str) -> None:
+    seen = _Services.seen
+    ask = {"method": "POST", "headers": {"authorization": "Bearer key", "content-type": "application/json"}, "body": "{}", "timeoutMs": 5000}
+    # A service on this computer is fine; a redirect to a metadata address is refused before it is asked.
+    with pytest.raises(MetadataAddressError) as refused:
+        service_fetch(f"{services}/metadata", ask)
+    assert refused.value.host == "169.254.169.254"
+    assert str(refused.value) == "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to"
+    with pytest.raises(MetadataAddressError) as refused:
+        service_fetch(f"{services}/metadata-v6", ask)
+    assert refused.value.host == "fd00:ec2::254"
+    with pytest.raises(MetadataAddressError):
+        service_fetch("http://169.254.169.254/v1/models", {})
+    # Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and the key goes no
+    # further than the origin it was meant for.
+    seen.clear()
+    assert service_fetch(f"{services}/see-other", ask).text() == "ok"
+    assert seen[1] == {"method": "GET", "url": "/landed", "body": "", "authorization": "Bearer key", "type": ""}
+    seen.clear()
+    service_fetch(f"{services}/keep", ask)
+    assert seen[1] == {"method": "POST", "url": "/landed", "body": "{}", "authorization": "Bearer key", "type": "application/json"}
+    seen.clear()
+    service_fetch(f"{services}/elsewhere", ask)
+    assert seen[1] == {"method": "POST", "url": "/landed", "body": "{}", "authorization": "", "type": "application/json"}
+    # Past the last redirect, the redirect comes back as it is.
+    seen.clear()
+    assert service_fetch(f"{services}/loop", {"redirects": 2}).status == 302
+    assert len(seen) == 3
+    # The AI assistant and a mail webhook refuse such a redirect with the address it led to.
+    with pytest.raises(AssistantError) as assistant:
+        list_models({"provider": "custom", "baseUrl": f"{services}/metadata#", "key": ""})
+    assert assistant.value.code == "address_refused"
+    assert assistant.value.params == {"host": "169.254.169.254"}
+    message = {"to": "me@example.com", "from": "reports@example.com", "subject": "Hi", "html": "<p>Hi</p>", "text": "Hi"}
+    with pytest.raises(MailError) as mail:
+        send({"service": "webhook", "url": f"{services.replace('127.0.0.1', 'localhost')}/metadata"}, message)
+    assert mail.value.code == "address_refused"
+    assert mail.value.params == {"host": "169.254.169.254"}
+    assert str(mail.value) == "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to"
+
+
+def test_a_pinned_request_goes_to_the_pinned_address_and_never_through_a_proxy(services: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    port = services.rsplit(":", 1)[1]
+    # A proxy that would answer for every request, were it asked.
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), _Services)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, f"http://127.0.0.1:{proxy.server_address[1]}")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        _Services.seen = []
+        answer = UrllibFetcher().fetch(f"http://pinned.invalid:{port}/landed", {"resolve": [f"pinned.invalid:{port}:127.0.0.1"], "redirect": "manual"})
+        assert answer.text() == "ok"
+        assert [s["url"] for s in _Services.seen] == ["/landed"], "asked directly, at the pinned address, and the proxy never"
+        # A pin that does not cover the request refuses it, rather than fetch it unpinned.
+        with pytest.raises(FetchError, match="not pinned"):
+            UrllibFetcher().fetch(f"http://pinned.invalid:{port}/landed", {"resolve": [f"other.invalid:{port}:127.0.0.1"]})
+        assert len(_Services.seen) == 1
+    finally:
+        proxy.shutdown()
+        proxy.server_close()

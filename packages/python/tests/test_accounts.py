@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from support.databases import kinds
+from support.databases import store_kinds
 
 from runlight import _js
 from runlight.accounts.auth import INVITE_MS, SESSION_MS, AccountError, Accounts, Throttle, signature, totp
@@ -31,7 +31,7 @@ def code_of(fn) -> str:
         return error.code
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_the_first_account_owns_and_the_rest_are_admins_unless_asked(databases, kind):
     accounts = Accounts(fresh(databases, kind), SECRET)
     assert accounts.count() == 0
@@ -59,7 +59,7 @@ def test_the_first_account_owns_and_the_rest_are_admins_unless_asked(databases, 
     assert accounts.set_password("emoji@example.com", "\U0001f600" * 5, NOW)["role"] == "admin"
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_roles_handing_over_and_removing(databases, kind):
     accounts = Accounts(fresh(databases, kind), SECRET)
     owner = accounts.set_password("jon@example.com", "a long password", NOW)
@@ -82,7 +82,7 @@ def test_roles_handing_over_and_removing(databases, kind):
     assert code_of(lambda: accounts.remove(owner["id"])) == "unknown_account"
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_invites_work_once_and_the_newest_link_wins(databases, kind):
     accounts = Accounts(fresh(databases, kind), SECRET)
     accounts.set_password("jon@example.com", "a long password", NOW)
@@ -114,7 +114,7 @@ def test_invites_work_once_and_the_newest_link_wins(databases, kind):
     assert accounts.invites(NOW + INVITE_MS) == [], "expired invites are cleared on the way"
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_sessions_tickets_and_devices_are_signed_and_end_with_their_password(databases, kind):
     accounts = Accounts(fresh(databases, kind), SECRET)
     user = accounts.set_password("jon@example.com", "a long password", NOW)
@@ -151,7 +151,7 @@ def test_sessions_tickets_and_devices_are_signed_and_end_with_their_password(dat
     assert accounts.from_session(accounts.session_for(changed, NOW), NOW + 1) is not None
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_two_factor_codes_work_once_and_recovery_codes_are_crossed_off(databases, kind):
     accounts = Accounts(fresh(databases, kind), SECRET)
     user = accounts.set_password("jon@example.com", "a long password", NOW)
@@ -210,7 +210,7 @@ def test_a_throttle_in_memory_keeps_its_counts_out_of_the_database(databases):
     assert Throttle(store, "address", 3, 1000, memory=True).blocked(pair, NOW) is False, "each process counts its own"
 
 
-@pytest.mark.parametrize("kind", kinds())
+@pytest.mark.parametrize("kind", store_kinds())
 def test_the_throttle_lets_a_burst_through_no_further_than_its_limit(databases, kind):
     store = fresh(databases, kind)
     throttle = Throttle(store, "burst", 10, 60_000)

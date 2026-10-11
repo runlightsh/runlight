@@ -24,7 +24,7 @@ from typing import Any
 from . import _js
 from .http import Fetcher, FetchError, Url, UrllibFetcher
 from .mcp import INSTRUCTIONS, TOOLS, ApiRead, call_tool
-from .safefetch import metadata_host
+from .safefetch import MetadataAddressError, service_fetch
 
 # Each provider: id, name, protocol ("anthropic" or "openai"), baseUrl (the API's address, filled in for known
 # services and asked for otherwise), model (one to start with, or "" when the person picks one), and key ("yes",
@@ -112,12 +112,10 @@ def _service_message(data: Any) -> str:
     return message if isinstance(message, str) else ""
 
 
-def refuse_metadata(url: str) -> None:
-    """Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
-    private network is allowed, as the person setting it up means it to be."""
-    host = Url(url).hostname
-    if metadata_host(host):
-        raise AssistantError(f"{host} is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", {"host": host})
+def _refused(error: MetadataAddressError) -> AssistantError:
+    """A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+    (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be."""
+    return AssistantError(str(error), "address_refused", {"host": error.host})
 
 
 def _post(
@@ -130,10 +128,9 @@ def _post(
     cancelled: Callable[[], bool] | None,
 ) -> Any:
     _in_time(deadline, now, cancelled)
-    refuse_metadata(url)
     left = deadline - now()
     try:
-        answer = fetcher.fetch(
+        answer = service_fetch(
             url,
             {
                 "method": "POST",
@@ -142,7 +139,10 @@ def _post(
                 "timeoutMs": min(90_000, left),
                 "maxBytes": ANSWER_MAX_BYTES,
             },
+            fetcher,
         )
+    except MetadataAddressError as error:
+        raise _refused(error) from None
     except Exception as error:
         host = _host(url)
         if isinstance(error, FetchError) and error.timed_out:
@@ -420,9 +420,14 @@ def list_models(settings: dict[str, Any], fetcher: Fetcher | None = None) -> lis
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
     else:
         headers = {"authorization": f"Bearer {key}"} if key else {}
-    refuse_metadata(base)
     try:
-        answer = fetcher.fetch(f"{base}/models{'?limit=100' if provider['protocol'] == 'anthropic' else ''}", {"headers": headers, "timeoutMs": 20_000, "maxBytes": ANSWER_MAX_BYTES})
+        answer = service_fetch(
+            f"{base}/models{'?limit=100' if provider['protocol'] == 'anthropic' else ''}",
+            {"headers": headers, "timeoutMs": 20_000, "maxBytes": ANSWER_MAX_BYTES},
+            fetcher,
+        )
+    except MetadataAddressError as error:
+        raise _refused(error) from None
     except Exception:
         host = _host(base)
         raise AssistantError(f"Could not reach {host}", "unreachable", {"host": host}) from None

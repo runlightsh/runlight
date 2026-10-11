@@ -51,6 +51,18 @@ def kinds() -> list[str]:
     return out
 
 
+# The table prefix the "+prefix" kinds use in place of rl_, as WordPress would give one.
+TEST_PREFIX = "wp_rl_"
+
+
+def store_kinds() -> list[str]:
+    """kinds(), and SQLite, Postgres, and the first MySQL server once more with their tables under TEST_PREFIX, as
+    the TypeScript tests run each store with a prefix too."""
+    out = kinds()
+    prefixed = ["sqlite", *(["postgres"] if "postgres" in out else []), *[k for k in out if k.startswith("mysql")][:1]]
+    return out + [f"{k}+prefix" for k in prefixed]
+
+
 def _empty_mysql(db: Any) -> None:
     """Drops every table in the test database, so a test starts from nothing."""
     rows = db.all("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE()")
@@ -70,7 +82,9 @@ class Databases:
         self._lock_file: Any = None
 
     def db(self, kind: str) -> Any:
-        """A fresh Db of this kind."""
+        """A fresh Db of this kind. A "+prefix" kind's tables start with TEST_PREFIX."""
+        if kind.endswith("+prefix"):
+            return dbs.prefixed(self.db(kind[: -len("+prefix")]), TEST_PREFIX)
         if kind == "sqlite":
             return dbs.sqlite(":memory:")
         if kind == "postgres":

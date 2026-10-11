@@ -429,3 +429,42 @@ def test_the_apps_mailer_needs_a_from_address_and_without_one_the_answer_has_no_
     answer = _js.loads(rl.routes(token="t").handle(Request("https://stats.example.com/runlight/api/mail", headers={"authorization": "Bearer t"})).text())
     assert answer["source"] is None
     assert "app" not in answer, "an install without an app mailer answers as before"
+
+
+def test_mail_services_offers_only_those_named_and_a_saved_one_not_offered_counts_as_none():
+    with pytest.raises(ValueError, match='Runlight: mail_services names "carrier-pigeon", which is not a mail service'):
+        Runlight({"store": Stores.sqlite(":memory:"), "mailServices": ["resend", "carrier-pigeon"]})
+    assert Runlight({"store": Stores.sqlite(":memory:")}).mail_services is SERVICES, "every service by default"
+    assert Runlight(store=Stores.sqlite(":memory:"), mail_services=[]).mail_services == [], "an empty list offers none"
+
+    sent: list[dict] = []
+    store = Stores.sqlite(":memory:")
+    # Kept in the order Settings lists them, whatever the order given.
+    rl = Runlight({
+        "store": store,
+        "secret": "s" * 64,
+        "mailServices": ["webhook", "resend"],
+        "mail": {"from": "site@example.com", "via": "Craft", "send": sent.append},
+        "fetcher": capture(),
+    })  # fmt: skip
+    assert [s["id"] for s in rl.mail_services] == ["resend", "webhook"]
+    routes = rl.routes(token="t")
+
+    def call(method: str, path: str, body: object = None):
+        headers = {"authorization": "Bearer t", "content-type": "application/json"}
+        return routes.handle(Request(f"https://stats.example.com/runlight{path}", method, headers, None if body is None else _js.dumps(body)))
+
+    assert [s["id"] for s in _js.loads(call("GET", "/api/mail").text())["services"]] == ["resend", "webhook"]
+    refused = call("PUT", "/api/mail", {"service": "smtp", "host": "mail.example.com", "port": "587", "from": "reports@example.com"})
+    assert refused.status == 400
+    assert _js.loads(refused.text()) == {"error": "SMTP is not offered here. Pick another mail service", "code": "mail_service", "params": {"service": "smtp"}}
+    unknown = call("PUT", "/api/mail", {"service": "carrier-pigeon", "from": "reports@example.com"})
+    assert _js.loads(unknown.text()) == {"error": "Pick a mail service", "code": "mail_service", "params": {}}
+    assert call("PUT", "/api/mail", {"service": "resend", "apiKey": "re_live_key", "from": "reports@example.com"}).status == 200
+    assert rl.mail_settings()["source"] == "dashboard"
+
+    # The same database with resend no longer offered: the saved service counts as none, and the app's mailer sends.
+    later = Runlight({"store": store, "secret": "s" * 64, "mailServices": ["webhook"], "mail": {"from": "site@example.com", "via": "Craft", "send": sent.append}})
+    assert later.mail_settings() == {"service": "app", "from": "site@example.com", "via": "Craft", "source": "app"}
+    later.send_mail({"to": "jon@example.com", "subject": "Hi", "html": "<p>Hi</p>", "text": "Hi"})
+    assert len(sent) == 1

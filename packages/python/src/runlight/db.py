@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import decimal
 import inspect
+import math
 import os
 import re
 import sys
@@ -33,6 +34,33 @@ MIGRATION_LOCK = 7_331_906
 # One lock per MySQL database, so installs sharing a server do not wait on each other. Lock names are 64
 # characters at most.
 _MYSQL_LOCK = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))"
+
+# The longest a process waits for another one creating or upgrading the tables before it gives up.
+LOCK_WAIT_MS = 30_000
+
+_lock_wait = LOCK_WAIT_MS
+
+
+def lock_wait_ms() -> int:
+    """How long the stores wait for the lock for creating tables: LOCK_WAIT_MS, unless a test has set another."""
+    return _lock_wait
+
+
+def lock_wait_in_tests(ms: int | None) -> None:
+    """For tests: the stores wait this long for the lock instead, or LOCK_WAIT_MS again with None."""
+    global _lock_wait
+    _lock_wait = LOCK_WAIT_MS if ms is None else ms
+
+
+class TablesBusyError(Exception):
+    """Another process held the lock for creating tables past LOCK_WAIT_MS, such as one building an index on a big
+    table after an upgrade. The request that waited fails with this, rather than waiting for good."""
+
+    def __init__(self, waited: int = LOCK_WAIT_MS) -> None:
+        super().__init__(
+            f"Runlight: another process is creating or upgrading the tables, and had not finished after {_js.js_round(waited / 1000)} seconds. Try again in a minute."
+        )
+        self.name = "TablesBusyError"
 
 
 class Db(Protocol):
@@ -129,6 +157,18 @@ class _BaseDb:
         raise NotImplementedError
 
 
+def _owner_and_group(path: str, mode: int) -> None:
+    """A database file just made is for its owner and group alone (0660), whatever the umask, and so is a folder
+    made for it (0770): the visits in it are nobody else's to read, and a scheduled job running as another user of
+    the same group can still write to it. SQLite gives the -wal and -shm files it makes later the same mode as the
+    file. Systems without such modes ignore it."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        # Not a file this process may change, or a system with no such modes.
+        pass
+
+
 class SqliteDb(_BaseDb):
     """SQLite through the standard library's sqlite3, with the pragmas stores/sqlite.ts sets: WAL, NORMAL
     synchronous, and a five second busy timeout."""
@@ -150,14 +190,19 @@ class SqliteDb(_BaseDb):
                 conn = self._path()
             else:
                 path = self._path
+                made = False
                 # A file in a folder that is not there yet gets the folder, as a fresh app's data/ often is.
                 if path not in ("", ":memory:") and not path.startswith("file:"):
                     folder = os.path.dirname(path)
                     if folder and not os.path.isdir(folder):
                         os.makedirs(folder, exist_ok=True)
+                        _owner_and_group(folder, 0o770)
+                    made = not os.path.exists(path)
                 conn = sqlite3.connect(
                     path, timeout=5, isolation_level=None, check_same_thread=False, uri=path.startswith("file:")
                 )
+                if made:
+                    _owner_and_group(path, 0o660)
                 conn.execute("PRAGMA journal_mode = WAL")
                 conn.execute("PRAGMA synchronous = NORMAL")
                 conn.execute("PRAGMA busy_timeout = 5000")
@@ -535,7 +580,12 @@ class PostgresDb(_NetworkDb):
     def _locked(self, conn: Any, fn: Callable[[Any], T]) -> T:
         # Asked for again and again rather than waited on: a waiting statement would hold up an index being
         # built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
+        # Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+        wait = lock_wait_ms()
+        until = time.monotonic() + wait / 1000
         while not (self.all("SELECT pg_try_advisory_lock(?) AS ok", [MIGRATION_LOCK])[0].get("ok")):
+            if time.monotonic() >= until:
+                raise TablesBusyError(wait)
             time.sleep(0.1)
         try:
             return fn(self)
@@ -593,14 +643,20 @@ class MysqlDb(_NetworkDb):
         _set_timeout(conn, ms, self._mariadb)
 
     def _locked(self, conn: Any, fn: Callable[[Any], T]) -> T:
+        # Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+        wait = lock_wait_ms()
+        until = time.monotonic() + wait / 1000
         while True:
-            rows = self._raw(conn, f"SELECT GET_LOCK({_MYSQL_LOCK}, 5) AS ok")
+            left = max(1, min(5, math.ceil(until - time.monotonic())))
+            rows = self._raw(conn, f"SELECT GET_LOCK({_MYSQL_LOCK}, {left}) AS ok")
             ok = rows[0][0] if rows else None
             if ok is None:
                 raise RuntimeError("Runlight: MySQL refused the lock for creating tables")
             if int(ok) == 1:
                 break
-            # Not got within 5 seconds: another process is creating the tables. Ask again.
+            # Not got in time: another process is creating the tables. Ask again, until the wait is up.
+            if time.monotonic() >= until:
+                raise TablesBusyError(wait)
         try:
             # An index on a big table takes a while to build, so the build may run past the statement timeout.
             if self._statement_timeout > 0:
@@ -651,6 +707,71 @@ def _set_timeout(conn: Any, ms: int, mariadb: bool) -> None:
             cursor.execute(f"SET SESSION max_statement_time = {_js.number_text(ms / 1000)}")
         else:
             cursor.execute(f"SET SESSION max_execution_time = {int(ms)}")
+
+
+# Table prefixes
+
+# What every table and index name starts with, unless a store is given another prefix in its place.
+PREFIX = "rl_"
+
+# Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app dropping Runlight's tables
+# drops these by name, never every table that starts with the prefix.
+TABLES = (
+    "meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings",
+    "reports", "tokens", "funnels", "rollup_days", "rollups", "users", "invites",
+)  # fmt: skip
+
+# A name in a statement, and short enough that the longest index name stays inside MySQL's 64.
+_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,31}\Z")
+_NAMED = re.compile(r"\brl_(?=[a-z])")
+
+
+class PrefixedDb:
+    """A Db whose tables and indexes start with `prefix` in place of `rl_`, such as `wp_rl_` inside WordPress, so two
+    apps sharing one database each keep a set of their own. Runlight's SQL names every table and index `rl_` and
+    something, and those names alone are rewritten on the way through, in each statement and in the names a schema
+    check compares as text. A store given a prefix puts one in front of its Db, so the accounts and importers that
+    reach the Db through the store follow it too."""
+
+    def __init__(self, inner: Any, prefix: str) -> None:
+        if not isinstance(prefix, str) or not _PREFIX.match(prefix):
+            raise ValueError("Runlight: a table prefix is up to 32 letters, digits, and underscores, and does not start with a digit")
+        self.inner = inner
+        self.prefix = prefix
+        if hasattr(inner, "metered"):
+            self.metered = inner.metered
+
+    def _sql(self, text: str) -> str:
+        return _NAMED.sub(lambda _m: self.prefix, text)
+
+    def _wrap(self, db: Any) -> Any:
+        return self if db is self.inner else PrefixedDb(db, self.prefix)
+
+    def dialect(self) -> str:
+        return self.inner.dialect()
+
+    def all(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+        return self.inner.all(self._sql(sql), params)
+
+    def run(self, sql: str, params: Sequence[Any] = ()) -> None:
+        self.inner.run(self._sql(sql), params)
+
+    def affected(self, sql: str, params: Sequence[Any] = ()) -> int:
+        return self.inner.affected(self._sql(sql), params)
+
+    def transaction(self, fn: Callable[[Any], T]) -> T:
+        return self.inner.transaction(lambda db: fn(self._wrap(db)))
+
+    def exclusive(self, fn: Callable[[Any], T]) -> T:
+        return self.inner.exclusive(lambda db: fn(self._wrap(db)))
+
+    def close(self) -> None:
+        self.inner.close()
+
+
+def prefixed(inner: Any, prefix: str) -> PrefixedDb:
+    """A Db whose tables and indexes start with `prefix` in place of `rl_`. See PrefixedDb."""
+    return PrefixedDb(inner, prefix)
 
 
 # Opening connections

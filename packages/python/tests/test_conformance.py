@@ -10,10 +10,10 @@ import pytest
 
 from runlight import _js
 from support import conformance
-from support.databases import kinds
+from support.databases import store_kinds
 
 FILE = conformance.load()
-CASES = [(kind, scenario["name"]) for kind in kinds() for scenario in FILE["scenarios"]]
+CASES = [(kind, scenario["name"]) for kind in store_kinds() for scenario in FILE["scenarios"]]
 
 
 def _sorted(value: Any) -> Any:
