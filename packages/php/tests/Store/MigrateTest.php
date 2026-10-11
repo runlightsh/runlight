@@ -8,6 +8,9 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Runlight\Db\Connect;
 use Runlight\Db\Db;
+use Runlight\Db\PdoDb;
+use Runlight\Db\Prefixed;
+use Runlight\Db\TablesBusy;
 use Runlight\Store\Sql;
 use Runlight\Store\SqlStore;
 use Runlight\Store\Stores;
@@ -180,7 +183,7 @@ final class MigrateTest extends TestCase
         }
     }
 
-    public function testANewSqliteDatabaseAndItsFolderAreTheUsersAlone(): void
+    public function testANewSqliteDatabaseAndItsFolderAreTheUsersAndItsGroupsAlone(): void
     {
         if (DIRECTORY_SEPARATOR !== '/') {
             $this->markTestSkipped('File modes are checked on Unix-like systems.');
@@ -188,12 +191,19 @@ final class MigrateTest extends TestCase
         $dir = sys_get_temp_dir() . '/rl-migrate-' . bin2hex(random_bytes(5));
         $file = "$dir/data/runlight.db";
         array_push($this->files, $file, "$file-wal", "$file-shm");
-        $store = Stores::sqlite($file);
-        $store->migrate();
-        $this->assertSame(0o700, fileperms("$dir/data") & 0o777);
+        $umask = umask(0o022);
+        try {
+            $store = Stores::sqlite($file);
+            $store->migrate();
+        } finally {
+            umask($umask);
+        }
+        // A scheduled job running as another user of the same group can open it too, whatever the umask.
+        $this->assertSame(0o770, fileperms("$dir/data") & 0o777);
+        $this->assertFileExists("$file-wal");
         foreach (['', '-wal', '-shm'] as $suffix) {
             if (file_exists($file . $suffix)) {
-                $this->assertSame(0o600, fileperms($file . $suffix) & 0o777, "runlight.db$suffix");
+                $this->assertSame(0o660, fileperms($file . $suffix) & 0o777, "runlight.db$suffix");
             }
         }
         $store->close();
@@ -248,6 +258,64 @@ final class MigrateTest extends TestCase
         }
         $this->assertSame(15, self::tables($store->db));
         $store->close();
+    }
+
+    public function testPostgresBuildsAnIndexLeftUnusableAgainUnderAPrefixThatItselfStartsRl(): void
+    {
+        if (Databases::pgUrl() === null) {
+            $this->markTestSkipped('RUNLIGHT_TEST_PG is not set');
+        }
+        $schema = Databases::pgSchema();
+        $url = (string) Databases::pgUrl();
+        $store = Stores::postgres($url, ['schema' => $schema, 'prefix' => 'rl_wp_']);
+        $store->migrate();
+        $inner = $store->db instanceof Prefixed ? $store->db->inner : $store->db;
+        // As a concurrent build stopped part way leaves it.
+        try {
+            $inner->run("UPDATE pg_index SET indisvalid = false WHERE indexrelid = '$schema.rl_wp_events_site_ts'::regclass");
+        } catch (\PDOException) {
+            $this->markTestSkipped('marking an index unusable needs a superuser');
+        }
+        Stores::postgres($url, ['schema' => $schema, 'prefix' => 'rl_wp_'])->migrate(true);
+        $this->assertSame([['valid' => true]], $inner->all("SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = '$schema.rl_wp_events_site_ts'::regclass"), 'dropped, and built again');
+        $store->close();
+    }
+
+    #[DataProvider('servers')]
+    public function testWaitingOnAnotherProcessesMigrationGivesUpAfterTheWaitAndThenTablesBusy(string $kind): void
+    {
+        if ($kind === 'none') {
+            $this->markTestSkipped('Set RUNLIGHT_TEST_PG or RUNLIGHT_TEST_MYSQL.');
+        }
+        [$store, , $args] = $this->shared($kind);
+        // Another process holds the lock for creating tables, as one building an index after an upgrade would.
+        $other = $kind === 'postgres' ? Connect::postgres($args[1]) : Connect::mysql($args[1]);
+        $lock = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))";
+        if ($kind === 'postgres') {
+            $other->run('SELECT pg_advisory_lock(?)', [PdoDb::MIGRATION_LOCK]);
+        } else {
+            $this->assertSame(1, (int) $other->all("SELECT GET_LOCK($lock, 0) AS ok")[0]['ok']);
+        }
+        TablesBusy::inTests(1);
+        try {
+            $started = microtime(true);
+            try {
+                $store->migrate();
+                $this->fail('the wait should run out');
+            } catch (TablesBusy $error) {
+                $this->assertSame('Runlight: another process is creating or upgrading the tables, and had not finished after 1 seconds. Try again in a minute.', $error->getMessage());
+            }
+            $this->assertLessThan(4, microtime(true) - $started);
+            $this->assertSame('Runlight: another process is creating or upgrading the tables, and had not finished after 30 seconds. Try again in a minute.', (new TablesBusy())->getMessage());
+            // Once the other process is done, the tables are made.
+            $other->run($kind === 'postgres' ? 'SELECT pg_advisory_unlock(' . PdoDb::MIGRATION_LOCK . ')' : "DO RELEASE_LOCK($lock)");
+            $store->migrate();
+            $this->assertSame(15, self::tables($store->db));
+        } finally {
+            TablesBusy::inTests(null);
+            $other->close();
+            $store->close();
+        }
     }
 
     public function testTheTablesAreTheOnesTheTypeScriptSdkMakesOnSqlite(): void

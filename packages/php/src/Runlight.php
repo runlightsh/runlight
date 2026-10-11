@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight;
 
 use Runlight\Accounts\Throttle;
+use Runlight\Db\TablesBusy;
 use Runlight\Http\BodyTooLong;
 use Runlight\Http\CurlFetcher;
 use Runlight\Http\Fetcher;
@@ -94,6 +95,8 @@ final class Runlight
     /** On a database that caps statements per request (Cloudflare D1), fewer days a check, about 30 statements. */
     private const METERED_ROLLUP_BATCH = 4;
     private const ROLLUP_DELAY_MS = 2 * 3_600_000;
+    /** The longest a tracker hit waits for the tables while another process creates or upgrades them, in seconds. */
+    private const TRACKER_WAIT = 10;
 
     public readonly SqlStore $store;
     /** Whether sites are managed in the dashboard. */
@@ -460,6 +463,24 @@ final class Runlight
             }
         }
         $this->ready = true;
+    }
+
+    /**
+     * Whether init() finished, waiting at most `$seconds` for the lock another process holds while it creates
+     * or upgrades the tables. False when that wait ran out; init() runs again on the next request. Its other
+     * errors are thrown.
+     */
+    private function readyWithin(float $seconds): bool
+    {
+        if ($this->ready) {
+            return true;
+        }
+        try {
+            TablesBusy::atMost($seconds, $this->init(...));
+            return true;
+        } catch (TablesBusy) {
+            return false;
+        }
     }
 
     /** The dashboard and API. Routes is the port of routes.ts. */
@@ -1299,6 +1320,12 @@ final class Runlight
             return;
         }
         if ($this->limit !== null && !$this->limit->allow($this->clientIp($request, $context))) {
+            return;
+        }
+
+        // While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+        // waits a moment at most and is then dropped, rather than holding its request until that is done.
+        if (!$this->readyWithin(self::TRACKER_WAIT)) {
             return;
         }
 

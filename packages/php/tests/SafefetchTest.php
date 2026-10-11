@@ -5,11 +5,18 @@ declare(strict_types=1);
 namespace Runlight\Tests;
 
 use PHPUnit\Framework\TestCase;
+use Runlight\Assistant;
+use Runlight\AssistantError;
+use Runlight\Http\CurlFetcher;
 use Runlight\Http\FetchError;
 use Runlight\Http\Response;
+use Runlight\Mail\MailError;
+use Runlight\Mail\Transports;
+use Runlight\MetadataAddressError;
 use Runlight\PrivateAddressError;
 use Runlight\Safefetch;
 use Runlight\Tests\Support\FakeFetcher;
+use Runlight\Tests\Support\LocalServer;
 
 /** Ports safefetch.test.ts, replays the address checks in tests/fixtures/outbound.json, and covers each hop's checks. */
 final class SafefetchTest extends TestCase
@@ -154,5 +161,77 @@ final class SafefetchTest extends TestCase
         $refused = new FakeFetcher(static fn () => throw new FetchError('Connection refused'));
         $this->expectExceptionMessage('Connection refused');
         Safefetch::publicFetch('https://a.example/', ['timeoutMs' => 2000, 'lookup' => self::dns(['a.example' => ['1.1.1.1']])], $refused);
+    }
+
+    public function testAServicesRedirectsAreFollowedOnlyWhileEachOneStaysOffLinkLocalAndMetadataAddresses(): void
+    {
+        $server = new LocalServer();
+        $base = "http://127.0.0.1:{$server->port}";
+        $to = static fn (string $where, int $status = 302): string => "$base/redirect?status=$status&to=" . rawurlencode($where);
+        // Every request made goes through here, so a refused one is seen never to have been asked.
+        $asked = [];
+        $fetcher = new FakeFetcher(static function (string $url, array $init) use (&$asked): Response {
+            $asked[] = $url;
+            return (new CurlFetcher())->fetch($url, $init);
+        });
+        $ask = ['method' => 'POST', 'headers' => ['authorization' => 'Bearer key', 'content-type' => 'application/json'], 'body' => '{}'];
+        $echo = static fn (Response $answer): array => json_decode($answer->text(), true);
+        try {
+            // A service on this computer is fine; a redirect to a metadata address is refused before it is asked.
+            foreach ([[$to('http://169.254.169.254/latest/meta-data/'), '169.254.169.254'], [$to('http://[fd00:ec2::254]/', 307), 'fd00:ec2::254']] as [$url, $host]) {
+                $asked = [];
+                try {
+                    Safefetch::serviceFetch($url, $ask, $fetcher);
+                    $this->fail("$host should be refused");
+                } catch (MetadataAddressError $error) {
+                    $this->assertSame($host, $error->host);
+                    $this->assertSame("$host is a link-local or cloud metadata address, which Runlight never connects to", $error->getMessage());
+                }
+                $this->assertSame([$url], $asked, 'nothing was asked there');
+            }
+            $asked = [];
+            try {
+                Safefetch::serviceFetch('http://169.254.169.254/v1/models', [], $fetcher);
+                $this->fail('a metadata address is refused');
+            } catch (MetadataAddressError) {
+                $this->assertSame([], $asked);
+            }
+
+            // Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and the key
+            // goes no further than the origin it was meant for.
+            $seen = $echo(Safefetch::serviceFetch($to('/request', 303), $ask, $fetcher));
+            $this->assertSame(['GET', '', ['Bearer key']], [$seen['method'], $seen['body'], $seen['headers']['authorization'] ?? null]);
+            $this->assertArrayNotHasKey('content-type', $seen['headers']);
+            $seen = $echo(Safefetch::serviceFetch($to('/request', 307), $ask, $fetcher));
+            $this->assertSame(['POST', '{}', ['Bearer key'], ['application/json']], [$seen['method'], $seen['body'], $seen['headers']['authorization'] ?? null, $seen['headers']['content-type'] ?? null]);
+            $seen = $echo(Safefetch::serviceFetch($to("http://localhost:{$server->port}/request", 307), $ask, $fetcher));
+            $this->assertSame(['POST', '{}', ['application/json']], [$seen['method'], $seen['body'], $seen['headers']['content-type'] ?? null]);
+            $this->assertArrayNotHasKey('authorization', $seen['headers'], 'another origin gets no credentials');
+
+            // Past the last redirect, the redirect comes back as it is.
+            $asked = [];
+            $loop = "$base/redirect?to=" . rawurlencode('/redirect?to=%2Fredirect');
+            $this->assertSame(302, Safefetch::serviceFetch($loop, ['redirects' => 2], $fetcher)->status);
+            $this->assertCount(3, $asked);
+
+            // The AI assistant and a mail webhook refuse such a redirect with the address it led to.
+            try {
+                Assistant::listModels(['provider' => 'custom', 'baseUrl' => $to('http://169.254.169.254/') . '#', 'key' => ''], $fetcher);
+                $this->fail('the assistant should refuse');
+            } catch (AssistantError $error) {
+                $this->assertSame(['address_refused', ['host' => '169.254.169.254']], [$error->code, $error->params]);
+            }
+            $message = ['to' => 'me@example.com', 'from' => 'reports@example.com', 'subject' => 'Hi', 'html' => '<p>Hi</p>', 'text' => 'Hi'];
+            try {
+                Transports::send(['service' => 'webhook', 'url' => "http://localhost:{$server->port}/redirect?to=" . rawurlencode('http://169.254.169.254/')], $message, $fetcher);
+                $this->fail('the webhook should refuse');
+            } catch (MailError $error) {
+                $this->assertSame('address_refused', $error->code);
+                $this->assertSame('169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to', $error->getMessage());
+                $this->assertSame(['host' => '169.254.169.254'], $error->params);
+            }
+        } finally {
+            $server->stop();
+        }
     }
 }

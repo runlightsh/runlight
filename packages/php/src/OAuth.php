@@ -261,7 +261,9 @@ final class OAuth
             $manage = !$cms && in_array('manage', $scopes, true);
             // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
             $host = self::siteHost($redirect);
-            $counting = array_values(array_filter($runlight->sites(), static fn (array $s): bool => $runlight->remote($s['id']) === null && in_array($host, $s['hostnames'], true)));
+            // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+            $local = array_values(array_filter($runlight->sites(), static fn (array $s): bool => $runlight->remote($s['id']) === null));
+            $counting = count($local) === 1 && $local[0]['hostnames'] === [] ? $local : array_values(array_filter($local, static fn (array $s): bool => in_array($host, $s['hostnames'], true)));
             $name = (string) $client['name'];
 
             if (!($ctx['isOwner'])($request)) {

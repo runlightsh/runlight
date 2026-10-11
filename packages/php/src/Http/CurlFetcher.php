@@ -4,14 +4,43 @@ declare(strict_types=1);
 
 namespace Runlight\Http;
 
-/** Fetches with PHP's curl extension, or with its stream wrapper when curl is missing. */
+use Runlight\Safefetch;
+
+/**
+ * Fetches with PHP's curl extension, or with its stream wrapper when curl is missing.
+ *
+ * A request with `resolve` pins is only ever made to a pinned address: through no proxy, and with every redirect
+ * followed here, so each one is checked against the pins in turn. A pin that cannot be applied (no pin for the
+ * URL's host and port, or a curl without CURLOPT_RESOLVE) refuses the request with a FetchError rather than
+ * letting it look the name up again.
+ */
 final class CurlFetcher implements Fetcher
 {
+    /** Redirects followed for one request, as curl's own limit was. */
+    private const MAX_REDIRECTS = 20;
+
     public function fetch(string $url, array $init = []): Response
     {
-        if (!function_exists('curl_init')) {
-            return $this->viaStreams($url, $init);
+        if (empty($init['resolve'])) {
+            return function_exists('curl_init') ? $this->viaCurl($url, $init) : $this->viaStreams($url, $init);
         }
+        // Each redirect is followed by hand, so its address is checked against the pins as the first one was.
+        $follow = ($init['redirect'] ?? 'follow') !== 'manual';
+        for ($hop = 0; ; $hop++) {
+            $answer = function_exists('curl_init') ? $this->viaCurl($url, [...$init, 'redirect' => 'manual']) : $this->viaStreams($url, [...$init, 'redirect' => 'manual']);
+            $location = $answer->headers->get('location');
+            if (!$follow || $answer->status < 300 || $answer->status >= 400 || $location === null || $location === '') {
+                return $answer;
+            }
+            if ($hop >= self::MAX_REDIRECTS) {
+                throw new FetchError('Maximum (' . self::MAX_REDIRECTS . ') redirects followed');
+            }
+            $url = (new Url($location, $url))->href();
+        }
+    }
+
+    private function viaCurl(string $url, array $init): Response
+    {
         $method = strtoupper((string) ($init['method'] ?? 'GET'));
         $headers = $init['headers'] ?? [];
         $headers = $headers instanceof Headers ? $headers : new Headers($headers);
@@ -19,6 +48,17 @@ final class CurlFetcher implements Fetcher
         $maxBytes = isset($init['maxBytes']) ? (int) $init['maxBytes'] : null;
         $truncate = !empty($init['truncate']);
         $follow = ($init['redirect'] ?? 'follow') !== 'manual';
+        $pin = null;
+        if (!empty($init['resolve'])) {
+            // A curl that cannot be told the address would look the name up again itself.
+            if (!defined('CURLOPT_RESOLVE')) {
+                throw new FetchError('Runlight: this curl cannot pin a checked address, so nothing is fetched');
+            }
+            $addresses = Safefetch::pinned($url, array_values($init['resolve']));
+            $parsed = new Url($url);
+            $port = $parsed->port !== '' ? $parsed->port : ($parsed->protocol === 'https:' ? '443' : '80');
+            $pin = "{$parsed->hostname}:$port:" . implode(',', array_map(static fn (string $a): string => str_contains($a, ':') ? "[$a]" : $a, $addresses));
+        }
 
         $lines = [];
         foreach ($headers->all() as $name => $values) {
@@ -70,8 +110,13 @@ final class CurlFetcher implements Fetcher
         if ($method === 'HEAD') {
             curl_setopt($handle, CURLOPT_NOBODY, true);
         }
-        if (!empty($init['resolve'])) {
-            curl_setopt($handle, CURLOPT_RESOLVE, array_values($init['resolve']));
+        if ($pin !== null) {
+            curl_setopt_array($handle, [
+                CURLOPT_RESOLVE => [$pin],
+                // A proxy, even one named only in the environment (HTTPS_PROXY), would look the name up itself.
+                CURLOPT_PROXY => '',
+                CURLOPT_FOLLOWLOCATION => false,
+            ]);
         }
         $ok = curl_exec($handle);
         $errno = curl_errno($handle);
@@ -92,18 +137,17 @@ final class CurlFetcher implements Fetcher
     {
         $headers = new Headers($init['headers'] ?? []);
         $ssl = [];
+        $pinned = !empty($init['resolve']);
         // A pin connects to the checked address, with the name kept for the Host header and the certificate.
-        foreach ($init['resolve'] ?? [] as $pin) {
-            $parsed = Url::parse($url);
-            if ($parsed !== null && preg_match('/^(.+):(\d+):\[?([^\],]+)\]?/', (string) $pin, $m) && strcasecmp($m[1], $parsed->hostname) === 0) {
-                if (!$headers->has('host')) {
-                    $headers->set('host', $parsed->host());
-                }
-                $ssl = ['peer_name' => $parsed->hostname, 'SNI_enabled' => true];
-                $address = str_contains($m[3], ':') ? "[{$m[3]}]" : $m[3];
-                $url = $parsed->protocol . '//' . $address . ($parsed->port !== '' ? ":{$parsed->port}" : '') . $parsed->pathname . $parsed->search;
-                break;
+        if ($pinned) {
+            $addresses = Safefetch::pinned($url, array_values($init['resolve']));
+            $parsed = new Url($url);
+            if (!$headers->has('host')) {
+                $headers->set('host', $parsed->host());
             }
+            $ssl = ['peer_name' => $parsed->hostname, 'SNI_enabled' => true];
+            $address = str_contains($addresses[0], ':') ? "[{$addresses[0]}]" : $addresses[0];
+            $url = $parsed->protocol . '//' . $address . ($parsed->port !== '' ? ":{$parsed->port}" : '') . $parsed->pathname . $parsed->search;
         }
         $lines = [];
         foreach ($headers->all() as $name => $values) {
@@ -117,7 +161,7 @@ final class CurlFetcher implements Fetcher
             'content' => (string) ($init['body'] ?? ''),
             'timeout' => ((int) ($init['timeoutMs'] ?? 30_000)) / 1000,
             'ignore_errors' => true,
-            'follow_location' => ($init['redirect'] ?? 'follow') !== 'manual' ? 1 : 0,
+            'follow_location' => !$pinned && ($init['redirect'] ?? 'follow') !== 'manual' ? 1 : 0,
         ]]);
         $maxBytes = isset($init['maxBytes']) ? (int) $init['maxBytes'] : null;
         $stream = @fopen($url, 'rb', false, $context);

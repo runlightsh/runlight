@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight;
 
 use Runlight\Accounts\Web;
+use Runlight\Db\TablesBusy;
 use Runlight\Http\FetchError;
 use Runlight\Http\Headers;
 use Runlight\Http\Request;
@@ -2802,8 +2803,7 @@ final class Routes
             try {
                 return OAuth::oauthResponse($this->oauth, $request, $url->pathname, $url, $context) ?? self::coded('Not found', 'not_found', 404);
             } catch (\Throwable $error) {
-                Log::write("Runlight: $error");
-                return self::coded('Internal error', 'internal', 500);
+                return self::failed($error);
             }
         }
         if ($base !== '' && $url->pathname !== $base && !str_starts_with($url->pathname, "$base/")) {
@@ -2815,9 +2815,19 @@ final class Routes
         try {
             return $this->route($request, $path, $url, $context);
         } catch (\Throwable $error) {
-            Log::write("Runlight: $error");
-            return self::coded('Internal error', 'internal', 500);
+            return self::failed($error);
         }
+    }
+
+    /** The answer to a request that failed with an error nothing else caught. */
+    private static function failed(\Throwable $error): Response
+    {
+        // Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+        if ($error instanceof TablesBusy) {
+            return self::coded('Runlight is creating or upgrading its tables. Try again in a minute.', 'tables_busy', 503, null, ['retry-after' => '30']);
+        }
+        Log::write("Runlight: $error");
+        return self::coded('Internal error', 'internal', 500);
     }
 
     /** @param array{ip?: string} $context */

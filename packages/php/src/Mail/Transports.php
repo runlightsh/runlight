@@ -11,6 +11,8 @@ use Runlight\Http\FetchError;
 use Runlight\Http\SearchParams;
 use Runlight\Http\Url;
 use Runlight\Json;
+use Runlight\MetadataAddressError;
+use Runlight\Safefetch;
 
 /**
  * Sends mail through the service a site picked. A message is an array shaped as TS's Message:
@@ -116,7 +118,10 @@ final class Transports
     private static function post(Fetcher $fetcher, string $url, array $init, bool $explains = true): void
     {
         try {
-            $response = $fetcher->fetch($url, ['method' => 'POST', 'headers' => $init['headers'], 'body' => $init['body'], 'timeoutMs' => 20_000]);
+            // A webhook can be at any address, so it and each redirect are checked, as for every service.
+            $response = Safefetch::serviceFetch($url, ['method' => 'POST', 'headers' => $init['headers'], 'body' => $init['body'], 'timeoutMs' => 20_000], $fetcher);
+        } catch (MetadataAddressError $error) {
+            throw new MailError($error->getMessage(), 'address_refused', ['host' => $error->host]);
         } catch (FetchError $error) {
             $host = (new Url($url))->host();
             throw new MailError("Could not reach $host: {$error->getMessage()}", 'mail_unreachable', ['host' => $host, 'detail' => $error->getMessage()]);

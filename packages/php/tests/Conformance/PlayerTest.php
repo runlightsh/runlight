@@ -76,6 +76,20 @@ final class PlayerTest extends TestCase
 
         $scenario = Json::decode('{"site":{"hostnames":[],"timezone":"UTC"},"sites":[],"token":"t","options":{"managedSites":true,"rateLimit":4}}');
         $this->assertSame(['managedSites' => true, 'rateLimit' => 4], Player::runlightOptions($scenario));
+
+        $scenario = Json::decode('{"site":{"hostnames":[],"timezone":"UTC"},"token":"","options":{"cms":"wordpress","mailServices":["resend"],"appMailer":{"via":"WordPress","from":"r@example.com","fromName":"R"}}}');
+        $mailed = [];
+        $options = Player::runlightOptions($scenario, function (array $message) use (&$mailed): void {
+            $mailed[] = $message;
+        });
+        $this->assertSame(['resend'], $options['mailServices']);
+        $this->assertSame(['from' => 'r@example.com', 'fromName' => 'R', 'via' => 'WordPress'], array_diff_key($options['mail'], ['send' => 0]));
+        ($options['mail']['send'])(['to' => 'a@example.com']);
+        $this->assertSame([['to' => 'a@example.com']], $mailed);
+        $this->assertSame('wordpress', Player::routesOptions($scenario)['cms']);
+        $failing = Player::runlightOptions(Json::decode('{"site":{"hostnames":[],"timezone":"UTC"},"token":"","options":{"appMailer":{"via":"W","from":"r@example.com","fail":"no relay"}}}'));
+        $this->expectExceptionMessage('no relay');
+        ($failing['mail']['send'])(['to' => 'a@example.com']);
     }
 
     public function testSendsAndKeepsWhatTheTypeScriptRunnerDoes(): void

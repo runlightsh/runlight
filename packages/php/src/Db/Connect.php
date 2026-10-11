@@ -17,28 +17,28 @@ final class Connect
     {
         return new PdoDb(static function () use ($path): \PDO {
             $file = $path !== '' && $path !== ':memory:' && !str_starts_with($path, 'file:');
+            $unix = DIRECTORY_SEPARATOR === '/';
             // A file in a folder that is not there yet gets the folder, as a fresh app's data/ often is, open to
-            // this user alone, since the database holds password hashes and sealed keys.
-            if ($file && !is_dir(dirname($path))) {
-                @mkdir(dirname($path), 0700, true);
+            // this user and its group alone (0770, whatever the umask), since the database holds password hashes
+            // and sealed keys, and a scheduled job running as another user of the same group makes files there too.
+            if ($file && !is_dir(dirname($path)) && @mkdir(dirname($path), 0770, true) && $unix) {
+                @chmod(dirname($path), 0770);
             }
             $new = $file && !file_exists($path);
             // better-sqlite3 waits up to five seconds for a lock from the moment it opens, pragmas included.
             $pdo = new \PDO("sqlite:$path", null, null, [\PDO::ATTR_TIMEOUT => 5]);
+            // A database this made is for its owner and group alone (0660), whatever the umask: the visits in it
+            // are nobody else's to read, and a scheduled job running as another user of the same group can still
+            // write to it. Set before WAL is turned on, so the -wal and -shm files SQLite makes take the same mode.
+            if ($new && $unix && file_exists($path)) {
+                @chmod($path, 0660);
+            }
             $pdo->exec('PRAGMA journal_mode = WAL');
             $pdo->exec('PRAGMA synchronous = NORMAL');
             $pdo->exec('PRAGMA busy_timeout = 5000');
             // Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes,
             // so they do not linger in the file's free space.
             $pdo->exec('PRAGMA secure_delete = FAST');
-            // A database this made is readable by this user alone, and so are the files SQLite keeps beside it.
-            if ($new && DIRECTORY_SEPARATOR === '/') {
-                foreach (['', '-wal', '-shm'] as $suffix) {
-                    if (file_exists($path . $suffix)) {
-                        @chmod($path . $suffix, 0600);
-                    }
-                }
-            }
             return $pdo;
         }, 'sqlite');
     }

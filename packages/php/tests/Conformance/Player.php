@@ -16,7 +16,7 @@ use Runlight\Json;
  * Plays a scenario from conformance/http.json exactly as play() in
  * packages/sdk/test/http-conformance.ts does, and returns each step's answer,
  * normalized, in the shape of the file's `expect`: stdClass objects with
- * status, headers, body, text, files, found, fetched, or pass.
+ * status, headers, body, text, files, found, fetched, mailed, or pass.
  *
  * The scenario's options become the PHP options the port conventions name,
  * and a Target (the core, or a fake) takes the requests. Keep this file in step
@@ -26,7 +26,7 @@ use Runlight\Json;
 final class Player
 {
     /** The SHA-256 of http.json's description this runner was written against. */
-    public const FORMAT_SHA256 = '87a6f2d7f8acd8026aa4c9ede697d21457a0b9c1a2bfc01488aa2d9598def68f';
+    public const FORMAT_SHA256 = '9721f5d81842e566cbe725d3823b9e1b02580936b9366e0e7ea316d4f49c3acb';
 
     /** Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts. */
     public const ENV = ['RUNLIGHT_TOKEN', 'RUNLIGHT_SECRET', 'CRON_SECRET', 'RUNLIGHT_OBSERVE_KEY', 'NODE_ENV'];
@@ -36,6 +36,9 @@ final class Player
 
     /** The clock, in epoch milliseconds, as the scenario's steps move it. */
     private int $now = 0;
+
+    /** @var list<array<string, mixed>> the messages handed to the app's own mailer during the step under way */
+    private array $mailed = [];
 
     /**
      * Runs a scenario's steps and returns each answer, normalized.
@@ -57,11 +60,13 @@ final class Player
     }
 
     /**
-     * The options new Runlight([...]) gets, without the store, the clock, and the fetcher.
+     * The options new Runlight([...]) gets, without the store, the clock, and the fetcher. An appMailer
+     * becomes the mail option's app mailer, whose send hands each message to `$mailed`, or throws `fail`.
      *
+     * @param (\Closure(array<string, mixed>): void)|null $mailed
      * @return array<string, mixed>
      */
-    public static function runlightOptions(\stdClass $scenario): array
+    public static function runlightOptions(\stdClass $scenario, ?\Closure $mailed = null): array
     {
         $options = $scenario->options ?? new \stdClass();
         $out = [];
@@ -77,6 +82,25 @@ final class Player
         }
         if (property_exists($options, 'rateLimit')) {
             $out['rateLimit'] = $options->rateLimit;
+        }
+        if (isset($options->mailServices)) {
+            $out['mailServices'] = self::plain($options->mailServices);
+        }
+        if (isset($options->appMailer)) {
+            $app = $options->appMailer;
+            $out['mail'] = [
+                'from' => $app->from,
+                ...(isset($app->fromName) ? ['fromName' => $app->fromName] : []),
+                'via' => $app->via,
+                'send' => static function (array $message) use ($app, $mailed): void {
+                    if (isset($app->fail)) {
+                        throw new \RuntimeException($app->fail);
+                    }
+                    if ($mailed !== null) {
+                        $mailed($message);
+                    }
+                },
+            ];
         }
         return $out;
     }
@@ -101,6 +125,9 @@ final class Player
         if (!empty($options->origin)) {
             $out['origin'] = $options->origin;
         }
+        if (!empty($options->cms)) {
+            $out['cms'] = $options->cms;
+        }
         return $out;
     }
 
@@ -108,7 +135,10 @@ final class Player
     private function steps(\stdClass $scenario, \Closure $makeTarget, mixed $store, UpstreamFetcher $fetcher): array
     {
         $this->now = (int) $scenario->start;
-        $runlightOptions = ($store === null ? [] : ['store' => $store]) + self::runlightOptions($scenario) + [
+        $record = function (array $message): void {
+            $this->mailed[] = $message;
+        };
+        $runlightOptions = ($store === null ? [] : ['store' => $store]) + self::runlightOptions($scenario, $record) + [
             'now' => fn (): int => $this->now,
             'fetcher' => $fetcher,
         ];
@@ -173,6 +203,7 @@ final class Player
         $url = Url::parse($raw)?->href() ?? $raw;
         $request = new Request($url, (string) $step->method, $headers, $body ?? '');
         $fetcher->take();
+        $this->mailed = [];
         $answer = match ($to) {
             'links' => $target->links($request),
             'linkDomain' => $target->linkDomain($request),
@@ -182,15 +213,23 @@ final class Player
         $target->idle();
         $sentOut = $fetcher->take();
         $outbound = array_map(fn (array $f) => Normalizer::normalize($f['seen']), $sentOut);
+        $handed = array_map(fn (array $m) => Normalizer::normalize(self::mailedShape($m)), $this->mailed);
         if ($answer === null) {
             $out = new \stdClass();
             $out->pass = true;
             if ($outbound !== []) {
                 $out->fetched = $outbound;
             }
+            if ($handed !== []) {
+                $out->mailed = $handed;
+            }
             return $out;
         }
-        return $this->answer($step, $answer, $sentOut, $outbound, $kept, $jar);
+        $out = $this->answer($step, $answer, $sentOut, $outbound, $kept, $jar);
+        if ($handed !== []) {
+            $out->mailed = $handed;
+        }
+        return $out;
     }
 
     /**
@@ -272,6 +311,25 @@ final class Player
         if ($outbound !== []) {
             $out->fetched = $outbound;
         }
+        return $out;
+    }
+
+    /**
+     * A message the app's own mailer was handed, as the answer's `mailed` lists it: to, from, fromName when it
+     * is not empty, subject, and text.
+     *
+     * @param array<string, mixed> $message
+     */
+    private static function mailedShape(array $message): \stdClass
+    {
+        $out = new \stdClass();
+        $out->to = $message['to'];
+        $out->from = $message['from'];
+        if (($message['fromName'] ?? '') !== '') {
+            $out->fromName = $message['fromName'];
+        }
+        $out->subject = $message['subject'];
+        $out->text = $message['text'];
         return $out;
     }
 

@@ -3,9 +3,15 @@
 declare(strict_types=1);
 
 // A router for PHP's built-in server in the fetch tests: /bytes?n=... answers n bytes of "a", in chunks. Under
-// /emit/ it answers through Response::emit(), and /request answers with the request Request::fromGlobals() reads.
+// /emit/ it answers through Response::emit(), /request answers with the request Request::fromGlobals() reads, and
+// /redirect?status=...&to=... redirects there.
 require __DIR__ . '/../../vendor/autoload.php';
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+if ($path === '/redirect') {
+    http_response_code((int) ($_GET['status'] ?? 302));
+    header('location: ' . ($_GET['to'] ?? '/'));
+    return true;
+}
 if ($path === '/emit/untyped') {
     (new Runlight\Http\Response('', 202, ['cache-control' => 'no-store']))->emit();
     return true;
