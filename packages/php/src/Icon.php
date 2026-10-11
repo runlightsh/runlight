@@ -15,7 +15,8 @@ use Runlight\Http\Url;
  *
  * PHP forgets everything between requests, so the cache lives in the app's
  * Cache when it passes one, else in APCu when it is loaded, else in one small
- * file per origin in the system's temporary folder, else only for this process. An icon is `['body' => bytes, 'type' => media type]`.
+ * file per origin in the system's temporary folder, else only for this process.
+ * An icon is `['body' => bytes, 'type' => media type]`.
  */
 final class Icon
 {
