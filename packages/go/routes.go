@@ -855,37 +855,61 @@ func (rt *Routes) pickKey(ctx context.Context) (string, error) {
 	return made, rt.r.Store.SetSetting(ctx, "pick-key", &made)
 }
 
-// pickTicket lets the picker, on site's pages, send its choice to origin, the dashboard that asked, for half an hour.
-func (rt *Routes) pickTicket(ctx context.Context, origin, site string) (string, error) {
+// pickBack is where a picker sends its choice: the relay page on the dashboard's origin, and the nonce the
+// dashboard tab that started the pick listens for.
+type pickBack struct{ url, nonce string }
+
+// pickTarget is what a picker ticket names.
+type pickTarget struct {
+	origin, site string
+	back         *pickBack
+}
+
+// pickTicket lets the picker, on site's pages, send its choice to origin, the dashboard that asked, for half
+// an hour. With back it sends it there, to the relay page, which hands it to the dashboard tab that made the
+// nonce; without it, as an older dashboard asks, to the tab that opened the site.
+func (rt *Routes) pickTicket(ctx context.Context, origin, site string, back *pickBack) (string, error) {
 	key, err := rt.pickKey(ctx)
 	if err != nil {
 		return "", err
 	}
 	payload := fmt.Sprintf("%d.%s.%s", rt.r.now()+pickTicketMs, hexText(site), hexText(origin))
+	if back != nil {
+		payload += "." + hexText(back.url) + "." + back.nonce
+	}
 	return payload + "." + hmacHex(key, payload), nil
 }
 
-var ticketPattern = regexp.MustCompile(`^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})$`)
+// ticketPattern is a picker ticket. RE2 counts to 1000 at most, so the return address, 2 to 2048 hex
+// digits, is any length here and measured after.
+var ticketPattern = regexp.MustCompile(`^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]+)\.([a-f0-9]{32}))?\.([a-f0-9]{64})$`)
 
-// pickTarget is the dashboard origin and site a picker ticket names, or false
-// when it is not one this install signed or has run out.
-func (rt *Routes) pickTarget(ctx context.Context, ticket string) (string, string, bool, error) {
+// pickTarget is what a picker ticket names, or nil when it is not one this
+// install signed or has run out.
+func (rt *Routes) pickTarget(ctx context.Context, ticket string) (*pickTarget, error) {
 	parts := ticketPattern.FindStringSubmatch(ticket)
-	if parts == nil || js.Number(parts[1]) < float64(rt.r.now()) {
-		return "", "", false, nil
+	if parts == nil || (parts[4] != "" && (len(parts[4]) < 2 || len(parts[4]) > 2048)) || js.Number(parts[1]) < float64(rt.r.now()) {
+		return nil, nil
 	}
 	key, err := rt.pickKey(ctx)
 	if err != nil {
-		return "", "", false, err
+		return nil, err
 	}
-	if !constantTimeEqual(parts[4], hmacHex(key, parts[1]+"."+parts[2]+"."+parts[3])) {
-		return "", "", false, nil
+	if !constantTimeEqual(parts[6], hmacHex(key, ticket[:strings.LastIndexByte(ticket, '.')])) {
+		return nil, nil
 	}
 	origin := unhexText(parts[3])
 	if !originPattern.MatchString(origin) {
-		return "", "", false, nil
+		return nil, nil
 	}
-	return origin, unhexText(parts[2]), true, nil
+	if parts[4] == "" {
+		return &pickTarget{origin: origin, site: unhexText(parts[2])}, nil
+	}
+	back := unhexText(parts[4])
+	if !pickReturnPattern.MatchString(back) || !strings.HasPrefix(back, origin+"/") {
+		return nil, nil
+	}
+	return &pickTarget{origin: origin, site: unhexText(parts[2]), back: &pickBack{back, parts[5]}}, nil
 }
 
 // embedKey is the key embed tickets and sessions are signed with, made on first use and kept in the database for every process.

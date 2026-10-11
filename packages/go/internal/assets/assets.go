@@ -20,6 +20,8 @@ var (
 	Tracker string
 	//go:embed picker.js
 	Picker string
+	//go:embed pick-return.js
+	PickRelay string
 	//go:embed locales.json
 	localesJSON []byte
 	//go:embed build.json

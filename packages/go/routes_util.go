@@ -109,12 +109,24 @@ const smallPageStyle = `<style>body{margin:0;min-height:100vh;display:grid;place
 
 // smallPage is a plain page in a visitor's language, for unsubscribing and for a share link that is gone.
 func smallPage(lang, body string, status int) *Response {
+	return smallPageScript(lang, body, status, "")
+}
+
+// smallPageScript is a small page that, for the picker's relay page, runs one script: one file from this
+// server at the address script, never inline.
+func smallPageScript(lang, body string, status int, script string) *Response {
+	tag := ""
+	csp := "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+	if script != "" {
+		tag = `<script src="` + escapeHTML(script) + `"></script>`
+		csp = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	}
 	html := `<!doctype html><html lang="` + lang + `"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Runlight</title>
-` + smallPageStyle + `</head><body><main>` + body + `</main></body></html>`
+` + smallPageStyle + `</head><body><main>` + body + `</main>` + tag + `</body></html>`
 	return web.NewResponse(status, []byte(html),
 		"content-type", "text/html; charset=utf-8",
 		"cache-control", "no-store",
-		"content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+		"content-security-policy", csp,
 		"referrer-policy", "no-referrer")
 }
 
@@ -314,6 +326,10 @@ var (
 	manageAreas   = regexp.MustCompile(`^/api/(links|link-domains|reports|goals|funnels|shares)(/|$)`)
 	manageSite    = regexp.MustCompile(`^/api/sites/[^/]+$`)
 	originPattern = regexp.MustCompile(`^https?://[^/?#\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+$`)
+	// pickReturnPattern is the relay page on a dashboard's origin: the dashboard's address with /pick-return on the end.
+	pickReturnPattern = regexp.MustCompile(`^https?://[^/?#\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+(/[^?#\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*)?/pick-return$`)
+	// pickNoncePattern is what the dashboard names one pick by, so its relay page answers only the tab that started it.
+	pickNoncePattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 )
 
 // ManagePath reports what a manage token, held by a Runlight hub, may read
@@ -345,6 +361,10 @@ const (
 	pickTargetPlaceholder = `"__RUNLIGHT_PICK_TARGET__"`
 	// pickHostsPlaceholder is where the hostnames of the site its ticket names go, as JSON inside a string.
 	pickHostsPlaceholder = `"__RUNLIGHT_PICK_HOSTS__"`
+	// pickReturnPlaceholder is where the relay page the picker sends its choice to goes, the return address its ticket names.
+	pickReturnPlaceholder = `"__RUNLIGHT_PICK_RETURN__"`
+	// pickNoncePlaceholder is where the nonce the dashboard made for this pick goes, which the relay page hands back to it.
+	pickNoncePlaceholder = `"__RUNLIGHT_PICK_NONCE__"`
 	// pickTicketMs is how long a picker ticket works: long enough to find the element, not to be kept.
 	pickTicketMs = 30 * 60_000
 	// embedTicketMs is how long an embed ticket works: long enough for the admin page to load its frame, never to be kept.
