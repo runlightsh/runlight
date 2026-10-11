@@ -14,6 +14,7 @@ from urllib.parse import quote
 import pytest
 
 from runlight import OPEN, _js, assets
+from runlight.http import Request
 from runlight.routes import bearer, coded, cookie_value, dashboard, is_json, read_cookie
 from runlight.store import Stores
 from support.routes import body, owner, req, runlight
@@ -126,6 +127,38 @@ def test_the_element_picker_sends_its_choice_only_to_the_dashboard_its_ticket_na
     assert ask({"origin": "https://evil.example"}, manage).status == 403, "never another origin"
     hub = body(ask({"origin": "https://hub.example.net"}, manage))["ticket"]
     assert target(hub) == "https://hub.example.net"
+
+
+def test_broken_percent_escapes_in_a_path_answer_as_a_name_nobody_has_never_an_error() -> None:
+    rl = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]})
+    routes = rl.routes({"token": "secret"})
+    cases = [
+        ("PATCH", "/runlight/api/goals/%E0?site=blog", "unknown_goal", {"name": "X", "kind": "event", "match": "X"}),
+        ("DELETE", "/runlight/api/goals/%zz?site=blog", "unknown_goal", None),
+        ("PATCH", "/runlight/api/shares/%E0%A4?site=blog", "unknown_share", {"name": "X"}),
+        ("DELETE", "/runlight/api/shares/%?site=blog", "unknown_share", None),
+        ("PATCH", "/runlight/api/sites/%E0", "unknown_site", {"name": "X"}),
+        ("DELETE", "/runlight/api/sites/%zz", "unknown_site", None),
+        ("GET", "/runlight/api/link-domains/%E0/check?site=blog", "unknown_domain", None),
+        ("DELETE", "/runlight/api/link-domains/%zz?site=blog", "unknown_domain", None),
+    ]
+    for method, path, code, given in cases:
+        answer = routes.handle(owner(path, method, given))
+        assert answer.status == 404, f"{method} {path}"
+        assert body(answer)["code"] == code, f"{method} {path}"
+    # A hub's manage token, checked against its one site before anything else.
+    made = body(routes.handle(owner("/runlight/api/tokens", "POST", {"name": "Hub", "scope": "manage", "site": "blog"})))
+    assert routes.handle(owner("/runlight/api/sites/%E0", "PATCH", {"name": "X"}, made["secret"])).status == 404
+    # Public pages and short links: the share page, unsubscribing, the app's link path, and a link domain.
+    assert routes.handle(req("/runlight/share/%E0")).status == 404
+    assert routes.handle(req("/runlight/unsubscribe/%E0")).status == 404
+    assert routes.handle(req("/runlight/assets/app.%E0.js")).status == 404
+    assert rl.link_handler()(req("/go/%E0")).status == 404
+    rl.store.add_link_domain("go.example.net", "blog", rl.now())
+    rl.forget_link_domains()
+    linked = rl.link_domain_response(Request("https://go.example.net/%E0"))
+    assert linked is not None
+    assert linked.status == 404
 
 
 def test_the_check_endpoint_takes_the_cron_secret() -> None:
@@ -420,10 +453,15 @@ def test_errors_are_json_with_their_code_and_never_sniffed() -> None:
 
 
 def test_an_error_inside_a_route_is_an_internal_error_that_says_nothing_more() -> None:
-    routes = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]}).routes({"token": OPEN})
+    rl = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]})
+    routes = rl.routes({"token": OPEN})
+
+    def broken(site: str) -> list:
+        raise RuntimeError("the database went away")
+
+    rl.store.goals = broken
     with contextlib.redirect_stderr(io.StringIO()):
-        # A broken escape in a path makes decodeURIComponent throw, as it does in TypeScript.
-        answer = routes.handle(req("/runlight/api/goals/%E0%A4%A?site=blog", "DELETE"))
+        answer = routes.handle(req("/runlight/api/goals/g1?site=blog", "DELETE"))
     assert answer.status == 500
     assert body(answer) == {"error": "Internal error", "code": "internal"}
 
