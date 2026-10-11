@@ -399,8 +399,10 @@ pub async fn public_fetch(
         };
         let port = url.port().parse::<u16>().unwrap_or(443);
         if literal {
-            // Pinned to itself, so the request goes straight there and never through a proxy.
-            options.resolve = host.parse::<IpAddr>().map(|ip| vec![(host.clone(), port, vec![ip])]).unwrap_or_default();
+            // Pinned to itself, so the request goes straight there and never through a proxy. An address that
+            // cannot be pinned is refused, never fetched unpinned.
+            let Ok(ip) = host.parse::<IpAddr>() else { return Err(PrivateAddressError(host).into()) };
+            options.resolve = vec![(host.clone(), port, vec![ip])];
         } else {
             // The address checked is the address used: every one the name gives must be public, and the
             // connection is pinned to them, so a second lookup cannot hand back another.
@@ -415,6 +417,9 @@ pub async fn public_fetch(
                 return Err(PrivateAddressError(host).into());
             }
             let ips: Vec<IpAddr> = addresses.iter().filter_map(|a| unbracket(a).parse().ok()).collect();
+            if ips.len() != addresses.len() {
+                return Err(PrivateAddressError(host).into());
+            }
             options.resolve = vec![(host.clone(), port, ips)];
         }
         let remaining = left();
@@ -483,4 +488,119 @@ pub(crate) async fn install_fetch(
         PublicFetchError::Fetch(e) => e,
         e => FetchError::Failed(e.to_string()),
     })
+}
+
+/// Refused before anything was fetched, because the address is link-local or a cloud's metadata service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetadataAddressError {
+    /// The host refused, without IPv6 brackets.
+    pub host: String,
+}
+
+impl std::fmt::Display for MetadataAddressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is a link-local or cloud metadata address, which Runlight never connects to", self.host)
+    }
+}
+
+impl std::error::Error for MetadataAddressError {}
+
+/// Why a service fetch gave nothing back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceFetchError {
+    /// The address, or one a redirect named, is link-local or a metadata service.
+    Metadata(MetadataAddressError),
+    /// The request failed, or time ran out (`FetchError::TimedOut`).
+    Fetch(FetchError),
+}
+
+impl std::fmt::Display for ServiceFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceFetchError::Metadata(e) => e.fmt(f),
+            ServiceFetchError::Fetch(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ServiceFetchError {}
+
+impl From<FetchError> for ServiceFetchError {
+    fn from(e: FetchError) -> Self {
+        ServiceFetchError::Fetch(e)
+    }
+}
+
+/// How many redirects a service fetch follows.
+pub const SERVICE_REDIRECTS: u32 = 5;
+
+/// Headers that describe a body, dropped with it when a redirect turns a request into a GET.
+const BODY_HEADERS: [&str; 5] =
+    ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
+/// Credentials, dropped when a redirect leads to another origin.
+const CREDENTIAL_HEADERS: [&str; 3] = ["authorization", "proxy-authorization", "cookie"];
+
+/// Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
+/// this computer or a private network, but is never at a link-local or cloud metadata address. The address
+/// is checked, and so is every redirect's, up to `redirects` of them ([`SERVICE_REDIRECTS`] as a rule),
+/// each followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no
+/// body, and a redirect to another origin goes without the credentials. A redirect past the last one comes
+/// back as it is. `init.timeout_ms` is the whole fetch's limit, every hop included. `with` stands in for
+/// DNS in tests.
+pub async fn service_fetch(
+    fetcher: &dyn Fetcher,
+    target: &str,
+    init: FetchInit,
+    redirects: u32,
+    with: Option<&Lookup>,
+) -> Result<Response, ServiceFetchError> {
+    let until = Instant::now() + Duration::from_millis(init.timeout_ms);
+    let mut url = Url::parse(target).ok_or_else(|| FetchError::Failed("Invalid URL".into()))?;
+    let mut method = init.method.to_ascii_uppercase();
+    let mut headers = init.headers.clone();
+    let mut body = init.body.clone();
+    let mut hop = 0;
+    loop {
+        let host = unbracket(&url.hostname()).to_string();
+        if metadata_host(&host, with).await {
+            return Err(ServiceFetchError::Metadata(MetadataAddressError { host }));
+        }
+        // The first hop has the whole limit; each after it, what is left of it.
+        let left =
+            if hop == 0 { init.timeout_ms } else { until.saturating_duration_since(Instant::now()).as_millis() as u64 };
+        if left == 0 {
+            return Err(FetchError::TimedOut.into());
+        }
+        let href = url.href();
+        let options = FetchInit {
+            method: method.clone(),
+            headers: headers.clone(),
+            body: body.clone(),
+            manual_redirect: true,
+            timeout_ms: left,
+            ..init.clone()
+        };
+        let answer = fetcher.fetch(&href, options).await?;
+        let location = answer.headers.get("location").unwrap_or_default();
+        if answer.status < 300 || answer.status >= 400 || location.is_empty() || hop >= redirects {
+            return Ok(answer);
+        }
+        let next = Url::parse_with_base(&location, &href).ok_or_else(|| FetchError::Failed("Invalid URL".into()))?;
+        if answer.status == 303 || ((answer.status == 301 || answer.status == 302) && method == "POST") {
+            if method != "HEAD" {
+                method = "GET".into();
+            }
+            body = None;
+            for name in BODY_HEADERS {
+                headers.delete(name);
+            }
+        }
+        if next.origin() != url.origin() {
+            for name in CREDENTIAL_HEADERS {
+                headers.delete(name);
+            }
+        }
+        url = next;
+        hop += 1;
+    }
 }

@@ -407,11 +407,13 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     let manage = !cms && scopes.contains(&"manage");
     // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
     let host_name = site_host(&redirect)?;
-    let counting: Vec<_> = runlight
-        .sites()
-        .into_iter()
-        .filter(|s| !runlight.is_remote(&s.id) && s.hostnames.contains(&host_name))
-        .collect();
+    // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+    let local: Vec<_> = runlight.sites().into_iter().filter(|s| !runlight.is_remote(&s.id)).collect();
+    let counting: Vec<_> = if local.len() == 1 && local[0].hostnames.is_empty() {
+        local
+    } else {
+        local.into_iter().filter(|s| s.hostnames.contains(&host_name)).collect()
+    };
     let name = esc(&client.name_text());
 
     if !host.is_owner(request).await {

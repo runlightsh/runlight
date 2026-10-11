@@ -12,6 +12,7 @@ use crate::http::{FetchInit, Headers, Request, Response, SharedFetcher, Url, def
 use crate::js::{self, Object, Value};
 use crate::limit::{RateLimit, Turns};
 use crate::mail::Message;
+use crate::mail::transports::{SERVICES, Service};
 use crate::payload::{MAX_BODY, Payload, parse_payload};
 use crate::re::{js_re, test};
 use crate::safefetch::{Lookup, public_address};
@@ -32,6 +33,8 @@ pub(crate) const REMOTE_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// On a database that caps statements per request (Cloudflare D1), fewer days a check.
 const METERED_ROLLUP_BATCH: usize = 4;
 const ROLLUP_DELAY_MS: i64 = 2 * 3_600_000;
+/// The longest a tracker hit waits for the tables while another process creates or upgrades them.
+const TRACKER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The choices for how long a site keeps its visits.
 pub const RETENTION_MONTHS: [i64; 5] = [6, 12, 24, 36, 60];
 /// Thirty minutes without a request ends a session.
@@ -65,8 +68,8 @@ pub enum TrustProxy {
 /// A clock in epoch milliseconds.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// Sends one message through the app's own mailer. A [`MailError`](crate::mail::MailError) it gives back
-/// passes through as it is; any other error becomes one coded `mail_app_failed`.
+/// Sends one message through the app's own mailer. A [`MailError`](crate::mail::MailError) it gives back,
+/// or a [`crate::Error::Mail`], passes through as it is; any other error becomes one coded `mail_app_failed`.
 pub type AppSend = Arc<dyn Fn(Message) -> BoxFuture<'static, Result<(), BoxError>> + Send + Sync>;
 
 /// A mailer of the app's own, such as a CMS's, that sends each message itself.
@@ -113,10 +116,14 @@ pub struct RunlightOptions {
     /// The mail service for email reports, invites, and sign-in links, in code, as the SDK's MailSettings
     /// object. The dashboard shows it and cannot change it.
     pub mail: Option<Object>,
-    /// Or a mailer of the app's own, such as a CMS's, in place of `mail`, which it then overrides. It is a
+    /// Or a mailer of the app's own, such as a CMS's, in place of `mail`: giving both is refused. It is a
     /// default: a service saved in the dashboard takes its place, and removing that service goes back to
     /// it. Without either, the service is set up in Settings.
     pub app_mailer: Option<AppMailer>,
+    /// The ids of the mail services Settings offers and saves, such as every service but "smtp" in an app
+    /// that cannot keep connections of its own open. `None` is the default, every service. A service saved
+    /// earlier that is not in the list counts as none, so the app's mailer, if there is one, sends instead.
+    pub mail_services: Option<Vec<String>>,
     /// Encrypts the keys kept in the database. Default RUNLIGHT_SECRET, then RUNLIGHT_TOKEN.
     pub secret: Option<String>,
     /// Tracker requests allowed per visitor address per minute. `None` is the default, 120; zero,
@@ -148,6 +155,7 @@ impl RunlightOptions {
             link_path: None,
             mail: None,
             app_mailer: None,
+            mail_services: None,
             secret: None,
             rate_limit: None,
             now: None,
@@ -273,12 +281,16 @@ pub(crate) struct Inner {
     pub(crate) link_path: String,
     pub(crate) mail_in_code: Option<Object>,
     pub(crate) app_mailer: Option<AppMailer>,
+    /// The mail services Settings offers, in SERVICES order: `None` for every one.
+    pub(crate) mail_services: Option<Vec<&'static Service>>,
     pub(crate) secret: Option<String>,
     pub(crate) fetcher: SharedFetcher,
     local_installs: bool,
     lookup: Option<Lookup>,
     state: Mutex<State>,
     ready: tokio::sync::Mutex<bool>,
+    /// Set once init() has finished, so a tracker hit after that does not wait for it.
+    initialized: AtomicBool,
     checking: tokio::sync::Mutex<()>,
     turns: Turns,
     pruning: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -310,7 +322,10 @@ impl Runlight {
         if ids.len() != configured.len() {
             return Err("Runlight: two sites share an id".into());
         }
-        // The app's mailer takes the place of a service in code, as the SDK's mail option is one or the other.
+        // The SDK's mail option is one or the other, so both at once is a mistake.
+        if options.mail.is_some() && options.app_mailer.is_some() {
+            return Err("Runlight: pass mail or app_mailer, not both".into());
+        }
         let app_mailer = options.app_mailer.map(|mut app| {
             app.from_name = app.from_name.filter(|n| !n.is_empty());
             app
@@ -318,7 +333,14 @@ impl Runlight {
         if app_mailer.as_ref().is_some_and(|app| !is_email(&app.from)) {
             return Err("Runlight: the app's mailer needs a from address, like reports@example.com".into());
         }
-        let mail_in_code = if app_mailer.is_some() { None } else { options.mail };
+        let mail_in_code = options.mail;
+        if let Some(id) = options.mail_services.iter().flatten().find(|id| !SERVICES.iter().any(|s| s.id == *id)) {
+            return Err(format!("Runlight: mail_services names \"{id}\", which is not a mail service"));
+        }
+        let mail_services = options
+            .mail_services
+            .as_ref()
+            .map(|offered| SERVICES.iter().filter(|s| offered.iter().any(|id| id == s.id)).collect());
         let per_minute = options.rate_limit.unwrap_or(120.0);
         // Zero, or anything that is not a positive number, means no limit, never a limit of nothing.
         let limit = (per_minute > 0.0).then(|| RateLimit::new(per_minute));
@@ -342,12 +364,14 @@ impl Runlight {
             link_path,
             mail_in_code,
             app_mailer,
+            mail_services,
             secret,
             fetcher: options.fetcher.unwrap_or_else(default_fetcher),
             local_installs: options.local_installs,
             lookup: options.lookup,
             state: Mutex::new(State { configured, ..State::default() }),
             ready: tokio::sync::Mutex::new(false),
+            initialized: AtomicBool::new(false),
             checking: tokio::sync::Mutex::new(()),
             turns: Turns::default(),
             pruning: Mutex::new(Vec::new()),
@@ -363,6 +387,12 @@ impl Runlight {
     /// The app's own mailer, used while no service is saved in the dashboard.
     pub fn app_mailer(&self) -> Option<&AppMailer> {
         self.0.app_mailer.as_ref()
+    }
+
+    /// The mail services Settings offers and saves, in their usual order: every one, unless
+    /// `mail_services` names fewer.
+    pub fn mail_services(&self) -> Vec<&'static Service> {
+        self.0.mail_services.clone().unwrap_or_else(|| SERVICES.iter().collect())
     }
 
     /// The store.
@@ -452,7 +482,24 @@ impl Runlight {
             }
         }
         *ready = true;
+        self.0.initialized.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Whether init() finished within `wait`; false while it is still waiting, such as on another process
+    /// creating the tables, and it then goes on for later requests. Its errors are given back.
+    async fn ready_within(&self, wait: std::time::Duration) -> Result<bool, Error> {
+        if self.0.initialized.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        // Run on its own, so giving up the wait does not stop it part way.
+        let rl = self.clone();
+        let init = tokio::spawn(async move { rl.init().await });
+        match tokio::time::timeout(wait, init).await {
+            Ok(Ok(done)) => done.map(|()| true),
+            Ok(Err(stopped)) => Err(Error::Other(format!("Runlight: {stopped}"))),
+            Err(_) => Ok(false),
+        }
     }
 
     /// The sites, with any settings changed in the dashboard applied.
@@ -1185,6 +1232,11 @@ impl Runlight {
         if let Some(limit) = &self.0.limit
             && !limit.allow(&self.client_ip(request), self.now())
         {
+            return Ok(());
+        }
+        // While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+        // waits a moment at most and is then dropped, rather than holding its request until that is done.
+        if !self.ready_within(TRACKER_WAIT).await? {
             return Ok(());
         }
         // A database too busy to take the hit right now gets it a little later, at the time it arrived.

@@ -184,7 +184,8 @@ pub enum Hold {
     /// One transaction: committed by `finish(true)`, rolled back by `finish(false)`.
     Transaction,
     /// A database-wide lock, so two processes starting at once do not race to create the same
-    /// tables; let go by `finish`.
+    /// tables; let go by `finish`. Waits for the lock at most [`lock_wait`](super::lock_wait), then
+    /// fails with a [`TablesBusyError`](super::TablesBusyError).
     Exclusive,
 }
 
@@ -221,6 +222,12 @@ pub trait Db: Send + Sync {
     /// Lets the connections go.
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+
+    /// The prefix this Db puts on Runlight's table and index names in place of `rl_`, when it puts one
+    /// ([`Prefixed`](super::Prefixed)), so a store over it keeps it.
+    fn prefix(&self) -> Option<&str> {
+        None
     }
 }
 

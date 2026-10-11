@@ -5,7 +5,7 @@ use super::parts::R;
 use super::*;
 use crate::assistant::{AssistantFailure, ChatContext, ChatMessage, ChatSite, PROVIDERS, chat, list_models};
 use crate::error::Error;
-use crate::mail::transports::{Message, SERVICES, services_value};
+use crate::mail::transports::{Message, SERVICES};
 use crate::mcp::ApiRead;
 use crate::store::{ReportRow, SiteRow};
 use crate::time::local_date;
@@ -137,7 +137,7 @@ pub(crate) async fn mail_view(rl: &Runlight, managed: bool) -> Result<Value, Err
         "fields" => if managed { Value::Object(js::Object::new()) } else { Value::Object(fields) },
         "saved" => if managed { Value::Array(vec![]) } else { Value::Array(saved) },
         "encrypted" => rl.secret().is_some(),
-        "services" => services_value(),
+        "services" => Value::Array(rl.mail_services().iter().map(|s| s.to_value()).collect()),
     };
     // The app's own mailer, named only when there is one, so the answer without it stays as it was.
     if let (Some(app), Value::Object(o)) = (rl.app_mailer(), &mut view) {

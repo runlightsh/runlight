@@ -16,7 +16,7 @@ use crate::http::{Headers, Request, Response, Url};
 use crate::js::{self, Value};
 use crate::re::{js_re, test};
 use crate::runlight::{Runlight, env_value};
-use crate::store::TokenRow;
+use crate::store::{TablesBusyError, TokenRow};
 use crate::{BoxFuture, obj};
 
 pub use glue::RoutesExtras;
@@ -1252,6 +1252,18 @@ fn admin_only(path: &str, method: &str) -> bool {
 }
 
 fn internal(error: crate::Error) -> Response {
+    // Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+    if let crate::Error::Db(db) = &error
+        && TablesBusyError::of(db).is_some()
+    {
+        return coded_with(
+            "Runlight is creating or upgrading its tables. Try again in a minute.",
+            "tables_busy",
+            503,
+            None,
+            &[("retry-after", "30")],
+        );
+    }
     eprintln!("Runlight: {error}");
     coded("Internal error", "internal", 500, None)
 }

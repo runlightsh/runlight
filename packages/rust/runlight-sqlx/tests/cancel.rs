@@ -42,7 +42,7 @@ async fn commits(db: &Arc<dyn Db>, label: &str) {
 
 /// The lock can be taken from another pool, so the cancelled holder's connection let it go.
 async fn lock_free(kind: &str, url: &str, label: &str) {
-    if kind == "sqlite" {
+    if common::base(kind) == "sqlite" {
         return;
     }
     let other = runlight_sqlx::connect(url).await.unwrap();
@@ -83,7 +83,7 @@ async fn a_cancelled_transaction_or_lock_leaves_the_next_one_working() {
                 .await;
         })
         .await;
-        if kind != "sqlite" {
+        if common::base(kind) != "sqlite" {
             assert_eq!(seen(&db).await, [0.0; 5], "{kind}: no connection is left in the transaction");
         }
         commits(&db, &format!("{kind}: after the store's transaction")).await;
@@ -109,7 +109,7 @@ async fn a_cancelled_transaction_or_lock_leaves_the_next_one_working() {
             drop((lock, tx));
         })
         .await;
-        if kind != "sqlite" {
+        if common::base(kind) != "sqlite" {
             assert_eq!(seen(&db).await, [0.0; 5], "{kind}: no connection is left in the nested transaction");
         }
         lock_free(kind, &url, &format!("{kind}: after a transaction in the lock")).await;
@@ -122,7 +122,7 @@ async fn a_cancelled_transaction_or_lock_leaves_the_next_one_working() {
         tx.run("INSERT INTO rl_cancel (n) VALUES (1)", vec![]).await.unwrap();
         lock.finish(true).await.unwrap();
         drop((lock, tx));
-        if kind != "sqlite" {
+        if common::base(kind) != "sqlite" {
             assert_eq!(seen(&db).await, [0.0; 5], "{kind}: an unended nested transaction is not given back");
         }
         lock_free(kind, &url, &format!("{kind}: after an unended transaction in the lock")).await;

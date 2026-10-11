@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use runlight::http::{FetchError, FetchInit, Fetcher, Headers, Request, Response, SearchParams, Url};
 use runlight::js::{self, Object, Value};
-use runlight::{BoxFuture, Routes, RoutesOptions, Runlight, RunlightOptions, SiteOptions, TokenOption};
+use runlight::{AppMailer, BoxFuture, Routes, RoutesOptions, Runlight, RunlightOptions, SiteOptions, TokenOption};
 
 /// Headers every implementation must send the same, where it sends them.
 const HEADERS: [&str; 16] = [
@@ -345,6 +345,38 @@ async fn play(scenario: &Value, store: runlight::store::SqlStore) -> Result<Vec<
         Some(Value::Number(n)) => rl_options.rate_limit = Some(*n),
         _ => {}
     }
+    if let Some(Value::Array(offered)) = options.get("mailServices") {
+        rl_options.mail_services = Some(offered.iter().map(js::js_string).collect());
+    }
+    // A mailer of the app's own, whose send records each message, or fails with `fail` as its error's words.
+    let mailed: Arc<Mutex<Vec<Value>>> = Arc::default();
+    if let Some(app) = options.get("appMailer").filter(|a| a.is_object()) {
+        let fail = app.get("fail").and_then(Value::as_str).map(str::to_string);
+        let into = mailed.clone();
+        rl_options.app_mailer = Some(AppMailer {
+            from: js::str_or_empty(app.get("from")),
+            from_name: app.get("fromName").map(js::js_string),
+            via: js::str_or_empty(app.get("via")),
+            send: Arc::new(move |m| {
+                let (fail, into) = (fail.clone(), into.clone());
+                Box::pin(async move {
+                    if let Some(fail) = fail {
+                        return Err(fail.into());
+                    }
+                    let mut message = Object::new();
+                    message.set("to", m.to);
+                    message.set("from", m.from);
+                    if let Some(name) = m.from_name.filter(|n| !n.is_empty()) {
+                        message.set("fromName", name);
+                    }
+                    message.set("subject", m.subject);
+                    message.set("text", m.text);
+                    into.lock().unwrap().push(Value::Object(message));
+                    Ok(())
+                })
+            }),
+        });
+    }
     let clock = now.clone();
     rl_options.now = Some(Arc::new(move || clock.load(Ordering::SeqCst)));
     rl_options.fetcher = Some(upstream.clone());
@@ -361,6 +393,7 @@ async fn play(scenario: &Value, store: runlight::store::SqlStore) -> Result<Vec<
         cron_secret: Some(js::str_or_empty(options.get("cronSecret"))),
         accounts: js::opt_truthy(options.get("accounts")),
         origin: options.get("origin").filter(|o| js::truthy(o)).map(js::js_string),
+        cms: options.get("cms").filter(|c| js::truthy(c)).map(js::js_string),
         ..RoutesOptions::default()
     };
     let routes: Routes = rl.routes(routes_options).map_err(|e| format!("routes(): {e}"))?;
@@ -419,6 +452,7 @@ async fn play(scenario: &Value, store: runlight::store::SqlStore) -> Result<Vec<
             remote_address: String::new(),
         };
         upstream.take();
+        mailed.lock().unwrap().clear();
         let answer = match to.as_str() {
             "links" => Some(
                 rl.link_response(&request).await.map_err(|e| format!("{method} {}: {e}", step.at("path").to_json()))?,
@@ -433,11 +467,15 @@ async fn play(scenario: &Value, store: runlight::store::SqlStore) -> Result<Vec<
         rl.idle().await;
         let sent = upstream.take();
         let outbound: Vec<Value> = sent.iter().map(|f| normalize(&f.0, "")).collect();
+        let handed: Vec<Value> = mailed.lock().unwrap().iter().map(|m| normalize(m, "")).collect();
         let Some(answer) = answer else {
             let mut out = Object::new();
             out.set("pass", true);
             if !outbound.is_empty() {
                 out.set("fetched", Value::Array(outbound));
+            }
+            if !handed.is_empty() {
+                out.set("mailed", Value::Array(handed));
             }
             answers.push(Value::Object(out));
             continue;
@@ -510,6 +548,9 @@ async fn play(scenario: &Value, store: runlight::store::SqlStore) -> Result<Vec<
         }
         if !outbound.is_empty() {
             out.set("fetched", Value::Array(outbound));
+        }
+        if !handed.is_empty() {
+            out.set("mailed", Value::Array(handed));
         }
         answers.push(Value::Object(out));
     }

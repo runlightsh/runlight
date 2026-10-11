@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD;
 use crate::goals::CodedError;
 use crate::http::{FetchInit, SearchParams, SharedFetcher, Url};
 use crate::js::{self, Object, Value};
+use crate::safefetch::{SERVICE_REDIRECTS, ServiceFetchError, service_fetch};
 use crate::{arr, obj};
 
 /// One message to send.
@@ -313,13 +314,19 @@ async fn post(
     for (k, v) in headers {
         init = init.header(k, v);
     }
-    let response = fetcher.fetch(url, init).await.map_err(|e| {
-        let detail = e.to_string();
-        CodedError::new(
-            format!("Could not reach {host}: {detail}"),
-            "mail_unreachable",
-            &[("host", &host), ("detail", &detail)],
-        )
+    // A webhook can be at any address, so it and each redirect are checked, as for every service.
+    let response = service_fetch(&**fetcher, url, init, SERVICE_REDIRECTS, None).await.map_err(|e| match e {
+        ServiceFetchError::Metadata(refused) => {
+            CodedError::new(refused.to_string(), "address_refused", &[("host", &refused.host)])
+        }
+        ServiceFetchError::Fetch(e) => {
+            let detail = e.to_string();
+            CodedError::new(
+                format!("Could not reach {host}: {detail}"),
+                "mail_unreachable",
+                &[("host", &host), ("detail", &detail)],
+            )
+        }
     })?;
     if response.ok() {
         return Ok(());

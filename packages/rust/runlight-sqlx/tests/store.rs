@@ -335,7 +335,7 @@ async fn the_same_rows_in_postgres_and_mysql_answer_the_same() {
         "rl_rollups",
     ];
     for (kind, url) in common::kinds() {
-        if kind == "sqlite" {
+        if common::base(kind) == "sqlite" {
             continue;
         }
         let file = copy_db();

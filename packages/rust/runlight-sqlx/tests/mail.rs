@@ -183,3 +183,105 @@ async fn the_apps_mailer_needs_a_from_address_and_without_one_the_answer_has_no_
     assert!(view.get("app").is_none(), "an install without an app mailer answers as before");
     assert!(rl.app_mailer().is_none());
 }
+
+fn app_mailer(send: runlight::AppSend) -> AppMailer {
+    AppMailer { from: "site@example.com".into(), from_name: None, via: "Drupal".into(), send }
+}
+
+#[tokio::test]
+async fn a_service_in_code_and_the_apps_mailer_are_one_or_the_other() {
+    let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+    options.mail = Some(
+        obj! { "service" => "resend", "apiKey" => "re_key", "from" => "r@example.com" }.as_object().unwrap().clone(),
+    );
+    options.app_mailer = Some(app_mailer(Arc::new(|_| Box::pin(async { Ok(()) }))));
+    assert_eq!(Runlight::new(options).err().unwrap(), "Runlight: pass mail or app_mailer, not both");
+}
+
+#[tokio::test]
+async fn the_apps_mailer_may_give_back_runlights_own_mail_error() {
+    let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+    options.app_mailer = Some(app_mailer(Arc::new(|_| {
+        Box::pin(async {
+            Err(runlight::Error::Mail(runlight::goals::CodedError::new(
+                "No way",
+                "mail_failed",
+                &[("detail", "No way")],
+            ))
+            .into())
+        })
+    })));
+    let rl = Runlight::new(options).unwrap();
+    assert_eq!(
+        answer(&routes(&rl), "POST", "/api/mail/test", Some(obj! { "to" => "jon@example.com" })).await,
+        (400, obj! { "error" => "No way", "code" => "mail_failed", "params" => obj! { "detail" => "No way" } })
+    );
+}
+
+#[tokio::test]
+async fn mail_services_limits_what_settings_offers_and_saves() {
+    let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+    options.mail_services = Some(vec!["webhook".into(), "pigeon".into()]);
+    assert_eq!(
+        Runlight::new(options).err().unwrap(),
+        "Runlight: mail_services names \"pigeon\", which is not a mail service"
+    );
+
+    let store = runlight_sqlx::connect(":memory:").await.unwrap();
+    let every = Runlight::new(RunlightOptions::new(store.clone())).unwrap();
+    let resend = Some(obj! { "service" => "resend", "apiKey" => "re_key", "from" => "reports@example.com" });
+    assert_eq!(answer(&routes(&every), "PUT", "/api/mail", resend.clone()).await.0, 200);
+
+    // The same database, with fewer services offered and the app's mailer.
+    let sent = Arc::new(Mutex::new(0));
+    let counted = sent.clone();
+    let mut options = RunlightOptions::new(store);
+    options.mail_services = Some(vec!["webhook".into(), "resend".into(), "smtp".into()]);
+    options.app_mailer = Some(app_mailer(Arc::new(move |_| {
+        *counted.lock().unwrap() += 1;
+        Box::pin(async { Ok(()) })
+    })));
+    let rl = Runlight::new(options.clone()).unwrap();
+    let ids = |view: &Value| -> Vec<String> {
+        view.at("services").as_array().unwrap().iter().map(|s| runlight::js::js_string(s.at("id"))).collect()
+    };
+    let (_, view) = answer(&routes(&rl), "GET", "/api/mail", None).await;
+    assert_eq!(ids(&view), ["resend", "smtp", "webhook"], "in their usual order");
+    assert_eq!(view.at("source"), &Value::from("dashboard"));
+
+    let ses = Some(
+        obj! { "service" => "ses", "region" => "us-east-1", "accessKeyId" => "a", "secretAccessKey" => "b", "from" => "r@example.com" },
+    );
+    assert_eq!(
+        answer(&routes(&rl), "PUT", "/api/mail", ses).await,
+        (
+            400,
+            obj! {
+                "error" => "Amazon SES is not offered here. Pick another mail service",
+                "code" => "mail_service",
+                "params" => obj! { "service" => "ses" },
+            }
+        )
+    );
+    assert_eq!(
+        answer(&routes(&rl), "PUT", "/api/mail", Some(obj! { "service" => "pigeon", "from" => "r@example.com" })).await,
+        (400, obj! { "error" => "Pick a mail service", "code" => "mail_service", "params" => obj! {} })
+    );
+
+    // A saved service no longer offered counts as none, so the app's mailer sends.
+    options.mail_services = Some(vec!["webhook".into()]);
+    let fewer = Runlight::new(options).unwrap();
+    let (_, view) = answer(&routes(&fewer), "GET", "/api/mail", None).await;
+    assert_eq!((view.at("source"), ids(&view)), (&Value::from("app"), vec!["webhook".to_string()]));
+    assert_eq!(
+        answer(&routes(&fewer), "POST", "/api/mail/test", Some(obj! { "to" => "jon@example.com" })).await.0,
+        200
+    );
+    assert_eq!(*sent.lock().unwrap(), 1);
+
+    // An empty list offers none.
+    let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+    options.mail_services = Some(vec![]);
+    let none = Runlight::new(options).unwrap();
+    assert_eq!(answer(&routes(&none), "GET", "/api/mail", None).await.1.at("services"), &Value::Array(vec![]));
+}
