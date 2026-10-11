@@ -12,7 +12,7 @@ module Conformance
     # files zipped, the requests to other servers made through the runner's
     # fetcher, and Set-Cookie lines with values for the jars. Replaying every
     # scenario through it proves the runner itself (normalizing, captures, jars,
-    # templates, ZIP reading, and the fetched record) before the core exists.
+    # templates, ZIP reading, and the fetched and mailed records) before the core exists.
     #
     # It also checks what it is sent: the entry point, method, and URL each step
     # names, no template left unfilled, and nothing read from the environment.
@@ -61,6 +61,7 @@ module Conformance
         expect = step["expect"]
 
         (expect["fetched"] || []).each { |fetched| fetch(fetched) }
+        (expect["mailed"] || []).each { |message| @runlight_options["mail"]["send"].call(@values.value(message)) }
         return nil if Player.filled?(expect["pass"])
 
         headers = {}

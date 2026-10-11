@@ -85,6 +85,9 @@ module Runlight
           http.ipaddr = m[3]
           break
         end
+        # A pin that names another host or port would leave the name to be looked up again: refused, never
+        # fetched unpinned.
+        raise FetchError, "fetch failed" if pinned && http.ipaddr.nil?
         http.open_timeout = [left, 15].min
         http.read_timeout = left
         http.write_timeout = left

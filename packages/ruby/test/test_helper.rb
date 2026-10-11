@@ -45,13 +45,17 @@ end
 # The databases the store tests run on: SQLite always; Postgres when RUNLIGHT_TEST_PG is set (each test gets a
 # schema of its own inside runlight_test_ruby); MySQL 8.4 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set
 # (each test empties Runlight's tables in runlight_test_ruby first, so those tests run one at a time). Either
-# variable may hold a URL; set to anything else (such as 1), the local test servers are used.
+# variable may hold a URL; set to anything else (such as 1), the local test servers are used. The store suites
+# and the conformance replay also run each kind once more with its tables under another prefix (store_kinds).
 module Databases
   PG_URL = "postgres://joncphillips@127.0.0.1:5432/runlight_test_ruby"
   MYSQL_URLS = {
     "mysql" => "mysql://root:runlight@127.0.0.1:33084/runlight_test_ruby",
     "mariadb" => "mysql://root:runlight@127.0.0.1:33114/runlight_test_ruby",
   }.freeze
+
+  # The table prefix the "+prefix" kinds use in place of rl_, as WordPress would give one.
+  TEST_PREFIX = "wp_rl_"
 
   @cleanups = []
   @mysql = {}
@@ -61,6 +65,11 @@ module Databases
     kinds << "postgres" if pg_url
     kinds.concat(mysql_urls.keys)
     kinds
+  end
+
+  # Every kind, each followed by the same kind with its tables under TEST_PREFIX.
+  def self.store_kinds
+    kinds.flat_map { |kind| [kind, "#{kind}+prefix"] }
   end
 
   def self.pg_url
@@ -82,6 +91,7 @@ module Databases
 
   # A fresh, empty database of a kind, dropped (or emptied) by cleanup.
   def self.db(kind)
+    return Runlight::Db::Prefixed.new(db(kind.delete_suffix("+prefix")), TEST_PREFIX) if kind.end_with?("+prefix")
     return Runlight::Db::Connect.sqlite(":memory:") if kind == "sqlite"
 
     if kind == "postgres"
@@ -119,9 +129,9 @@ module Databases
     Runlight::Stores.from_db(db(kind))
   end
 
-  # Drops every rl_ table in the MySQL test database, so the next test starts from nothing.
+  # Drops every rl_ and wp_rl_ table in the MySQL test database, so the next test starts from nothing.
   def self.empty_mysql(db)
-    tables = db.all("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'rl\\_%'")
+    tables = db.all("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND (table_name LIKE 'rl\\_%' OR table_name LIKE 'wp\\_rl\\_%')")
     return if tables.empty?
 
     db.run("SET FOREIGN_KEY_CHECKS = 0")

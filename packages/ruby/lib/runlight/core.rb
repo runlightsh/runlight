@@ -31,6 +31,9 @@ module Runlight
   #   `via` names it there, such as "WordPress (WP Mail SMTP)". The message has to, from, fromName (when there
   #   is one), subject, html, text, and headers; `send` raises to say it failed. Without either, the service is
   #   set up in Settings.
+  # - mailServices: the ids of the mail services Settings offers and saves, such as every service but "smtp" in
+  #   an app that cannot keep connections of its own open. Default every service. A service saved earlier that
+  #   is not in the list counts as none, so the app's mailer, if there is one, sends instead.
   # - secret: encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens
   #   for connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
   # - rateLimit: tracker requests allowed per visitor address per minute. Default 120, which a real visitor
@@ -66,7 +69,9 @@ module Runlight
     # On a database that caps statements per request (Cloudflare D1), fewer days a check, about 30 statements.
     METERED_ROLLUP_BATCH = 4
     ROLLUP_DELAY_MS = 2 * 3_600_000
-    private_constant :ROLLUP_VERSION, :ROLLUP_BATCH, :REMOTE_MAX_BYTES, :METERED_ROLLUP_BATCH, :ROLLUP_DELAY_MS
+    # The longest a tracker hit waits for the tables while another process creates or upgrades them.
+    TRACKER_WAIT_MS = 10_000
+    private_constant :ROLLUP_VERSION, :ROLLUP_BATCH, :REMOTE_MAX_BYTES, :METERED_ROLLUP_BATCH, :ROLLUP_DELAY_MS, :TRACKER_WAIT_MS
 
     BUSY = /timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked/i
     private_constant :BUSY
@@ -86,7 +91,9 @@ module Runlight
                 :fetcher,
                 # The app's own mailer, used while no service is saved in the dashboard: { "send", "from",
                 # "fromName" (when there is one), "via" }. Nil when there is none.
-                :app_mailer
+                :app_mailer,
+                # The mail services Settings offers and saves: every one, unless `mailServices` names fewer.
+                :mail_services
 
     # Where routes() serves the dashboard and API, which a link domain leaves alone, as a list without
     # repeats. Middleware often runs apart from the routes, where none were made, so the default "/runlight"
@@ -144,6 +151,15 @@ module Runlight
         @app_mailer = nil
         @mail_in_code = mail
       end
+      offered = options["mailServices"]&.then { |ids| Array(ids).map(&:to_s) }
+      offered&.each do |id|
+        unless Mail::Transports::SERVICES.any? { |s| s["id"] == id }
+          raise ArgumentError, "Runlight: mail_services names \"#{id}\", which is not a mail service"
+        end
+      end
+      @mail_services = if offered.nil? then Mail::Transports::SERVICES
+                       else Mail::Transports::SERVICES.select { |s| offered.include?(s["id"]) }.freeze
+                       end
       @local_installs = options["localInstalls"] ? true : false
       @secret = if options.key?("secret") && !options["secret"].nil?
                   options["secret"].to_s
@@ -158,6 +174,9 @@ module Runlight
       @ready = false
       # init runs once however many threads ask at once; reentrant, as init may ask for itself.
       @init_lock = Monitor.new
+      # The thread running init for tracker hits, which wait for it a moment at most.
+      @init_thread = nil
+      @init_thread_lock = Mutex.new
       @checking = false
       # When planner statistics were last gathered.
       @optimized_at = 0
@@ -188,7 +207,11 @@ module Runlight
       init
       sealed = @store.setting("mail")
       opened = sealed.nil? || sealed == "" ? nil : Mail::Secret.unseal(sealed, @secret)
-      return Json.decode(opened).merge("source" => "dashboard") unless opened.nil? || opened == ""
+      saved = opened.nil? || opened == "" ? nil : Json.decode(opened)
+      # A service no longer offered counts as none, so it is never sent through.
+      if saved && (@mail_services.equal?(Mail::Transports::SERVICES) || @mail_services.any? { |s| s["id"] == saved["service"] })
+        return saved.merge("source" => "dashboard")
+      end
 
       app = @app_mailer
       return nil if app.nil?
@@ -211,6 +234,9 @@ module Runlight
       before = current && current["source"] == "dashboard" ? current : {}
       service = Mail::Transports::SERVICES.find { |s| s["id"] == input["service"] }
       raise Mail::MailError.new("Pick a mail service", "mail_service", {}) if service.nil?
+      unless @mail_services.include?(service)
+        raise Mail::MailError.new("#{service["name"]} is not offered here. Pick another mail service", "mail_service", { "service" => service["id"] })
+      end
 
       settings = { "service" => service["id"] }
       service["fields"].each do |f|
@@ -324,6 +350,21 @@ module Runlight
       return if @ready
 
       @init_lock.synchronize { init_now unless @ready }
+    end
+
+    # Whether init finished within `ms`; false while it is still waiting, such as on another process creating
+    # the tables, and it goes on in a thread of its own for later requests. Its errors are raised.
+    private def ready_within(ms)
+      return true if @ready
+
+      runner = @init_thread_lock.synchronize do
+        # One that failed is started again, as init is by the next request after a failure.
+        @init_thread = nil unless @init_thread&.alive? || @init_thread&.status == false
+        @init_thread ||= Thread.new { init }.tap { |t| t.report_on_exception = false }
+      end
+      return false if runner.join(ms / 1000.0).nil?
+
+      true
     end
 
     # Whether init has run, so middleware can leave the app's own requests alone until it has.
@@ -770,6 +811,10 @@ module Runlight
       ua = request.headers.get("user-agent") || ""
       return if !Ua.ai_agent(ua).nil? || Ua.bot?(ua)
       return if !@limit.nil? && !@limit.allow(client_ip(request, context))
+
+      # While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+      # waits a moment at most and is then dropped, rather than holding its request until that is done.
+      return unless ready_within(TRACKER_WAIT_MS)
 
       # A database too busy to take the hit right now (every pooled connection held by long reports, or
       # another process writing the SQLite file) gets it a little later, at the time it arrived.

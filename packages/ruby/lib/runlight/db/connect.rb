@@ -31,8 +31,14 @@ module Runlight
       def sqlite(path)
         path = path.to_s
         memory = path == ":memory:" || path.empty?
-        # A file in a folder that is not there yet gets the folder, as a fresh app's data/ often is.
-        FileUtils.mkdir_p(File.dirname(path)) if !memory && !path.start_with?("file:") && !File.directory?(File.dirname(path))
+        file = !memory && !path.start_with?("file:")
+        # A file in a folder that is not there yet gets the folder, as a fresh app's data/ often is, for its
+        # owner and group alone, as the file is.
+        if file && !File.directory?(File.dirname(path))
+          FileUtils.mkdir_p(File.dirname(path), mode: 0o770)
+          owner_and_group(File.dirname(path), 0o770)
+        end
+        made(path) if file && !File.exist?(path)
         config = { adapter: "sqlite3", database: memory ? ":memory:" : path, timeout: 5000,
                    # One connection for a database in memory, which every connection would otherwise make anew.
                    pool: memory ? 1 : 5 }
@@ -91,6 +97,23 @@ module Runlight
         when "sqlite", "file" then sqlite(url.to_s.sub(%r{\A(sqlite|file):(//)?}i, ""))
         else raise ArgumentError, "Runlight: DATABASE_URL must start with postgres://, mysql://, mariadb://, or sqlite:"
         end
+      end
+
+      # A database file made here is for its owner and group alone (0660), whatever the umask: the visits in it
+      # are nobody else's to read, and a scheduled job running as another user of the same group can still
+      # write to it. It is made empty, which SQLite takes as a new database, before anything opens it, so the
+      # -wal and -shm files SQLite makes beside it later take the same mode.
+      def made(path)
+        File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o660) { nil }
+        owner_and_group(path, 0o660)
+      rescue SystemCallError
+        # Made by another process meanwhile, or a folder this one may not write to, which opening reports.
+      end
+
+      def owner_and_group(path, mode)
+        File.chmod(mode, path)
+      rescue SystemCallError, NotImplementedError
+        # Not a file this process may change, or a system with no such modes.
       end
 
       def quote_name(name, quote)

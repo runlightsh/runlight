@@ -31,6 +31,16 @@ module Runlight
       # How long after a visit starts its events are looked for: far past any real visit.
       EVENT_TAIL_MS = 2 * 86_400_000
 
+      # What every table and index name starts with, unless a store is given another prefix in its place.
+      PREFIX = "rl_"
+
+      # Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app dropping
+      # Runlight's tables drops these by name, never every table that starts with the prefix.
+      TABLES = %w[
+        meta sites salts sessions events links link_domains shares goals settings
+        reports tokens funnels rollup_days rollups users invites
+      ].freeze
+
       PIECE_MS = 86_400_000
 
       # Pageviews that can report engaged time: the tracker's, which carry a pageview id. Imported history has

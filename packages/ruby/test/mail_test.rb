@@ -398,4 +398,38 @@ class MailTest < Minitest::Test
     assert_nil answer["source"]
     refute answer.key?("app"), "an install without an app mailer answers as before"
   end
+
+  def test_mail_services_names_the_services_settings_offers_and_one_saved_that_is_not_offered_counts_as_none
+    error = assert_raises(ArgumentError) { Runlight::Core.new(store: Runlight::Stores.sqlite(":memory:"), mail_services: %w[resend pigeon]) }
+    assert_equal "Runlight: mail_services names \"pigeon\", which is not a mail service", error.message
+    assert_equal Runlight::Mail::Transports::SERVICES, Runlight::Core.new(store: Runlight::Stores.sqlite(":memory:")).mail_services
+    assert_equal [], Runlight::Core.new(store: Runlight::Stores.sqlite(":memory:"), mail_services: []).mail_services, "an empty list offers none"
+
+    sent = []
+    store = Runlight::Stores.sqlite(":memory:")
+    everything = Runlight::Core.new(store: store, secret: "s")
+    everything.save_mail_settings({ "service" => "smtp", "host" => "smtp.example.com", "port" => "587", "security" => "starttls", "from" => "r@example.com" })
+    rl = Runlight::Core.new(store: store, secret: "s", mail_services: %w[webhook resend],
+                            mail: { from: "site@example.com", via: "Drupal", send: ->(m) { sent << m } })
+    # In the usual order, whatever order they were named in.
+    assert_equal %w[resend webhook], rl.mail_services.map { |s| s["id"] }
+    # SMTP was saved before it stopped being offered: it counts as none, and the app's mailer sends.
+    assert_equal "app", rl.mail_settings["source"]
+    assert_equal "dashboard", everything.mail_settings["source"]
+    rl.send_mail({ "to" => "me@example.com", "subject" => "Hi", "html" => "<p>Hi</p>", "text" => "Hi" })
+    assert_equal 1, sent.length
+
+    refused = assert_raises(Runlight::Mail::MailError) do
+      rl.save_mail_settings({ "service" => "smtp", "host" => "smtp.example.com", "port" => "587", "from" => "r@example.com" })
+    end
+    assert_equal ["SMTP is not offered here. Pick another mail service", "mail_service", { "service" => "smtp" }],
+                 [refused.message, refused.code, refused.params]
+    unknown = assert_raises(Runlight::Mail::MailError) { rl.save_mail_settings({ "service" => "pigeon", "from" => "r@example.com" }) }
+    assert_equal ["Pick a mail service", "mail_service", {}], [unknown.message, unknown.code, unknown.params]
+
+    answer = Runlight::Json.decode(rl.routes({ "token" => "t" }).handle(
+      Runlight::Http::Request.new("https://stats.example.com/runlight/api/mail", headers: { "authorization" => "Bearer t" }),
+    ).text)
+    assert_equal %w[resend webhook], answer["services"].map { |s| s["id"] }
+  end
 end

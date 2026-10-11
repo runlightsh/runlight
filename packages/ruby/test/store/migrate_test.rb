@@ -67,7 +67,7 @@ class StoreMigrateTest < StoreTestCase
     db.all("SELECT value FROM rl_meta WHERE \"key\" = 'schema'").map { |r| { "value" => r["value"].to_s } }
   end
 
-  on_each "migrating_is_safe_any_number_of_times_and_records_the_schema_version" do |kind|
+  on_each "migrating_is_safe_any_number_of_times_and_records_the_schema_version", Databases.kinds do |kind|
     store = Databases.fresh(kind)
     store.migrate
     store.migrate
@@ -76,7 +76,7 @@ class StoreMigrateTest < StoreTestCase
     assert_equal [{ "value" => "11" }], schema_version(store.db)
   end
 
-  on_each "an_upgrade_that_stopped_after_adding_a_column_but_before_recording_its_version_starts_the_next_time" do |kind|
+  on_each "an_upgrade_that_stopped_after_adding_a_column_but_before_recording_its_version_starts_the_next_time", Databases.kinds do |kind|
     # MySQL 8.4 refuses the version 10 upgrade's TEXT column with a default, in TypeScript too; no MySQL
     # database was ever at version 9, since MySQL support came with version 11.
     skip "MySQL tables start at version 11" if kind == "mysql"
