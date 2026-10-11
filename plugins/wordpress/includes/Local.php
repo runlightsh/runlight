@@ -158,7 +158,7 @@ final class Local {
 			}
 		}
 		// With an SMTP or mail plugin set up, reports go through WordPress, until the dashboard names another service.
-		$mailer = property_exists( Runlight::class, 'appMailer' ) ? Mailer::option() : null;
+		$mailer = Mailer::option();
 		if ( null !== $mailer ) {
 			$options['mail'] = $mailer;
 		}

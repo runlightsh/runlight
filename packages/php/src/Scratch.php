@@ -12,7 +12,7 @@ namespace Runlight;
  * otherwise the caller gets null and does without.
  *
  * Every file Runlight shares this way is read and written here, so an app that passes a Cache of its own
- * never loads this class.
+ * never loads this class for those values. Sign-in's limits (Accounts\Slots) still use it.
  */
 final class Scratch
 {
