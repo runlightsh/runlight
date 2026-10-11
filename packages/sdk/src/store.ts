@@ -23,8 +23,9 @@ export interface Db {
   affected?(sql: string, params?: unknown[]): Promise<number>;
   /**
    * Runs `fn` while holding a database-wide lock, so two processes starting
-   * at once do not race to create the same tables. Optional: SQLite's file
-   * lock already serialises its writers.
+   * at once do not race to create the same tables. Waits for the lock at most
+   * LOCK_WAIT_MS, then throws a TablesBusyError. Optional: SQLite's file lock
+   * already serialises its writers.
    */
   exclusive?<T>(fn: (db: Db) => Promise<T>): Promise<T>;
   /**
@@ -40,6 +41,30 @@ export interface Db {
    * request (Cloudflare D1), so long jobs send fewer, larger pieces.
    */
   metered?: boolean;
+}
+
+/** The longest a process waits for another one creating or upgrading the tables before it gives up. */
+export const LOCK_WAIT_MS = 30_000;
+
+let lockWait = LOCK_WAIT_MS;
+
+/** How long the stores wait for the lock for creating tables: LOCK_WAIT_MS, unless a test has set another. */
+export const lockWaitMs = (): number => lockWait;
+
+/** For tests: the stores wait this long for the lock instead, or LOCK_WAIT_MS again with null. */
+export function lockWaitInTests(ms: number | null): void {
+  lockWait = ms ?? LOCK_WAIT_MS;
+}
+
+/**
+ * Another process held the lock for creating tables past LOCK_WAIT_MS, such as one building an index on a
+ * big table after an upgrade. The request that waited fails with this, rather than waiting for good.
+ */
+export class TablesBusyError extends Error {
+  constructor(waited: number = LOCK_WAIT_MS) {
+    super(`Runlight: another process is creating or upgrading the tables, and had not finished after ${Math.round(waited / 1000)} seconds. Try again in a minute.`);
+    this.name = "TablesBusyError";
+  }
 }
 
 /** Lets other work run: resolves once the event loop has come round. */
@@ -336,6 +361,49 @@ export const JOURNEY_VISITS = 20_000;
 
 /** How long after a visit starts its events are looked for: far past any real visit. */
 export const EVENT_TAIL_MS = 2 * 86_400_000;
+
+/** What every table and index name starts with, unless a store is given another prefix in its place. */
+export const PREFIX = "rl_";
+
+/**
+ * Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app dropping
+ * Runlight's tables drops these by name, never every table that starts with the prefix.
+ */
+export const TABLES = [
+  "meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings",
+  "reports", "tokens", "funnels", "rollup_days", "rollups", "users", "invites",
+] as const;
+
+/** The prefix each prefixed Db was made with, so a store over one keeps it. */
+const prefixes = new WeakMap<Db, string>();
+
+/**
+ * A Db whose tables and indexes start with `prefix` in place of `rl_`, such as `wp_rl_` inside WordPress, so
+ * two apps sharing one database each keep a set of their own. Runlight's SQL names every table and index
+ * `rl_` and something, and those names alone are rewritten on the way through, in each statement and in the
+ * names a schema check compares as text. A store given a prefix puts one in front of its Db, so the accounts
+ * and importers that reach the Db through the store follow it too.
+ */
+export function prefixed(inner: Db, prefix: string): Db {
+  // A name in a statement, and short enough that the longest index name stays inside MySQL's 64.
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,31}$/.test(prefix)) {
+    throw new Error("Runlight: a table prefix is up to 32 letters, digits, and underscores, and does not start with a digit");
+  }
+  const sql = (text: string) => text.replace(/\brl_(?=[a-z])/g, prefix);
+  const wrap = (db: Db): Db => (db === inner ? outer : prefixed(db, prefix));
+  const outer: Db = {
+    dialect: inner.dialect,
+    all: (text, params) => inner.all(sql(text), params),
+    run: (text, params) => inner.run(sql(text), params),
+    ...(inner.affected ? { affected: (text: string, params?: unknown[]) => inner.affected!(sql(text), params) } : {}),
+    ...(inner.exclusive ? { exclusive: <T>(fn: (db: Db) => Promise<T>) => inner.exclusive!((db) => fn(wrap(db))) } : {}),
+    ...(inner.transaction ? { transaction: <T>(fn: (db: Db) => Promise<T>) => inner.transaction!((db) => fn(wrap(db))) } : {}),
+    ...(inner.close ? { close: () => inner.close!() } : {}),
+    ...(inner.metered ? { metered: true } : {}),
+  };
+  prefixes.set(outer, prefix);
+  return outer;
+}
 
 const PIECE_MS = 86_400_000;
 
@@ -660,8 +728,34 @@ function visitRows(filters: Filter[], site: string, from: number, to: number, di
 
 export class SqlStore {
   private ready: Promise<void> | null = null;
+  readonly db: Db;
+  /** What the store's table and index names start with: `rl_` unless it was given another. */
+  readonly prefix: string;
 
-  constructor(readonly db: Db) {}
+  /**
+   * `prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
+   * Runlight's tables in one database. A Db that is already prefixed keeps its own.
+   */
+  constructor(db: Db, prefix: string = PREFIX) {
+    const own = prefixes.get(db);
+    if (own !== undefined) prefix = own;
+    else if (prefix !== PREFIX) db = prefixed(db, prefix);
+    this.db = db;
+    this.prefix = prefix;
+  }
+
+  /**
+   * The store's tables as named in the database, for an app removing Runlight: each one by name, since
+   * another app's tables may well start with the same letters.
+   */
+  tables(): string[] {
+    return TABLES.map((table) => `${this.prefix}${table}`);
+  }
+
+  /** A table or index name as the database has it, under the store's prefix. */
+  private named(name: string): string {
+    return name.startsWith(PREFIX) ? `${this.prefix}${name.slice(PREFIX.length)}` : name;
+  }
 
   /** Creates the tables on first use. Safe to call any number of times. */
   migrate(): Promise<void> {
@@ -685,7 +779,7 @@ export class SqlStore {
         // A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
         const broken = await db.all<{ name: string }>(
           `SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace`,
+           WHERE NOT i.indisvalid AND c.relname LIKE '${this.prefix.replace(/_/g, "\\_")}%' AND c.relnamespace = current_schema()::regnamespace`,
         );
         for (const { name } of broken) await db.run(`DROP INDEX IF EXISTS "${name.replace(/"/g, "")}"`);
       }
@@ -694,7 +788,7 @@ export class SqlStore {
         if (index && db.dialect === "mysql") {
           // MySQL has no CREATE INDEX IF NOT EXISTS, so it is looked for first.
           const [, unique, name, table] = index;
-          const there = await db.all(`SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`, [table, name]);
+          const there = await db.all(`SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`, [this.named(table!), this.named(name!)]);
           if (!there.length) await db.run(statement.replace(/^CREATE (UNIQUE )?INDEX IF NOT EXISTS/, `CREATE ${unique ?? ""}INDEX`));
         } else {
           await db.run(postgres ? statement.replace(/^CREATE (UNIQUE )?INDEX IF NOT EXISTS/, "CREATE $1INDEX CONCURRENTLY IF NOT EXISTS") : statement);

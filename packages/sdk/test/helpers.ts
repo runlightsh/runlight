@@ -10,18 +10,23 @@ import { d1 } from "../src/stores/d1.js";
 import { createClient } from "@libsql/client";
 import Database from "better-sqlite3";
 
-export type StoreKind = "sqlite" | "postgres" | "libsql" | "d1" | "mysql";
+export type StoreKind = "sqlite" | "postgres" | "libsql" | "d1" | "mysql" | "sqlite+prefix" | "postgres+prefix" | "mysql+prefix";
+
+/** The table prefix the "+prefix" stores use in place of rl_, as WordPress would give one. */
+export const TEST_PREFIX = "wp_rl_";
 
 /**
  * SQLite, libSQL, and D1 always; Postgres too when RUNLIGHT_TEST_PG holds a connection string, and MySQL or
- * MariaDB when RUNLIGHT_TEST_MYSQL holds a connection URL.
+ * MariaDB when RUNLIGHT_TEST_MYSQL holds a connection URL. Each of SQLite, Postgres, and MySQL also runs once
+ * more with its tables under another prefix.
  */
 export const STORES: StoreKind[] = [
   "sqlite",
   "libsql",
   "d1",
-  ...(process.env.RUNLIGHT_TEST_PG ? (["postgres"] as const) : []),
-  ...(process.env.RUNLIGHT_TEST_MYSQL ? (["mysql"] as const) : []),
+  "sqlite+prefix",
+  ...(process.env.RUNLIGHT_TEST_PG ? (["postgres", "postgres+prefix"] as const) : []),
+  ...(process.env.RUNLIGHT_TEST_MYSQL ? (["mysql", "mysql+prefix"] as const) : []),
 ];
 
 /** A new, empty MySQL database of its own, dropped by cleanup(), and a URL that reaches it. */
@@ -81,12 +86,18 @@ export async function cleanup(): Promise<void> {
 
 /** A fresh store: an in-memory SQLite, or a Postgres schema or MySQL database of its own. */
 export function freshStore(kind: StoreKind): SqlStore {
+  if (kind === "sqlite+prefix") return sqlite({ path: ":memory:", prefix: TEST_PREFIX });
+  if (kind === "mysql+prefix" || kind === "postgres+prefix") return freshStoreOf(kind === "mysql+prefix" ? "mysql" : "postgres", TEST_PREFIX);
+  return freshStoreOf(kind);
+}
+
+function freshStoreOf(kind: "sqlite" | "postgres" | "libsql" | "d1" | "mysql", prefix?: string): SqlStore {
   if (kind === "sqlite") return sqlite({ path: ":memory:" });
   if (kind === "libsql") return libsql({ client: createClient({ url: ":memory:" }) });
   if (kind === "d1") return d1({ database: fakeD1() });
   if (kind === "mysql") {
     const { url, ready } = freshMysqlDatabase();
-    const store = mysql({ url, max: 3 });
+    const store = mysql({ url, max: 3, ...(prefix ? { prefix } : {}) });
     // Nothing reaches the database before it exists.
     const db = store.db as unknown as Record<string, unknown>;
     for (const name of ["all", "run", "affected", "exclusive", "transaction"]) {
@@ -96,6 +107,10 @@ export function freshStore(kind: StoreKind): SqlStore {
         return inner(...args);
       };
     }
+    // Closing more than once is the same as closing once, so a test may close it early, as the conformance test does.
+    const close = store.close.bind(store);
+    let closed: Promise<void> | null = null;
+    store.close = () => (closed ??= close());
     // Registered after the database's own cleanup, so it runs first: the pool closes before the database goes.
     cleanups.push(() => store.close());
     return store;
@@ -104,7 +119,7 @@ export function freshStore(kind: StoreKind): SqlStore {
   const url = process.env.RUNLIGHT_TEST_PG!;
   const pool = new pg.Pool({ connectionString: url, max: 3, options: `-c search_path=${schema}` });
   const ready = pool.query(`CREATE SCHEMA ${schema}`);
-  const store = postgres({ pool });
+  const store = postgres({ pool, ...(prefix ? { prefix } : {}) });
   // Nothing reaches the database before the schema exists: a request can reach the accounts tables before
   // anything migrates.
   const db = store.db as unknown as Record<string, unknown>;
@@ -121,11 +136,15 @@ export function freshStore(kind: StoreKind): SqlStore {
     await ready;
     return migrate();
   };
-  cleanups.push(async () => {
-    await ready.catch(() => {});
-    await pool.query(`DROP SCHEMA ${schema} CASCADE`);
-    await pool.end();
-  });
+  // Closing drops the schema and ends the pool, once, so a test may close it early, as the conformance test does.
+  let closed: Promise<void> | null = null;
+  store.close = () =>
+    (closed ??= (async () => {
+      await ready.catch(() => {});
+      await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await pool.end();
+    })());
+  cleanups.push(() => store.close());
   return store;
 }
 

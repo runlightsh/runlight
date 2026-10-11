@@ -3,6 +3,11 @@ import { SqlStore, oneConnection, type Db } from "../store.js";
 export interface BunSqliteOptions {
   /** A file path, or ":memory:". */
   path: string;
+  /**
+   * What every table and index name starts with, in place of `rl_`, so two apps sharing one database each
+   * keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+   */
+  prefix?: string;
 }
 
 type BunDatabase = {
@@ -23,7 +28,17 @@ export function bunSqlite(options: BunSqliteOptions): SqlStore {
   const open = async (): Promise<BunDatabase> => {
     if (!handle) {
       const { Database } = (await import(/* @vite-ignore */ "bun:sqlite" as string)) as { Database: new (path: string) => BunDatabase };
+      const fs = await import("node:fs");
+      const made = options.path !== ":memory:" && !options.path.startsWith("file:") && !fs.existsSync(options.path);
       handle = new Database(options.path);
+      // A file just made is for its owner and group alone, as the better-sqlite3 store makes it; -wal and -shm follow.
+      if (made) {
+        try {
+          fs.chmodSync(options.path, 0o660);
+        } catch {
+          // Not a file this process may change, or a system with no such modes.
+        }
+      }
       handle.exec("PRAGMA journal_mode = WAL");
       handle.exec("PRAGMA synchronous = NORMAL");
       handle.exec("PRAGMA busy_timeout = 5000");
@@ -47,5 +62,5 @@ export function bunSqlite(options: BunSqliteOptions): SqlStore {
       handle = null;
     },
   };
-  return new SqlStore(oneConnection(db));
+  return new SqlStore(oneConnection(db), options.prefix);
 }

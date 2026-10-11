@@ -22,7 +22,7 @@ export type { Message as MailMessage } from "./mail/transports.js";
 export type { Routes, RoutesOptions, FetchHandler } from "./routes.js";
 export { RUNLIGHT_ICON, DOMAIN_NAME, coded, hostName } from "./routes.js";
 export type { GeoLookup, Location } from "./geo.js";
-export { SqlStore, BOUNCE_MS } from "./store.js";
+export { SqlStore, BOUNCE_MS, LOCK_WAIT_MS, PREFIX, TABLES, TablesBusyError, prefixed } from "./store.js";
 export { Links, LinkError, SLUG_PATTERN } from "./links.js";
 export type { LinkInput } from "./links.js";
 export type { LinkRow } from "./store.js";

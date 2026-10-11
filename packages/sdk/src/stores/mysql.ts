@@ -1,5 +1,5 @@
 import mysql2 from "mysql2/promise";
-import { SqlStore, type Db } from "../store.js";
+import { SqlStore, TablesBusyError, lockWaitMs, type Db } from "../store.js";
 
 export interface MysqlOptions {
   /** A connection URL, such as process.env.DATABASE_URL (mysql://user:password@host:3306/database). */
@@ -14,6 +14,11 @@ export interface MysqlOptions {
    * to reads only; MariaDB to every statement.
    */
   statementTimeout?: number;
+  /**
+   * What every table and index name starts with, in place of `rl_`, so two apps sharing one database each
+   * keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+   */
+  prefix?: string;
 }
 
 /** How long a statement waits for a free connection before it gives up. */
@@ -86,7 +91,7 @@ function driver(on: On): Pick<Db, "all" | "run" | "affected"> {
 }
 
 /**
- * Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, through mysql2. Tables are prefixed `rl_`,
+ * Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, through mysql2. Tables are prefixed `rl_` (or `prefix`),
  * so the database can be the app's own. Text is utf8mb4 with a binary collation, so it compares and
  * sorts by code point, case and trailing spaces included, as SQLite and Postgres do.
  */
@@ -197,12 +202,17 @@ export function mysql(options: MysqlOptions): SqlStore {
       return pooled(async (conn) => {
         // One lock per database, so installs sharing a server do not wait on each other. Lock names are 64 characters at most.
         const name = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))";
+        // Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+        const wait = lockWaitMs();
+        const until = Date.now() + wait;
         for (;;) {
-          const [rows] = await conn.query(`SELECT GET_LOCK(${name}, 5) AS ok`);
+          const left = Math.max(1, Math.min(5, Math.ceil((until - Date.now()) / 1000)));
+          const [rows] = await conn.query(`SELECT GET_LOCK(${name}, ${left}) AS ok`);
           const ok = (rows as Array<{ ok: unknown }>)[0]?.ok;
           if (ok === null || ok === undefined) throw new Error("Runlight: MySQL refused the lock for creating tables");
           if (Number(ok) === 1) break;
-          // Not got within 5 seconds: another process is creating the tables. Ask again.
+          // Not got in time: another process is creating the tables. Ask again, until the wait is up.
+          if (Date.now() >= until) throw new TablesBusyError(wait);
         }
         try {
           // An index on a big table takes a while to build, so the build may run past the statement timeout.
@@ -243,5 +253,5 @@ export function mysql(options: MysqlOptions): SqlStore {
       if (owned) await pool.end();
     },
   };
-  return new SqlStore(db);
+  return new SqlStore(db, options.prefix);
 }

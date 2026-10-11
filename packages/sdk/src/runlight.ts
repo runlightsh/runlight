@@ -145,6 +145,8 @@ const REMOTE_MAX_BYTES = 2 * 1024 * 1024;
 /** On a database that caps statements per request (Cloudflare D1), fewer days a check, about 30 statements. */
 const METERED_ROLLUP_BATCH = 4;
 const ROLLUP_DELAY_MS = 2 * 3_600_000;
+/** The longest a tracker hit waits for the tables while another process creates or upgrades them. */
+const TRACKER_WAIT_MS = 10_000;
 
 /** The choices for how long a site keeps its visits. */
 export const RETENTION_MONTHS = [6, 12, 24, 36, 60];
@@ -215,6 +217,8 @@ export class Runlight {
    */
   readonly routeBases = new Set<string>();
   private ready: Promise<void> | null = null;
+  /** Set once init() has finished. */
+  private initialized = false;
   /** The scheduled check under way, which a second caller shares, and when planner statistics were last gathered. */
   private checking: Promise<{ ok: true; reports: { sent: number; failed: number } }> | null = null;
   private optimizedAt = 0;
@@ -381,6 +385,20 @@ export class Runlight {
     });
   }
 
+  /** Whether init() finished within `ms`; false while it is still waiting, such as on another process creating the tables. Its errors are thrown. */
+  private async readyWithin(ms: number): Promise<boolean> {
+    if (this.initialized) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    });
+    try {
+      return await Promise.race([this.init().then(() => true as const), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Creates tables and records the configured sites. Runs once. */
   init(): Promise<void> {
     this.ready ??= (async () => {
@@ -403,6 +421,7 @@ export class Runlight {
         if (zone === null) await this.store.setSetting(`rollup-zone:${site.id}`, JSON.stringify({ zone: site.timezone, since: 0 }));
         else if (zone !== site.timezone) await this.zoneChanged(site.id, site.timezone);
       }
+      this.initialized = true;
     })().catch((error) => {
       this.ready = null;
       throw error;
@@ -894,6 +913,10 @@ export class Runlight {
     const ua = request.headers.get("user-agent") ?? "";
     if (aiAgent(ua) || isBot(ua)) return;
     if (this.limit && !(await this.limit.allow(this.clientIp(request, context)))) return;
+
+    // While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+    // waits a moment at most and is then dropped, rather than holding its request until that is done.
+    if (!(await this.readyWithin(TRACKER_WAIT_MS))) return;
 
     // A database too busy to take the hit right now (every pooled connection held by long reports, or
     // another process writing the SQLite file) gets it a little later, at the time it arrived.
