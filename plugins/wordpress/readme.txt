@@ -22,7 +22,7 @@ Activate the plugin and choose to run Runlight inside WordPress, with nothing el
 * The Runlight item in the admin menu shows this site's numbers in wp-admin, and the full dashboard opens at /runlight on your site, for anyone who can manage options.
 * Goals, funnels, short links, email reports, and imports from Umami, Bitly, and other services are all in the dashboard.
 
-The numbers stay in this site's database: in Runlight's own tables, named after WordPress's table prefix (such as wp_rl_events), when the database is MySQL 8.4 or MariaDB 11.4 or later, or else in a SQLite file in the uploads folder. Each site in a network keeps a SQLite file of its own.
+The numbers stay in this site's database: in Runlight's own tables, named after WordPress's table prefix (such as wp_rl_events), when the database is MySQL 8.0.20 or MariaDB 11.4 or later, or else in a SQLite file in the uploads folder. Each site in a network keeps a SQLite file of its own.
 
 If you already run Runlight elsewhere, as the standalone server or inside an app, the plugin can send to that one instead. Press Connect in its settings and that Runlight fills them in, so one dashboard covers all your sites.
 
@@ -48,7 +48,7 @@ Running npm install and then npm run build at the top of the repository builds e
 
 To send to a Runlight you run elsewhere instead, choose "Connect to a Runlight you run elsewhere" on the setup screen, enter its address, and press Connect. That Runlight asks you to allow the connection for the site that counts this domain, or offers to add one when its sites are managed in its dashboard, as on the standalone server, and then sends you back with every setting filled in. Connecting needs wp-admin on https. You can also copy the settings by hand from that Runlight's Settings, Install, where they have the same names: Runlight address, Site id, Agents key, and Dashboard key.
 
-Running Runlight inside WordPress needs PHP 8.2 or later with the mbstring and openssl extensions, and either WordPress's database on MySQL 8.4 or MariaDB 11.4 or later, which Runlight reaches through WordPress's own connection, or else PHP's sqlite3 extension. Each site in a network always uses a SQLite file, so a network needs sqlite3. The settings page says when something is missing.
+Running Runlight inside WordPress needs PHP 8.2 or later with the mbstring and openssl extensions, and either WordPress's database on MySQL 8.0.20 or MariaDB 11.4 or later, which Runlight reaches through WordPress's own connection, or else PHP's sqlite3 extension. Each site in a network always uses a SQLite file, so a network needs sqlite3. The settings page says when something is missing.
 
 With plain permalinks, Runlight answers at /index.php/runlight rather than /runlight, so it works on every server, and the settings page says so.
 

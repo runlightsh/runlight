@@ -49,7 +49,7 @@ class Stores:
 
     @staticmethod
     def mysql(url: Any, statement_timeout: int = 120_000, prefix: str = dbs.PREFIX) -> SqlStore:
-        """Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL, or a PyMySQL
+        """Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL, or a PyMySQL
         connection the app already has, in autocommit mode. Text is utf8mb4 with a binary collation, so it compares
         and sorts by code point, case and trailing spaces included, as SQLite and Postgres do. `statement_timeout`,
         in milliseconds (0 for no limit), is applied by MySQL to reads only and by MariaDB to every statement."""

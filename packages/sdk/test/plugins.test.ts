@@ -476,8 +476,10 @@ test("the Drupal module keeps its tables under Drupal's prefix, beside anyone el
   // A new database: Drupal's own, under Drupal's prefix.
   assert.deepEqual(JSON.parse(fresh), { kind: "mysql", clash: false, prefix: "d_rl_", dropped: [], log: [] });
   assert.equal(JSON.parse(run(["node"], { type: "pgsql" })!).kind, "postgres");
-  // MySQL before 8.4 and MariaDB before 11.4 lack the collation, so SQLite in the private folder, or nothing without one.
-  assert.equal(JSON.parse(run(["node"], { version: "8.0.36" })!).kind, "");
+  // MySQL before 8.0.20 and MariaDB before 11.4 lack the collation, so SQLite in the private folder, or nothing without one.
+  assert.equal(JSON.parse(run(["node"], { version: "8.0.19" })!).kind, "");
+  assert.equal(JSON.parse(run(["node"], { version: "8.0.20" })!).kind, "mysql");
+  assert.equal(JSON.parse(run(["node"], { version: "8.0.36-0ubuntu0.22.04.1" })!).kind, "mysql");
   assert.equal(JSON.parse(run(["node"], { version: "10.11.6-MariaDB", privatePath: true })!).kind, "sqlite");
   assert.equal(JSON.parse(run(["node"], { type: "sqlite", privatePath: true })!).kind, "sqlite");
   // This site's own tables, left by an earlier install: used again.
@@ -694,6 +696,8 @@ test("the Craft plugin keeps its tables under Craft's prefix, beside anyone else
   assert.equal(JSON.parse(run(["entries"], { driver: "pgsql" })!).kind, "craft");
   assert.equal(JSON.parse(run(["entries"], { version: "10.11.6-MariaDB" })!).kind, "sqlite");
   // This install's own tables: used, whether or not its folder is here.
+  assert.equal(JSON.parse(run(["entries"], { version: "8.0.19" })!).kind, "sqlite");
+  assert.equal(JSON.parse(run(["entries"], { version: "8.0.20" })!).kind, "craft");
   assert.equal(JSON.parse(run([...own(""), "entries"], { owner: "install-1" })!).kind, "craft");
   // A SQLite file already made stays the choice.
   assert.equal(JSON.parse(run(["entries"], { sqlite: true })!).kind, "sqlite");

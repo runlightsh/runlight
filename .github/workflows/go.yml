@@ -45,6 +45,10 @@ jobs:
             mysql: mirror.gcr.io/library/mariadb:11.4
             mysql-env: RUNLIGHT_TEST_MARIADB
             mysql-health: healthcheck.sh --connect --innodb_initialized
+          - go: "1.26"
+            mysql: public.ecr.aws/docker/library/mysql:8.0
+            mysql-env: RUNLIGHT_TEST_MYSQL
+            mysql-health: mysqladmin ping -h 127.0.0.1 -ppw
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16

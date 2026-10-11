@@ -19,7 +19,7 @@ use Runlight\Store\Stores;
 /**
  * Where Runlight keeps its numbers when it runs in this Drupal.
  *
- * In Drupal's own database when that is Postgres, or MySQL 8.4 or MariaDB
+ * In Drupal's own database when that is Postgres, or MySQL 8.0.20 or MariaDB
  * 11.4 or later, in tables named after Drupal's table prefix and rl_, such as
  * rl_events, or d_rl_events with a prefix of d_. Otherwise in a SQLite file
  * in the private files folder, which the web never serves. The choice is made
@@ -215,7 +215,7 @@ final class Storage {
    * Which kind of database Drupal's own is, if it can hold Runlight's tables.
    *
    * @return string
-   *   "postgres", or "mysql" for MySQL 8.4 or MariaDB 11.4 or later, whose
+   *   "postgres", or "mysql" for MySQL 8.0.20 or MariaDB 11.4 or later, whose
    *   tables compare text by code point with a collation older servers lack,
    *   or an empty string for any other.
    */
@@ -237,10 +237,10 @@ final class Storage {
     catch (\Throwable) {
       return '';
     }
-    if (!preg_match('/^(\d+\.\d+)/', $version, $number)) {
+    if (!preg_match('/^(\d+\.\d+(?:\.\d+)?)/', $version, $number)) {
       return '';
     }
-    return version_compare($number[1], stripos($version, 'mariadb') !== FALSE ? '11.4' : '8.4', '>=') ? 'mysql' : '';
+    return version_compare($number[1], stripos($version, 'mariadb') !== FALSE ? '11.4' : '8.0.20', '>=') ? 'mysql' : '';
   }
 
   /**

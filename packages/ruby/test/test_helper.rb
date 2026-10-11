@@ -43,7 +43,7 @@ module Fixtures
 end
 
 # The databases the store tests run on: SQLite always; Postgres when RUNLIGHT_TEST_PG is set (each test gets a
-# schema of its own inside runlight_test_ruby); MySQL 8.4 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set
+# schema of its own inside runlight_test_ruby); MySQL 8.0.20 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set
 # (each test empties Runlight's tables in runlight_test_ruby first, so those tests run one at a time). Either
 # variable may hold a URL; set to anything else (such as 1), the local test servers are used. The store suites
 # and the conformance replay also run each kind once more with its tables under another prefix (store_kinds).

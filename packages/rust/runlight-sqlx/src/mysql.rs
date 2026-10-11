@@ -1,4 +1,4 @@
-//! MySQL 8.4 and MariaDB 11.4, on the app's pool. Each statement runs on the pool on its own; a
+//! MySQL 8.0.20 and MariaDB 11.4, on the app's pool. Each statement runs on the pool on its own; a
 //! transaction or a lock holds one connection until it ends.
 
 use std::sync::Arc;

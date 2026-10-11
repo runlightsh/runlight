@@ -36,7 +36,7 @@ dependencies = []
 tzdata = ["tzdata"]
 # Stores.postgres(), on psycopg 3.
 postgres = ["psycopg>=3.2"]
-# Stores.mysql(), for MySQL 8.4 and MariaDB 11.4 and later.
+# Stores.mysql(), for MySQL 8.0.20 and MariaDB 11.4 and later.
 mysql = ["pymysql>=1.1"]
 
 [project.scripts]

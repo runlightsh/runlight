@@ -2,7 +2,7 @@
 /**
  * Where Runlight keeps its numbers when it runs in this WordPress: in
  * WordPress's own database, in tables named after WordPress's own prefix and
- * rl_, such as wp_rl_events, when that is MySQL 8.4 or MariaDB 11.4 or later,
+ * rl_, such as wp_rl_events, when that is MySQL 8.0.20 or MariaDB 11.4 or later,
  * or else in a SQLite file under the uploads folder. The choice is made the
  * first time Runlight runs and kept, so the numbers never split across two
  * places.
@@ -56,7 +56,7 @@ final class Storage {
 	}
 
 	/**
-	 * Whether WordPress's own database can hold Runlight's tables: MySQL 8.4 or
+	 * Whether WordPress's own database can hold Runlight's tables: MySQL 8.0.20 or
 	 * MariaDB 11.4 or later, reached through $wpdb. Runlight's tables
 	 * compare text by code point with a collation older servers lack.
 	 */
@@ -66,10 +66,10 @@ final class Storage {
 			return false;
 		}
 		$version = (string) $wpdb->get_var( 'SELECT VERSION()' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- the server's version, read once to choose where Runlight's tables go.
-		if ( ! preg_match( '/^(\d+\.\d+)/', $version, $number ) ) {
+		if ( ! preg_match( '/^(\d+\.\d+(?:\.\d+)?)/', $version, $number ) ) {
 			return false;
 		}
-		return version_compare( $number[1], stripos( $version, 'mariadb' ) !== false ? '11.4' : '8.4', '>=' );
+		return version_compare( $number[1], stripos( $version, 'mariadb' ) !== false ? '11.4' : '8.0.20', '>=' );
 	}
 
 	/** What Runlight's table names start with in WordPress's database: WordPress's own prefix, then rl_. */

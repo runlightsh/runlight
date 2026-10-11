@@ -130,7 +130,7 @@ public final class Connect {
   }
 
   /**
-   * MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or
+   * MySQL 8.0.20 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or
    * mariadb://). The session is utf8mb4 with the server's own SQL mode and IGNORE_SPACE added, as
    * mysql2 asks for it. Runlight's tables carry their own binary collation, so text compares and
    * sorts by code point. {@code statementTimeout} is set per connection; 0 turns it off.

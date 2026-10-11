@@ -92,7 +92,7 @@ public static class Stores
     public static SqlStore Postgres(DbDataSource source, int statementTimeout = 0, string prefix = Sql.Prefix) => new(new AdoDb(source, "postgres", statementTimeout: statementTimeout), prefix);
 
     /// <summary>
-    /// Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, over MySqlConnector's data source.
+    /// Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, over MySqlConnector's data source.
     /// Text is utf8mb4 with a binary collation, so it compares and sorts by code point, case and
     /// trailing spaces included, as SQLite and Postgres do.
     /// </summary>

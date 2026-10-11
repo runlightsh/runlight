@@ -20,7 +20,7 @@ include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE"]
 sqlite = ["sqlx/sqlite-bundled"]
 # Postgres.
 postgres = ["sqlx/postgres"]
-# MySQL 8.4 or MariaDB 11.4 and later.
+# MySQL 8.0.20 or MariaDB 11.4 and later.
 mysql = ["sqlx/mysql"]
 
 [dependencies]

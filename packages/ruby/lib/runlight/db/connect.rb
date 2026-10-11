@@ -63,7 +63,7 @@ module Runlight
         Database.new(Pools.make(config.compact), owned: true, dialect: "postgres")
       end
 
-      # MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://),
+      # MySQL 8.0.20 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://),
       # through the trilogy gem when it is installed, else mysql2. The session is utf8mb4 with the server's own
       # SQL mode plus IGNORE_SPACE, as mysql2 opens it for the TypeScript driver (its connect flags ask for
       # that, which neither Ruby driver can, so it is set as the session's mode), less NO_BACKSLASH_ESCAPES, as
