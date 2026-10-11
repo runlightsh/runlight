@@ -97,7 +97,7 @@ def test_the_element_picker_sends_its_choice_only_to_the_dashboard_its_ticket_na
 
     def target(ticket: str) -> str | None:
         script = routes.handle(req(f"/runlight/pick.js?runlight=pick&runlight_ticket={quote(ticket, safe='')}")).text()
-        m = re.search(r'var \w+="([^"]*)";if\(', script)
+        m = re.search(r'\w+="([^"]*)";if\(/\^https', script)
         return m.group(1) if m else None
 
     assert ask({"origin": "https://stats.example.com"}, "wrong").status == 401, "only the owner gets a ticket"
@@ -127,6 +127,85 @@ def test_the_element_picker_sends_its_choice_only_to_the_dashboard_its_ticket_na
     assert ask({"origin": "https://evil.example"}, manage).status == 403, "never another origin"
     hub = body(ask({"origin": "https://hub.example.net"}, manage))["ticket"]
     assert target(hub) == "https://hub.example.net"
+
+
+def test_the_picker_sends_its_choice_to_the_relay_page_its_ticket_names_never_through_the_tab_that_opened_it() -> None:
+    now = [calendar.timegm((2026, 10, 7, 12, 0, 0)) * 1000]
+    rl = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}], "now": lambda: now[0]})
+    routes = rl.routes({"token": "secret"})
+
+    def ask(given, auth="secret"):
+        return routes.handle(owner("/runlight/api/pick?site=blog", "POST", given, auth))
+
+    def script(ticket: str) -> str:
+        return routes.handle(req(f"/runlight/pick.js?runlight=pick&runlight_ticket={quote(ticket, safe='')}")).text()
+
+    nonce = "0123456789abcdef0123456789abcdef"
+    back = "https://stats.example.com/runlight/pick-return"
+
+    asked = ask({"origin": "https://stats.example.com", "return": back, "nonce": nonce})
+    assert asked.status == 200
+    ticket = body(asked)["ticket"]
+    assert len(ticket.split(".")) == 6, "the return address and nonce are signed into the ticket"
+    picker = script(ticket)
+    assert _js.dumps(back) in picker and _js.dumps(nonce) in picker
+    assert "__RUNLIGHT_PICK_RETURN__" not in picker and "__RUNLIGHT_PICK_NONCE__" not in picker
+
+    # Neither can be changed: a ticket with another return address or nonce is no ticket, and the picker sends nowhere.
+    parts = ticket.split(".")
+    other = b"https://stats.example.com/elsewhere/pick-return".hex()
+    for changed in ([*parts[:3], other, *parts[4:]], [*parts[:4], "f" * 32, parts[5]]):
+        sent = script(".".join(changed))
+        assert "stats.example.com" not in sent and nonce not in sent
+
+    # The return address is the relay page on the dashboard's own origin, and the nonce is 32 hex digits.
+    for given in (
+        {"origin": "https://stats.example.com", "return": "https://evil.example/pick-return", "nonce": nonce},
+        {"origin": "https://stats.example.com", "return": "https://stats.example.com.evil.example/pick-return", "nonce": nonce},
+        {"origin": "https://stats.example.com", "return": "https://stats.example.com/runlight/", "nonce": nonce},
+        {"origin": "https://stats.example.com", "return": "https://stats.example.com/pick-return?x=1", "nonce": nonce},
+        {"origin": "https://stats.example.com", "return": "https://stats.example.com/pick-return#x", "nonce": nonce},
+        {"origin": "https://stats.example.com", "return": back},
+        {"origin": "https://stats.example.com", "return": back, "nonce": "short"},
+        {"origin": "https://stats.example.com", "nonce": nonce},
+    ):
+        refused = ask(given)
+        assert refused.status == 400, _js.dumps(given)
+        assert body(refused)["code"] == "pick_return"
+    root = ask({"origin": "https://stats.example.com", "return": "https://stats.example.com/pick-return", "nonce": nonce})
+    assert root.status == 200, "a dashboard at the root"
+
+    # A hub's ticket names a relay page on the hub it connected from, and no other origin.
+    made = body(routes.handle(owner("/runlight/api/tokens", "POST", {"name": "Hub", "scope": "manage", "site": "blog"})))
+    rl.store.set_setting(f"token-origin:{made['token']['id']}", "https://hub.example.net")
+    assert ask({"origin": "https://hub.example.net", "return": "https://hub.example.net/pick-return", "nonce": nonce}, made["secret"]).status == 200
+    assert ask({"origin": "https://hub.example.net", "return": "https://evil.example/pick-return", "nonce": nonce}, made["secret"]).status == 400
+
+    now[0] += 31 * 60_000
+    assert nonce not in script(ticket), "a ticket runs out after half an hour"
+
+
+def test_the_relay_page_is_static_runs_only_its_own_script_and_keeps_its_address_to_itself() -> None:
+    routes = runlight().routes({"token": "secret"})
+    page = routes.handle(req("/runlight/pick-return", "GET", {"accept-language": "de-DE,de;q=0.9"}))
+    assert page.status == 200
+    assert "text/html" in (page.headers.get("content-type") or "")
+    assert page.headers.get("cache-control") == "no-store"
+    assert page.headers.get("referrer-policy") == "no-referrer"
+    csp = page.headers.get("content-security-policy") or ""
+    assert "script-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert not re.search(r"script-src[^;]*unsafe", csp), "no inline script"
+    html = page.text()
+    assert 'lang="de"' in html
+    assert '<script src="/runlight/pick-return.js"></script>' in html
+    assert "<script>" not in html, "no inline script"
+    script = routes.handle(req("/runlight/pick-return.js"))
+    assert "javascript" in (script.headers.get("content-type") or "")
+    assert "BroadcastChannel" in script.text()
+    # Signed out, it answers the same: it holds nothing.
+    signed_out = runlight({"secret": "a" * 32}).routes({"token": "secret", "accounts": True})
+    assert signed_out.handle(req("/runlight/pick-return")).status == 200
 
 
 def test_broken_percent_escapes_in_a_path_answer_as_a_name_nobody_has_never_an_error() -> None:

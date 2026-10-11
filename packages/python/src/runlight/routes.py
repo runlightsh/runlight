@@ -288,17 +288,21 @@ def _pass_through(runlight: Any, remote: Mapping[str, Any], path: str, url: Url,
     return Response(answer.content(), answer.status, back)
 
 
-def _small_page(lang: str, body: str, status: int = 200) -> Response:
-    """A plain page in a visitor's language, for unsubscribing and for a share link that is gone."""
+def _small_page(lang: str, body: str, status: int = 200, script: str = "") -> Response:
+    """A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's
+    relay page, which alone runs a script: one file from this server, never inline."""
+    tag = f'<script src="{escape_html(script)}"></script>' if script else ""
     return Response(
         f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Runlight</title>\n'
         '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>'
-        f"{body}</main></body></html>",
+        f"{body}</main>{tag}</body></html>",
         status,
         {
             "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store",
-            "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+            "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            if script
+            else "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
             "referrer-policy": "no-referrer",
         },
     )
@@ -454,8 +458,16 @@ RULES_PLACEHOLDER = '"__RUNLIGHT_RULES__"'
 PICK_TARGET_PLACEHOLDER = '"__RUNLIGHT_PICK_TARGET__"'
 # Where the hostnames of the site its ticket names go, as JSON inside a string.
 PICK_HOSTS_PLACEHOLDER = '"__RUNLIGHT_PICK_HOSTS__"'
+# Where the relay page the picker sends its choice to goes, the return address its ticket names.
+PICK_RETURN_PLACEHOLDER = '"__RUNLIGHT_PICK_RETURN__"'
+# Where the nonce the dashboard made for this pick goes, which the relay page hands back to it.
+PICK_NONCE_PLACEHOLDER = '"__RUNLIGHT_PICK_NONCE__"'
 # A dashboard's origin, which a picker ticket names.
 _ORIGIN = re.compile(f"https?://[^/?#{_WS}]+\\Z")
+# The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end.
+_PICK_RETURN = re.compile(f"https?://[^/?#{_WS}]+(/[^?#{_WS}]*)?/pick-return\\Z")
+# What the dashboard names one pick by, so its relay page answers only the tab that started it.
+_PICK_NONCE = re.compile(r"[a-f0-9]{32}\Z")
 # How long a picker ticket works: long enough to find the element, not to be kept.
 PICK_TICKET_MS = 30 * 60_000
 # Questions one person may put to the assistant in an hour, and at once.
@@ -978,26 +990,38 @@ class Routes:
         self.rl.store.set_setting("pick-key", made)
         return made
 
-    def _pick_ticket(self, origin: str, site: str) -> str:
+    def _pick_ticket(self, origin: str, site: str, back: dict[str, str] | None = None) -> str:
         """A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked,
-        for half an hour."""
+        for half an hour. With a return address and a nonce it sends it there, to the relay page, which hands it to
+        the dashboard tab that made the nonce; without them, as an older dashboard asks, to the tab that opened the
+        site."""
         payload = f"{self.rl.now() + PICK_TICKET_MS}.{_js.encode(site).hex()}.{_js.encode(origin).hex()}"
+        if back:
+            payload += f".{_js.encode(back['url']).hex()}.{back['nonce']}"
         return f"{payload}.{hmac(self._pick_key(), payload)}"
 
-    def _pick_target(self, ticket: str) -> dict[str, str] | None:
-        """The dashboard origin and site a picker ticket names, or None when it is not one this install signed or has
-        run out."""
-        parts = re.fullmatch(r"([0-9]+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})", ticket)
+    def _pick_target(self, ticket: str) -> dict[str, Any] | None:
+        """What a picker ticket names, or None when it is not one this install signed or has run out."""
+        parts = re.fullmatch(
+            r"([0-9]+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]{2,2048})\.([a-f0-9]{32}))?\.([a-f0-9]{64})", ticket
+        )
         if not parts or _js.number(parts.group(1)) < self.rl.now():
             return None
-        if not _constant_time_equal(parts.group(4), hmac(self._pick_key(), f"{parts.group(1)}.{parts.group(2)}.{parts.group(3)}")):
+        if not _constant_time_equal(parts.group(6), hmac(self._pick_key(), ticket[: ticket.rindex(".")])):
             return None
 
         def unhex(text: str) -> str:
             return _js.utf8(bytes.fromhex(text[: len(text) - len(text) % 2]))
 
         origin = unhex(parts.group(3))
-        return {"origin": origin, "site": unhex(parts.group(2))} if _ORIGIN.match(origin) else None
+        if not _ORIGIN.match(origin):
+            return None
+        if parts.group(4) is None:
+            return {"origin": origin, "site": unhex(parts.group(2))}
+        url = unhex(parts.group(4))
+        if not (_PICK_RETURN.match(url) and url.startswith(f"{origin}/")):
+            return None
+        return {"origin": origin, "site": unhex(parts.group(2)), "back": {"url": url, "nonce": parts.group(5)}}
 
     def _embed_key(self) -> str:
         """The key embed tickets and sessions are signed with, made on first use and kept in the database for every
@@ -1814,11 +1838,20 @@ class Routes:
             origin = _text(body, "origin")
             if not _ORIGIN.match(origin):
                 return coded("Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400)
+            # Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+            # listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+            back = None
+            if _defined(body, "return") or _defined(body, "nonce"):
+                address = _text(body, "return")
+                nonce = _text(body, "nonce")
+                if len(_js.encode(address).hex()) > 2048 or not _PICK_RETURN.match(address) or not address.startswith(f"{origin}/") or not _PICK_NONCE.match(nonce):
+                    return coded("Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits", "pick_return", 400)
+                back = {"url": address, "nonce": nonce}
             # A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
             hub = self.managed.get(request)
             if hub and rl.store.setting(f"token-origin:{hub['id']}") != origin:
                 return coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403)
-            return json({"ticket": self._pick_ticket(origin, site["id"])})
+            return json({"ticket": self._pick_ticket(origin, site["id"], back)})
 
         if (path == "/api/goals" and method == "POST") or (re.fullmatch(r"/api/goals/[^/]+", path) and method in ("PATCH", "DELETE")):
             access = self._can_read(request)
@@ -2419,9 +2452,27 @@ class Routes:
                 hosts = ticketed["hostnames"] if ticketed else None
             else:
                 hosts = []
-            script = assets.PICKER.replace(PICK_TARGET_PLACEHOLDER, _js.dumps((target or {}).get("origin", "") if hosts is not None else ""), 1)
+            named = (target or {}) if hosts is not None else {}
+            back = named.get("back") or {}
+            script = assets.PICKER.replace(PICK_TARGET_PLACEHOLDER, _js.dumps(named.get("origin", "")), 1)
             script = script.replace(PICK_HOSTS_PLACEHOLDER, _js.dumps(_js.dumps(hosts if hosts is not None else [])), 1)
+            script = script.replace(PICK_RETURN_PLACEHOLDER, _js.dumps(back.get("url", "")), 1)
+            script = script.replace(PICK_NONCE_PLACEHOLDER, _js.dumps(back.get("nonce", "")), 1)
             return Response(script, 200, {"content-type": "application/javascript; charset=utf-8", "cache-control": "no-store"})
+
+        # The relay page the picker opens with its choice in the fragment, which never reaches a server. Its script
+        # hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+        if path == "/pick-return" and method == "GET":
+            t, lang = _translator(_accepted_language(request))
+            return _small_page(
+                lang,
+                f'<div id="done" hidden><h1>{escape_html(t("pick.doneTitle"))}</h1><p>{escape_html(t("pick.done"))}</p></div>'
+                f'<div id="gone" hidden><h1>{escape_html(t("pick.goneTitle"))}</h1><p>{escape_html(t("pick.gone"))}</p></div>',
+                200,
+                f"{base}/pick-return.js",
+            )
+        if path == "/pick-return.js" and method == "GET":
+            return Response(assets.PICK_RELAY, 200, {"content-type": "application/javascript; charset=utf-8", "cache-control": "no-store"})
 
         if path == f"/assets/world.{assets.WORLD_HASH}.json" and method == "GET":
             return Response(assets.WORLD_JSON, 200, {"content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=31536000, immutable"})
