@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
@@ -153,7 +154,7 @@ class RoutesTest {
                           "/runlight/pick.js?runlight=pick&runlight_ticket="
                               + Js.encodeURIComponent(ticket)))
                   .text();
-          Matcher m = Pattern.compile("var \\w+=\"([^\"]*)\";if\\(").matcher(script);
+          Matcher m = Pattern.compile("\\w+=\"([^\"]*)\";if\\(/\\^https").matcher(script);
           return m.find() ? m.group(1) : null;
         };
 
@@ -896,6 +897,185 @@ class RoutesTest {
     Response answer = routes.handle(req("/runlight/api/sites"));
     assertEquals(500, answer.status());
     assertEquals("{\"error\":\"Internal error\",\"code\":\"internal\"}", answer.text());
+  }
+
+  @Test
+  void thePickerSendsItsChoiceToTheRelayPageItsTicketNamesNeverThroughTheTabThatOpenedIt() {
+    AtomicLong now = new AtomicLong(Make.utc(2026, 10, 7, 12));
+    Runlight rl =
+        Make.runlight(
+            new Runlight.Options()
+                .sites(List.of(Make.site("blog", "blog.example.com")))
+                .now(now::get));
+    Routes routes = rl.routes(new Routes.Options().token("secret"));
+    java.util.function.BiFunction<Object, String, Response> ask =
+        (body, auth) -> routes.handle(owner("/runlight/api/pick?site=blog", "POST", body, auth));
+    Function<String, String> script =
+        ticket ->
+            routes
+                .handle(
+                    req(
+                        "/runlight/pick.js?runlight=pick&runlight_ticket="
+                            + Js.encodeURIComponent(ticket)))
+                .text();
+    String nonce = "0123456789abcdef0123456789abcdef";
+    String back = "https://stats.example.com/runlight/pick-return";
+    String origin = "https://stats.example.com";
+
+    Response asked =
+        ask.apply(Json.object("origin", origin, "return", back, "nonce", nonce), "secret");
+    assertEquals(200, asked.status());
+    String ticket = (String) body(asked).get("ticket");
+    assertEquals(
+        6, ticket.split("\\.").length, "the return address and nonce are signed into the ticket");
+    String picker = script.apply(ticket);
+    assertTrue(picker.contains(Json.stringify(back)) && picker.contains(Json.stringify(nonce)));
+    assertFalse(
+        picker.contains("__RUNLIGHT_PICK_RETURN__") || picker.contains("__RUNLIGHT_PICK_NONCE__"));
+
+    // Neither can be changed: a ticket with another return address or nonce is no ticket, and the
+    // picker sends nowhere.
+    String[] parts = ticket.split("\\.");
+    String other =
+        HexFormat.of()
+            .formatHex(
+                "https://stats.example.com/elsewhere/pick-return".getBytes(StandardCharsets.UTF_8));
+    for (String changed :
+        List.of(
+            String.join(".", parts[0], parts[1], parts[2], other, parts[4], parts[5]),
+            String.join(".", parts[0], parts[1], parts[2], parts[3], "f".repeat(32), parts[5]))) {
+      String sent = script.apply(changed);
+      assertFalse(sent.contains("stats.example.com") || sent.contains(nonce));
+    }
+
+    // The return address is the relay page on the dashboard's own origin, and the nonce is 32 hex
+    // digits.
+    for (Object body :
+        List.of(
+            Json.object(
+                "origin", origin, "return", "https://evil.example/pick-return", "nonce", nonce),
+            Json.object(
+                "origin",
+                origin,
+                "return",
+                "https://stats.example.com.evil.example/pick-return",
+                "nonce",
+                nonce),
+            Json.object(
+                "origin", origin, "return", "https://stats.example.com/runlight/", "nonce", nonce),
+            Json.object(
+                "origin",
+                origin,
+                "return",
+                "https://stats.example.com/pick-return?x=1",
+                "nonce",
+                nonce),
+            Json.object(
+                "origin",
+                origin,
+                "return",
+                "https://stats.example.com/pick-return#x",
+                "nonce",
+                nonce),
+            Json.object("origin", origin, "return", back),
+            Json.object("origin", origin, "return", back, "nonce", "short"),
+            Json.object("origin", origin, "return", back, "nonce", nonce.toUpperCase(Locale.ROOT)),
+            Json.object("origin", origin, "nonce", nonce))) {
+      Response refused = ask.apply(body, "secret");
+      assertEquals(400, refused.status(), Json.stringify(body));
+      assertEquals("pick_return", body(refused).get("code"));
+    }
+    assertEquals(
+        200,
+        ask.apply(
+                Json.object(
+                    "origin",
+                    origin,
+                    "return",
+                    "https://stats.example.com/pick-return",
+                    "nonce",
+                    nonce),
+                "secret")
+            .status(),
+        "a dashboard at the root");
+
+    // An older dashboard sends neither, and its ticket names only the origin.
+    String older = (String) body(ask.apply(Json.object("origin", origin), "secret")).get("ticket");
+    assertEquals(4, older.split("\\.").length);
+    String old = script.apply(older);
+    assertTrue(old.contains(Json.stringify(origin)));
+    assertFalse(old.contains(back) || old.contains(nonce));
+
+    // A hub's ticket names a relay page on the hub it connected from, and no other origin.
+    Map<String, Object> made =
+        body(
+            routes.handle(
+                owner(
+                    "/runlight/api/tokens",
+                    "POST",
+                    Json.object("name", "Hub", "scope", "manage", "site", "blog"))));
+    rl.store.setSetting("token-origin:" + Make.dig(made, "token.id"), "https://hub.example.net");
+    String manage = (String) made.get("secret");
+    assertEquals(
+        200,
+        ask.apply(
+                Json.object(
+                    "origin",
+                    "https://hub.example.net",
+                    "return",
+                    "https://hub.example.net/pick-return",
+                    "nonce",
+                    nonce),
+                manage)
+            .status());
+    assertEquals(
+        400,
+        ask.apply(
+                Json.object(
+                    "origin",
+                    "https://hub.example.net",
+                    "return",
+                    "https://evil.example/pick-return",
+                    "nonce",
+                    nonce),
+                manage)
+            .status());
+
+    now.addAndGet(31 * 60_000L);
+    assertFalse(script.apply(ticket).contains(nonce), "a ticket runs out after half an hour");
+  }
+
+  @Test
+  void theRelayPageIsStaticRunsOnlyItsOwnScriptAndKeepsItsAddressToItself() {
+    Routes routes = withToken("secret");
+    Response page =
+        routes.handle(
+            req("/runlight/pick-return", "GET", Map.of("accept-language", "de-DE,de;q=0.9")));
+    assertEquals(200, page.status());
+    assertTrue(matches("text/html", page.headers().get("content-type")));
+    assertEquals("no-store", page.headers().get("cache-control"));
+    assertEquals("no-referrer", page.headers().get("referrer-policy"));
+    String csp = page.headers().get("content-security-policy");
+    assertTrue(matches("script-src 'self'", csp));
+    assertTrue(matches("frame-ancestors 'none'", csp));
+    assertFalse(matches("script-src[^;]*unsafe", csp), "no inline script");
+    String html = page.text();
+    assertTrue(matches("lang=\"de\"", html));
+    assertTrue(html.contains("<script src=\"/runlight/pick-return.js\"></script>"));
+    assertTrue(
+        html.contains("<div id=\"done\" hidden>") && html.contains("<div id=\"gone\" hidden>"));
+    assertFalse(html.contains("<script>"), "no inline script");
+    Response script = routes.handle(req("/runlight/pick-return.js"));
+    assertTrue(matches("javascript", script.headers().get("content-type")));
+    assertEquals("no-store", script.headers().get("cache-control"));
+    assertTrue(script.text().contains("BroadcastChannel"));
+    assertEquals(
+        404, routes.handle(req("/runlight/pick-return", "POST", Map.of())).status(), "only GET");
+    // Signed out, it answers the same: it holds nothing.
+    Routes open =
+        Make.runlight(new Runlight.Options().secret("a".repeat(32)))
+            .routes(new Routes.Options().token("secret").accounts(true));
+    assertEquals(200, open.handle(req("/runlight/pick-return")).status());
   }
 
   @Test

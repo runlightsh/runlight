@@ -55,6 +55,8 @@ public final class Standalone {
           "/mcp",
           "/s.js",
           "/pick.js",
+          "/pick-return",
+          "/pick-return.js",
           "/e",
           "/embed");
 

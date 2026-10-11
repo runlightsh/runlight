@@ -86,6 +86,16 @@ public final class Routes {
   /** Where the hostnames of the site its ticket names go, as JSON inside a string. */
   private static final String PICK_HOSTS_PLACEHOLDER = "\"__RUNLIGHT_PICK_HOSTS__\"";
 
+  /**
+   * Where the relay page the picker sends its choice to goes, the return address its ticket names.
+   */
+  private static final String PICK_RETURN_PLACEHOLDER = "\"__RUNLIGHT_PICK_RETURN__\"";
+
+  /**
+   * Where the nonce the dashboard made for this pick goes, which the relay page hands back to it.
+   */
+  private static final String PICK_NONCE_PLACEHOLDER = "\"__RUNLIGHT_PICK_NONCE__\"";
+
   /** How long a picker ticket works: long enough to find the element, not to be kept. */
   public static final long PICK_TICKET_MS = 30 * 60_000L;
 
@@ -132,6 +142,18 @@ public final class Routes {
   private static final String NO = "[^" + Js.SPACE + "@<>\"]+";
   private static final Pattern EMAIL = Pattern.compile("^" + NO + "@" + NO + "\\." + NO + "\\z");
   private static final Pattern ORIGIN = Pattern.compile("^https?://[^/?#" + Js.SPACE + "]+\\z");
+
+  /**
+   * The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end.
+   */
+  private static final Pattern PICK_RETURN =
+      Pattern.compile("^https?://[^/?#" + Js.SPACE + "]+(/[^?#" + Js.SPACE + "]*)?/pick-return\\z");
+
+  /**
+   * What the dashboard names one pick by, so its relay page answers only the tab that started it.
+   */
+  private static final Pattern PICK_NONCE = Pattern.compile("^[a-f0-9]{32}\\z");
+
   private static final Pattern FILENAME = Pattern.compile("filename=\"([A-Za-z0-9._-]+)\"");
   private static final Pattern ERROR_CODE = Pattern.compile("^[a-z_]{1,40}\\z");
   private static final Pattern GOAL_PAGE = Pattern.compile("^/api/goals/[a-f0-9]{24}\\z");
@@ -144,7 +166,8 @@ public final class Routes {
   private static final Pattern IMPORT_PATH = Pattern.compile("^/api/links/import/([a-z]+)\\z");
   private static final Pattern LINK_PATH = Pattern.compile("^/api/links/([a-f0-9]+)\\z");
   private static final Pattern TICKET =
-      Pattern.compile("^(\\d+)\\.([a-f0-9]{2,512})\\.([a-f0-9]{2,512})\\.([a-f0-9]{64})\\z");
+      Pattern.compile(
+          "^(\\d+)\\.([a-f0-9]{2,512})\\.([a-f0-9]{2,512})(?:\\.([a-f0-9]{2,2048})\\.([a-f0-9]{32}))?\\.([a-f0-9]{64})\\z");
   private static final Pattern REPORT_PATH =
       Pattern.compile("^/api/reports/([a-f0-9]{24})(/send)?\\z");
   private static final Pattern REPORT_TOKEN = Pattern.compile("^[a-f0-9]{32}\\z");
@@ -698,15 +721,24 @@ public final class Routes {
     return new Response(answer.bytes(), answer.status(), Headers.of(back));
   }
 
-  /** A plain page in a visitor's language, for unsubscribing and for a share link that is gone. */
+  /**
+   * A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for
+   * the picker's relay page, which alone runs a script: one file from this server, never inline.
+   */
   private static Response smallPage(String lang, String body, int status) {
+    return smallPage(lang, body, status, "");
+  }
+
+  private static Response smallPage(String lang, String body, int status, String script) {
     return new Response(
         "<!doctype html><html lang=\""
             + lang
             + "\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>Runlight</title>\n"
             + "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>"
             + body
-            + "</main></body></html>",
+            + "</main>"
+            + (script.isEmpty() ? "" : "<script src=\"" + escapeHtml(script) + "\"></script>")
+            + "</body></html>",
         status,
         Headers.of(
             "content-type",
@@ -714,7 +746,9 @@ public final class Routes {
             "cache-control",
             "no-store",
             "content-security-policy",
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+            script.isEmpty()
+                ? "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+                : "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
             "referrer-policy",
             "no-referrer"));
   }
@@ -1678,22 +1712,25 @@ public final class Routes {
 
   /**
    * A ticket that lets the picker, on site's pages, send its choice to origin, the dashboard that
-   * asked, for half an hour.
+   * asked, for half an hour. With a return address and a nonce it sends it there, to the relay
+   * page, which hands it to the dashboard tab that made the nonce; without them (back is null), as
+   * an older dashboard asks, to the tab that opened the site.
    */
-  private String pickTicket(String origin, String site) {
+  private String pickTicket(String origin, String site, String[] back) {
     HexFormat hex = HexFormat.of();
     String payload =
         (rl.now() + PICK_TICKET_MS)
             + "."
             + hex.formatHex(Js.utf8(site))
             + "."
-            + hex.formatHex(Js.utf8(origin));
+            + hex.formatHex(Js.utf8(origin))
+            + (back != null ? "." + hex.formatHex(Js.utf8(back[0])) + "." + back[1] : "");
     return payload + "." + Hash.hmac(pickKey(), payload);
   }
 
   /**
-   * The dashboard origin and site a picker ticket names, or null when it is not one this install
-   * signed or has run out.
+   * What a picker ticket names (origin, site, and for a relay ticket return and nonce), or null
+   * when it is not one this install signed or has run out.
    */
   private Map<String, Object> pickTarget(String ticket) {
     Matcher parts = TICKET.matcher(ticket);
@@ -1701,12 +1738,28 @@ public final class Routes {
       return null;
     }
     if (!constantTimeEqual(
-        parts.group(4),
-        Hash.hmac(pickKey(), parts.group(1) + "." + parts.group(2) + "." + parts.group(3)))) {
+        parts.group(6), Hash.hmac(pickKey(), ticket.substring(0, ticket.lastIndexOf('.'))))) {
       return null;
     }
     String origin = unhex(parts.group(3));
-    return isOrigin(origin) ? Json.object("origin", origin, "site", unhex(parts.group(2))) : null;
+    if (!isOrigin(origin)) {
+      return null;
+    }
+    if (parts.group(4) == null) {
+      return Json.object("origin", origin, "site", unhex(parts.group(2)));
+    }
+    String back = unhex(parts.group(4));
+    return PICK_RETURN.matcher(back).find() && back.startsWith(origin + "/")
+        ? Json.object(
+            "origin",
+            origin,
+            "site",
+            unhex(parts.group(2)),
+            "return",
+            back,
+            "nonce",
+            parts.group(5))
+        : null;
   }
 
   /**
@@ -3037,6 +3090,25 @@ public final class Routes {
         return coded(
             "Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400);
       }
+      // Where the picker sends its choice: the relay page on the same origin, and the nonce the
+      // dashboard tab listens for. An older dashboard sends neither and gets a ticket for the tab
+      // that opened the site.
+      String[] back = null;
+      Map<String, Object> pickBody = asMap(read);
+      if (defined(pickBody, "return") || defined(pickBody, "nonce")) {
+        String address = text(pickBody, "return");
+        String nonce = text(pickBody, "nonce");
+        if (Js.utf8(address).length * 2 > 2048
+            || !PICK_RETURN.matcher(address).find()
+            || !address.startsWith(pickOrigin + "/")
+            || !PICK_NONCE.matcher(nonce).find()) {
+          return coded(
+              "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "pick_return",
+              400);
+        }
+        back = new String[] {address, nonce};
+      }
       // A hub's ticket only ever sends to the hub it connected from, never to an origin it names
       // now.
       Map<String, Object> hub = managed.get(request);
@@ -3046,7 +3118,8 @@ public final class Routes {
             "pick_hub",
             403);
       }
-      return json(Json.object("ticket", pickTicket(pickOrigin, (String) asMap(found).get("id"))));
+      return json(
+          Json.object("ticket", pickTicket(pickOrigin, (String) asMap(found).get("id"), back)));
     }
 
     if ((path.equals("/api/goals") && method.equals("POST"))
@@ -4039,18 +4112,59 @@ public final class Routes {
       } else {
         hosts = new ArrayList<>();
       }
+      Map<String, Object> named = hosts != null ? target : null;
       String script =
           replaceOnce(
               Version.asset("picker.js"),
               PICK_TARGET_PLACEHOLDER,
-              Json.stringify(hosts != null && target != null ? target.get("origin") : ""));
+              Json.stringify(named != null ? named.get("origin") : ""));
       script =
           replaceOnce(
               script,
               PICK_HOSTS_PLACEHOLDER,
               Json.stringify(Json.stringify(hosts != null ? hosts : new ArrayList<>())));
+      script =
+          replaceOnce(
+              script,
+              PICK_RETURN_PLACEHOLDER,
+              Json.stringify(named != null ? named.getOrDefault("return", "") : ""));
+      script =
+          replaceOnce(
+              script,
+              PICK_NONCE_PLACEHOLDER,
+              Json.stringify(named != null ? named.getOrDefault("nonce", "") : ""));
       return new Response(
           script,
+          200,
+          Headers.of(
+              "content-type",
+              "application/javascript; charset=utf-8",
+              "cache-control",
+              "no-store"));
+    }
+
+    // The relay page the picker opens with its choice in the fragment, which never reaches a
+    // server. Its script hands the choice to the dashboard tab on this origin that started the
+    // pick, and nothing else.
+    if (path.equals("/pick-return") && method.equals("GET")) {
+      Messages.Translator t = Messages.translator(acceptedLanguage(request));
+      return smallPage(
+          t.lang(),
+          "<div id=\"done\" hidden><h1>"
+              + escapeHtml(t.t("pick.doneTitle"))
+              + "</h1><p>"
+              + escapeHtml(t.t("pick.done"))
+              + "</p></div><div id=\"gone\" hidden><h1>"
+              + escapeHtml(t.t("pick.goneTitle"))
+              + "</h1><p>"
+              + escapeHtml(t.t("pick.gone"))
+              + "</p></div>",
+          200,
+          base + "/pick-return.js");
+    }
+    if (path.equals("/pick-return.js") && method.equals("GET")) {
+      return new Response(
+          Version.asset("pick-return.js"),
           200,
           Headers.of(
               "content-type",
