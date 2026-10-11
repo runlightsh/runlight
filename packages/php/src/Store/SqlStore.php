@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Store;
 
 use Runlight\Db\Db;
+use Runlight\Db\Prefixed;
 use Runlight\Js;
 use Runlight\Json;
 use Runlight\Query;
@@ -38,11 +39,42 @@ final class SqlStore
     public const EVENT_TAIL_MS = Sql::EVENT_TAIL_MS;
     public const MYSQL_COLLATION = Sql::MYSQL_COLLATION;
 
+    public readonly Db $db;
+    /** What the store's table and index names start with: `rl_` unless it was given another. */
+    public readonly string $prefix;
     private bool $ready = false;
     private bool $checkedAll = false;
 
-    public function __construct(public readonly Db $db)
+    /**
+     * `$prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
+     * Runlight's tables in one database. A Db that is already Prefixed keeps its own.
+     */
+    public function __construct(Db $db, string $prefix = Sql::PREFIX)
     {
+        if ($db instanceof Prefixed) {
+            $prefix = $db->prefix;
+        } elseif ($prefix !== Sql::PREFIX) {
+            $db = new Prefixed($db, $prefix);
+        }
+        $this->db = $db;
+        $this->prefix = $prefix;
+    }
+
+    /**
+     * The store's tables as named in the database, for an app removing Runlight: each one by name, since
+     * another app's tables may well start with the same letters.
+     *
+     * @return list<string>
+     */
+    public function tables(): array
+    {
+        return array_map(fn (string $table): string => $this->prefix . $table, Sql::TABLES);
+    }
+
+    /** A table or index name as the database has it, under the store's prefix. */
+    private function named(string $name): string
+    {
+        return str_starts_with($name, Sql::PREFIX) ? $this->prefix . substr($name, strlen(Sql::PREFIX)) : $name;
     }
 
     /**
@@ -102,7 +134,7 @@ final class SqlStore
             // A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
             $broken = $db->all(
                 "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace",
+           WHERE NOT i.indisvalid AND c.relname LIKE '" . str_replace('_', '\\_', $this->prefix) . "%' AND c.relnamespace = current_schema()::regnamespace",
             );
             foreach ($broken as $row) {
                 $db->run('DROP INDEX IF EXISTS "' . str_replace('"', '', (string) $row['name']) . '"');
@@ -112,7 +144,7 @@ final class SqlStore
             if ($db->dialect() === 'mysql' && preg_match('/^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (\w+)/', $statement, $index)) {
                 // MySQL has no CREATE INDEX IF NOT EXISTS, so it is looked for first.
                 [, $unique, $name, $table] = $index;
-                $there = $db->all('SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1', [$table, $name]);
+                $there = $db->all('SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1', [$this->named($table), $this->named($name)]);
                 if (!$there) {
                     $db->run((string) preg_replace('/^CREATE (UNIQUE )?INDEX IF NOT EXISTS/', "CREATE {$unique}INDEX", $statement));
                 }

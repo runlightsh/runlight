@@ -55,11 +55,14 @@ final class RecordsTest extends StoreTestCase
         $store->insertLink($link);
         $this->assertSame($link, $store->linkBySlug('launch'));
         // A slug is unique across every domain while its link lives.
+        $refused = false;
         try {
             $store->insertLink([...$link, 'id' => str_repeat('m', 24), 'domain' => 'go.example.com']);
-            $this->fail('a second live link with the slug');
-        } catch (\PDOException) {
+        } catch (\Exception) {
+            // Each driver says so its own way: PDO, SQLite3, and $wpdb's last error.
+            $refused = true;
         }
+        $this->assertTrue($refused, 'a second live link with the slug');
         $store->updateLink([...$link, 'domain' => 'go.example.com', 'name' => 'Moved', 'updatedAt' => self::NOW]);
         $this->assertSame(['go.example.com', 'Moved', self::NOW], [$store->linkById($link['id'])['domain'], $store->linkById($link['id'])['name'], $store->linkById($link['id'])['updatedAt']]);
         for ($i = 0; $i < 40; $i++) {
@@ -146,6 +149,11 @@ final class RecordsTest extends StoreTestCase
         $this->assertSame([['key' => 'remote\\d', 'value' => '5']], $store->settingsStartingWith('remote\\'), 'and a backslash, on MySQL too');
         $store->setSetting('remote:a', null);
         $this->assertNull($store->setting('remote:a'));
+        // As an OAuth code or an embed ticket is taken: once, by whoever deletes the row.
+        $store->setSetting('oauth-code:x', 'v');
+        $this->assertSame('v', $store->takeSetting('oauth-code:x'));
+        $this->assertNull($store->takeSetting('oauth-code:x'), 'and only once');
+        $this->assertNull($store->setting('oauth-code:x'));
     }
 
     #[DataProvider('kinds')]

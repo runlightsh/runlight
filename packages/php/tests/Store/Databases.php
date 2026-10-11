@@ -6,6 +6,8 @@ namespace Runlight\Tests\Store;
 
 use Runlight\Db\Connect;
 use Runlight\Db\PdoDb;
+use Runlight\Db\Prefixed;
+use Runlight\Store\Sql;
 use Runlight\Store\SqlStore;
 use Runlight\Store\Stores;
 
@@ -14,6 +16,10 @@ use Runlight\Store\Stores;
  * string (each test gets a schema of its own); MySQL 8.4 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set
  * (each test gets a database of its own). RUNLIGHT_TEST_MYSQL may hold the URLs, separated by spaces or
  * commas; any other value means the two local test servers.
+ *
+ * Each also runs once with its tables under another prefix (the "-prefixed" kinds), and in a checkout of the
+ * whole repository, on the WordPress plugin's drivers: SQLite3 always, and $wpdb on the first MySQL, with
+ * WordPress's table prefix, as the plugin keeps them.
  */
 final class Databases
 {
@@ -27,6 +33,27 @@ final class Databases
 
     /** @return array<string, array{0: string}> kind => [kind], for a data provider */
     public static function kinds(): array
+    {
+        $kinds = [];
+        foreach (self::plainKinds() as $name => $_) {
+            $kinds[$name] = [$name];
+            $kinds["$name-prefixed"] = ["$name-prefixed"];
+        }
+        if (WordPress::available()) {
+            $kinds['wordpress-sqlite3'] = ['wordpress-sqlite3'];
+        }
+        if (self::mysqlUrls() !== [] && WordPress::mysqlAvailable()) {
+            $kinds['wordpress-wpdb'] = ['wordpress-wpdb'];
+        }
+        return $kinds;
+    }
+
+    /**
+     * The databases alone, for tests that open one from several processes or look at how a driver connects.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function plainKinds(): array
     {
         $kinds = ['sqlite' => ['sqlite']];
         if (self::pgUrl() !== null) {
@@ -66,18 +93,39 @@ final class Databases
         return $out;
     }
 
+    /** The prefix the "-prefixed" kinds keep their tables under, as an app sharing its database might. */
+    public const PREFIX = 'app_rl_';
+
     /** A fresh, empty store of a kind, dropped by cleanup(). */
     public static function fresh(string $kind): SqlStore
     {
+        $prefixed = str_ends_with($kind, '-prefixed');
+        $kind = $prefixed ? substr($kind, 0, -strlen('-prefixed')) : $kind;
+        $prefix = $prefixed ? self::PREFIX : Sql::PREFIX;
         if ($kind === 'sqlite') {
-            return Stores::sqlite(':memory:');
+            return Stores::sqlite(['path' => ':memory:', 'prefix' => $prefix]);
+        }
+        if ($kind === 'wordpress-sqlite3') {
+            $file = tempnam(sys_get_temp_dir(), 'rl-wp-') . '.db';
+            $store = new SqlStore(WordPress::sqlite3($file));
+            self::$cleanups[] = static function () use ($store, $file): void {
+                $store->close();
+                foreach (['', '-wal', '-shm'] as $suffix) {
+                    @unlink($file . $suffix);
+                }
+            };
+            return $store;
         }
         $name = 'rl_test_' . bin2hex(random_bytes(5));
+        if ($kind === 'wordpress-wpdb') {
+            // WordPress's own prefix in front of Runlight's, as the plugin names its tables.
+            return new SqlStore(WordPress::wpdb(self::mysqlDatabase(array_values(self::mysqlUrls())[0], $name)), 'wp_rl_');
+        }
         if ($kind === 'postgres') {
             $url = (string) self::pgUrl();
             $admin = Connect::postgres($url);
             $admin->run("CREATE SCHEMA $name");
-            $store = Stores::postgres($url, ['schema' => $name]);
+            $store = Stores::postgres($url, ['schema' => $name, 'prefix' => $prefix]);
             self::$cleanups[] = static function () use ($store, $admin, $name): void {
                 $store->close();
                 $admin->run("DROP SCHEMA $name CASCADE");
@@ -86,7 +134,7 @@ final class Databases
             return $store;
         }
         $url = self::mysqlUrls()[$kind];
-        $store = Stores::mysql(self::mysqlDatabase($url, $name));
+        $store = Stores::mysql(self::mysqlDatabase($url, $name), ['prefix' => $prefix]);
         self::$cleanups[] = static function () use ($store): void {
             $store->close();
         };
@@ -134,7 +182,7 @@ final class Databases
     /** The PdoDb under a store. */
     public static function pdoDb(SqlStore $store): PdoDb
     {
-        $db = $store->db;
+        $db = $store->db instanceof Prefixed ? $store->db->inner : $store->db;
         if (!$db instanceof PdoDb) {
             throw new \LogicException('not a PdoDb');
         }

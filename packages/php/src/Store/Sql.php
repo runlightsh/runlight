@@ -56,6 +56,18 @@ final class Sql
 
     public const SCHEMA_VERSION = 11;
 
+    /** What every table and index name starts with, unless the store is given another prefix in its place. */
+    public const PREFIX = 'rl_';
+
+    /**
+     * Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app dropping
+     * Runlight's tables drops these by name, never every table that starts with the prefix.
+     */
+    public const TABLES = [
+        'meta', 'sites', 'salts', 'sessions', 'events', 'links', 'link_domains', 'shares', 'goals', 'settings',
+        'reports', 'tokens', 'funnels', 'rollup_days', 'rollups', 'users', 'invites',
+    ];
+
     /**
      * MySQL's text collation: UTF-8 compared and sorted by code point, case and trailing spaces included,
      * as SQLite and Postgres's "C" collation do. MariaDB has it too, from 11.4.

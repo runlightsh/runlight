@@ -18,7 +18,7 @@ final class TurnsTest extends TestCase
     /** @return array<string, array{0: string}> */
     public static function kinds(): array
     {
-        return Databases::kinds();
+        return Databases::plainKinds();
     }
 
     protected function tearDown(): void
