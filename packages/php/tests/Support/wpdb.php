@@ -13,6 +13,8 @@ class wpdb
 
     public string $last_error = '';
     public int $rows_affected = 0;
+    /** Whether errors are kept from the page and the error log, as WordPress's own flag says. */
+    public bool $suppressed = false;
     private \mysqli $dbh;
 
     public function __construct(string $host, int $port, string $user, string $password, string $name)
@@ -69,6 +71,13 @@ class wpdb
         }
         $value = array_values($rows[0])[0] ?? null;
         return $value === null ? null : (string) $value;
+    }
+
+    public function suppress_errors(bool $suppress = true): bool
+    {
+        $was = $this->suppressed;
+        $this->suppressed = $suppress;
+        return $was;
     }
 
     public function _real_escape(string $value): string

@@ -222,8 +222,9 @@ final class Local {
 		if ( $path !== $base && ! str_starts_with( $path, $base . '/' ) && ! $link ) {
 			return;
 		}
-		if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-			define( 'DONOTCACHEPAGE', true ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- the constant page caches look for.
+		// A short link's page is left to page caches until Runlight knows the link, since another plugin may answer there.
+		if ( ! $link ) {
+			self::uncached();
 		}
 		if ( $base . '/login' === $path ) {
 			self::sign_in();
@@ -243,12 +244,17 @@ final class Local {
 				if ( 404 === $response->status ) {
 					return;
 				}
+				self::uncached();
 			} else {
 				$response = self::routes()->handle( $request, $context );
 			}
 		} catch ( \Throwable $error ) {
 			\Runlight\Log::write( 'Runlight: ' . $error->getMessage() );
-			$response = new \Runlight\Http\Response( '{"error":"Internal error","code":"internal"}', 500, array( 'content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store' ) );
+			// A short link Runlight could not look up is left to WordPress, which may have a page there.
+			if ( $link ) {
+				return;
+			}
+			$response = new \Runlight\Http\Response( '{"error":"Internal error","code":"internal"}', 500, array( 'content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store', 'x-content-type-options' => 'nosniff' ) );
 		}
 		$response->emit( 'HEAD' !== $request->method );
 		// The visitor has the answer; whatever is left runs without keeping them waiting.
@@ -259,6 +265,13 @@ final class Local {
 		}
 		self::runlight()->idle();
 		exit;
+	}
+
+	/** Tells page caches to leave this answer alone. */
+	private static function uncached(): void {
+		if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+			define( 'DONOTCACHEPAGE', true ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- the constant page caches look for.
+		}
 	}
 
 	/** Where short links live, before Runlight is made. */

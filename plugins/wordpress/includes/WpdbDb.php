@@ -42,7 +42,8 @@ final class WpdbDb implements Db {
 	 * @return list<array<string, mixed>>
 	 */
 	public function all( string $sql, array $params = array() ): array {
-		$rows = $this->wpdb->get_results( $this->text( $sql, $params ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
+		$text = $this->text( $sql, $params );
+		$rows = $this->quietly( fn () => $this->wpdb->get_results( $text, ARRAY_A ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
 		$this->check();
 		return is_array( $rows ) ? array_values( $rows ) : array();
 	}
@@ -100,7 +101,7 @@ final class WpdbDb implements Db {
 		$until = microtime( true ) + $wait;
 		for ( ;; ) {
 			$left = max( 1, min( 5, (int) ceil( $until - microtime( true ) ) ) );
-			$ok   = $this->wpdb->get_var( 'SELECT GET_LOCK(' . self::LOCK . ', ' . $left . ')' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- a fixed statement taking Runlight's own lock, with a whole number of seconds.
+			$ok   = $this->quietly( fn () => $this->wpdb->get_var( 'SELECT GET_LOCK(' . self::LOCK . ', ' . $left . ')' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- a fixed statement taking Runlight's own lock, with a whole number of seconds.
 			$this->check();
 			if ( null === $ok ) {
 				throw new \RuntimeException( 'Runlight: MySQL refused the lock for creating tables' );
@@ -129,8 +130,24 @@ final class WpdbDb implements Db {
 	 * @param string $sql A statement with its values in place.
 	 */
 	private function query( string $sql ): void {
-		$this->wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
+		$this->quietly( fn () => $this->wpdb->query( $sql ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
 		$this->check();
+	}
+
+	/**
+	 * Runs one call on $wpdb without $wpdb printing or logging a failure:
+	 * Runlight expects some, such as reading rl_meta before its tables exist,
+	 * and check() turns each one into an exception for it instead.
+	 *
+	 * @param callable $call The call.
+	 */
+	private function quietly( callable $call ): mixed {
+		$was = $this->wpdb->suppress_errors( true );
+		try {
+			return $call();
+		} finally {
+			$this->wpdb->suppress_errors( $was );
+		}
 	}
 
 	/** $wpdb reports a failed statement in last_error rather than throwing, and Runlight expects it thrown. */
