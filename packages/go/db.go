@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +39,8 @@ type Affecter interface {
 }
 
 // Exclusiver is a Db that runs fn while holding a database-wide lock, so two
-// processes starting at once do not race to create the same tables.
+// processes starting at once do not race to create the same tables. It waits
+// for the lock at most LockWait, then fails with a *TablesBusyError.
 type Exclusiver interface {
 	Exclusive(ctx context.Context, fn func(Db) error) error
 }
@@ -51,6 +54,22 @@ type Transactor interface {
 // cap on statements per request, so long jobs send fewer, larger pieces.
 type Metered interface {
 	Metered() bool
+}
+
+// LockWait is the longest a process waits for another one creating or
+// upgrading the tables before it gives up.
+const LockWait = 30 * time.Second
+
+// TablesBusyError is another process holding the lock for creating tables
+// past the wait, such as one building an index on a big table after an
+// upgrade. The request that waited fails with it, rather than waiting for good.
+type TablesBusyError struct {
+	// Waited is how long the lock was waited for.
+	Waited time.Duration
+}
+
+func (e *TablesBusyError) Error() string {
+	return fmt.Sprintf("Runlight: another process is creating or upgrading the tables, and had not finished after %d seconds. Try again in a minute.", int64(math.Round(e.Waited.Seconds())))
 }
 
 // migrationLock is arbitrary but fixed, so every Runlight process takes the
@@ -79,6 +98,9 @@ type SQLDB struct {
 	// MySQL: the session's statement timeout, lifted while tables are built.
 	statementTimeout int
 	mariadb          *bool
+
+	// How long Exclusive waits for the lock: LockWait when zero.
+	lockWait time.Duration
 }
 
 type querier interface {
@@ -87,7 +109,9 @@ type querier interface {
 }
 
 // SQLite is a Db for a SQLite database opened with database/sql. The
-// connection is put in WAL mode with a busy timeout, as the SDK's is.
+// connection is put in WAL mode with a busy timeout, as the SDK's is, and a
+// file the driver has just made, with nothing in it yet, is for its owner
+// and group alone (0660).
 func SQLite(db *sql.DB) *SQLDB { return &SQLDB{db: db, dialect: "sqlite"} }
 
 // Postgres is a Db for a Postgres database opened with database/sql (pgx's
@@ -105,6 +129,14 @@ func MySQL(db *sql.DB) *SQLDB { return &SQLDB{db: db, dialect: "mysql"} }
 func (d *SQLDB) Owned(statementTimeout int) *SQLDB {
 	d.owned = true
 	d.statementTimeout = statementTimeout
+	return d
+}
+
+// WaitForTables sets how long Exclusive waits for another process creating
+// or upgrading the tables before it fails with a *TablesBusyError: LockWait
+// unless a test sets less.
+func (d *SQLDB) WaitForTables(wait time.Duration) *SQLDB {
+	d.lockWait = wait
 	return d
 }
 
@@ -139,6 +171,8 @@ func (d *SQLDB) target(ctx context.Context) (querier, func(), error) {
 }
 
 func sqlitePragmas(ctx context.Context, conn *sql.Conn) error {
+	// Before WAL, so the -wal and -shm files SQLite makes take the same mode.
+	ownerAndGroup(ctx, conn)
 	// An in-memory database has no journal to change, and answers "memory". Deleted rows, such as a day's
 	// salt once it is gone, are overwritten where that costs no extra writes, so they do not linger in the
 	// file's free space.
@@ -150,6 +184,33 @@ func sqlitePragmas(ctx context.Context, conn *sql.Conn) error {
 		rows.Close()
 	}
 	return nil
+}
+
+// ownerAndGroup makes a database file just made, with nothing in it yet, for its owner and group alone
+// (0660), whatever the umask: the visits in it are nobody else's to read, and a scheduled job running as
+// another user of the same group can still write to it. SQLite gives the -wal and -shm files it makes later
+// the same mode. Systems without such modes, and files this process may not change, are left as they are.
+func ownerAndGroup(ctx context.Context, conn *sql.Conn) {
+	rows, err := conn.QueryContext(ctx, "PRAGMA database_list")
+	if err != nil {
+		return
+	}
+	file := ""
+	for rows.Next() {
+		var seq any
+		var name, path sql.NullString
+		if rows.Scan(&seq, &name, &path) == nil && name.String == "main" {
+			file = path.String
+		}
+	}
+	rows.Close()
+	// In memory, or a temporary database: no file.
+	if file == "" || runtime.GOOS == "windows" {
+		return
+	}
+	if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+		_ = os.Chmod(file, 0o660)
+	}
 }
 
 func (d *SQLDB) text(sql string, params []any) (string, []any, error) {
@@ -345,6 +406,12 @@ func (d *SQLDB) Exclusive(ctx context.Context, fn func(Db) error) error {
 	}
 	defer conn.Close()
 	inner := &SQLDB{db: d.db, dialect: d.dialect, q: conn, statementTimeout: d.statementTimeout}
+	// Up to LockWait, so a request does not wait on a long index build for good.
+	wait := d.lockWait
+	if wait <= 0 {
+		wait = LockWait
+	}
+	until := time.Now().Add(wait)
 	if d.dialect == "postgres" {
 		// Asked for again and again rather than waited on: a waiting statement would hold up an index being
 		// built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
@@ -355,6 +422,9 @@ func (d *SQLDB) Exclusive(ctx context.Context, fn func(Db) error) error {
 			}
 			if ok {
 				break
+			}
+			if !time.Now().Before(until) {
+				return &TablesBusyError{wait}
 			}
 			select {
 			case <-ctx.Done():
@@ -367,8 +437,9 @@ func (d *SQLDB) Exclusive(ctx context.Context, fn func(Db) error) error {
 		return fn(inner)
 	}
 	for {
+		left := max(1, min(5, int64(math.Ceil(time.Until(until).Seconds()))))
 		var ok sql.NullInt64
-		if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK("+mysqlLock+", 5) AS ok").Scan(&ok); err != nil {
+		if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK("+mysqlLock+", "+strconv.FormatInt(left, 10)+") AS ok").Scan(&ok); err != nil {
 			return err
 		}
 		if !ok.Valid {
@@ -377,7 +448,10 @@ func (d *SQLDB) Exclusive(ctx context.Context, fn func(Db) error) error {
 		if ok.Int64 == 1 {
 			break
 		}
-		// Not got within 5 seconds: another process is creating the tables. Ask again.
+		// Not got in time: another process is creating the tables. Ask again, until the wait is up.
+		if !time.Now().Before(until) {
+			return &TablesBusyError{wait}
+		}
 	}
 	defer conn.ExecContext(context.WithoutCancel(ctx), "DO RELEASE_LOCK("+mysqlLock+")")
 	// An index on a big table takes a while to build, so the build may run past the statement timeout.

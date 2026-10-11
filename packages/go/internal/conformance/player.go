@@ -40,14 +40,28 @@ type Target interface {
 
 // Setup is what a scenario says to make its Runlight with.
 type Setup struct {
-	// Runlight options as JSON: managedSites, sites, site, secret, rateLimit.
+	// Runlight options as JSON: managedSites, sites, site, secret, rateLimit, mailServices, appMailer.
 	Runlight *js.Object
-	// Routes options as JSON: token (string, "" none, or null open), observeKey, cronSecret, accounts, origin.
+	// Routes options as JSON: token (string, "" none, or null open), observeKey, cronSecret, accounts, origin, cms.
 	Routes *js.Object
 	// Now is the scenario's clock, in epoch milliseconds.
 	Now func() int64
 	// Fetcher plays the scenario's upstream servers.
 	Fetcher web.Fetcher
+	// Mailed records a message the app's own mailer (appMailer) was handed, as Mailed makes it.
+	Mailed func(message *js.Object)
+}
+
+// Mailed is a message the app's own mailer was handed, as a step's answer
+// lists it: to, from, fromName (only when it is not empty), subject, and text.
+func Mailed(to, from, fromName, subject, text string) *js.Object {
+	out := js.NewObject("to", to, "from", from)
+	if fromName != "" {
+		out.Set("fromName", fromName)
+	}
+	out.Set("subject", subject)
+	out.Set("text", text)
+	return out
 }
 
 // RunlightOptions are the options a scenario's Runlight gets, without the store, the clock, and the fetcher.
@@ -68,6 +82,12 @@ func RunlightOptions(scenario any) *js.Object {
 	if v, ok := options.Get("rateLimit"); ok {
 		out.Set("rateLimit", v)
 	}
+	if v := options.Value("mailServices"); v != nil {
+		out.Set("mailServices", v)
+	}
+	if v := options.Value("appMailer"); v != nil {
+		out.Set("appMailer", v)
+	}
 	return out
 }
 
@@ -81,6 +101,9 @@ func RoutesOptions(scenario any) *js.Object {
 	}
 	if js.Truthy(options.Value("origin")) {
 		out.Set("origin", options.Value("origin"))
+	}
+	if js.Truthy(options.Value("cms")) {
+		out.Set("cms", options.Value("cms"))
 	}
 	return out
 }
@@ -120,7 +143,11 @@ func Play(scenario any, makeTarget func(Setup) (Target, error)) ([]any, error) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.now
-	}, Fetcher: p.fetcher})
+	}, Fetcher: p.fetcher, Mailed: func(message *js.Object) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.mailed = append(p.mailed, message)
+	}})
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +193,8 @@ type player struct {
 	fetcher *upstream
 	kept    map[string]string
 	jars    map[string]*jar
+	// mailed are the messages the app's own mailer was handed during the step.
+	mailed []*js.Object
 }
 
 var (
@@ -267,6 +296,9 @@ func (p *player) step(step any, target Target) (any, error) {
 	}
 	request := web.NewRequest(js.Str(s.Value("method")), url, headers, body)
 	p.fetcher.take()
+	p.mu.Lock()
+	p.mailed = nil
+	p.mu.Unlock()
 	var answer *web.Response
 	switch to {
 	case "links":
@@ -283,21 +315,30 @@ func (p *player) step(step any, target Target) (any, error) {
 	for _, f := range sent {
 		outbound = append(outbound, Normalize(f.seen, ""))
 	}
+	p.mu.Lock()
+	handed := []any{}
+	for _, m := range p.mailed {
+		handed = append(handed, Normalize(m, ""))
+	}
+	p.mu.Unlock()
 	if answer == nil {
 		out := js.NewObject("pass", true)
 		if len(outbound) > 0 {
 			out.Set("fetched", outbound)
 		}
+		if len(handed) > 0 {
+			out.Set("mailed", handed)
+		}
 		return out, nil
 	}
-	return p.answer(s, answer, sent, outbound, j)
+	return p.answer(s, answer, sent, outbound, handed, j)
 }
 
 func mediaType(contentType string) string {
 	return strings.TrimSpace(strings.Split(contentType, ";")[0])
 }
 
-func (p *player) answer(step *js.Object, answer *web.Response, sent []fetched, outbound []any, j *jar) (any, error) {
+func (p *player) answer(step *js.Object, answer *web.Response, sent []fetched, outbound, handed []any, j *jar) (any, error) {
 	text := web.DecodeUTF8(answer.Body)
 	if strings.HasPrefix(string(answer.Body), "\xef\xbb\xbf") {
 		// TextDecoder drops a byte order mark too.
@@ -398,6 +439,9 @@ func (p *player) answer(step *js.Object, answer *web.Response, sent []fetched, o
 	}
 	if len(outbound) > 0 {
 		out.Set("fetched", outbound)
+	}
+	if len(handed) > 0 {
+		out.Set("mailed", handed)
 	}
 	return out, nil
 }

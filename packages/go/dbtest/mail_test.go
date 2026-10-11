@@ -183,3 +183,60 @@ func TestTheAppsMailerNeedsAFromAddressAndWithoutOneTheAnswerHasNoApp(t *testing
 		t.Error("an install without an app mailer answers as before")
 	}
 }
+
+func TestMailServicesNamesTheServicesSettingsOffers(t *testing.T) {
+	ctx := context.Background()
+	if _, err := runlight.New(runlight.Options{Store: Store(t, Kinds()[0]), MailServices: []string{"resend", "pigeon"}}); err == nil || err.Error() != `Runlight: MailServices names "pigeon", which is not a mail service` {
+		t.Fatalf("%v", err)
+	}
+	store := Store(t, Kinds()[0])
+	app := &runlight.AppMailer{From: "site@example.com", Via: "Drupal", Send: func(context.Context, runlight.AppMessage) error { return nil }}
+	secret := "s"
+	all, err := runlight.New(runlight.Options{Store: store, Secret: &secret, Logf: func(string, ...any) {}, AppMailer: app})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := all.SaveMailSettings(ctx, js.NewObject("service", "smtp", "host", "smtp.example.com", "port", "587", "security", "starttls", "from", "reports@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	// Listed in the order of the services, whatever the order given.
+	fewer, err := runlight.New(runlight.Options{Store: store, Secret: &secret, Logf: func(string, ...any) {}, AppMailer: app, MailServices: []string{"webhook", "resend"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SMTP, saved before and no longer offered, counts as none, so the app's mailer sends.
+	settings, err := fewer.MailSettings(ctx)
+	if err != nil || js.Stringify(settings) != `{"service":"app","from":"site@example.com","via":"Drupal","source":"app"}` {
+		t.Fatalf("%s %v", js.Stringify(settings), err)
+	}
+	err = fewer.SaveMailSettings(ctx, js.NewObject("service", "smtp", "host", "smtp.example.com", "port", "587", "security", "starttls", "from", "reports@example.com"))
+	var refused *runlight.MailError
+	if !errors.As(err, &refused) || refused.Code != "mail_service" || refused.Message != "SMTP is not offered here. Pick another mail service" || js.Stringify(refused.Params) != `{"service":"smtp"}` {
+		t.Fatalf("%v", err)
+	}
+	err = fewer.SaveMailSettings(ctx, js.NewObject("service", "pigeon"))
+	if !errors.As(err, &refused) || refused.Message != "Pick a mail service" || js.Stringify(refused.Params) != `{}` {
+		t.Fatalf("%v", err)
+	}
+	token := "t"
+	routes, err := fewer.Routes(runlight.RoutesOptions{Token: &token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := routes.Handle(ctx, web.NewRequest("GET", "https://example.com/runlight/api/mail", web.NewHeaders("authorization", "Bearer t"), nil))
+	parsed, _ := js.Parse(answer.Text())
+	ids := []string{}
+	for _, s := range js.Arr(js.Dig(parsed, "services")) {
+		ids = append(ids, js.Str(js.Dig(s, "id")))
+	}
+	if strings.Join(ids, ",") != "resend,webhook" {
+		t.Errorf("services %v", ids)
+	}
+	none, err := runlight.New(runlight.Options{Store: store, MailServices: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := none.SaveMailSettings(ctx, js.NewObject("service", "resend")); !errors.As(err, &refused) || refused.Code != "mail_service" {
+		t.Errorf("an empty list offers none: %v", err)
+	}
+}

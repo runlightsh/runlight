@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -71,6 +72,25 @@ func makeCore(store *runlight.Store) func(conformance.Setup) (conformance.Target
 			}
 			options.RateLimit = &n
 		}
+		if services := ro.Value("mailServices"); services != nil {
+			options.MailServices = []string{}
+			for _, id := range js.Arr(services) {
+				options.MailServices = append(options.MailServices, js.Str(id))
+			}
+		}
+		if app := js.Obj(ro.Value("appMailer")); app != nil {
+			fail, fails := app.Value("fail").(string)
+			options.AppMailer = &runlight.AppMailer{
+				From: js.Str(app.Value("from")), FromName: js.Str(app.Value("fromName")), Via: js.Str(app.Value("via")),
+				Send: func(_ context.Context, m runlight.AppMessage) error {
+					if fails {
+						return errors.New(fail)
+					}
+					setup.Mailed(conformance.Mailed(m.To, m.From, m.FromName, m.Subject, m.Text))
+					return nil
+				},
+			}
+		}
 		r, err := runlight.New(options)
 		if err != nil {
 			return nil, err
@@ -85,6 +105,9 @@ func makeCore(store *runlight.Store) func(conformance.Setup) (conformance.Target
 		}
 		if origin, ok := o.Value("origin").(string); ok {
 			ropts.Origin = origin
+		}
+		if cms, ok := o.Value("cms").(string); ok {
+			ropts.CMS = cms
 		}
 		routes, err := r.Routes(ropts)
 		if err != nil {

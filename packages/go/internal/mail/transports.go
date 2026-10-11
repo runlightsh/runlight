@@ -210,8 +210,13 @@ func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Hea
 		return errors.New("Invalid URL")
 	}
 	host := parsed.Host()
-	response, err := fetcher.Fetch(ctx, url, web.FetchInit{Method: "POST", Headers: headers, Body: []byte(body), Timeout: 20 * time.Second})
+	// A webhook can be at any address, so it and each redirect are checked, as for every service.
+	response, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{Method: "POST", Headers: headers, Body: []byte(body), Timeout: 20 * time.Second}, 5)
 	if err != nil {
+		var refused *web.MetadataAddressError
+		if errors.As(err, &refused) {
+			return mailError(refused.Error(), "address_refused", "host", refused.Host)
+		}
 		return mailError("Could not reach "+host+": "+err.Error(), "mail_unreachable", "host", host, "detail", err.Error())
 	}
 	if response.OK() {

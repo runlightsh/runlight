@@ -329,3 +329,81 @@ func PublicFetch(ctx context.Context, fetcher Fetcher, target string, init Fetch
 		u = next
 	}
 }
+
+// MetadataAddressError is a request refused before anything was fetched,
+// because the address is link-local or a cloud's metadata service.
+type MetadataAddressError struct{ Host string }
+
+func (e *MetadataAddressError) Error() string {
+	return e.Host + " is a link-local or cloud metadata address, which Runlight never connects to"
+}
+
+// bodyHeaders describe a body, and go with it when a redirect turns a request into a GET.
+var bodyHeaders = []string{"content-type", "content-length", "content-encoding", "content-language", "content-location"}
+
+// credentialHeaders go no further than the origin they were meant for.
+var credentialHeaders = []string{"authorization", "proxy-authorization", "cookie"}
+
+// ServiceFetch fetches from a service someone set up, such as an AI model's
+// API or a mail webhook, which may well be on this computer or a private
+// network, but is never at a link-local or cloud metadata address. The
+// address is checked, and so is every redirect's, up to redirects of them,
+// each followed as fetch follows it: a 303, or a 301 or 302 answering a
+// POST, goes on as a GET with no body, and a redirect to another origin
+// goes without the credentials. A redirect past the last one comes back as
+// it is. init.Timeout is the limit for all of it (30 seconds when zero). It
+// fails with a *MetadataAddressError for an address it refuses.
+func ServiceFetch(ctx context.Context, fetcher Fetcher, target string, init FetchInit, redirects int) (*Response, error) {
+	if init.Timeout <= 0 {
+		init.Timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, init.Timeout)
+	defer cancel()
+	init.Method = strings.ToUpper(init.Method)
+	if init.Method == "" {
+		init.Method = "GET"
+	}
+	init.Redirect = "manual"
+	init.Headers = init.Headers.Clone()
+	u, err := whatwg.Parse(target)
+	if err != nil {
+		return nil, &FetchError{Message: "Invalid URL"}
+	}
+	for hop := 0; ; hop++ {
+		host := strings.TrimSuffix(strings.TrimPrefix(u.Hostname, "["), "]")
+		if MetadataHost(ctx, host) {
+			return nil, &MetadataAddressError{host}
+		}
+		answer, err := fetcher.Fetch(ctx, u.Href(), init)
+		if err != nil {
+			// Whichever way the runtime says it gave up, the caller hears that time ran out.
+			if ctx.Err() != nil {
+				return nil, &FetchError{Message: "The operation was aborted due to timeout", Timeout: true}
+			}
+			return nil, err
+		}
+		location := answer.Header.Get("location")
+		if answer.Status < 300 || answer.Status >= 400 || location == "" || hop >= redirects {
+			return answer, nil
+		}
+		next, err := whatwg.Parse(location, u.Href())
+		if err != nil {
+			return nil, &FetchError{Message: "Invalid URL"}
+		}
+		if answer.Status == 303 || ((answer.Status == 301 || answer.Status == 302) && init.Method == "POST") {
+			if init.Method != "HEAD" {
+				init.Method = "GET"
+			}
+			init.Body = nil
+			for _, name := range bodyHeaders {
+				init.Headers.Delete(name)
+			}
+		}
+		if next.Origin() != u.Origin() {
+			for _, name := range credentialHeaders {
+				init.Headers.Delete(name)
+			}
+		}
+		u = next
+	}
+}

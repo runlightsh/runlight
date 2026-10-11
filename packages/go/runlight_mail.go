@@ -3,6 +3,7 @@ package runlight
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/mail"
@@ -111,29 +112,37 @@ func (r *Runlight) MailSettings(ctx context.Context) (*js.Object, error) {
 	if found && sealed != "" {
 		opened, ok = r.unseal(sealed)
 	}
-	if !ok {
-		app := r.appMailer
-		if app == nil {
-			return nil, nil
+	// A service no longer offered counts as none, so it is never sent through.
+	if ok {
+		parsed, err := js.Parse(opened)
+		if err != nil {
+			return nil, err
 		}
-		out := js.NewObject("service", "app", "from", app.From)
-		if app.FromName != "" {
-			out.Set("fromName", app.FromName)
+		out := js.Obj(parsed)
+		if out == nil {
+			out = &js.Object{}
 		}
-		out.Set("via", app.Via)
-		out.Set("source", "app")
-		return out, nil
+		if len(r.mailServices) == len(mail.Services) || r.mailOffered(js.String(out.Value("service"))) {
+			out.Set("source", "dashboard")
+			return out, nil
+		}
 	}
-	parsed, err := js.Parse(opened)
-	if err != nil {
-		return nil, err
+	app := r.appMailer
+	if app == nil {
+		return nil, nil
 	}
-	out := js.Obj(parsed)
-	if out == nil {
-		out = &js.Object{}
+	out := js.NewObject("service", "app", "from", app.From)
+	if app.FromName != "" {
+		out.Set("fromName", app.FromName)
 	}
-	out.Set("source", "dashboard")
+	out.Set("via", app.Via)
+	out.Set("source", "app")
 	return out, nil
+}
+
+// mailOffered reports whether Settings offers the mail service with this id.
+func (r *Runlight) mailOffered(id string) bool {
+	return slices.ContainsFunc(r.mailServices, func(s mail.Service) bool { return s.ID == id })
 }
 
 func configOf(settings *js.Object) mail.Config {
@@ -168,6 +177,9 @@ func (r *Runlight) SaveMailSettings(ctx context.Context, input *js.Object) error
 	service := mailService(serviceID)
 	if service == nil {
 		return &mail.MailError{Message: "Pick a mail service", Code: "mail_service", Params: &js.Object{}}
+	}
+	if !r.mailOffered(service.ID) {
+		return &mail.MailError{Message: service.Name + " is not offered here. Pick another mail service", Code: "mail_service", Params: js.NewObject("service", service.ID)}
 	}
 	settings := js.NewObject("service", service.ID)
 	for _, f := range service.Fields {
@@ -298,7 +310,7 @@ func (rt *Routes) mailView(c *call) (*Response, error) {
 		serviceID = ""
 	}
 	answer := js.NewObject("source", source, "service", serviceID, "from", value("from"), "fromName", value("fromName"),
-		"fields", fields, "saved", saved, "encrypted", rt.r.HasSecret, "services", mail.Services)
+		"fields", fields, "saved", saved, "encrypted", rt.r.HasSecret, "services", rt.r.mailServices)
 	// The app's own mailer, named only when there is one, so the answer without it stays as it was.
 	if mailer := rt.r.appMailer; mailer != nil {
 		answer.Set("app", js.NewObject("via", mailer.Via, "from", mailer.From, "fromName", mailer.FromName, "replaced", !app))

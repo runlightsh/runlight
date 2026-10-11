@@ -14,18 +14,67 @@ import (
 	"runlight.sh/go/internal/js"
 )
 
-// Store keeps Runlight's tables (all prefixed rl_) in a SQL database, so the
-// database can be the app's own. It is the TypeScript SDK's SqlStore, and
-// writes the same rows, so either can read the other's database.
+// Store keeps Runlight's tables (all prefixed rl_, or another prefix) in a
+// SQL database, so the database can be the app's own. It is the TypeScript
+// SDK's SqlStore, and writes the same rows, so either can read the other's
+// database.
 type Store struct {
-	db Db
+	db     Db
+	prefix string
 
 	mu    sync.Mutex
 	ready bool
 }
 
 // NewStore is a store over a Db: SQLite(db), Postgres(db), or MySQL(db).
-func NewStore(db Db) *Store { return &Store{db: db} }
+// Its tables start with rl_, or with the prefix of a Db made by Prefixed.
+func NewStore(db Db) *Store { return &Store{db: db, prefix: prefixOf(db)} }
+
+// NewStoreWithPrefix is a store whose tables and indexes start with prefix
+// in place of rl_, so two apps sharing one database each keep a set of
+// their own: up to 32 letters, digits, and underscores, not starting with a
+// digit. A Db that is already prefixed keeps its own.
+func NewStoreWithPrefix(db Db, prefix string) (*Store, error) {
+	if _, own := db.(*prefixedDb); !own && prefix != Prefix {
+		prefixed, err := Prefixed(db, prefix)
+		if err != nil {
+			return nil, err
+		}
+		db = prefixed
+	}
+	return NewStore(db), nil
+}
+
+// Prefix is what the store's table and index names start with: rl_ unless
+// it was given another.
+func (s *Store) Prefix() string { return s.prefix }
+
+// Tables are the store's tables as named in the database, for an app
+// removing Runlight: each one by name, since another app's tables may well
+// start with the same letters.
+func (s *Store) Tables() []string {
+	out := make([]string, len(Tables))
+	for i, table := range Tables {
+		out[i] = s.prefix + table
+	}
+	return out
+}
+
+// unnamed is a name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_.
+func (s *Store) unnamed(name string) string {
+	if rest, ok := strings.CutPrefix(name, s.prefix); ok {
+		return Prefix + rest
+	}
+	return name
+}
+
+// named is a table or index name as the database has it, under the store's prefix.
+func (s *Store) named(name string) string {
+	if rest, ok := strings.CutPrefix(name, Prefix); ok {
+		return s.prefix + rest
+	}
+	return name
+}
 
 // DB is the database the store keeps its tables in.
 func (s *Store) DB() Db { return s.db }
@@ -33,7 +82,7 @@ func (s *Store) DB() Db { return s.db }
 func (s *Store) dialect() string { return s.db.Dialect() }
 
 func (s *Store) metered() bool {
-	m, ok := s.db.(Metered)
+	m, ok := as[Metered](s.db)
 	return ok && m.Metered()
 }
 
@@ -57,7 +106,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return s.upgrade(ctx, db, postgres)
 	}
 	var err error
-	if ex, ok := s.db.(Exclusiver); ok {
+	if ex, ok := as[Exclusiver](s.db); ok {
 		err = ex.Exclusive(ctx, create)
 	} else {
 		err = create(s.db)
@@ -90,12 +139,14 @@ func (s *Store) upgrade(ctx context.Context, db Db, postgres bool) error {
 	if postgres {
 		// A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
 		broken, err := db.All(ctx, `SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\_%' AND c.relnamespace = current_schema()::regnamespace`)
+           WHERE NOT i.indisvalid AND c.relname LIKE '`+strings.ReplaceAll(s.prefix, "_", `\_`)+`%' AND c.relnamespace = current_schema()::regnamespace`)
 		if err != nil {
 			return err
 		}
+		// The name comes back as the database has it, so it goes back under rl_ before the prefix is put on
+		// again, which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
 		for _, b := range broken {
-			if err := db.Run(ctx, `DROP INDEX IF EXISTS "`+strings.ReplaceAll(str(b["name"]), `"`, "")+`"`); err != nil {
+			if err := db.Run(ctx, `DROP INDEX IF EXISTS "`+strings.ReplaceAll(s.unnamed(str(b["name"])), `"`, "")+`"`); err != nil {
 				return err
 			}
 		}
@@ -104,7 +155,7 @@ func (s *Store) upgrade(ctx context.Context, db Db, postgres bool) error {
 		index := createIndex.FindStringSubmatch(statement)
 		if index != nil && db.Dialect() == "mysql" {
 			// MySQL has no CREATE INDEX IF NOT EXISTS, so it is looked for first.
-			there, err := db.All(ctx, `SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`, index[3], index[2])
+			there, err := db.All(ctx, `SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`, s.named(index[3]), s.named(index[2]))
 			if err != nil {
 				return err
 			}
@@ -183,7 +234,7 @@ func (s *Store) Close() error {
 
 // changed is how many rows an UPDATE or DELETE of rows with an id matched.
 func (s *Store) changed(ctx context.Context, sql string, params ...any) (int64, error) {
-	if a, ok := s.db.(Affecter); ok {
+	if a, ok := as[Affecter](s.db); ok {
 		return a.Affected(ctx, sql, params...)
 	}
 	rows, err := s.db.All(ctx, sql+" RETURNING id", params...)
@@ -192,8 +243,8 @@ func (s *Store) changed(ctx context.Context, sql string, params ...any) (int64, 
 
 // Transaction runs fn with a store whose every query is in one transaction.
 func (s *Store) Transaction(ctx context.Context, fn func(*Store) error) error {
-	if t, ok := s.db.(Transactor); ok {
-		return t.Transaction(ctx, func(db Db) error { return fn(&Store{db: db, ready: true}) })
+	if t, ok := as[Transactor](s.db); ok {
+		return t.Transaction(ctx, func(db Db) error { return fn(&Store{db: db, prefix: s.prefix, ready: true}) })
 	}
 	if err := s.db.Run(ctx, "BEGIN"); err != nil {
 		return err
@@ -1262,7 +1313,7 @@ func (s *Store) TakeSetting(ctx context.Context, key string) (string, bool, erro
 	}
 	sql := `DELETE FROM rl_settings WHERE "key" = ?`
 	var n int64
-	if a, ok := s.db.(Affecter); ok {
+	if a, ok := as[Affecter](s.db); ok {
 		n, err = a.Affected(ctx, sql, key)
 	} else {
 		var rows []Row

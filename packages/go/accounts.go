@@ -157,7 +157,7 @@ func NewAccountStore(store *Store, secret string) *AccountStore {
 func (a *AccountStore) turn(ctx context.Context, fn func() error) error {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
-	if ex, ok := a.store.db.(Exclusiver); ok {
+	if ex, ok := as[Exclusiver](a.store.db); ok {
 		return ex.Exclusive(ctx, func(Db) error { return fn() })
 	}
 	return fn()
@@ -243,7 +243,7 @@ func (a *AccountStore) init(ctx context.Context) error {
 		return db.Run(ctx, `UPDATE rl_invites SET role = 'admin' WHERE role = 'owner'`)
 	}
 	var err error
-	if ex, ok := db.(Exclusiver); ok {
+	if ex, ok := as[Exclusiver](db); ok {
 		err = ex.Exclusive(ctx, create)
 	} else {
 		err = create(db)

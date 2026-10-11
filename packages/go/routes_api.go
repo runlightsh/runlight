@@ -1364,6 +1364,11 @@ func (rt *Routes) export(ctx context.Context, site SiteRow, query Query, rng Ran
 // Handle answers one request to the routes.
 func (rt *Routes) Handle(ctx context.Context, request *Request) *Response {
 	answer, err := rt.handle(ctx, request)
+	// Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+	var busy *TablesBusyError
+	if errors.As(err, &busy) {
+		return Coded("Runlight is creating or upgrading its tables. Try again in a minute.", "tables_busy", 503, nil, "retry-after", "30")
+	}
 	if err != nil {
 		rt.r.logf("Runlight: %v", err)
 		return Coded("Internal error", "internal", 500, nil)

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/mail"
 	"runlight.sh/go/internal/web"
 	"runlight.sh/go/internal/whatwg"
 )
@@ -76,13 +78,22 @@ type Options struct {
 	// LinkPath is where short links on the app's own domain live, as
 	// {LinkPath}/{slug}. "" is "/go".
 	LinkPath string
-	// Mail is the mail service for email reports, in code. When set, the
-	// dashboard shows it and cannot change it.
+	// Mail is how email reports, invites, and sign-in links are sent: a mail
+	// service in code, such as {"service": "resend", "apiKey": ..., "from": ...},
+	// which the dashboard shows and cannot change. For a mailer of the app's
+	// own, AppMailer takes its place. Without either, the service is set up
+	// in Settings.
 	Mail *js.Object
 	// AppMailer is a mailer of the app's own, such as a CMS's, in place of
 	// Mail. It is a default: a service saved in the dashboard takes its
 	// place, and removing that service goes back to it.
 	AppMailer *AppMailer
+	// MailServices are the ids of the mail services Settings offers and
+	// saves, such as every service but "smtp" in an app that cannot keep
+	// connections of its own open. nil offers every service; an empty list
+	// offers none. A service saved earlier that is not in the list counts as
+	// none, so the app's mailer, if there is one, sends instead.
+	MailServices []string
 	// Secret encrypts the keys kept in the database. nil reads the
 	// RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
 	Secret *string
@@ -238,12 +249,15 @@ type Runlight struct {
 	appMailer *AppMailer
 	readyMu   sync.Mutex
 	ready     bool
+	initing   *initRun
 	checkMu   sync.Mutex
 	checking  *checkRun
 	pruneMu   sync.Mutex
 	turnsMu   sync.Mutex
 	turns     map[string]*turn
 	optimized int64
+	// mailServices are the mail services Settings offers and saves, in the order of mail.Services.
+	mailServices []mail.Service
 	// warnDirect is true until the default trust, never chosen, has been seen
 	// answering a public address directly, and warned about once.
 	warnDirect atomic.Bool
@@ -273,6 +287,12 @@ type linkDomainCache struct {
 	domains map[string]bool
 }
 
+// initRun is init under way, which every caller waits on rather than starting another.
+type initRun struct {
+	done chan struct{}
+	err  error
+}
+
 type checkRun struct {
 	done   chan struct{}
 	result CheckResult
@@ -283,6 +303,9 @@ type turn struct {
 	mu    sync.Mutex
 	users int
 }
+
+// trackerWait is the longest a tracker hit waits for the tables while another process creates or upgrades them.
+var trackerWait = 10 * time.Second
 
 // New makes a Runlight.
 func New(options Options) (*Runlight, error) {
@@ -376,6 +399,20 @@ func New(options Options) (*Runlight, error) {
 		copied := *app
 		r.appMailer = &copied
 	}
+	for _, id := range options.MailServices {
+		if mailService(id) == nil {
+			return nil, fmt.Errorf(`Runlight: MailServices names "%s", which is not a mail service`, id)
+		}
+	}
+	r.mailServices = mail.Services
+	if options.MailServices != nil {
+		r.mailServices = []mail.Service{}
+		for _, s := range mail.Services {
+			if slices.Contains(options.MailServices, s.ID) {
+				r.mailServices = append(r.mailServices, s)
+			}
+		}
+	}
 	r.Links = &Links{r: r}
 	r.LinkPath = "/" + strings.Trim(firstNonEmpty(options.LinkPath, "/go"), "/")
 	if options.Secret != nil {
@@ -405,16 +442,68 @@ func (r *Runlight) Fetcher() Fetcher { return r.fetcher }
 
 // Init creates tables and records the configured sites. Runs once.
 func (r *Runlight) Init(ctx context.Context) error {
+	run := r.initRun(ctx)
+	if run == nil {
+		return nil
+	}
+	select {
+	case <-run.done:
+		return run.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// initRun is init under way, started if it is not, or nil once it has finished. It goes on when the caller
+// that started it leaves, so a request giving up on it does not stop it for the next one.
+func (r *Runlight) initRun(ctx context.Context) *initRun {
 	r.readyMu.Lock()
 	defer r.readyMu.Unlock()
 	if r.ready {
 		return nil
 	}
-	if err := r.init(ctx); err != nil {
-		return err
+	if r.initing == nil {
+		run := &initRun{done: make(chan struct{})}
+		r.initing = run
+		go func() {
+			var err error
+			func() {
+				// A panic is the caller's error, as it would be had init run on the caller's goroutine.
+				defer func() {
+					if p := recover(); p != nil {
+						err = fmt.Errorf("panic: %v", p)
+					}
+				}()
+				err = r.init(context.WithoutCancel(ctx))
+			}()
+			r.readyMu.Lock()
+			r.ready = err == nil
+			r.initing = nil
+			r.readyMu.Unlock()
+			run.err = err
+			close(run.done)
+		}()
 	}
-	r.ready = true
-	return nil
+	return r.initing
+}
+
+// readyWithin reports whether Init finished within wait; false while it is still waiting, such as on another
+// process creating the tables. Its errors are returned.
+func (r *Runlight) readyWithin(ctx context.Context, wait time.Duration) (bool, error) {
+	run := r.initRun(ctx)
+	if run == nil {
+		return true, nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-run.done:
+		return run.err == nil, run.err
+	case <-timer.C:
+		return false, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 func (r *Runlight) init(ctx context.Context) error {
@@ -1564,6 +1653,11 @@ func (r *Runlight) Collect(ctx context.Context, request *Request) error {
 	}
 	if r.limit != nil && !r.limit.allow(r.ClientIP(request)) {
 		return nil
+	}
+	// While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+	// waits a moment at most and is then dropped, rather than holding its request until that is done.
+	if ready, err := r.readyWithin(ctx, trackerWait); !ready {
+		return err
 	}
 	// A database too busy to take the hit right now (every pooled connection held by long reports, or
 	// another process writing the SQLite file) gets it a little later, at the time it arrived.

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -278,5 +280,19 @@ func TestProvidersAreWrittenAsTheTypeScriptHasThem(t *testing.T) {
 	}
 	if len(Providers) != 7 {
 		t.Errorf("%d providers", len(Providers))
+	}
+}
+
+// Nor at the end of a redirect: the list of models refuses one with the address it led to.
+func TestARedirectToAMetadataAddressIsRefused(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("location", "http://169.254.169.254/latest/meta-data/")
+		w.WriteHeader(302)
+	}))
+	defer server.Close()
+	_, err := ListModels(context.Background(), web.HTTPFetcher{}, Settings{Provider: "custom", BaseURL: server.URL + "/metadata#"})
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "address_refused" || js.Stringify(e.Params) != `{"host":"169.254.169.254"}` {
+		t.Fatalf("%v", err)
 	}
 }
