@@ -1,5 +1,5 @@
 defmodule Runlight.RoutesTest do
-  @moduledoc "The SDK's routes.test.ts on paths: broken percent escapes."
+  @moduledoc "The SDK's routes.test.ts on the picker's relay page and on broken percent escapes in a path."
   use ExUnit.Case, async: true
 
   alias Runlight.Http.Request
@@ -28,6 +28,99 @@ defmodule Runlight.RoutesTest do
       )
 
   defp body(%Response{body: body}), do: Jason.decode!(body)
+
+  test "the picker sends its choice to the relay page its ticket names, never through the tab that opened it" do
+    {:ok, clock} = Agent.start_link(fn -> 1_791_374_400_000 end)
+    rl = rl(sites: [[id: "blog", hostnames: ["blog.example.com"]]], now: fn -> Agent.get(clock, & &1) end)
+    handle = &Runlight.Routes.handle(Runlight.routes(rl, token: "secret"), &1)
+    ask = fn sent, bearer -> handle.(owner("/runlight/api/pick?site=blog", "POST", sent, bearer)) end
+
+    script = fn ticket ->
+      handle.(req("/runlight/pick.js?runlight=pick&runlight_ticket=#{URI.encode_www_form(ticket)}")).body
+    end
+
+    nonce = "0123456789abcdef0123456789abcdef"
+    back = "https://stats.example.com/runlight/pick-return"
+
+    asked = ask.(%{origin: "https://stats.example.com", return: back, nonce: nonce}, "secret")
+    assert asked.status == 200
+    %{"ticket" => ticket} = body(asked)
+    assert length(String.split(ticket, ".")) == 6, "the return address and nonce are signed into the ticket"
+    picker = script.(ticket)
+    assert picker =~ Jason.encode!(back) and picker =~ Jason.encode!(nonce)
+    refute picker =~ "__RUNLIGHT_PICK_RETURN__" or picker =~ "__RUNLIGHT_PICK_NONCE__"
+
+    # Neither can be changed: a ticket with another return address or nonce is no ticket, and the picker sends nowhere.
+    parts = String.split(ticket, ".")
+    other = Base.encode16("https://stats.example.com/elsewhere/pick-return", case: :lower)
+
+    for changed <- [
+          List.replace_at(parts, 3, other),
+          List.replace_at(parts, 4, String.duplicate("f", 32))
+        ] do
+      sent = script.(Enum.join(changed, "."))
+      refute sent =~ "stats.example.com" or sent =~ nonce
+    end
+
+    # The return address is the relay page on the dashboard's own origin, and the nonce is 32 hex digits.
+    for sent <- [
+          %{origin: "https://stats.example.com", return: "https://evil.example/pick-return", nonce: nonce},
+          %{
+            origin: "https://stats.example.com",
+            return: "https://stats.example.com.evil.example/pick-return",
+            nonce: nonce
+          },
+          %{origin: "https://stats.example.com", return: "https://stats.example.com/runlight/", nonce: nonce},
+          %{origin: "https://stats.example.com", return: "https://stats.example.com/pick-return?x=1", nonce: nonce},
+          %{origin: "https://stats.example.com", return: "https://stats.example.com/pick-return#x", nonce: nonce},
+          %{origin: "https://stats.example.com", return: back},
+          %{origin: "https://stats.example.com", return: back, nonce: "short"},
+          %{origin: "https://stats.example.com", nonce: nonce}
+        ] do
+      refused = ask.(sent, "secret")
+      assert refused.status == 400, inspect(sent)
+      assert body(refused)["code"] == "pick_return"
+    end
+
+    assert ask.(
+             %{origin: "https://stats.example.com", return: "https://stats.example.com/pick-return", nonce: nonce},
+             "secret"
+           ).status ==
+             200,
+           "a dashboard at the root"
+
+    # A hub's ticket names a relay page on the hub it connected from, and no other origin.
+    made = body(handle.(owner("/runlight/api/tokens", "POST", %{name: "Hub", scope: "manage", site: "blog"})))
+    Store.set_setting(rl.store, "token-origin:#{made["token"]["id"]}", "https://hub.example.net")
+    hub = %{origin: "https://hub.example.net", return: "https://hub.example.net/pick-return", nonce: nonce}
+    assert ask.(hub, made["secret"]).status == 200
+    assert ask.(%{hub | return: "https://evil.example/pick-return"}, made["secret"]).status == 400
+
+    Agent.update(clock, &(&1 + 31 * 60_000))
+    refute script.(ticket) =~ nonce, "a ticket runs out after half an hour"
+  end
+
+  test "the relay page is static, runs only its own script, and keeps its address to itself" do
+    handle = &Runlight.Routes.handle(Runlight.routes(rl([]), token: "secret"), &1)
+    page = handle.(req("/runlight/pick-return", "GET", [{"accept-language", "de-DE,de;q=0.9"}]))
+    assert page.status == 200
+    assert Response.header(page, "content-type") =~ "text/html"
+    assert Response.header(page, "cache-control") == "no-store"
+    assert Response.header(page, "referrer-policy") == "no-referrer"
+    csp = Response.header(page, "content-security-policy")
+    assert csp =~ "script-src 'self'"
+    assert csp =~ "frame-ancestors 'none'"
+    refute csp =~ ~r/script-src[^;]*unsafe/, "no inline script"
+    assert page.body =~ ~s(lang="de")
+    assert page.body =~ ~s(<script src="/runlight/pick-return.js"></script>)
+    refute page.body =~ "<script>", "no inline script"
+    script = handle.(req("/runlight/pick-return.js"))
+    assert Response.header(script, "content-type") =~ "javascript"
+    assert script.body =~ "BroadcastChannel"
+    # Signed out, it answers the same: it holds nothing.
+    open = Runlight.routes(rl(secret: String.duplicate("a", 32)), token: "secret", accounts: true)
+    assert Runlight.Routes.handle(open, req("/runlight/pick-return")).status == 200
+  end
 
   test "broken percent escapes in a path answer as a name nobody has, never an error" do
     rl = rl(sites: [[id: "blog", hostnames: ["blog.example.com"]]])

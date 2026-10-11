@@ -1,13 +1,14 @@
 defmodule Runlight.Assets do
   @moduledoc false
   # Internal. The dashboard bundle, its CSS, the world map, the locales, the
-  # tracker, and the picker: the TypeScript SDK's generated files, copied into
-  # priv/assets by scripts/elixir-assets.mts (never edited by hand), read into
-  # the compiled module so a release needs no priv lookup.
+  # tracker, the picker, and its relay page's script: the TypeScript SDK's
+  # generated files, copied into priv/assets by scripts/elixir-assets.mts
+  # (never edited by hand), read into the compiled module so a release needs
+  # no priv lookup.
 
   @dir Path.expand("../../priv/assets", __DIR__)
 
-  for name <- ~w(dashboard.js dashboard.css world.json tracker.js picker.js locales.json build.json) do
+  for name <- ~w(dashboard.js dashboard.css world.json tracker.js picker.js pick-return.js locales.json build.json) do
     @external_resource Path.join(@dir, name)
   end
 
@@ -16,6 +17,7 @@ defmodule Runlight.Assets do
   @world_json File.read!(Path.join(@dir, "world.json"))
   @tracker File.read!(Path.join(@dir, "tracker.js"))
   @picker File.read!(Path.join(@dir, "picker.js"))
+  @pick_relay File.read!(Path.join(@dir, "pick-return.js"))
   @locales_text File.read!(Path.join(@dir, "locales.json"))
   @build_text File.read!(Path.join(@dir, "build.json"))
 
@@ -30,6 +32,7 @@ defmodule Runlight.Assets do
   def world_json, do: @world_json
   def tracker, do: @tracker
   def picker, do: @picker
+  def pick_relay, do: @pick_relay
 
   @doc "Each language's messages as JSON text, English included, by code."
   def locales, do: @locales

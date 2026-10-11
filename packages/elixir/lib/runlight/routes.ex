@@ -82,6 +82,14 @@ defmodule Runlight.Routes do
   @rules_placeholder ~s("__RUNLIGHT_RULES__")
   @pick_target_placeholder ~s("__RUNLIGHT_PICK_TARGET__")
   @pick_hosts_placeholder ~s("__RUNLIGHT_PICK_HOSTS__")
+  # Where the relay page the picker sends its choice to goes, the return address its ticket names.
+  @pick_return_placeholder ~s("__RUNLIGHT_PICK_RETURN__")
+  # Where the nonce the dashboard made for this pick goes, which the relay page hands back to it.
+  @pick_nonce_placeholder ~s("__RUNLIGHT_PICK_NONCE__")
+  # The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end.
+  @pick_return ~r/\Ahttps?:\/\/[^\/?#\s]+(\/[^?#\s]*)?\/pick-return\z/
+  # What the dashboard names one pick by, so its relay page answers only the tab that started it.
+  @pick_nonce ~r/\A[a-f0-9]{32}\z/
   @pick_ticket_ms 30 * 60_000
   @ask_per_hour 30
   @ask_at_once 2
@@ -291,16 +299,25 @@ defmodule Runlight.Routes do
       )
   end
 
-  defp small_page(lang, body, status \\ 200) do
+  # A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's relay
+  # page, which alone runs a script: one file from this server, never inline.
+  defp small_page(lang, body, status \\ 200, script \\ "") do
+    tag = if script != "", do: ~s(<script src="#{escape_html(script)}"></script>), else: ""
+
+    csp =
+      if script != "",
+        do:
+          "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        else: "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+
     Response.new(
       ~s(<!doctype html><html lang="#{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Runlight</title>\n) <>
-        ~s(<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>#{body}</main></body></html>),
+        ~s(<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>#{body}</main>#{tag}</body></html>),
       status,
       [
         {"content-type", "text/html; charset=utf-8"},
         {"cache-control", "no-store"},
-        {"content-security-policy",
-         "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"},
+        {"content-security-policy", csp},
         {"referrer-policy", "no-referrer"}
       ]
     )
@@ -1162,25 +1179,41 @@ defmodule Runlight.Routes do
 
   defp hex(text), do: Base.encode16(text, case: :lower)
 
-  # A ticket that lets the picker, on `site`'s pages, send its choice to `origin` for half an hour.
-  defp pick_ticket(rl, origin, site) do
-    payload = "#{Runlight.now(rl) + @pick_ticket_ms}.#{hex(site)}.#{hex(origin)}"
+  # A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
+  # an hour. With a return address and a nonce it sends it there, to the relay page, which hands it to the dashboard
+  # tab that made the nonce; without them, as an older dashboard asks, to the tab that opened the site.
+  defp pick_ticket(rl, origin, site, back) do
+    tail = if back, do: ".#{hex(back.url)}.#{back.nonce}", else: ""
+    payload = "#{Runlight.now(rl) + @pick_ticket_ms}.#{hex(site)}.#{hex(origin)}#{tail}"
     "#{payload}.#{Hash.hmac(pick_key(rl), payload)}"
   end
 
-  # The dashboard origin and site a picker ticket names, or nil when it is not one this install signed or has run out.
+  # What a picker ticket names, or nil when it is not one this install signed or has run out.
   defp pick_target(rl, ticket) do
-    with [_, expires, site, origin, mac] <-
-           Regex.run(~r/\A(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})\z/, ticket),
+    with [_, expires, site, origin, url, nonce, mac] <-
+           Regex.run(
+             ~r/\A(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]{2,2048})\.([a-f0-9]{32}))?\.([a-f0-9]{64})\z/,
+             ticket
+           ),
          false <- JS.number(expires) < Runlight.now(rl),
-         true <- Crypto.constant_time_equal?(mac, Hash.hmac(pick_key(rl), "#{expires}.#{site}.#{origin}")),
+         true <-
+           Crypto.constant_time_equal?(mac, Hash.hmac(pick_key(rl), binary_part(ticket, 0, byte_size(ticket) - 65))),
          origin_text = unhex(origin),
          true <- Regex.match?(~r/\Ahttps?:\/\/[^\/?#\s]+\z/, origin_text) do
-      %{origin: origin_text, site: unhex(site)}
+      back_url = if url != "", do: unhex(url)
+
+      cond do
+        url == "" -> %{origin: origin_text, site: unhex(site), back: nil}
+        relay?(back_url, origin_text) -> %{origin: origin_text, site: unhex(site), back: %{url: back_url, nonce: nonce}}
+        true -> nil
+      end
     else
       _ -> nil
     end
   end
+
+  # Whether an address is the relay page on the dashboard origin that asked.
+  defp relay?(url, origin), do: Regex.match?(@pick_return, url) and String.starts_with?(url, origin <> "/")
 
   defp unhex(text) do
     bytes = for <<a, b <- text>>, into: <<>>, do: <<String.to_integer(<<a, b>>, 16)>>
@@ -2743,11 +2776,24 @@ defmodule Runlight.Routes do
          {:ok, site} <- query_site(routes, url),
          {:ok, body} <- read_json(request) do
       origin = body |> JS.prop("origin") |> JS.nullish("") |> JS.string()
+      # Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+      # listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+      asks_back = JS.prop(body, "return") != :undefined or JS.prop(body, "nonce") != :undefined
+      address = body |> JS.prop("return") |> JS.nullish("") |> JS.string()
+      nonce = body |> JS.prop("nonce") |> JS.nullish("") |> JS.string()
       hub = managed(request)
 
       cond do
         not Regex.match?(~r/\Ahttps?:\/\/[^\/?#\s]+\z/, origin) ->
           coded("Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400)
+
+        asks_back and
+            (byte_size(address) * 2 > 2048 or not relay?(address, origin) or not Regex.match?(@pick_nonce, nonce)) ->
+          coded(
+            "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+            "pick_return",
+            400
+          )
 
         # A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
         hub != nil and Store.setting(rl.store, "token-origin:#{hub["id"]}") != origin ->
@@ -2758,7 +2804,8 @@ defmodule Runlight.Routes do
           )
 
         true ->
-          json(JS.obj(ticket: pick_ticket(rl, origin, site["id"])))
+          back = if asks_back, do: %{url: address, nonce: nonce}
+          json(JS.obj(ticket: pick_ticket(rl, origin, site["id"], back)))
       end
     else
       {:denied, access} -> denied(access)
@@ -3508,17 +3555,37 @@ defmodule Runlight.Routes do
         target = pick_target(rl, param(url, "runlight_ticket") || "")
         if target, do: Runlight.init(rl)
         hosts = if target, do: (Runlight.site(rl, target.site) || %{})["hostnames"], else: []
+        named = if hosts, do: target
+        back = named && named.back
 
         script =
           Assets.picker()
-          |> String.replace(
-            @pick_target_placeholder,
-            JS.stringify(if(hosts, do: (target && target.origin) || "", else: "")),
-            global: false
-          )
+          |> String.replace(@pick_target_placeholder, JS.stringify((named && named.origin) || ""), global: false)
           |> String.replace(@pick_hosts_placeholder, JS.stringify(JS.stringify(hosts || [])), global: false)
+          |> String.replace(@pick_return_placeholder, JS.stringify((back && back.url) || ""), global: false)
+          |> String.replace(@pick_nonce_placeholder, JS.stringify((back && back.nonce) || ""), global: false)
 
         Response.new(script, 200, [
+          {"content-type", "application/javascript; charset=utf-8"},
+          {"cache-control", "no-store"}
+        ])
+
+      # The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+      # script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+      path == "/pick-return" and method == "GET" ->
+        lang = accepted_language(request)
+        t = &escape_html(Messages.t(lang, &1))
+
+        small_page(
+          lang,
+          ~s(<div id="done" hidden><h1>#{t.("pick.doneTitle")}</h1><p>#{t.("pick.done")}</p></div>) <>
+            ~s(<div id="gone" hidden><h1>#{t.("pick.goneTitle")}</h1><p>#{t.("pick.gone")}</p></div>),
+          200,
+          "#{routes.base}/pick-return.js"
+        )
+
+      path == "/pick-return.js" and method == "GET" ->
+        Response.new(Assets.pick_relay(), 200, [
           {"content-type", "application/javascript; charset=utf-8"},
           {"cache-control", "no-store"}
         ])
