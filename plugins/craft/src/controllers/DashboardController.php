@@ -7,6 +7,7 @@ namespace Runlight\Craft\controllers;
 use Craft;
 use craft\helpers\UrlHelper;
 use craft\web\Controller;
+use Runlight\Cms\Frame;
 use Runlight\Craft\Local;
 use Runlight\Craft\Plugin;
 use yii\web\Response;
@@ -56,6 +57,8 @@ final class DashboardController extends Controller
             'error' => !$framed && is_string($frame) ? $frame : null,
             'note' => $note,
             'origin' => Local::originOf($address),
+            // The package's frame script, the same in every CMS plugin.
+            'frameScript' => Frame::run(),
             'full' => $full,
             'settingsUrl' => 'settings/plugins/runlight',
         ]);
