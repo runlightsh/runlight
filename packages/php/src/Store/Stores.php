@@ -10,18 +10,19 @@ use Runlight\Db\PdoDb;
 
 /**
  * The stores stores/sqlite.ts, stores/postgres.ts, and stores/mysql.ts make, over PDO. Tables are prefixed
- * `rl_`, so the database can be the app's own, and a database made by the TypeScript SDK opens here.
+ * `rl_`, so the database can be the app's own, and a database made by the TypeScript SDK opens here. Each
+ * takes a `prefix` option to use in place of `rl_`, so two apps sharing a database keep a set each.
  */
 final class Stores
 {
     /**
      * Runlight's tables in a SQLite file (or ":memory:"), in WAL mode, as better-sqlite3 opens it there.
      *
-     * @param string|array{path: string} $path
+     * @param string|array{path: string, prefix?: string} $path
      */
     public static function sqlite(string|array $path): SqlStore
     {
-        return new SqlStore(Connect::sqlite(is_array($path) ? (string) $path['path'] : $path));
+        return new SqlStore(Connect::sqlite(is_array($path) ? (string) $path['path'] : $path), is_array($path) ? self::prefix($path) : Sql::PREFIX);
     }
 
     /**
@@ -30,17 +31,17 @@ final class Stores
      * a connection Runlight opens, in milliseconds (default 120000, 0 for no limit), and `schema`, the search
      * path for one it opens.
      *
-     * @param array{statementTimeout?: int, schema?: string} $options
+     * @param array{statementTimeout?: int, schema?: string, prefix?: string} $options
      */
     public static function postgres(string|\PDO $url, array $options = []): SqlStore
     {
         if ($url instanceof \PDO) {
-            return new SqlStore(new PdoDb($url, 'postgres', false));
+            return new SqlStore(new PdoDb($url, 'postgres', false), self::prefix($options));
         }
         if ($url === '') {
             throw new \InvalidArgumentException('Runlight: postgres() needs a url or a pool');
         }
-        return new SqlStore(Connect::postgres($url, (int) ($options['statementTimeout'] ?? 120_000), $options['schema'] ?? null));
+        return new SqlStore(Connect::postgres($url, (int) ($options['statementTimeout'] ?? 120_000), $options['schema'] ?? null), self::prefix($options));
     }
 
     /**
@@ -50,17 +51,17 @@ final class Stores
      * milliseconds (default 120000, 0 for no limit), which MySQL applies to reads only and MariaDB to every
      * statement.
      *
-     * @param array{statementTimeout?: int} $options
+     * @param array{statementTimeout?: int, prefix?: string} $options
      */
     public static function mysql(string|\PDO $url, array $options = []): SqlStore
     {
         if ($url instanceof \PDO) {
-            return new SqlStore(new PdoDb($url, 'mysql', false));
+            return new SqlStore(new PdoDb($url, 'mysql', false), self::prefix($options));
         }
         if ($url === '') {
             throw new \InvalidArgumentException('Runlight: mysql() needs a url or a pool');
         }
-        return new SqlStore(Connect::mysql($url, (int) ($options['statementTimeout'] ?? 120_000)));
+        return new SqlStore(Connect::mysql($url, (int) ($options['statementTimeout'] ?? 120_000)), self::prefix($options));
     }
 
     /**
@@ -72,10 +73,16 @@ final class Stores
         return new SqlStore(Connect::url($databaseUrl));
     }
 
-    /** A store over any Db. */
-    public static function fromDb(Db $db): SqlStore
+    /** A store over any Db, with its tables under `$prefix` in place of `rl_` when one is given. */
+    public static function fromDb(Db $db, string $prefix = Sql::PREFIX): SqlStore
     {
-        return new SqlStore($db);
+        return new SqlStore($db, $prefix);
+    }
+
+    /** The `prefix` option, or `rl_`. */
+    private static function prefix(array $options): string
+    {
+        return isset($options['prefix']) ? (string) $options['prefix'] : Sql::PREFIX;
     }
 
     /**

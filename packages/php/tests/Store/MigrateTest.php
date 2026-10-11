@@ -35,13 +35,13 @@ final class MigrateTest extends TestCase
     /** @return array<string, array{0: string}> */
     public static function kinds(): array
     {
-        return Databases::kinds();
+        return Databases::plainKinds();
     }
 
     /** @return array<string, array{0: string}> */
     public static function servers(): array
     {
-        $kinds = Databases::kinds();
+        $kinds = Databases::plainKinds();
         unset($kinds['sqlite']);
         return $kinds ?: ['none' => ['none']];
     }
@@ -88,6 +88,57 @@ final class MigrateTest extends TestCase
         (new SqlStore($store->db))->migrate();
         $this->assertSame(15, self::tables($store->db));
         $this->assertSame([['value' => '11']], $store->db->all('SELECT value FROM rl_meta WHERE "key" = \'schema\''));
+    }
+
+    /**
+     * Every table, index, and sequence name in the database, as each dialect lists them.
+     *
+     * @return list<string>
+     */
+    private static function names(Db $db): array
+    {
+        $sql = match ($db->dialect()) {
+            'sqlite' => "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+            'postgres' => "SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind IN ('r', 'i', 'S')",
+            default => "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE()
+                UNION SELECT index_name AS name FROM information_schema.statistics WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY'",
+        };
+        $names = array_map(static fn (array $row): string => (string) $row['name'], $db->all($sql));
+        sort($names);
+        return $names;
+    }
+
+    #[DataProvider('kinds')]
+    public function testAPrefixKeepsASecondSetOfTablesBesideTheFirstInOneDatabase(string $kind): void
+    {
+        [$plain, , $args] = $this->shared($kind);
+        $prefix = 'wp_rl_';
+        $open = static fn (): SqlStore => match ($args[0]) {
+            'sqlite' => Stores::sqlite(['path' => $args[1], 'prefix' => $prefix]),
+            'postgres' => Stores::postgres($args[1], ['schema' => $args[2], 'prefix' => $prefix]),
+            default => Stores::mysql($args[1], ['prefix' => $prefix]),
+        };
+        $other = $open();
+        $other->migrate();
+        // Gone over in full a second time, as the hourly check does, which finds every index already there.
+        $open()->migrate(true);
+        $raw = $plain->db;
+        $names = self::names($raw);
+        $this->assertNotSame([], $names);
+        $this->assertSame([], array_values(array_filter($names, static fn (string $n): bool => !str_starts_with($n, $prefix))), 'every name is under the prefix');
+        $this->assertSame(array_map(static fn (string $t): string => $prefix . $t, Sql::TABLES), $other->tables());
+        $this->assertSame([], array_values(array_diff(array_slice($other->tables(), 0, 15), $names)), "the store's 15 tables, listed for removing them");
+
+        $plain->migrate();
+        $this->assertSame(15, count(array_filter(self::names($raw), static fn (string $n): bool => str_starts_with($n, 'rl_') && in_array(substr($n, 3), Sql::TABLES, true))));
+        $site = static fn (string $id): array => ['id' => $id, 'name' => $id, 'hostnames' => ["$id.example"], 'timezone' => 'UTC'];
+        $plain->upsertSite($site('first'), 1);
+        $other->upsertSite($site('second'), 1);
+        $this->assertSame(['first'], array_column($plain->sites(), 'id'));
+        $this->assertSame(['second'], array_column($other->sites(), 'id'));
+        $this->assertSame('second', $other->transaction(static fn (SqlStore $tx): string => $tx->sites()[0]['id']));
+        $other->close();
+        $plain->close();
     }
 
     #[DataProvider('kinds')]

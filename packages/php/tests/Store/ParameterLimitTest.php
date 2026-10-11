@@ -17,7 +17,7 @@ final class ParameterLimitTest extends StoreTestCase
     /** @return array<string, array{0: string}> */
     public static function limited(): array
     {
-        return array_filter(Databases::kinds(), static fn (string $kind): bool => $kind !== 'postgres', ARRAY_FILTER_USE_KEY);
+        return array_filter(Databases::kinds(), static fn (string $kind): bool => !str_starts_with($kind, 'postgres'), ARRAY_FILTER_USE_KEY);
     }
 
     #[DataProvider('limited')]
