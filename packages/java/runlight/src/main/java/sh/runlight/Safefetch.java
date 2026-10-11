@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 import sh.runlight.http.FetchError;
 import sh.runlight.http.FetchInit;
 import sh.runlight.http.Fetcher;
+import sh.runlight.http.Headers;
 import sh.runlight.http.JdkFetcher;
 import sh.runlight.http.Response;
 import sh.runlight.http.Url;
@@ -447,6 +448,102 @@ public final class Safefetch {
       options.maxBytes(Js.asLong(init.get("maxBytes")));
     }
     return options;
+  }
+
+  /** Headers that describe a body, dropped with it when a redirect turns a request into a GET. */
+  private static final List<String> BODY_HEADERS =
+      List.of(
+          "content-type",
+          "content-length",
+          "content-encoding",
+          "content-language",
+          "content-location");
+
+  /** Credentials, dropped when a redirect leads to another origin. */
+  private static final List<String> CREDENTIAL_HEADERS =
+      List.of("authorization", "proxy-authorization", "cookie");
+
+  /** As {@link #serviceFetch(String, FetchInit, int, Fetcher)}, following up to 5 redirects. */
+  public static Response serviceFetch(String target, FetchInit init, Fetcher fetcher) {
+    return serviceFetch(target, init, 5, fetcher);
+  }
+
+  /**
+   * Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may
+   * well be on this computer or a private network, but is never at a link-local or cloud metadata
+   * address. The address is checked, and so is every redirect's, up to {@code redirects} of them,
+   * each followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET
+   * with no body, and a redirect to another origin goes without the credentials. A redirect past
+   * the last one comes back as it is. Each request is pinned to the addresses checked, so a name
+   * that answers differently a moment later gets nowhere. {@code init}'s timeout covers the
+   * redirects too.
+   *
+   * @param fetcher what sends each request; null for a {@link JdkFetcher}
+   * @throws MetadataAddressError for an address it refuses
+   */
+  public static Response serviceFetch(
+      String target, FetchInit init, int redirects, Fetcher fetcher) {
+    Fetcher sender = fetcher != null ? fetcher : new JdkFetcher();
+    long until = System.nanoTime() + Math.max(0, init.timeoutMs) * 1_000_000L;
+    Url url = new Url(target);
+    String method = Js.upper(init.method == null ? "GET" : init.method);
+    Headers headers = new Headers(init.headers);
+    byte[] body = init.body;
+    for (int hop = 0; ; hop++) {
+      String host = BRACKETS.matcher(url.hostname).replaceAll("");
+      List<String> addresses = metadataChecked(host, sender::lookup);
+      if (addresses == null) {
+        throw new MetadataAddressError(host);
+      }
+      // The first request has the whole timeout; each redirect, what is left of it.
+      long left = hop == 0 ? init.timeoutMs : Math.floorDiv(until - System.nanoTime(), 1_000_000L);
+      if (left <= 0) {
+        throw timedOut();
+      }
+      FetchInit options =
+          new FetchInit()
+              .method(method)
+              .headers(headers)
+              .body(body)
+              .redirect("manual")
+              .timeoutMs(left)
+              .truncate(init.truncate);
+      if (init.maxBytes != null) {
+        options.maxBytes(init.maxBytes);
+      }
+      if (!addresses.isEmpty()) {
+        List<String> written = new ArrayList<>();
+        for (String address : addresses) {
+          written.add(address.contains(":") ? "[" + address + "]" : address);
+        }
+        String port = !url.port.isEmpty() ? url.port : url.protocol.equals("https:") ? "443" : "80";
+        options.resolve(Js.lower(host) + ":" + port + ":" + String.join(",", written));
+      }
+      Response answer = sender.fetch(url.href(), options);
+      String location = answer.headers().get("location");
+      if (answer.status() < 300
+          || answer.status() >= 400
+          || location == null
+          || location.isEmpty()
+          || hop >= redirects) {
+        return answer;
+      }
+      Url next = new Url(location, url.href());
+      if (answer.status() == 303
+          || ((answer.status() == 301 || answer.status() == 302) && method.equals("POST"))) {
+        method = method.equals("HEAD") ? "HEAD" : "GET";
+        body = null;
+        for (String name : BODY_HEADERS) {
+          headers.delete(name);
+        }
+      }
+      if (!next.origin().equals(url.origin())) {
+        for (String name : CREDENTIAL_HEADERS) {
+          headers.delete(name);
+        }
+      }
+      url = next;
+    }
   }
 
   /**

@@ -213,38 +213,13 @@ public final class Assistant {
   }
 
   /**
-   * Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM
-   * Studio) or a private network is allowed, as the person setting it up means it to be. TypeScript
-   * checks the name; here the request is also pinned to the addresses checked, so a name that
-   * answers differently a moment later gets nowhere.
-   *
-   * @return the pin for {@link FetchInit#resolve}, or null for an address or a name that does not
-   *     resolve here
+   * A service at a link-local or cloud metadata address, refused there or at a redirect. One on
+   * this computer (Ollama, LM Studio) or a private network is allowed, as the person setting it up
+   * means it to be.
    */
-  static String refuseMetadata(String url, Fetcher fetcher) {
-    Url parsed = new Url(url);
-    List<String> addresses = Safefetch.metadataChecked(parsed.hostname, fetcher::lookup);
-    if (addresses == null) {
-      throw new AssistantError(
-          parsed.hostname
-              + " is a link-local or cloud metadata address, which Runlight never connects to",
-          "address_refused",
-          Json.object("host", parsed.hostname));
-    }
-    if (addresses.isEmpty()) {
-      return null;
-    }
-    List<String> written = new ArrayList<>();
-    for (String address : addresses) {
-      written.add(address.contains(":") ? "[" + address + "]" : address);
-    }
-    String port =
-        !parsed.port.isEmpty() ? parsed.port : parsed.protocol.equals("https:") ? "443" : "80";
-    return Js.lower(parsed.hostname) + ":" + port + ":" + String.join(",", written);
-  }
-
-  private static FetchInit pinned(FetchInit init, String pin) {
-    return pin != null ? init.resolve(pin) : init;
+  private static AssistantError refused(MetadataAddressError error) {
+    return new AssistantError(
+        error.getMessage(), "address_refused", Json.object("host", error.host()));
   }
 
   private static Object post(
@@ -256,7 +231,6 @@ public final class Assistant {
       LongSupplier now,
       BooleanSupplier cancelled) {
     inTime(deadline, now, cancelled);
-    String pin = refuseMetadata(url, fetcher);
     long left = deadline - now.getAsLong();
     Headers all = new Headers();
     all.set("content-type", "application/json");
@@ -266,15 +240,16 @@ public final class Assistant {
     Response answer;
     try {
       answer =
-          fetcher.fetch(
+          Safefetch.serviceFetch(
               url,
-              pinned(
-                  new FetchInit()
-                      .method("POST")
-                      .headers(all)
-                      .body(Json.stringify(body))
-                      .timeoutMs(Math.min(90_000, left)),
-                  pin));
+              new FetchInit()
+                  .method("POST")
+                  .headers(all)
+                  .body(Json.stringify(body))
+                  .timeoutMs(Math.min(90_000, left)),
+              fetcher);
+    } catch (MetadataAddressError error) {
+      throw refused(error);
     } catch (RuntimeException error) {
       String host = new Url(url).host();
       throw error instanceof FetchError f && f.timedOut()
@@ -609,13 +584,15 @@ public final class Assistant {
         anthropic
             ? Headers.of("x-api-key", key, "anthropic-version", "2023-06-01")
             : key.isEmpty() ? new Headers() : Headers.of("authorization", "Bearer " + key);
-    String pin = refuseMetadata(base, fetcher);
     Response answer;
     try {
       answer =
-          fetcher.fetch(
+          Safefetch.serviceFetch(
               base + "/models" + (anthropic ? "?limit=100" : ""),
-              pinned(new FetchInit().headers(headers).timeoutMs(20_000), pin));
+              new FetchInit().headers(headers).timeoutMs(20_000),
+              fetcher);
+    } catch (MetadataAddressError error) {
+      throw refused(error);
     } catch (RuntimeException error) {
       String host = new Url(base).host();
       throw new AssistantError("Could not reach " + host, "unreachable", Json.object("host", host));

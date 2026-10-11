@@ -1,6 +1,7 @@
 package sh.runlight.conformance;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,12 +19,13 @@ import sh.runlight.http.Request;
 import sh.runlight.http.Response;
 import sh.runlight.http.SearchParams;
 import sh.runlight.http.Url;
+import sh.runlight.mail.AppMailer;
 import sh.runlight.store.SqlStore;
 
 /**
  * Plays a scenario from conformance/http.json exactly as play() in
  * packages/sdk/test/http-conformance.ts does, and returns each step's answer, normalized, in the
- * shape of the file's expect: status, headers, body, text, files, found, fetched, or pass.
+ * shape of the file's expect: status, headers, body, text, files, found, fetched, mailed, or pass.
  */
 public final class Player {
   /** Environment the SDK reads defaults from, cleared while a scenario plays. */
@@ -42,6 +44,9 @@ public final class Player {
 
   /** The clock, in epoch milliseconds, as the scenario's steps move it. */
   private final AtomicLong now = new AtomicLong();
+
+  /** The messages the app's own mailer was handed during the step, in order. */
+  private final List<Map<String, Object>> mailed = Collections.synchronizedList(new ArrayList<>());
 
   /** The Runlight a scenario plays against, its routes, and its short-link handler. */
   private record Target(Runlight rl, Routes routes) {}
@@ -81,6 +86,36 @@ public final class Player {
     if (options.containsKey("rateLimit")) {
       out.rateLimit(options.get("rateLimit"));
     }
+    if (options.get("mailServices") instanceof List<?> services) {
+      List<String> ids = new ArrayList<>();
+      for (Object id : services) {
+        ids.add(Js.string(id));
+      }
+      out.mailServices(ids);
+    }
+    Map<String, Object> app = Js.map(options.get("appMailer"));
+    if (app != null) {
+      Object fail = app.get("fail");
+      out.mail(
+          new AppMailer(
+              message -> {
+                if (fail != null) {
+                  throw new IllegalStateException(Js.string(fail));
+                }
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("to", message.get("to"));
+                one.put("from", message.get("from"));
+                if (Js.truthy(message.get("fromName"))) {
+                  one.put("fromName", message.get("fromName"));
+                }
+                one.put("subject", message.get("subject"));
+                one.put("text", message.get("text"));
+                mailed.add(one);
+              },
+              (String) app.get("from"),
+              app.get("fromName") instanceof String name ? name : null,
+              (String) app.get("via")));
+    }
     return out;
   }
 
@@ -100,6 +135,9 @@ public final class Player {
     }
     if (Js.truthy(options.get("origin"))) {
       out.origin((String) options.get("origin"));
+    }
+    if (Js.truthy(options.get("cms"))) {
+      out.cms((String) options.get("cms"));
     }
     return out;
   }
@@ -191,6 +229,7 @@ public final class Player {
             body == null ? new byte[0] : Js.utf8(body),
             "");
     fetcher.take();
+    mailed.clear();
     Response answer =
         switch (to) {
           case "links" -> target.rl().linkHandler().apply(request);
@@ -204,17 +243,30 @@ public final class Player {
     for (UpstreamFetcher.Sent sent : sentOut) {
       outbound.add(Normalizer.normalize(sent.seen()));
     }
+    List<Object> handed = new ArrayList<>();
+    synchronized (mailed) {
+      for (Map<String, Object> message : mailed) {
+        handed.add(Normalizer.normalize(message));
+      }
+    }
     if (answer == null) {
       Map<String, Object> out = Json.object("pass", true);
       if (!outbound.isEmpty()) {
         out.put("fetched", outbound);
       }
+      if (!handed.isEmpty()) {
+        out.put("mailed", handed);
+      }
       return out;
     }
-    return answer(step, answer, sentOut, outbound, kept, jar);
+    Map<String, Object> out = answer(step, answer, sentOut, outbound, kept, jar);
+    if (!handed.isEmpty()) {
+      out.put("mailed", handed);
+    }
+    return out;
   }
 
-  private Object answer(
+  private Map<String, Object> answer(
       Map<String, Object> step,
       Response answer,
       List<UpstreamFetcher.Sent> sentOut,

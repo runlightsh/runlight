@@ -14,16 +14,22 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.net.ProxySelector;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.zip.GZIPOutputStream;
 import javax.net.ssl.ExtendedSSLSession;
 import javax.net.ssl.KeyManagerFactory;
@@ -324,6 +330,48 @@ class JdkFetcherTest {
                 .fetch(
                     "http://pinned.invalid:" + port + "/",
                     new FetchInit().resolve("other.invalid:" + port + ":127.0.0.1")));
+  }
+
+  @Test
+  void aPinnedRequestNeverGoesThroughAProxy() {
+    // A proxy set for the whole JVM, as socksProxyHost or an app's own ProxySelector sets one, at
+    // an address where nothing listens: a request through it would fail.
+    List<URI> asked = new CopyOnWriteArrayList<>();
+    ProxySelector before = ProxySelector.getDefault();
+    ProxySelector.setDefault(
+        new ProxySelector() {
+          @Override
+          public List<Proxy> select(URI uri) {
+            asked.add(uri);
+            return List.of(
+                new Proxy(
+                    Proxy.Type.SOCKS,
+                    new InetSocketAddress(InetAddress.getLoopbackAddress(), unusedPort())));
+          }
+
+          @Override
+          public void connectFailed(URI uri, SocketAddress address, IOException e) {}
+        });
+    try {
+      Response answer =
+          new JdkFetcher()
+              .fetch(
+                  "http://pinned.invalid:" + port + "/",
+                  new FetchInit().resolve("pinned.invalid:" + port + ":127.0.0.1"));
+      assertEquals("host pinned.invalid:" + port, answer.text());
+      assertEquals(List.of(), asked, "the proxy was never asked");
+    } finally {
+      ProxySelector.setDefault(before);
+    }
+  }
+
+  /** A port on the loopback address where nothing listens. */
+  private static int unusedPort() {
+    try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+      return socket.getLocalPort();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   /** A self-signed certificate for pinned.test, made with the JDK's keytool. */

@@ -26,6 +26,7 @@ import sh.runlight.Runlight;
 import sh.runlight.http.Response;
 import sh.runlight.mail.AppMailer;
 import sh.runlight.mail.MailError;
+import sh.runlight.mail.Transports;
 import sh.runlight.routes.Make;
 import sh.runlight.store.SqlStore;
 import sh.runlight.store.Stores;
@@ -426,6 +427,109 @@ class ReportMailTest {
                 .handle(Make.owner("/runlight/api/mail", "GET", null, "t")));
     assertNull(answer.get("source"));
     assertFalse(answer.containsKey("app"), "an install without an app mailer answers as before");
+  }
+
+  @Test
+  void anAppsMailerWithNoViaIsNamedWithNothingRatherThanNull() {
+    Runlight rl =
+        runlight(
+            new AtomicLong(0),
+            new Runlight.Options().mail(new AppMailer(m -> {}, "site@example.com", null)));
+    assertEquals("", rl.mailSettings().get("via"));
+    Map<String, Object> answer =
+        Make.body(
+            rl.routes(new Routes.Options().token("t"))
+                .handle(Make.owner("/runlight/api/mail", "GET", null, "t")));
+    assertEquals("", Js.map(answer.get("app")).get("via"));
+    assertThrows(NullPointerException.class, () -> new AppMailer(null, "site@example.com", "X"));
+  }
+
+  @Test
+  void mailServicesNamesTheServicesSettingsOffersAndASavedOneNotAmongThemCountsAsNone() {
+    IllegalArgumentException unknown =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                runlight(
+                    new AtomicLong(0),
+                    new Runlight.Options().mailServices(List.of("resend", "pigeon"))));
+    assertEquals(
+        "Runlight: mailServices names \"pigeon\", which is not a mail service",
+        unknown.getMessage());
+
+    SqlStore store = Stores.sqlite(":memory:");
+    Runlight every = new Runlight(new Runlight.Options().store(store).secret("s"));
+    assertEquals(Transports.SERVICES, every.mailServices);
+    every.saveMailSettings(
+        Json.object(
+            "service",
+            "smtp",
+            "host",
+            "smtp.example.com",
+            "port",
+            "587",
+            "security",
+            "starttls",
+            "from",
+            "r@example.com"));
+    assertEquals("smtp", every.mailSettings().get("service"));
+
+    List<Map<String, Object>> sent = new ArrayList<>();
+    Runlight fewer =
+        new Runlight(
+            new Runlight.Options()
+                .store(store)
+                .secret("s")
+                .mailServices(List.of("webhook", "resend"))
+                .mail(new AppMailer(sent::add, "site@example.com", "Drupal")));
+    // Kept in the order Settings lists every service.
+    assertEquals(List.of("resend", "webhook"), column(fewer.mailServices));
+    // The SMTP server saved earlier is no longer offered, so the app's mailer sends.
+    assertEquals("app", fewer.mailSettings().get("source"));
+    fewer.sendMail(Json.object("to", "me@example.com", "subject", "Hi", "html", "", "text", "Hi"));
+    assertEquals(1, sent.size());
+    MailError refused =
+        mailError(
+            () ->
+                fewer.saveMailSettings(
+                    Json.object(
+                        "service",
+                        "smtp",
+                        "host",
+                        "smtp.example.com",
+                        "port",
+                        "587",
+                        "from",
+                        "r@example.com")));
+    assertEquals("SMTP is not offered here. Pick another mail service", refused.getMessage());
+    assertEquals("mail_service", refused.code());
+    assertEquals(Json.object("service", "smtp"), refused.params());
+    MailError pick =
+        mailError(
+            () ->
+                fewer.saveMailSettings(Json.object("service", "pigeon", "from", "r@example.com")));
+    assertEquals("Pick a mail service", pick.getMessage());
+    assertEquals(Map.of(), pick.params());
+    Map<String, Object> answer =
+        Make.body(
+            fewer
+                .routes(new Routes.Options().token("t"))
+                .handle(Make.owner("/runlight/api/mail", "GET", null, "t")));
+    assertEquals(List.of("resend", "webhook"), column(Js.list(answer.get("services"))));
+
+    // None at all offers none.
+    Runlight none =
+        new Runlight(
+            new Runlight.Options().store(Stores.sqlite(":memory:")).mailServices(List.of()));
+    assertEquals(List.of(), none.mailServices);
+  }
+
+  private static List<Object> column(List<?> services) {
+    List<Object> ids = new ArrayList<>();
+    for (Object s : services) {
+      ids.add(Js.map(s).get("id"));
+    }
+    return ids;
   }
 
   /** A JSON request to the routes, with the owner's token. */

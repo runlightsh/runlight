@@ -6,16 +6,24 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import sh.runlight.http.FetchError;
+import sh.runlight.http.FetchInit;
 import sh.runlight.http.Response;
+import sh.runlight.mail.MailError;
+import sh.runlight.mail.Transports;
 
 /**
  * Ports safefetch.test.ts, replays the address checks in outbound.json, and covers each hop's
@@ -345,5 +353,128 @@ class SafefetchTest {
                     "https://a.example/", init("lookup", lookup), new RecordingFetcher("network")));
     assertEquals("Could not connect", refused.getMessage());
     assertFalse(refused.timedOut());
+  }
+
+  /** One request the service test's server was sent. */
+  private record Seen(String method, String url, String body, String authorization, String type) {}
+
+  @Test
+  void aServicesRedirectsAreFollowedOnlyWhileEachOneStaysOffLinkLocalAndMetadataAddresses()
+      throws IOException {
+    List<Seen> seen = new CopyOnWriteArrayList<>();
+    HttpServer server =
+        HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+    int port = server.getAddress().getPort();
+    server.createContext(
+        "/",
+        exchange -> {
+          String body =
+              new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+          String path = exchange.getRequestURI().getPath();
+          String authorization = exchange.getRequestHeaders().getFirst("authorization");
+          String type = exchange.getRequestHeaders().getFirst("content-type");
+          seen.add(
+              new Seen(
+                  exchange.getRequestMethod(),
+                  path,
+                  body,
+                  authorization == null ? "" : authorization,
+                  type == null ? "" : type));
+          Map<String, Object> redirects =
+              Json.object(
+                  "/metadata", List.of(302, "http://169.254.169.254/latest/meta-data/"),
+                  "/metadata-v6", List.of(307, "http://[fd00:ec2::254]/"),
+                  "/see-other", List.of(303, "/landed"),
+                  "/keep", List.of(307, "/landed"),
+                  "/elsewhere", List.of(307, "http://localhost:" + port + "/landed"),
+                  "/loop", List.of(302, "/loop"));
+          if (redirects.get(path) instanceof List<?> to) {
+            exchange.getResponseHeaders().set("location", (String) to.get(1));
+            exchange.sendResponseHeaders((Integer) to.get(0), -1);
+          } else {
+            byte[] ok = "ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, ok.length);
+            exchange.getResponseBody().write(ok);
+          }
+          exchange.close();
+        });
+    server.start();
+    String base = "http://127.0.0.1:" + port;
+    Supplier<FetchInit> ask =
+        () ->
+            new FetchInit()
+                .method("POST")
+                .header("authorization", "Bearer key")
+                .header("content-type", "application/json")
+                .body("{}")
+                .timeoutMs(5000);
+    try {
+      // A service on this computer is fine; a redirect to a metadata address is refused before it
+      // is asked.
+      MetadataAddressError v4 =
+          assertThrows(
+              MetadataAddressError.class,
+              () -> Safefetch.serviceFetch(base + "/metadata", ask.get(), null));
+      assertEquals("169.254.169.254", v4.host());
+      MetadataAddressError v6 =
+          assertThrows(
+              MetadataAddressError.class,
+              () -> Safefetch.serviceFetch(base + "/metadata-v6", ask.get(), null));
+      assertEquals("fd00:ec2::254", v6.host());
+      assertThrows(
+          MetadataAddressError.class,
+          () -> Safefetch.serviceFetch("http://169.254.169.254/v1/models", new FetchInit(), null));
+      // Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and
+      // the key goes no further than the origin it was meant for.
+      seen.clear();
+      assertEquals("ok", Safefetch.serviceFetch(base + "/see-other", ask.get(), null).text());
+      assertEquals(new Seen("GET", "/landed", "", "Bearer key", ""), seen.get(1));
+      seen.clear();
+      Safefetch.serviceFetch(base + "/keep", ask.get(), null);
+      assertEquals(
+          new Seen("POST", "/landed", "{}", "Bearer key", "application/json"), seen.get(1));
+      seen.clear();
+      Safefetch.serviceFetch(base + "/elsewhere", ask.get(), null);
+      assertEquals(new Seen("POST", "/landed", "{}", "", "application/json"), seen.get(1));
+      // Past the last redirect, the redirect comes back as it is.
+      seen.clear();
+      assertEquals(302, Safefetch.serviceFetch(base + "/loop", new FetchInit(), 2, null).status());
+      assertEquals(3, seen.size());
+      // The AI assistant and a mail webhook refuse such a redirect with the address it led to.
+      AssistantError assistant =
+          assertThrows(
+              AssistantError.class,
+              () ->
+                  Assistant.listModels(
+                      Json.object("provider", "custom", "baseUrl", base + "/metadata#", "key", ""),
+                      null));
+      assertEquals("address_refused", assistant.code());
+      assertEquals(Json.object("host", "169.254.169.254"), assistant.params());
+      MailError mail =
+          assertThrows(
+              MailError.class,
+              () ->
+                  Transports.send(
+                      Json.object(
+                          "service", "webhook", "url", "http://localhost:" + port + "/metadata"),
+                      Json.object(
+                          "to",
+                          "me@example.com",
+                          "from",
+                          "reports@example.com",
+                          "subject",
+                          "Hi",
+                          "html",
+                          "<p>Hi</p>",
+                          "text",
+                          "Hi"),
+                      null));
+      assertEquals("address_refused", mail.code());
+      assertEquals(
+          "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to",
+          mail.getMessage());
+    } finally {
+      server.stop(0);
+    }
   }
 }

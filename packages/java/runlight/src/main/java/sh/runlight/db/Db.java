@@ -39,7 +39,8 @@ public interface Db extends AutoCloseable {
 
   /**
    * Runs {@code fn} while holding a database-wide lock, so two processes starting at once do not
-   * race to create the same tables.
+   * race to create the same tables. Waits for the lock at most {@link JdbcDb#LOCK_WAIT_MS}, then
+   * throws a {@link TablesBusyError}. SQLite's file lock already serialises its writers.
    */
   <T> T exclusive(Function<Db, T> fn);
 

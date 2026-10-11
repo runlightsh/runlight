@@ -47,6 +47,27 @@ public final class JdbcDb implements Db {
   /** Arbitrary but fixed, so every Runlight process takes the same lock to create tables. */
   public static final long MIGRATION_LOCK = 7_331_906;
 
+  /**
+   * The longest a process waits for another one creating or upgrading the tables before it gives
+   * up.
+   */
+  public static final long LOCK_WAIT_MS = 30_000;
+
+  private static volatile long lockWait = LOCK_WAIT_MS;
+
+  /**
+   * How long the stores wait for the lock for creating tables: LOCK_WAIT_MS, unless a test has set
+   * another.
+   */
+  public static long lockWaitMs() {
+    return lockWait;
+  }
+
+  /** For tests: the stores wait this long for the lock instead, or LOCK_WAIT_MS again with null. */
+  public static void lockWaitInTests(Long ms) {
+    lockWait = ms == null ? LOCK_WAIT_MS : ms;
+  }
+
   /** One lock per MySQL database, so installs sharing a server do not wait on each other. */
   private static final String MYSQL_LOCK =
       "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))";
@@ -511,6 +532,9 @@ public final class JdbcDb implements Db {
     if (dialect.equals("postgres")) {
       // Asked for again and again rather than waited on: a waiting statement would hold up an index
       // being built CONCURRENTLY by whoever has the lock, and the two would wait on each other.
+      // Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+      long wait = lockWaitMs();
+      long until = System.currentTimeMillis() + wait;
       while (true) {
         try (PreparedStatement statement =
             connection.prepareStatement("SELECT pg_try_advisory_lock(?) AS ok")) {
@@ -520,6 +544,9 @@ public final class JdbcDb implements Db {
               break;
             }
           }
+        }
+        if (System.currentTimeMillis() >= until) {
+          throw new TablesBusyError(wait);
         }
         sleep(100);
       }
@@ -535,10 +562,15 @@ public final class JdbcDb implements Db {
         }
       }
     }
+    // Up to LOCK_WAIT_MS, so a request does not wait on a long index build for good.
+    long wait = lockWaitMs();
+    long until = System.currentTimeMillis() + wait;
     while (true) {
+      long left =
+          Math.max(1, Math.min(5, (long) Math.ceil((until - System.currentTimeMillis()) / 1000.0)));
       try (Statement statement = connection.createStatement();
           ResultSet result =
-              statement.executeQuery("SELECT GET_LOCK(" + MYSQL_LOCK + ", 5) AS ok")) {
+              statement.executeQuery("SELECT GET_LOCK(" + MYSQL_LOCK + ", " + left + ") AS ok")) {
         Object ok = result.next() ? result.getObject(1) : null;
         if (ok == null) {
           throw new DbException("Runlight: MySQL refused the lock for creating tables");
@@ -547,7 +579,10 @@ public final class JdbcDb implements Db {
           break;
         }
       }
-      // Not got within 5 seconds: another process is creating the tables. Ask again.
+      // Not got in time: another process is creating the tables. Ask again, until the wait is up.
+      if (System.currentTimeMillis() >= until) {
+        throw new TablesBusyError(wait);
+      }
     }
     try {
       // An index on a big table takes a while to build, so the build may run past the statement

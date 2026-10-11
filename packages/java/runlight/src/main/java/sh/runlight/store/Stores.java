@@ -8,14 +8,21 @@ import sh.runlight.db.JdbcDb;
 /**
  * The stores stores/sqlite.ts, stores/postgres.ts, and stores/mysql.ts make, over JDBC. Tables are
  * prefixed {@code rl_}, so the database can be the app's own, and a database made by the TypeScript
- * SDK opens here.
+ * SDK opens here. Each one also takes a {@code prefix} to use in place of {@code rl_}: what every
+ * table and index name starts with, so two apps sharing one database each keep a set of their own,
+ * up to 32 letters, digits, and underscores, not starting with a digit.
  */
 public final class Stores {
   private Stores() {}
 
   /** Runlight's tables in a SQLite file (or ":memory:"), in WAL mode. Needs sqlite-jdbc. */
   public static SqlStore sqlite(String path) {
-    return new SqlStore(Connect.sqlite(path));
+    return sqlite(path, SqlStore.PREFIX);
+  }
+
+  /** As {@link #sqlite(String)}, with its tables under {@code prefix} in place of {@code rl_}. */
+  public static SqlStore sqlite(String path, String prefix) {
+    return new SqlStore(Connect.sqlite(path), prefix);
   }
 
   /**
@@ -41,10 +48,19 @@ public final class Stores {
    * statement past that waits up to ten seconds for one. Default 10.
    */
   public static SqlStore postgres(String url, long statementTimeout, String schema, int max) {
+    return postgres(url, statementTimeout, schema, max, SqlStore.PREFIX);
+  }
+
+  /**
+   * As {@link #postgres(String, long, String, int)}, with its tables under {@code prefix} in place
+   * of {@code rl_}.
+   */
+  public static SqlStore postgres(
+      String url, long statementTimeout, String schema, int max, String prefix) {
     if (url == null || url.isEmpty()) {
       throw new IllegalArgumentException("Runlight: postgres() needs a url or a pool");
     }
-    return new SqlStore(Connect.postgres(url, statementTimeout, schema, max));
+    return new SqlStore(Connect.postgres(url, statementTimeout, schema, max), prefix);
   }
 
   /**
@@ -66,10 +82,18 @@ public final class Stores {
    * that waits up to ten seconds for one. Default 10.
    */
   public static SqlStore mysql(String url, long statementTimeout, int max) {
+    return mysql(url, statementTimeout, max, SqlStore.PREFIX);
+  }
+
+  /**
+   * As {@link #mysql(String, long, int)}, with its tables under {@code prefix} in place of {@code
+   * rl_}.
+   */
+  public static SqlStore mysql(String url, long statementTimeout, int max, String prefix) {
     if (url == null || url.isEmpty()) {
       throw new IllegalArgumentException("Runlight: mysql() needs a url or a pool");
     }
-    return new SqlStore(Connect.mysql(url, statementTimeout, max));
+    return new SqlStore(Connect.mysql(url, statementTimeout, max), prefix);
   }
 
   /**
@@ -83,7 +107,16 @@ public final class Stores {
 
   /** As {@link #dataSource(DataSource)}, the dialect ("sqlite", "postgres", "mysql") named. */
   public static SqlStore dataSource(DataSource dataSource, String dialect) {
-    return new SqlStore(JdbcDb.of(dataSource, dialect));
+    return dataSource(dataSource, dialect, SqlStore.PREFIX);
+  }
+
+  /**
+   * As {@link #dataSource(DataSource, String)}, with its tables under {@code prefix} in place of
+   * {@code rl_}, such as {@code wp_rl_}. A null dialect is read from the DataSource's driver.
+   */
+  public static SqlStore dataSource(DataSource dataSource, String dialect, String prefix) {
+    return new SqlStore(
+        JdbcDb.of(dataSource, dialect != null ? dialect : JdbcDb.dialectOf(dataSource)), prefix);
   }
 
   /**
@@ -92,11 +125,24 @@ public final class Stores {
    * a path for SQLite.
    */
   public static SqlStore url(String databaseUrl) {
-    return new SqlStore(Connect.url(databaseUrl));
+    return url(databaseUrl, SqlStore.PREFIX);
+  }
+
+  /** As {@link #url(String)}, with its tables under {@code prefix} in place of {@code rl_}. */
+  public static SqlStore url(String databaseUrl, String prefix) {
+    return new SqlStore(Connect.url(databaseUrl), prefix);
   }
 
   /** A store over any Db. */
   public static SqlStore fromDb(Db db) {
     return new SqlStore(db);
+  }
+
+  /**
+   * A store over any Db, with its tables under {@code prefix} in place of {@code rl_}. A Db that is
+   * already prefixed keeps its own.
+   */
+  public static SqlStore fromDb(Db db, String prefix) {
+    return new SqlStore(db, prefix);
   }
 }

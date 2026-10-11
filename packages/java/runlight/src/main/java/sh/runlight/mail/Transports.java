@@ -10,6 +10,8 @@ import java.util.regex.Pattern;
 import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
+import sh.runlight.MetadataAddressError;
+import sh.runlight.Safefetch;
 import sh.runlight.http.FetchError;
 import sh.runlight.http.FetchInit;
 import sh.runlight.http.Fetcher;
@@ -159,14 +161,18 @@ public final class Transports {
       Fetcher fetcher, String url, Map<String, String> headers, String body, boolean explains) {
     Response response;
     try {
+      // A webhook can be at any address, so it and each redirect are checked, as for every service.
       response =
-          fetcher.fetch(
+          Safefetch.serviceFetch(
               url,
               new FetchInit()
                   .method("POST")
                   .headers(Headers.of(headers))
                   .body(body)
-                  .timeoutMs(20_000));
+                  .timeoutMs(20_000),
+              fetcher);
+    } catch (MetadataAddressError error) {
+      throw new MailError(error.getMessage(), "address_refused", Json.object("host", error.host()));
     } catch (FetchError error) {
       String host = new Url(url).host();
       throw new MailError(

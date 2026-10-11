@@ -14,6 +14,8 @@ import sh.runlight.db.Db;
  * connection string (each test gets a schema of its own); MySQL 8.4 and MariaDB 11.4 when
  * RUNLIGHT_TEST_MYSQL is set. RUNLIGHT_TEST_MYSQL may hold the URLs, separated by spaces or commas;
  * any other value means the two local test servers. Each MySQL test gets a database of its own.
+ * SQLite, Postgres, and the first MySQL server each run once more with the tables under another
+ * prefix, as kinds ending in "+prefix".
  */
 public final class Databases {
   private Databases() {}
@@ -23,10 +25,31 @@ public final class Databases {
           "mysql", "mysql://root:runlight@127.0.0.1:33084/runlight_test_java",
           "mariadb", "mysql://root:runlight@127.0.0.1:33114/runlight_test_java");
 
+  /** The table prefix the "+prefix" kinds use in place of rl_, as WordPress would give one. */
+  public static final String TEST_PREFIX = "wp_rl_";
+
+  private static final String PLUS_PREFIX = "+prefix";
+
   private static final List<Runnable> CLEANUPS = new ArrayList<>();
 
-  /** Every kind of database at hand: sqlite, then postgres and the MySQL servers when set. */
+  /**
+   * Every kind of database at hand: sqlite, then postgres and the MySQL servers when set, then
+   * sqlite, postgres, and the first MySQL server again with their tables under TEST_PREFIX.
+   */
   public static List<String> kinds() {
+    List<String> kinds = plainKinds();
+    List<String> prefixed = new ArrayList<>();
+    for (String kind : kinds) {
+      if (kind.equals("sqlite") || kind.equals("postgres") || kind.equals("mysql")) {
+        prefixed.add(kind + PLUS_PREFIX);
+      }
+    }
+    kinds.addAll(prefixed);
+    return kinds;
+  }
+
+  /** Every kind of database at hand, each with its tables under rl_. */
+  public static List<String> plainKinds() {
     List<String> kinds = new ArrayList<>();
     kinds.add("sqlite");
     if (pgUrl() != null) {
@@ -36,11 +59,23 @@ public final class Databases {
     return kinds;
   }
 
-  /** The kinds other than SQLite. */
+  /** The kinds other than SQLite, each with its tables under rl_. */
   public static List<String> servers() {
-    List<String> kinds = kinds();
+    List<String> kinds = plainKinds();
     kinds.remove("sqlite");
     return kinds;
+  }
+
+  /** The kind of database without "+prefix". */
+  public static String base(String kind) {
+    return kind.endsWith(PLUS_PREFIX)
+        ? kind.substring(0, kind.length() - PLUS_PREFIX.length())
+        : kind;
+  }
+
+  /** The table prefix a kind's stores use. */
+  public static String prefix(String kind) {
+    return kind.endsWith(PLUS_PREFIX) ? TEST_PREFIX : SqlStore.PREFIX;
   }
 
   public static String pgUrl() {
@@ -77,16 +112,18 @@ public final class Databases {
 
   /** A fresh, empty store of a kind, dropped by cleanup(). */
   public static SqlStore fresh(String kind) {
+    String prefix = prefix(kind);
+    kind = base(kind);
     if (kind.equals("sqlite")) {
-      return Stores.sqlite(":memory:");
+      return Stores.sqlite(":memory:", prefix);
     }
     if (kind.equals("postgres")) {
       String name = pgSchema();
-      SqlStore store = Stores.postgres(pgUrl(), 120_000, name);
+      SqlStore store = Stores.postgres(pgUrl(), 120_000, name, 10, prefix);
       CLEANUPS.add(store::close);
       return store;
     }
-    SqlStore store = Stores.mysql(mysqlDatabase(mysqlUrls().get(kind)));
+    SqlStore store = Stores.mysql(mysqlDatabase(mysqlUrls().get(kind)), 120_000, 10, prefix);
     CLEANUPS.add(store::close);
     return store;
   }

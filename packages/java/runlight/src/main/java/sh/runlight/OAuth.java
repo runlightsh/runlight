@@ -473,12 +473,23 @@ public final class OAuth {
     // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a
     // new one for it.
     String host = siteHost(redirect);
-    List<Map<String, Object>> counting = new ArrayList<>();
+    // As the tracker counts: a site that lists the domain, or the only site here when it lists
+    // none, which counts any.
+    List<Map<String, Object>> local = new ArrayList<>();
     for (Map<String, Object> s : runlight.sites()) {
-      if (runlight.remote(Js.string(s.get("id"))) == null
-          && s.get("hostnames") instanceof List<?> hostnames
-          && hostnames.contains(host)) {
-        counting.add(s);
+      if (runlight.remote(Js.string(s.get("id"))) == null) {
+        local.add(s);
+      }
+    }
+    List<Map<String, Object>> counting = new ArrayList<>();
+    if (local.size() == 1
+        && !(local.get(0).get("hostnames") instanceof List<?> listed && !listed.isEmpty())) {
+      counting.add(local.get(0));
+    } else {
+      for (Map<String, Object> s : local) {
+        if (s.get("hostnames") instanceof List<?> hostnames && hostnames.contains(host)) {
+          counting.add(s);
+        }
       }
     }
 

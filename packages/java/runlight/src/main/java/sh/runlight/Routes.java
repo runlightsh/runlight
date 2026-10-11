@@ -24,6 +24,7 @@ import sh.runlight.CodedError.LinkError;
 import sh.runlight.CodedError.SettingsError;
 import sh.runlight.accounts.AccountError;
 import sh.runlight.accounts.Web;
+import sh.runlight.db.TablesBusyError;
 import sh.runlight.http.FetchError;
 import sh.runlight.http.Headers;
 import sh.runlight.http.Request;
@@ -279,7 +280,9 @@ public final class Routes {
 
     /**
      * The CMS that adds the script to every page, such as "WordPress", when Runlight runs inside
-     * one. The dashboard then says so in place of the steps to add the script.
+     * one. The dashboard then says so in place of the steps to add the script, and pages of the
+     * same origin, the CMS's own admin, may show the whole dashboard in a frame. The WordPress,
+     * Drupal, and Craft plugins set it.
      */
     public Options cms(String value) {
       cms = value;
@@ -2103,7 +2106,7 @@ public final class Routes {
           out.put("fields", viaManage ? new LinkedHashMap<>() : fields);
           out.put("saved", viaManage ? new ArrayList<>() : saved);
           out.put("encrypted", rl.secret != null);
-          out.put("services", Transports.SERVICES);
+          out.put("services", rl.mailServices);
           // The app's own mailer, named only when there is one, so the answer without it stays as
           // it was.
           AppMailer app = rl.appMailer;
@@ -4092,6 +4095,15 @@ public final class Routes {
     path = path.isEmpty() ? "/" : path;
     try {
       return route(request, path, url, context);
+    } catch (TablesBusyError error) {
+      // Another process is building the tables, such as an index after an upgrade: worth asking
+      // again soon.
+      return coded(
+          "Runlight is creating or upgrading its tables. Try again in a minute.",
+          "tables_busy",
+          503,
+          null,
+          Map.of("retry-after", "30"));
     } catch (RuntimeException error) {
       logError(error);
       return coded("Internal error", "internal", 500);
