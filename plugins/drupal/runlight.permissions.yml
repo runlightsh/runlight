@@ -1,4 +1,7 @@
 administer runlight:
   title: 'Administer Runlight'
-  description: 'Change where the site sends its visits, and see its dashboard.'
+  description: 'Choose where Runlight runs and what it counts, and own Runlight in this site: its settings, keys, sites, people, and data.'
   restrict access: true
+view runlight:
+  title: 'View Runlight'
+  description: 'See the numbers in Runlight’s dashboard, without changing anything.'

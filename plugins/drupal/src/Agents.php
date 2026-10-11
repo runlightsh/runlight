@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace Drupal\runlight;
 
 /**
- * The AI agents Runlight records, matched on the user agent. Kept in step
- * with packages/sdk/src/data/agents.ts by a test in the SDK.
+ * The AI agents Runlight records, matched on the user agent.
+ *
+ * Kept in step with packages/sdk/src/data/agents.ts by a test in the SDK.
  */
 final class Agents {
 
-  /** Case-insensitive substrings of the user agent. */
+  /**
+   * Case-insensitive substrings of the user agent.
+   */
   public const TOKENS = [
     'chatgpt-user',
     'oai-searchbot',
@@ -35,7 +38,9 @@ final class Agents {
     'timpibot',
   ];
 
-  /** Whether a user agent is one of them. */
+  /**
+   * Whether a user agent is one of them.
+   */
   public static function isAgent(string $userAgent): bool {
     $lower = strtolower($userAgent);
     foreach (self::TOKENS as $token) {

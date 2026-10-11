@@ -1,27 +1,51 @@
 services:
-  # Ahead of the page cache (priority 200), so cached pages are seen too.
+  # Ahead of the page cache (priority 200), so cached pages are seen too. Its
+  # services are closures, made only for an AI agent's request, so a page the
+  # cache answers builds nothing of Runlight's.
   http_middleware.runlight:
     class: Drupal\runlight\StackMiddleware\AgentObserver
-    arguments: ['@config.factory', '@http_client', '@logger.channel.runlight', '@runlight.local']
+    arguments:
+      - !service_closure '@runlight.setup'
+      - !service_closure '@http_client'
+      - !service_closure '@logger.channel.runlight'
+      - !service_closure '@runlight.local'
+      - !service_closure '@cache.default'
     tags:
       - { name: http_middleware, priority: 250, responder: false }
   logger.channel.runlight:
     parent: logger.channel_base
     arguments: ['runlight']
+  runlight.setup:
+    class: Drupal\runlight\Setup
+    arguments: ['@config.factory', '@state', '@cache_tags.invalidator']
   runlight.connect:
     class: Drupal\runlight\Connect
-    arguments: ['@http_client', '@keyvalue.expirable', '@config.factory', '@current_user']
+    arguments: ['@http_client', '@keyvalue.expirable', '@runlight.setup', '@current_user']
   runlight.storage:
     class: Drupal\runlight\Storage
-    arguments: ['@state', '@database', '@file_system']
+    arguments: ['@state', '@database', '@file_system', '@config.factory', '@logger.channel.runlight']
   # Destructed once the answer is out, to finish what Runlight left for after it.
   runlight.local:
     class: Drupal\runlight\Local
-    arguments: ['@config.factory', '@state', '@runlight.storage', '@current_user', '@request_stack', '@http_client', '@logger.channel.runlight']
+    arguments:
+      - '@config.factory'
+      - '@state'
+      - '@runlight.setup'
+      - '@runlight.storage'
+      - '@current_user'
+      - '@request_stack'
+      - '@http_client'
+      - '@logger.channel.runlight'
+      - '@cache.default'
+      - '@datetime.time'
+      - '@plugin.manager.mail'
+      - '@language_manager'
     tags:
       - { name: needs_destruction }
-  # After the paths are decoded (1000), before aliases (100), so an alias never shadows it.
+  # After the paths are decoded (1000), before aliases (100), so an alias never
+  # shadows Runlight's paths while it runs here, and only then.
   runlight.path_processor:
     class: Drupal\runlight\PathProcessor\RunlightPaths
+    arguments: [!service_closure '@runlight.setup']
     tags:
       - { name: path_processor_inbound, priority: 200 }

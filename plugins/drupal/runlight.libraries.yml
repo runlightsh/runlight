@@ -1,8 +1,13 @@
 embed:
   js:
     js/embed.js: {}
+  dependencies:
+    - core/drupal
+    - core/once
 settings:
   js:
     js/settings.js: {}
   dependencies:
+    - core/drupal
     - core/drupalSettings
+    - core/once

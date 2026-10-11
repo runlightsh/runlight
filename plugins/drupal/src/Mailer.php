@@ -9,21 +9,35 @@ use Drupal\Core\Mail\MailManagerInterface;
 use Drupal\Core\Render\Markup;
 
 /**
- * Runlight's email through Drupal's own mailer, when the site has a real one
- * set up, such as the SMTP or Symfony Mailer modules. PHP's mail(), which
- * Drupal uses on its own, does not count, so without one the dashboard asks
- * for a mail service as before.
+ * Runlight's email through Drupal's own mailer.
+ *
+ * When the site has a real one set up, such as the SMTP or Symfony Mailer
+ * modules. PHP's mail(), which Drupal uses on its own, does not count, so
+ * without one the dashboard asks for a mail service as before.
  */
 final class Mailer {
 
-  /** Drupal's plain mail() sender, and its collector for tests, which do not count. */
+  /**
+   * Drupal's plain mail() sender, and its collector for tests.
+   *
+   * Neither counts as a mailer.
+   */
   private const PLAIN = ['php_mail', 'test_mail_collector'];
 
   /**
-   * The mailer to hand Runlight, or NULL when Drupal would send with PHP's
-   * mail() alone: from the site's email address, in the site's name.
+   * The mailer to hand Runlight.
+   *
+   * From the site's email address, in the site's name.
+   *
+   * @param \Drupal\Core\Config\ConfigFactoryInterface $config
+   *   The configuration.
+   * @param \Drupal\Core\Mail\MailManagerInterface $mail
+   *   Drupal's mail manager.
+   * @param string $langcode
+   *   The language the emails are built in.
    *
    * @return array{send: callable, from: string, fromName: string, via: string}|null
+   *   The mailer, or NULL when Drupal would send with PHP's mail() alone.
    */
   public static function option(ConfigFactoryInterface $config, MailManagerInterface $mail, string $langcode): ?array {
     $via = self::via($config, $mail);
@@ -40,18 +54,31 @@ final class Mailer {
     ];
   }
 
-  /** What the dashboard calls the mailer, or NULL when there is none but mail(). */
+  /**
+   * What the dashboard calls the mailer.
+   *
+   * @param \Drupal\Core\Config\ConfigFactoryInterface $config
+   *   The configuration.
+   * @param \Drupal\Core\Mail\MailManagerInterface $mail
+   *   Drupal's mail manager.
+   *
+   * @return string|null
+   *   Its name, or NULL when there is none but mail().
+   */
   private static function via(ConfigFactoryInterface $config, MailManagerInterface $mail): ?string {
     $interface = (array) $config->get('system.mail')->get('interface');
-    // The Mail System module, when it is installed, picks the sender in its own settings.
+    // The Mail System module, when it is installed, picks the sender in its
+    // own settings.
     $mailsystem = $config->get('mailsystem.settings');
-    $id = (string) ($mailsystem->get('modules.runlight.none.sender') ?: ($mailsystem->get('defaults.sender') ?: ($interface['runlight'] ?? $interface['default'] ?? 'php_mail')));
+    $core = $interface['runlight'] ?? $interface['default'] ?? 'php_mail';
+    $id = (string) ($mailsystem->get('modules.runlight.none.sender') ?: ($mailsystem->get('defaults.sender') ?: $core));
     // A sender whose module is gone sends nothing.
     if (in_array($id, self::PLAIN, TRUE) || !$mail->hasDefinition($id)) {
       return NULL;
     }
     $definition = (array) $mail->getDefinition($id);
-    // Core's own Symfony mailer sends with the server's sendmail unless it is given another transport, named by its scheme.
+    // Core's own Symfony mailer sends with the server's sendmail unless it is
+    // given another transport, named by its scheme.
     if (($definition['provider'] ?? '') === 'core') {
       $scheme = (string) ($config->get('system.mail')->get('mailer_dsn.scheme') ?? 'sendmail');
       return in_array($scheme, ['sendmail', 'native', 'null'], TRUE) ? NULL : 'Drupal (' . strtoupper($scheme) . ')';
@@ -61,10 +88,16 @@ final class Mailer {
   }
 
   /**
-   * Sends one of Runlight's emails through Drupal's mail manager, which
-   * builds it with runlight_mail().
+   * Sends one of Runlight's emails through Drupal's mail manager.
    *
+   * Which builds it with runlight_mail().
+   *
+   * @param \Drupal\Core\Mail\MailManagerInterface $mail
+   *   Drupal's mail manager.
+   * @param string $langcode
+   *   The language it is built in.
    * @param array{to: string, from: string, fromName?: string, subject: string, html: string, text: string, headers?: array<string, string>} $message
+   *   The email, as Runlight makes it.
    *
    * @throws \RuntimeException
    *   When Drupal could not send it.
@@ -77,8 +110,17 @@ final class Mailer {
   }
 
   /**
-   * Builds the email for hook_mail(): the HTML, with the text beside it for
-   * mailers that send both, and Runlight's headers, such as List-Unsubscribe.
+   * Builds the email for hook_mail().
+   *
+   * The HTML, with the text beside it for mailers that send both, and
+   * Runlight's headers, such as List-Unsubscribe.
+   *
+   * @param string $key
+   *   Which email.
+   * @param array<string, mixed> $message
+   *   The email Drupal builds.
+   * @param array<string, mixed> $params
+   *   The email as Runlight made it.
    */
   public static function build(string $key, array &$message, array $params): void {
     if ($key !== 'message') {
@@ -88,7 +130,8 @@ final class Mailer {
     $message['subject'] = $clean((string) $params['subject']);
     $message['body'] = [Markup::create((string) $params['html'])];
     $message['headers']['Content-Type'] = 'text/html; charset=UTF-8';
-    // The text part, where the SMTP, Swift Mailer, and Symfony Mailer Lite modules look for it.
+    // The text part, where the SMTP, Swift Mailer, and Symfony Mailer Lite
+    // modules look for it.
     $message['plain'] = (string) $params['text'];
     $message['params']['plain'] = (string) $params['text'];
     $message['params']['plaintext'] = (string) $params['text'];

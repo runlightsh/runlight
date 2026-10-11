@@ -2,14 +2,36 @@
 
 /**
  * @file
- * Adds the Runlight script to every page, and runs Runlight's upkeep when it
- * runs in this Drupal.
+ * Adds the Runlight script to every page, and runs Runlight's upkeep.
+ *
+ * The upkeep runs while Runlight runs in this Drupal.
  */
 
 declare(strict_types=1);
 
-use Drupal\runlight\Local;
+use Drupal\Core\Routing\RouteMatchInterface;
+use Drupal\Core\Url;
 use Drupal\runlight\Mailer;
+use Drupal\runlight\Setup;
+
+/**
+ * Implements hook_help().
+ */
+function runlight_help(string $route_name, RouteMatchInterface $route_match): string {
+  if ($route_name !== 'help.page.runlight') {
+    return '';
+  }
+  $output = '<h2>' . t('About') . '</h2>';
+  $output .= '<p>' . t('Runlight counts visitors without cookies and keeps the numbers in your own database. It runs inside this site, with its dashboard under Reports, or sends to a Runlight you run elsewhere. It also records AI agents such as ChatGPT and Claude that read your pages. See <a href=":docs">the Runlight docs</a>.', [':docs' => 'https://runlight.sh/docs/drupal/']) . '</p>';
+  $output .= '<h2>' . t('Uses') . '</h2>';
+  $output .= '<dl>';
+  $output .= '<dt>' . t('Choosing where Runlight runs') . '</dt>';
+  $output .= '<dd>' . t('Choose on the <a href=":url">Runlight settings page</a>. Nothing is counted until you do.', [':url' => Url::fromRoute('runlight.settings')->toString()]) . '</dd>';
+  $output .= '<dt>' . t('Seeing the numbers') . '</dt>';
+  $output .= '<dd>' . t('Reports, Runlight shows the dashboard to people with the Administer Runlight or View Runlight permission. Only Administer Runlight can change anything there.') . '</dd>';
+  $output .= '</dl>';
+  return $output;
+}
 
 /**
  * Implements hook_page_attachments().
@@ -19,12 +41,15 @@ use Drupal\runlight\Mailer;
  */
 function runlight_page_attachments(array &$attachments): void {
   $config = \Drupal::config('runlight.settings');
-  $attachments['#cache']['tags'][] = 'config:runlight.settings';
+  // Setup::TAG is cleared whenever where Runlight runs changes.
+  $attachments['#cache']['tags'][] = Setup::TAG;
   $attachments['#cache']['contexts'][] = 'user.permissions';
-  $mode = Local::mode($config->get('mode'), $config->get('address'));
+  /** @var \Drupal\runlight\Setup $setup */
+  $setup = \Drupal::service('runlight.setup');
+  $mode = $setup->mode();
   // Runlight here takes the script from its own path, which needs no address.
   $local = $mode === 'local' && \Drupal::service('runlight.local')->active();
-  $address = $local ? \Drupal::service('runlight.local')->base() : ($mode === 'remote' ? (string) $config->get('address') : '');
+  $address = $local ? \Drupal::service('runlight.local')->base() : ($mode === 'remote' ? $setup->get('address') : '');
   if ($address === '' || \Drupal::service('router.admin_context')->isAdminRoute()) {
     return;
   }
@@ -32,8 +57,8 @@ function runlight_page_attachments(array &$attachments): void {
     return;
   }
   $attributes = ['defer' => TRUE, 'src' => $address . '/s.js'];
-  if (!$local && (string) $config->get('site') !== '') {
-    $attributes['data-site'] = (string) $config->get('site');
+  if (!$local && $setup->get('site') !== '') {
+    $attributes['data-site'] = $setup->get('site');
   }
   if (!$config->get('outbound')) {
     $attributes['data-outbound'] = 'false';
@@ -67,8 +92,8 @@ function runlight_cron(): void {
 /**
  * Implements hook_mail().
  *
- * Runlight's email, when it goes through Drupal's mailer: reports, test
- * emails, and invites, in HTML with the text beside it.
+ * Runlight's email, when it goes through Drupal's mailer: reports and test
+ * emails, in HTML with the text beside it.
  */
 function runlight_mail(string $key, array &$message, array $params): void {
   Mailer::build($key, $message, $params);
