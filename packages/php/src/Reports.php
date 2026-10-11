@@ -169,22 +169,22 @@ final class Reports
             $label = self::esc($t("metric.{$m['key']}"));
             $value = self::esc(($m['format'])($now[$m['key']]));
             $text = self::esc($d['text']);
-            return <<<HTML
+            return strtr(<<<'HTML'
 <td width="33%" class="rl-line" style="padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top">
-<div class="rl-muted" style="font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280">{$label}</div>
-<div class="rl-ink" style="font-size:24px;font-weight:600;color:#111827;margin-top:4px">{$value}</div>
-<div class="rl-{$d['tone']}" style="font-size:12px;color:{$d['color']};margin-top:2px;min-height:16px">{$text}</div></td>
-HTML;
+<div class="rl-muted" style="font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280">{label}</div>
+<div class="rl-ink" style="font-size:24px;font-weight:600;color:#111827;margin-top:4px">{value}</div>
+<div class="rl-{tone}" style="font-size:12px;color:{color};margin-top:2px;min-height:16px">{text}</div></td>
+HTML, ['{label}' => $label, '{value}' => $value, '{tone}' => $d['tone'], '{color}' => $d['color'], '{text}' => $text]);
         };
         $table = static function (array $l) use ($t): string {
             $title = self::esc($l['title']);
             $rows = $l['rows']
                 ? implode('', array_map(static fn (array $r): string => '<tr><td class="rl-row rl-body-text" style="padding:7px 0;border-top:1px solid #f0f0f0;color:#374151;word-break:break-all">' . self::esc($r[0]) . '</td><td align="right" class="rl-row rl-ink" style="padding:7px 0 7px 12px;border-top:1px solid #f0f0f0;color:#111827;font-weight:600;white-space:nowrap">' . self::esc($r[1]) . '</td></tr>', $l['rows']))
                 : '<tr><td class="rl-muted" style="padding:7px 0;color:#6b7280">' . self::esc($t('panel.empty')) . '</td></tr>';
-            return <<<HTML
-<h3 class="rl-ink" style="font-size:14px;color:#111827;margin:28px 0 8px">{$title}</h3>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px">{$rows}</table>
-HTML;
+            return strtr(<<<'HTML'
+<h3 class="rl-ink" style="font-size:14px;color:#111827;margin:28px 0 8px">{title}</h3>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px">{rows}</table>
+HTML, ['{title}' => $title, '{rows}' => $rows]);
         };
 
         // Where the dashboard lives, without the scheme or the site query, so a reader
@@ -193,11 +193,11 @@ HTML;
         $where = $u !== null ? $u->host() . preg_replace('#/$#D', '', $u->pathname) : $links['dashboard'];
         $at = $t('email.at', ['where' => $where]);
         // The Runlight mark in table cells: mail apps block SVG and most inline images.
-        $mark = <<<HTML
+        $mark = strtr(<<<'HTML'
 <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>
-<td class="rl-mark" width="24" height="24" align="center" style="width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:{$font}">R</td>
-<td class="rl-ink" style="padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:{$font}">Runlight</td></tr></table>
-HTML;
+<td class="rl-mark" width="24" height="24" align="center" style="width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:{font}">R</td>
+<td class="rl-ink" style="padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:{font}">Runlight</td></tr></table>
+HTML, ['{font}' => $font]);
 
         $footer = $t('email.footer', ['frequency' => $t($monthly ? 'email.monthly' : 'email.weekly'), 'site' => $site['name']]);
         $atLine = self::esc($t('email.at', ['where' => "\0"]));
@@ -209,8 +209,8 @@ HTML;
         $cells1 = implode('', array_map($cell, array_slice($metrics, 0, 3)));
         $cells2 = implode('', array_map($cell, array_slice($metrics, 3)));
         $tables = implode('', array_map($table, $lists));
-        $html = <<<HTML
-<!doctype html><html lang="{$code}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>{$e($subject)}</title>
+        $html = strtr(<<<'HTML'
+<!doctype html><html lang="{code}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>{subject}</title>
 <style>
 @media (prefers-color-scheme: dark) {
   .rl-page { background: #09090b !important; }
@@ -227,24 +227,41 @@ HTML;
   .rl-foot, .rl-foot a { color: #a1a1aa !important; }
 }
 </style></head>
-<body class="rl-page" style="margin:0;padding:0;background:#f4f4f5;font-family:{$font}">
-<div style="display:none;max-height:0;overflow:hidden">{$e($headline)}</div>
+<body class="rl-page" style="margin:0;padding:0;background:#f4f4f5;font-family:{font}">
+<div style="display:none;max-height:0;overflow:hidden">{headline}</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="rl-page" style="background:#f4f4f5"><tr><td align="center" style="padding:32px 16px">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="rl-card" style="max-width:600px;background:#ffffff;border-radius:14px;border:1px solid #e5e7eb"><tr><td style="padding:32px">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 24px"><tr>
-<td style="vertical-align:middle">{$mark}</td>
-<td align="right" class="rl-muted" style="vertical-align:middle;font-size:12px;color:#6b7280">{$atLine}</td>
+<td style="vertical-align:middle">{mark}</td>
+<td align="right" class="rl-muted" style="vertical-align:middle;font-size:12px;color:#6b7280">{atLine}</td>
 </tr></table>
-<div class="rl-muted" style="font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280">{$e($site['name'])} · {$e($dates)}</div>
-<h1 class="rl-ink" style="font-size:24px;line-height:1.3;color:#111827;margin:10px 0 24px;font-weight:600">{$e($headline)}</h1>
+<div class="rl-muted" style="font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280">{site} · {dates}</div>
+<h1 class="rl-ink" style="font-size:24px;line-height:1.3;color:#111827;margin:10px 0 24px;font-weight:600">{headline}</h1>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="6" style="border-collapse:separate;margin:0 -6px">
-<tr>{$cells1}</tr><tr>{$cells2}</tr></table>
-{$tables}
-<p style="margin:32px 0 0"><a href="{$e($links['dashboard'])}" class="rl-button" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:11px 18px;border-radius:8px;font-size:14px;font-weight:600">{$e($t('email.open'))}</a></p>
+<tr>{cells1}</tr><tr>{cells2}</tr></table>
+{tables}
+<p style="margin:32px 0 0"><a href="{dashboard}" class="rl-button" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:11px 18px;border-radius:8px;font-size:14px;font-weight:600">{open}</a></p>
 </td></tr></table>
-<p class="rl-foot" style="max-width:600px;font-size:12px;line-height:1.5;color:#6b7280;margin:16px auto 0">{$e($footer)} <a href="{$e($links['unsubscribe'])}" style="color:#6b7280">{$e($t('email.unsubscribe'))}</a></p>
+<p class="rl-foot" style="max-width:600px;font-size:12px;line-height:1.5;color:#6b7280;margin:16px auto 0">{footer} <a href="{unsubscribe}" style="color:#6b7280">{unsubscribeText}</a></p>
 </td></tr></table></body></html>
-HTML;
+HTML, [
+            '{code}' => $code,
+            '{subject}' => $e($subject),
+            '{font}' => $font,
+            '{headline}' => $e($headline),
+            '{mark}' => $mark,
+            '{atLine}' => $atLine,
+            '{site}' => $e($site['name']),
+            '{dates}' => $e($dates),
+            '{cells1}' => $cells1,
+            '{cells2}' => $cells2,
+            '{tables}' => $tables,
+            '{dashboard}' => $e($links['dashboard']),
+            '{open}' => $e($t('email.open')),
+            '{footer}' => $e($footer),
+            '{unsubscribe}' => $e($links['unsubscribe']),
+            '{unsubscribeText}' => $e($t('email.unsubscribe')),
+        ]);
 
         // French sets a space before a colon, as its subject line does.
         $colon = $code === 'fr' ? "\u{a0}:" : ':';

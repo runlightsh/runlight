@@ -11,8 +11,9 @@ namespace Runlight;
  * record for an address, maps as arrays with string keys, or null when the
  * address is not in the database.
  *
- * A database opened from a file is read a page at a time as lookups need it,
- * so a 130 MB city database costs each request a few hundred kilobytes of reads.
+ * A database opened from a file is read a page at a time as lookups need it
+ * (see MmdbFile), so a 130 MB city database costs each request a few hundred
+ * kilobytes of reads.
  *
  * Format: https://maxmind.github.io/MaxMind-DB/
  */
@@ -21,9 +22,6 @@ final class Mmdb
     private const METADATA_MARKER = "\xAB\xCD\xEFMaxMind.com";
     /** The metadata sits in the file's last 128 KiB. */
     private const METADATA_MAX = 131072;
-    private const PAGE = 4096;
-    /** Pages kept from a file at once; a lookup reads a few dozen. */
-    private const PAGES_KEPT = 256;
 
     /** @var array<string, mixed> */
     public readonly array $metadata;
@@ -34,16 +32,17 @@ final class Mmdb
     private ?int $ipv4Start = null;
 
     private readonly int $size;
-    /** @var array<int, string> pages read from the file, by number */
-    private array $pages = [];
+    /** The file read a page at a time, or null when the whole database is in `$bytes`. */
+    private readonly ?MmdbFile $file;
 
     /**
      * @param string $bytes the whole database, or '' with `$handle`
-     * @param resource|null $handle an open file to read pages from instead
+     * @param resource|MmdbFile|null $handle an open file to read pages from instead
      */
-    public function __construct(private readonly string $bytes, private readonly mixed $handle = null)
+    public function __construct(private readonly string $bytes, mixed $handle = null)
     {
-        $this->size = $handle === null ? strlen($bytes) : (int) fstat($handle)['size'];
+        $this->file = $handle === null || $handle instanceof MmdbFile ? $handle : new MmdbFile($handle);
+        $this->size = $this->file === null ? strlen($bytes) : $this->file->size;
         $tailStart = max(0, $this->size - self::METADATA_MAX);
         $at = strrpos($this->read($tailStart, $this->size - $tailStart), self::METADATA_MARKER);
         if ($at === false) {
@@ -67,44 +66,18 @@ final class Mmdb
     /** A database read from its file as lookups need it. */
     public static function open(string $file): self
     {
-        $handle = is_file($file) ? @fopen($file, 'rb') : false;
-        if ($handle === false) {
-            throw new \RuntimeException("Could not read $file");
-        }
-        return new self('', $handle);
+        return new self('', MmdbFile::open($file));
     }
 
     /** `$length` bytes from `$at`, fewer at the end of the database. */
     private function read(int $at, int $length): string
     {
-        if ($this->handle === null) {
-            return substr($this->bytes, $at, $length);
-        }
-        $out = '';
-        $end = min($at + $length, $this->size);
-        while ($at < $end) {
-            $number = intdiv($at, self::PAGE);
-            if (!isset($this->pages[$number])) {
-                if (count($this->pages) >= self::PAGES_KEPT) {
-                    $this->pages = [];
-                }
-                fseek($this->handle, $number * self::PAGE);
-                $this->pages[$number] = (string) fread($this->handle, self::PAGE);
-            }
-            $offset = $at - $number * self::PAGE;
-            $piece = substr($this->pages[$number], $offset, $end - $at);
-            if ($piece === '') {
-                break;
-            }
-            $out .= $piece;
-            $at += strlen($piece);
-        }
-        return $out;
+        return $this->file === null ? substr($this->bytes, $at, $length) : $this->file->read($at, $length);
     }
 
     private function byte(int $at): int
     {
-        $byte = $this->handle === null ? ($this->bytes[$at] ?? '') : $this->read($at, 1);
+        $byte = $this->file === null ? ($this->bytes[$at] ?? '') : $this->file->read($at, 1);
         if ($byte === '') {
             throw new \RuntimeException('Invalid MaxMind DB: read past the end');
         }

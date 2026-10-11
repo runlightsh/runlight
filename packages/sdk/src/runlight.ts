@@ -65,6 +65,13 @@ export interface RunlightOptions {
    */
   mail?: MailSettings | AppMailer;
   /**
+   * The ids of the mail services Settings offers and saves, such as every
+   * service but "smtp" in an app that cannot keep connections of its own
+   * open. Default every service. A service saved earlier that is not in the
+   * list counts as none, so the app's mailer, if there is one, sends instead.
+   */
+  mailServices?: string[];
+  /**
    * Encrypts the keys kept in the database: the mail service's, the AI
    * Assistant's, and the tokens for connected installs. Default the
    * RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
@@ -219,6 +226,8 @@ export class Runlight {
   private readonly mailInCode: MailSettings | undefined;
   /** The app's own mailer, used while no service is saved in the dashboard. */
   readonly appMailer: AppMailer | null;
+  /** The mail services Settings offers and saves: every one, unless `mailServices` names fewer. */
+  readonly mailServices: typeof SERVICES;
   /** Encrypts the keys kept in the database; null leaves them readable, and the dashboard says so. */
   readonly secret: string | null;
   /** Whether a connected install may be on this machine, at http://localhost or http://127.0.0.1. */
@@ -255,6 +264,11 @@ export class Runlight {
       this.appMailer = null;
       this.mailInCode = mail as MailSettings | undefined;
     }
+    const offered = options.mailServices;
+    for (const id of offered ?? []) {
+      if (!SERVICES.some((s) => s.id === id)) throw new Error(`Runlight: mailServices names "${id}", which is not a mail service`);
+    }
+    this.mailServices = offered ? SERVICES.filter((s) => offered.includes(s.id)) : SERVICES;
     this.localInstalls = options.localInstalls ?? false;
     this.secret = options.secret ?? envValue("RUNLIGHT_SECRET") ?? envValue("RUNLIGHT_TOKEN") ?? null;
   }
@@ -269,7 +283,9 @@ export class Runlight {
     await this.init();
     const sealed = await this.store.setting("mail");
     const opened = sealed ? await unseal(sealed, this.secret) : null;
-    if (opened) return { ...(JSON.parse(opened) as MailSettings), source: "dashboard" };
+    const saved = opened ? (JSON.parse(opened) as MailSettings) : null;
+    // A service no longer offered counts as none, so it is never sent through.
+    if (saved && (this.mailServices === SERVICES || this.mailServices.some((s) => s.id === saved.service))) return { ...saved, source: "dashboard" };
     const app = this.appMailer;
     if (!app) return null;
     return { service: "app", from: app.from, ...(app.fromName ? { fromName: app.fromName } : {}), via: app.via, source: "app" };
@@ -286,6 +302,7 @@ export class Runlight {
     const before = current?.source === "dashboard" ? current : null;
     const service = SERVICES.find((x) => x.id === input.service);
     if (!service) throw new MailError("Pick a mail service", "mail_service", {});
+    if (!this.mailServices.includes(service)) throw new MailError(`${service.name} is not offered here. Pick another mail service`, "mail_service", { service: service.id });
     const settings: Record<string, string> = { service: service.id };
     for (const f of service.fields) if (!f.secret) settings[f.name] = String(input[f.name] ?? "").trim();
     // A blank secret keeps the saved one only while the connection is the same,

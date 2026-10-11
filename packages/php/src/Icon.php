@@ -13,9 +13,9 @@ use Runlight\Http\Url;
  * links to, or /favicon.ico. Fetched from the site's own configured origin
  * (never from request input), cached for a day.
  *
- * PHP forgets everything between requests, so the cache lives in APCu when it
- * is loaded, else in one small file per origin in the system's temporary
- * folder, else only for this process. An icon is `['body' => bytes, 'type' => media type]`.
+ * PHP forgets everything between requests, so the cache lives in the app's
+ * Cache when it passes one, else in APCu when it is loaded, else in one small
+ * file per origin in the system's temporary folder, else only for this process. An icon is `['body' => bytes, 'type' => media type]`.
  */
 final class Icon
 {
@@ -120,18 +120,19 @@ final class Icon
      *
      * @param int|null $now milliseconds; the clock when null
      * @param string|null $dir where the file cache goes; the system's temporary folder when null
+     * @param Cache|null $cache the app's own place for shared values, used in place of APCu and files
      * @return array{body: string, type: string}|null
      */
-    public static function fetchIcon(string $origin, ?int $now = null, ?Fetcher $fetcher = null, ?string $dir = null): ?array
+    public static function fetchIcon(string $origin, ?int $now = null, ?Fetcher $fetcher = null, ?string $dir = null, ?Cache $cache = null): ?array
     {
         $now ??= (int) floor(microtime(true) * 1000);
-        $cached = self::cached($origin, $dir);
+        $cached = self::cached($origin, $dir, $cache);
         if ($cached !== null && $now - $cached['at'] < ($cached['icon'] !== null ? self::DAY : intdiv(self::DAY, 24))) {
             return $cached['icon'];
         }
         // TS shares one lookup among dashboards opening at once; a PHP request is alone, so it looks itself.
         $icon = self::lookUp($origin, $fetcher);
-        self::store($origin, ['at' => $now, 'icon' => $icon], $dir);
+        self::store($origin, ['at' => $now, 'icon' => $icon], $dir, $cache);
         return $icon;
     }
 
@@ -155,18 +156,23 @@ final class Icon
     }
 
     /** @return array{at: int, icon: array{body: string, type: string}|null}|null */
-    private static function cached(string $origin, ?string $dir): ?array
+    private static function cached(string $origin, ?string $dir, ?Cache $cache): ?array
     {
         if (isset(self::$cache[$origin])) {
             return self::$cache[$origin];
         }
         $key = 'runlight:icon:' . hash('sha256', $origin);
-        if (function_exists('apcu_enabled') && apcu_enabled()) {
+        if ($cache === null && function_exists('apcu_enabled') && apcu_enabled()) {
             $hit = apcu_fetch($key, $ok);
             return $ok && is_array($hit) ? $hit : null;
         }
-        $file = self::file($origin, $dir);
-        $text = $file !== null ? @file_get_contents($file) : false;
+        // The app's cache holds what a file would.
+        if ($cache !== null) {
+            $text = $cache->get($key);
+        } else {
+            $file = self::file($origin, $dir);
+            $text = $file !== null ? @file_get_contents($file) : false;
+        }
         $saved = is_string($text) ? json_decode($text, true) : null;
         if (!is_array($saved) || !isset($saved['at'])) {
             return null;
@@ -176,32 +182,30 @@ final class Icon
     }
 
     /** @param array{at: int, icon: array{body: string, type: string}|null} $entry */
-    private static function store(string $origin, array $entry, ?string $dir): void
+    private static function store(string $origin, array $entry, ?string $dir, ?Cache $cache): void
     {
         unset(self::$cache[$origin]);
         self::$cache[$origin] = $entry;
         if (count(self::$cache) > self::CACHE_SIZE) {
             unset(self::$cache[array_key_first(self::$cache)]);
         }
-        if (function_exists('apcu_enabled') && apcu_enabled()) {
+        if ($cache === null && function_exists('apcu_enabled') && apcu_enabled()) {
             apcu_store('runlight:icon:' . hash('sha256', $origin), $entry, intdiv(self::DAY, 1000));
+            return;
+        }
+        $saved = ['at' => $entry['at']] + ($entry['icon'] !== null ? ['type' => $entry['icon']['type'], 'body' => base64_encode($entry['icon']['body'])] : []);
+        if ($cache !== null) {
+            $cache->set('runlight:icon:' . hash('sha256', $origin), (string) json_encode($saved), intdiv(self::DAY, 1000));
             return;
         }
         $file = self::file($origin, $dir);
         if ($file === null) {
             return;
         }
-        $saved = ['at' => $entry['at']] + ($entry['icon'] !== null ? ['type' => $entry['icon']['type'], 'body' => base64_encode($entry['icon']['body'])] : []);
         @file_put_contents($file, (string) json_encode($saved), LOCK_EX);
         Scratch::protect($file);
         // Past the cap the oldest files go.
-        $files = glob(dirname($file) . '/*.json') ?: [];
-        if (count($files) > self::CACHE_SIZE) {
-            usort($files, static fn ($a, $b) => (@filemtime($a) ?: 0) <=> (@filemtime($b) ?: 0));
-            foreach (array_slice($files, 0, count($files) - self::CACHE_SIZE) as $old) {
-                @unlink($old);
-            }
-        }
+        Scratch::prune(dirname($file) . '/*.json', self::CACHE_SIZE);
     }
 
     private static function file(string $origin, ?string $dir): ?string

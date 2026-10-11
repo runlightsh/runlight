@@ -38,9 +38,20 @@ sort($files);
 
 // Runlight itself, from packages/php, for running it in this WordPress: its source and the built dashboard,
 // under lib/ as the package lays them out. The command line, the standalone server, and the framework bridges
-// are left out, since WordPress never runs them.
+// are left out, since WordPress never runs them, and so are its PDO connections: inside WordPress it reaches the
+// database through $wpdb, or a SQLite file through SQLite3 (includes/WpdbDb.php and includes/Sqlite3Db.php).
+// So is whatever the plugin always replaces with WordPress's own: curl (includes/Fetcher.php), the files shared
+// between requests (includes/Cache.php), the location data's files (includes/Locations.php), and the SMTP client,
+// which the plugin does not offer. Sign-in accounts are left out too, as WordPress's own users sign in.
 $library = dirname($root, 2) . '/packages/php';
-$leftOut = ['src/Server/Cli.php', 'src/Server/Config.php', 'src/Server/Standalone.php', 'src/Server/Agents.php', 'src/Server/SendError.php', 'src/Server/FrontController.php', 'src/Bridge/HttpFoundation.php', 'src/Bridge/ShortLinks.php'];
+$leftOut = [
+    'src/Db/PdoDb.php', 'src/Db/Connect.php', 'src/Store/Stores.php',
+    'src/Server/Cli.php', 'src/Server/Config.php', 'src/Server/Standalone.php', 'src/Server/Agents.php', 'src/Server/SendError.php', 'src/Server/FrontController.php',
+    'src/Bridge/HttpFoundation.php', 'src/Bridge/ShortLinks.php',
+    'src/Http/CurlFetcher.php', 'src/Scratch.php', 'src/MmdbFile.php', 'src/Server/DbIpDisk.php',
+    'src/Mail/Smtp.php', 'src/Mail/SmtpSession.php',
+    'src/Accounts/Web.php', 'src/Accounts/Slots.php', 'src/Accounts/Pages.php',
+];
 $bundled = ['LICENSE' => 'lib/LICENSE'];
 foreach (['src', 'assets'] as $folder) {
     $walk = new RecursiveIteratorIterator(new RecursiveDirectoryIterator("$library/$folder", FilesystemIterator::SKIP_DOTS));

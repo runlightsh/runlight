@@ -390,6 +390,46 @@ final class MailTest extends TestCase
         $this->assertCount(3, $sent);
     }
 
+    public function testMailServicesNarrowsTheServicesSettingsOffersAndSavesAndOneSavedBeforeCountsAsNone(): void
+    {
+        try {
+            new Runlight(['store' => Stores::sqlite(':memory:'), 'mailServices' => ['resend', 'pigeon']]);
+            $this->fail('an unknown service');
+        } catch (\InvalidArgumentException $error) {
+            $this->assertMatchesRegularExpression('/pigeon/', $error->getMessage());
+        }
+        $store = Stores::sqlite(':memory:');
+        $sent = [];
+        $mail = ['from' => 'site@example.com', 'via' => 'WordPress', 'send' => static function (array $m) use (&$sent): void {
+            $sent[] = $m;
+        }];
+        $routes = static function (Runlight $rl): \Closure {
+            $handler = $rl->routes(['token' => 't']);
+            return static function (string $method, string $path, mixed $body = null) use ($handler): array {
+                $answer = $handler->handle(new Request("https://stats.example.com/runlight$path", $method, ['authorization' => 'Bearer t', 'content-type' => 'application/json'], $body === null ? '' : Json::encode($body)));
+                return ['status' => $answer->status, 'body' => Json::decode($answer->text(), true)];
+            };
+        };
+
+        // Saved while every service was offered.
+        $before = $routes(new Runlight(['store' => $store, 'mail' => $mail]));
+        $this->assertSame(200, $before('PUT', '/api/mail', ['service' => 'smtp', 'host' => '127.0.0.1', 'port' => '25', 'security' => 'none', 'from' => 'reports@example.com'])['status']);
+        $this->assertSame('smtp', $before('GET', '/api/mail')['body']['service']);
+
+        $call = $routes(new Runlight(['store' => $store, 'mail' => $mail, 'mailServices' => ['resend', 'webhook']]));
+        $answer = $call('GET', '/api/mail')['body'];
+        $this->assertSame(['resend', 'webhook'], array_column($answer['services'], 'id'));
+        $this->assertSame(['app', ''], [$answer['source'], $answer['service']], 'the SMTP server saved before counts as none');
+        $this->assertSame(200, $call('POST', '/api/mail/test', ['to' => 'jon@example.com'])['status']);
+        $this->assertCount(1, $sent, 'so the app\'s mailer sends');
+
+        $refused = $call('PUT', '/api/mail', ['service' => 'smtp', 'host' => '127.0.0.1', 'port' => '25', 'security' => 'none', 'from' => 'reports@example.com']);
+        $this->assertSame(400, $refused['status']);
+        $this->assertSame(['error' => 'SMTP is not offered here. Pick another mail service', 'code' => 'mail_service', 'params' => ['service' => 'smtp']], $refused['body']);
+        $this->assertSame(200, $call('PUT', '/api/mail', ['service' => 'resend', 'apiKey' => 're_live_key', 'from' => 'reports@example.com'])['status']);
+        $this->assertSame('resend', $call('GET', '/api/mail')['body']['service']);
+    }
+
     public function testTheAppsMailerNeedsAFromAddressAndWithoutOneTheAnswerHasNoApp(): void
     {
         try {

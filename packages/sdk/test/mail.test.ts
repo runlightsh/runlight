@@ -374,6 +374,37 @@ test("the app's own mailer sends until a service saved in the dashboard takes it
   assert.equal(sent.length, 3);
 });
 
+test("mailServices narrows the services Settings offers and saves, and one saved before counts as none", async () => {
+  assert.throws(() => runlight({ store: sqlite({ path: ":memory:" }), mailServices: ["resend", "pigeon"] }), /pigeon/);
+  const store = sqlite({ path: ":memory:" });
+  const sent: MailMessage[] = [];
+  const mail = { from: "site@example.com", via: "WordPress", send: async (m: MailMessage) => void sent.push(m) };
+  const routes = (rl: ReturnType<typeof runlight>) => {
+    const { GET, PUT, POST } = rl.routes({ token: "t" });
+    const auth = { authorization: "Bearer t", "content-type": "application/json" };
+    return (method: string, path: string, body?: unknown) =>
+      ({ GET, PUT, POST })[method as "GET"](new Request(`https://stats.example.com/runlight${path}`, { method, headers: auth, body: body === undefined ? undefined : JSON.stringify(body) }));
+  };
+
+  // Saved while every service was offered.
+  const before = routes(runlight({ store, mail }));
+  assert.equal((await before("PUT", "/api/mail", { service: "smtp", host: "127.0.0.1", port: "25", security: "none", from: "reports@example.com" })).status, 200);
+  assert.equal((await (await before("GET", "/api/mail")).json()).service, "smtp");
+
+  const call = routes(runlight({ store, mail, mailServices: ["resend", "webhook"] }));
+  const answer = await (await call("GET", "/api/mail")).json();
+  assert.deepEqual(answer.services.map((s: { id: string }) => s.id), ["resend", "webhook"]);
+  assert.deepEqual([answer.source, answer.service], ["app", ""], "the SMTP server saved before counts as none");
+  assert.equal((await call("POST", "/api/mail/test", { to: "jon@example.com" })).status, 200);
+  assert.equal(sent.length, 1, "so the app's mailer sends");
+
+  const refused = await call("PUT", "/api/mail", { service: "smtp", host: "127.0.0.1", port: "25", security: "none", from: "reports@example.com" });
+  assert.equal(refused.status, 400);
+  assert.deepEqual(await refused.json(), { error: "SMTP is not offered here. Pick another mail service", code: "mail_service", params: { service: "smtp" } });
+  assert.equal((await call("PUT", "/api/mail", { service: "resend", apiKey: "re_live_key", from: "reports@example.com" })).status, 200);
+  assert.equal((await (await call("GET", "/api/mail")).json()).service, "resend");
+});
+
 test("the app's mailer needs a from address, and without one the answer has no app", async () => {
   assert.throws(() => runlight({ store: sqlite({ path: ":memory:" }), mail: { from: "", via: "Drupal", send: async () => {} } }), /from address/);
   const rl = runlight({ store: sqlite({ path: ":memory:" }) });

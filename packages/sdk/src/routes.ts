@@ -958,7 +958,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
             fields: viaManage ? {} : fields,
             saved: viaManage ? [] : saved,
             encrypted: runlight.secret !== null,
-            services: SERVICES,
+            services: runlight.mailServices,
             ...(app ? { app: { via: app.via, from: app.from, fromName: app.fromName ?? "", replaced: settings?.source !== "app" } } : {}),
           });
         }

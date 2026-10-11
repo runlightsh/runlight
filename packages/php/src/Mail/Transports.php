@@ -170,10 +170,13 @@ final class Transports
         if ($config['service'] === 'webhook' && !Url::canParse($url)) {
             throw new MailError("Enter the webhook's whole URL, like https://example.com/hooks/mail", 'mail_url', []);
         }
-        // A port a socket can connect to, read with Number() as the SMTP client reads it.
-        $port = Smtp::number((string) ($config['port'] ?? ''));
-        if ($config['service'] === 'smtp' && !(!is_nan($port) && floor($port) === $port && $port >= 1 && $port <= 65535)) {
-            throw new MailError('The port must be a whole number from 1 to 65535', 'mail_port', []);
+        // A port a socket can connect to, read with Number() as the SMTP client reads it. Only SMTP loads its
+        // client, so an app that leaves SMTP out (the WordPress plugin) can leave its classes out too.
+        if ($config['service'] === 'smtp') {
+            $port = Smtp::number((string) ($config['port'] ?? ''));
+            if (!(!is_nan($port) && floor($port) === $port && $port >= 1 && $port <= 65535)) {
+                throw new MailError('The port must be a whole number from 1 to 65535', 'mail_port', []);
+            }
         }
     }
 

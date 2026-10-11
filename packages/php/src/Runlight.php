@@ -46,6 +46,9 @@ use Runlight\Store\SqlStore;
  *   removing that service goes back to it. `via` names it there, such as "WordPress (WP Mail SMTP)". The
  *   message has to, from, fromName (when there is one), subject, html, text, and headers; `send` throws to
  *   say it failed. Without either, the service is set up in Settings.
+ * - mailServices: list<string>, the ids of the mail services Settings offers and saves, such as every service
+ *   but "smtp" in an app that cannot keep connections of its own open. Default every service. A service saved
+ *   earlier that is not in the list counts as none, so the app's mailer, if there is one, sends instead.
  * - secret: encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens
  *   for connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
  * - rateLimit: tracker requests allowed per visitor address per minute. Default 120, which a real visitor
@@ -56,6 +59,7 @@ use Runlight\Store\SqlStore;
  * - dataDir: a folder of the server's own, outside the web root, for the small files requests share when APCu
  *   is not loaded: rate counts and cached site icons. Default the system's temporary folder, where they go in
  *   a folder only this server's user can open.
+ * - cache: a Cache of the app's own, such as a CMS's, for those small values in place of APCu and files.
  * - now: callable(): int, the clock in milliseconds. For tests.
  * - fetcher: the Fetcher every outgoing request goes through. Default CurlFetcher.
  *
@@ -106,6 +110,8 @@ final class Runlight
     public readonly bool $localInstalls;
     /** The folder for files shared between requests, or null for the system's temporary folder. See Scratch. */
     public readonly ?string $dataDir;
+    /** The app's own place for values shared between requests, used in place of APCu and files, or null. */
+    public readonly ?Cache $cache;
     /**
      * Where routes() serves the dashboard and API, which a link domain leaves alone, as a list without
      * repeats. Middleware often runs apart from the routes, where none were made, so the default "/runlight"
@@ -144,6 +150,10 @@ final class Runlight
     private ?array $mailInCode;
     /** @var array{send: callable(array<string, mixed>): void, from: string, fromName?: string, via: string}|null the app's own mailer, used while no service is saved in the dashboard */
     public readonly ?array $appMailer;
+    /** @var list<array> the mail services Settings offers and saves: every one, unless `mailServices` names fewer */
+    public readonly array $mailServices;
+    /** Whether `mailServices` names fewer than every service. */
+    private bool $mailNarrowed;
     /** @var list<?string> retention work asked for and not yet done: a site's id, or null for every site */
     private array $pruning = [];
     /** @var list<callable(): void> work to do once the answer is sent, such as an email whose timing must not show in the answer */
@@ -177,7 +187,8 @@ final class Runlight
         // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
         $number = $perMinute === false ? NAN : Js::number($perMinute);
         $this->dataDir = isset($options['dataDir']) && $options['dataDir'] !== '' ? (string) $options['dataDir'] : null;
-        $this->limit = !($number > 0) ? null : new RateLimit((int) min(PHP_INT_MAX, floor($number)), fn (): int => $this->now(), $this->dataDir, !isset($options['now']));
+        $this->cache = ($options['cache'] ?? null) instanceof Cache ? $options['cache'] : null;
+        $this->limit = !($number > 0) ? null : new RateLimit((int) min(PHP_INT_MAX, floor($number)), fn (): int => $this->now(), $this->dataDir, !isset($options['now']), $this->cache);
         $this->clock = $options['now'] ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->fetcher = $options['fetcher'] ?? new CurlFetcher();
         $this->localInstalls = (bool) ($options['localInstalls'] ?? false);
@@ -199,6 +210,14 @@ final class Runlight
             $this->appMailer = null;
             $this->mailInCode = $mail;
         }
+        $offered = $options['mailServices'] ?? null;
+        foreach ($offered ?? [] as $id) {
+            if (!in_array($id, array_column(Transports::SERVICES, 'id'), true)) {
+                throw new \InvalidArgumentException("Runlight: mailServices names \"$id\", which is not a mail service");
+            }
+        }
+        $this->mailNarrowed = $offered !== null;
+        $this->mailServices = $offered === null ? Transports::SERVICES : array_values(array_filter(Transports::SERVICES, static fn (array $s): bool => in_array($s['id'], $offered, true)));
         $this->secret = array_key_exists('secret', $options) && $options['secret'] !== null ? (string) $options['secret'] : (Env::get('RUNLIGHT_SECRET') ?? Env::get('RUNLIGHT_TOKEN'));
     }
 
@@ -241,8 +260,10 @@ final class Runlight
         $this->init();
         $sealed = $this->store->setting('mail');
         $opened = $sealed === null || $sealed === '' ? null : Secret::unseal($sealed, $this->secret);
-        if ($opened !== null && $opened !== '') {
-            return [...Json::decode($opened, true), 'source' => 'dashboard'];
+        $saved = $opened !== null && $opened !== '' ? Json::decode($opened, true) : null;
+        // A service no longer offered counts as none, so it is never sent through.
+        if ($saved !== null && (!$this->mailNarrowed || in_array($saved['service'] ?? null, array_column($this->mailServices, 'id'), true))) {
+            return [...$saved, 'source' => 'dashboard'];
         }
         $app = $this->appMailer;
         if ($app === null) {
@@ -277,6 +298,9 @@ final class Runlight
         }
         if ($service === null) {
             throw new MailError('Pick a mail service', 'mail_service', []);
+        }
+        if (!in_array($service, $this->mailServices, true)) {
+            throw new MailError("{$service['name']} is not offered here. Pick another mail service", 'mail_service', ['service' => $service['id']]);
         }
         $settings = ['service' => $service['id']];
         foreach ($service['fields'] as $f) {
@@ -1193,29 +1217,24 @@ final class Runlight
 
     /**
      * Under PHP-FPM each request is a new Runlight, so once per instance would be once per request and fill
-     * the log. The warning is kept to once a day across requests instead: an APCu key when APCu is loaded,
-     * as the rate limit uses, or else a marker file in the temporary folder, which needs nothing set up. A
-     * Runlight on a clock given in code (tests) warns once per instance, as the TypeScript SDK does.
+     * the log. The warning is kept to once a day across requests instead: in the app's Cache when it passes
+     * one, else an APCu key when APCu is loaded, as the rate limit uses, or else a marker file in the
+     * temporary folder, which needs nothing set up. A Runlight on a clock given in code (tests) warns once per
+     * instance, as the TypeScript SDK does.
      */
     private function firstWarningToday(): bool
     {
         if (!$this->warnShared) {
             return true;
         }
+        if ($this->cache !== null) {
+            return $this->cache->add('runlight:warned-direct', '1', 86_400);
+        }
         if (function_exists('apcu_enabled') && apcu_enabled()) {
             return apcu_add('runlight:warned-direct', 1, 86_400);
         }
         $dir = Scratch::dir('runlight-rate', $this->dataDir);
-        if ($dir === null) {
-            return true;
-        }
-        $marker = "$dir/warned-direct";
-        $at = @filemtime($marker);
-        if ($at !== false && $at > time() - 86_400) {
-            return false;
-        }
-        @touch($marker);
-        return true;
+        return $dir === null || Scratch::mark("$dir/warned-direct", 86_400);
     }
 
     /**

@@ -21,6 +21,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - Settings, Install has a WordPress, Drupal, and Craft section listing every setting the plugins ask for, under the names they use, each with a copy button.
 - `mail` can be a mailer of the app's own, `{ send, from, fromName, via }` (in PHP, `send` is a callable taking the message array), such as a CMS's. Unlike a service in code, it is a default: Settings, Email service says reports are sent through it, with a button to use another service instead, and a service saved there takes its place until it is removed. Reports, test emails, invites, and sign-in links go through it, and `GET /api/mail` answers `source: "app"` with an `app` object (`via`, `from`, `fromName`, `replaced`) whenever the app has one. TypeScript and PHP for now.
 - Running inside WordPress, Drupal, or Craft, Runlight sends email through the CMS's own mailer when one is set up: with wp_mail when an SMTP or mail plugin such as WP Mail SMTP or FluentSMTP is active, through Drupal's mail manager when its mailer is not plain PHP `mail()`, or through Craft's mailer when its transport is not Sendmail. Without one, the dashboard asks for a mail service as before.
+- A `mailServices` option lists the mail services Settings offers and saves, such as every one but SMTP; `GET /api/mail` lists only those, saving another is refused with `mail_service`, and a service saved earlier that is not in the list counts as none, so the app's mailer sends instead. Every service by default. TypeScript and PHP for now; the other languages follow.
+- PHP: a `cache` option takes a `Runlight\Cache` of the app's own for the small values requests share (rate counts and their daily key, the site's icon, and the once-a-day proxy warning) in place of APCu and files, and `Server\DbIp` takes a `DbIpFiles` that works its folder, so a CMS can keep both in its own storage. PHP's file functions and curl, the defaults, moved to `Scratch`, `MmdbFile`, and `Server\DbIpDisk`, and SMTP's client is loaded only for SMTP.
 
 ### Changed
 
@@ -28,6 +30,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - Ignoring your own visits moved from Settings, Install to Settings, General.
 - The WordPress plugin's Runlight menu item sits below the core admin items instead of near the top, as the plugin directory asks.
 - In the WordPress, Drupal, and Craft admin, the dashboard's frame grows to the dashboard's full height, so the admin page scrolls like any other instead of the dashboard scrolling inside a frame the size of the window. The dashboard tells the page its height, and the page tells it which part of the frame is on screen, so the filter drawer and other sheets open over that part. A plugin keeps fitting the frame to the window for a Runlight too old to say its height.
+- Running inside WordPress, the plugin offers no SMTP server in Settings, Email service (an SMTP plugin, which Runlight sends through, covers it), keeps rate counts and the site's icon in WordPress's object cache or transients, and downloads, unpacks, and reads the location data through WordPress's HTTP and filesystem APIs. The zip leaves out the parts of the PHP package WordPress never runs, so it passes the plugin directory's checks.
 
 ## 0.1.1 - 2026-10-10
 

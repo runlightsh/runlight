@@ -36,14 +36,14 @@ final class Library {
 			/* translators: 1: the PHP version needed, 2: the PHP version running */
 			return sprintf( __( 'Running Runlight in this WordPress needs PHP %1$s or later, and this server runs %2$s.', 'runlight' ), self::PHP, PHP_VERSION );
 		}
-		foreach ( array( 'pdo', 'mbstring', 'openssl' ) as $extension ) {
+		foreach ( array( 'mbstring', 'openssl' ) as $extension ) {
 			if ( ! extension_loaded( $extension ) ) {
-				/* translators: %s: a PHP extension, such as pdo */
+				/* translators: %s: a PHP extension, such as mbstring */
 				return sprintf( __( 'Running Runlight in this WordPress needs PHP’s %s extension, which this server does not have.', 'runlight' ), $extension );
 			}
 		}
 		if ( '' === Storage::kind() ) {
-			return __( 'Running Runlight in this WordPress needs PHP’s pdo_sqlite extension, or WordPress’s database on MySQL 8.4 or MariaDB 11.4 or later with pdo_mysql, and this server has neither.', 'runlight' );
+			return __( 'Running Runlight in this WordPress needs WordPress’s database on MySQL 8.4 or MariaDB 11.4 or later, or else PHP’s sqlite3 extension, and this server has neither.', 'runlight' );
 		}
 		if ( '' === self::folder() ) {
 			return __( 'This copy of the plugin is missing its lib folder. Install it again from WordPress.org.', 'runlight' );

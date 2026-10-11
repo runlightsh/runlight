@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Runlight\Server;
 
 use Runlight\Geo;
-use Runlight\Mmdb;
 
 /**
  * Location for servers with no platform headers (Cloudflare, Vercel, and Netlify send their own, and those always
@@ -19,20 +18,25 @@ final class DbIp
     private $download;
     /** @var callable(string): void */
     private $log;
+    private readonly DbIpFiles $files;
 
     /**
      * @param 'city'|'country' $mode
      * @param (callable(string $url, string $file): bool)|null $download writes the gzipped file at the URL to
      *     the file, and says whether it got one; curl by default
      * @param (callable(string): void)|null $log
+     * @param DbIpFiles|null $files makes the folder, unpacks, opens, moves, and deletes; PHP's own file
+     *     functions by default
      */
     public function __construct(
         private readonly string $dir,
         private readonly string $mode,
         ?callable $download = null,
         ?callable $log = null,
+        ?DbIpFiles $files = null,
     ) {
-        $this->download = $download ?? self::curl(...);
+        $this->download = $download ?? DbIpDisk::download(...);
+        $this->files = $files ?? new DbIpDisk();
         $this->log = $log ?? static function (string $line): void {
             error_log($line);
         };
@@ -70,9 +74,10 @@ final class DbIp
             return null;
         }
         $lookup = null;
-        return static function (string $ip) use ($file, &$lookup): ?array {
+        $files = $this->files;
+        return static function (string $ip) use ($file, $files, &$lookup): ?array {
             try {
-                $lookup ??= Geo::lookupFrom(Mmdb::open($file));
+                $lookup ??= Geo::lookupFrom($files->open($file));
             } catch (\Throwable) {
                 return null;
             }
@@ -96,7 +101,7 @@ final class DbIp
             ($this->log)("Runlight: location data from DB-IP needs PHP's zlib extension to unpack. Turn zlib on, or set RUNLIGHT_GEO to off or to the path of an MMDB file.");
             return;
         }
-        if (!is_dir($this->dir) && !@mkdir($this->dir, 0755, true) && !is_dir($this->dir)) {
+        if (!$this->files->folder($this->dir)) {
             ($this->log)("Runlight: could not make the folder for location data, {$this->dir}");
             return;
         }
@@ -113,13 +118,16 @@ final class DbIp
                 if (!($this->download)($url, $gz)) {
                     continue;
                 }
-                self::gunzip($gz, $partial);
+                if (!self::canUnpack()) {
+                    throw new \RuntimeException("could not unpack $gz: PHP's zlib extension is not loaded");
+                }
+                $this->files->gunzip($gz, $partial);
                 // A file that does not open as a database is never kept.
-                Mmdb::open($partial);
-                rename($partial, $this->file($release));
+                $this->files->open($partial);
+                $this->files->move($partial, $this->file($release));
                 foreach (glob("{$this->dir}/dbip-{$this->mode}-lite-*") ?: [] as $old) {
                     if ($old !== $this->file($release)) {
-                        @unlink($old);
+                        $this->files->delete($old);
                     }
                 }
                 ($this->log)("Runlight: location data from DB-IP ($release) is ready.");
@@ -127,8 +135,8 @@ final class DbIp
             } catch (\Throwable $error) {
                 ($this->log)("Runlight: could not download location data from $url: {$error->getMessage()}");
             } finally {
-                @unlink($gz);
-                @unlink($partial);
+                $this->files->delete($gz);
+                $this->files->delete($partial);
             }
         }
     }
@@ -136,71 +144,5 @@ final class DbIp
     private static function canUnpack(): bool
     {
         return function_exists('gzopen');
-    }
-
-    private static function gunzip(string $from, string $to): void
-    {
-        if (!self::canUnpack()) {
-            throw new \RuntimeException("could not unpack $from: PHP's zlib extension is not loaded");
-        }
-        $in = gzopen($from, 'rb');
-        $out = fopen($to, 'wb');
-        if ($in === false || $out === false) {
-            throw new \RuntimeException("could not unpack $from");
-        }
-        try {
-            while (!gzeof($in)) {
-                $chunk = gzread($in, 1 << 20);
-                if ($chunk === false) {
-                    throw new \RuntimeException("could not unpack $from");
-                }
-                fwrite($out, $chunk);
-            }
-        } finally {
-            gzclose($in);
-            fclose($out);
-        }
-    }
-
-    /**
-     * Downloads a file straight to disk, since a city database is too big to hold in memory. This is the one
-     * download that does not go through a Fetcher, which keeps whole answers in memory.
-     */
-    private static function curl(string $url, string $file): bool
-    {
-        $out = fopen($file, 'wb');
-        if ($out === false) {
-            throw new \RuntimeException("could not write $file");
-        }
-        try {
-            if (!function_exists('curl_init')) {
-                $in = @fopen($url, 'rb', false, stream_context_create(['http' => ['timeout' => 600, 'ignore_errors' => false]]));
-                if ($in === false) {
-                    return false;
-                }
-                stream_copy_to_stream($in, $out);
-                fclose($in);
-                return true;
-            }
-            $handle = curl_init($url);
-            curl_setopt_array($handle, [
-                CURLOPT_FILE => $out,
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_FAILONERROR => true,
-                CURLOPT_TIMEOUT => 600,
-                CURLOPT_CONNECTTIMEOUT => 15,
-                CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
-                CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS,
-            ]);
-            $ok = curl_exec($handle);
-            $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-            $error = curl_error($handle);
-            if ($ok === false && $status === 0) {
-                throw new \RuntimeException($error !== '' ? $error : 'no answer');
-            }
-            return $ok !== false && $status === 200;
-        } finally {
-            fclose($out);
-        }
     }
 }

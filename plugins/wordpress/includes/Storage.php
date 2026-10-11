@@ -43,7 +43,7 @@ final class Storage {
 			return $kept;
 		}
 		// Sites in a network each get a file of their own, so no site sees another's settings or keys.
-		$kind = ! is_multisite() && self::mysql_fits() ? 'mysql' : ( extension_loaded( 'pdo_sqlite' ) ? 'sqlite' : '' );
+		$kind = ! is_multisite() && self::mysql_fits() ? 'mysql' : ( class_exists( 'SQLite3' ) ? 'sqlite' : '' );
 		$kept = array(
 			'kind' => $kind,
 			'file' => 'runlight-' . bin2hex( random_bytes( 16 ) ) . '.db',
@@ -56,12 +56,12 @@ final class Storage {
 
 	/**
 	 * Whether WordPress's own database can hold Runlight's tables: MySQL 8.4 or
-	 * MariaDB 11.4 or later, reached through pdo_mysql. Runlight's tables
+	 * MariaDB 11.4 or later, reached through $wpdb. Runlight's tables
 	 * compare text by code point with a collation older servers lack.
 	 */
 	private static function mysql_fits(): bool {
 		global $wpdb;
-		if ( ! extension_loaded( 'pdo_mysql' ) || ! defined( 'DB_HOST' ) || ( defined( 'DB_ENGINE' ) && 'sqlite' === DB_ENGINE ) ) {
+		if ( ( defined( 'DB_ENGINE' ) && 'sqlite' === DB_ENGINE ) || ! $wpdb instanceof \wpdb ) {
 			return false;
 		}
 		$version = (string) $wpdb->get_var( 'SELECT VERSION()' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- the server's version, read once to choose where Runlight's tables go.
@@ -81,7 +81,8 @@ final class Storage {
 	public static function store(): \Runlight\Store\SqlStore {
 		$kept = self::kept();
 		if ( 'mysql' === $kept['kind'] ) {
-			return new \Runlight\Store\SqlStore( new \Runlight\Db\PdoDb( \Closure::fromCallable( array( self::class, 'connect' ) ), 'mysql', true, 120000 ) );
+			global $wpdb;
+			return new \Runlight\Store\SqlStore( new WpdbDb( $wpdb ) );
 		}
 		$folder = self::folder();
 		if ( ! is_dir( $folder ) ) {
@@ -90,34 +91,7 @@ final class Storage {
 			file_put_contents( $folder . '/index.php', "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a new file in a folder the plugin made.
 			file_put_contents( $folder . '/.htaccess', "Require all denied\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a new file in a folder the plugin made.
 		}
-		return \Runlight\Store\Stores::sqlite( $folder . '/' . $kept['file'] );
-	}
-
-	/**
-	 * A connection to WordPress's database for Runlight's own tables, from the
-	 * same settings WordPress connects with, as Runlight's MySQL store opens one.
-	 */
-	public static function connect(): \PDO {
-		$host   = (string) DB_HOST;
-		$port   = 0;
-		$socket = '';
-		// DB_HOST may be "host", "host:port", "host:/path/to.sock", or "/path/to.sock".
-		if ( str_starts_with( $host, '/' ) ) {
-			$socket = $host;
-			$host   = 'localhost';
-		} elseif ( preg_match( '/^(.+):(\d+)$/', $host, $parts ) ) {
-			$host = $parts[1];
-			$port = (int) $parts[2];
-		} elseif ( preg_match( '#^(.+):(/.+)$#', $host, $parts ) ) {
-			$host   = $parts[1];
-			$socket = $parts[2];
-		}
-		$dsn          = '' !== $socket ? 'mysql:unix_socket=' . $socket : 'mysql:host=' . $host . ( $port ? ';port=' . $port : '' );
-		$ignore_space = defined( 'Pdo\Mysql::ATTR_IGNORE_SPACE' ) ? \Pdo\Mysql::ATTR_IGNORE_SPACE : \PDO::MYSQL_ATTR_IGNORE_SPACE;
-		$pdo          = new \PDO( $dsn . ';dbname=' . DB_NAME . ';charset=utf8mb4', DB_USER, DB_PASSWORD, array( \PDO::ATTR_TIMEOUT => 10, $ignore_space => true ) );
-		$mariadb      = (bool) preg_match( '/mariadb/i', (string) $pdo->query( 'SELECT VERSION() AS v' )->fetchColumn() );
-		$pdo->exec( $mariadb ? 'SET SESSION max_statement_time = 120' : 'SET SESSION max_execution_time = 120000' );
-		return $pdo;
+		return new \Runlight\Store\SqlStore( new Sqlite3Db( $folder . '/' . $kept['file'] ) );
 	}
 
 	/** Removes Runlight's numbers, for uninstalling: its tables, or its SQLite file. */
