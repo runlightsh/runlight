@@ -70,7 +70,7 @@ jobs:
       DEPLOY_KEY: ${{ secrets.PHP_SPLIT_DEPLOY_KEY }}
       SPLIT_REPO: ${{ vars.PHP_SPLIT_REPO || 'runlightsh/runlight-php' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.ci-main.outputs.sha }}
@@ -113,7 +113,7 @@ jobs:
       SPLIT_REPO: ${{ vars.PHP_SPLIT_REPO || 'runlightsh/runlight-php' }}
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.ci.outputs.sha }}

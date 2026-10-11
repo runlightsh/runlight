@@ -59,7 +59,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.ci.outputs.sha }}
           persist-credentials: false
@@ -74,7 +74,7 @@ jobs:
           version="$(sed -n 's/^ *<Version>\(.*\)<\/Version>$/\1/p' Directory.Build.props)"
           if [ "v$version" != "$TAG" ]; then echo "packages/dotnet is $version, the tag is $TAG"; exit 1; fi
       # The SDK dotnet.yml builds and packs with; global.json pins its floor.
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
       # The solution: only the three projects under src are packable.
@@ -93,7 +93,7 @@ jobs:
           expected="$(printf '%s\n' Runlight Runlight.AspNetCore Runlight.Server | sed "s/\$/.$version.nupkg/" | sort)"
           found="$(cd artifacts/packages && find . -maxdepth 1 -name '*.nupkg' | sed 's#^\./##' | sort)"
           if [ "$found" != "$expected" ]; then printf 'expected:\n%s\nfound:\n%s\n' "$expected" "$found"; exit 1; fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nuget-packages
           path: packages/dotnet/artifacts/packages/*.nupkg
@@ -109,11 +109,11 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nuget-packages
           path: packages
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
       # The job's OIDC token for an API key that lives one hour, so this is
