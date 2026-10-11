@@ -6,13 +6,13 @@ import time
 from typing import Any
 
 import pytest
-from support.databases import kinds
+from support.databases import store_kinds
 from support.store import DAY, HOUR, MIN, NOW, WatchedDb, build_days, event, q, store, utc, visit
 
 from runlight import _js
 from runlight.store import SqlStore
 
-KINDS = kinds()
+KINDS = store_kinds()
 PAGES = ["/", "/blog/one", "/blog/two", "/pricing", "/about"]
 SOURCES = ["Google", "Hacker News", "", "ChatGPT", "Twitter"]
 COUNTRIES = ["GB", "US", "DE", "CA"]

@@ -45,6 +45,7 @@ from .env import env_value as env
 from .hash import hmac, random_id, sha256
 from .http import FetchError, Headers, Request, Response, Url
 from .body import read_text_capped
+from .db import TablesBusyError
 from .safefetch import install_fetch
 
 COOKIE = "runlight_token"
@@ -89,6 +90,15 @@ def coded(
     if params is not None:
         body["params"] = dict(params)
     return json(body, status, headers or {})
+
+
+def _failed(error: BaseException) -> Response:
+    """The answer to a request that failed: a generic 500, unless another process is building the tables."""
+    # Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+    if isinstance(error, TablesBusyError):
+        return coded("Runlight is creating or upgrading its tables. Try again in a minute.", "tables_busy", 503, None, {"retry-after": "30"})
+    print(f"Runlight: {error!r}", file=sys.stderr)
+    return coded("Internal error", "internal", 500)
 
 
 def _refused(error: BaseException, fallback: str, status: int = 400) -> Response:
@@ -1184,7 +1194,7 @@ class Routes:
                             "fields": {} if via_manage else fields,
                             "saved": [] if via_manage else saved,
                             "encrypted": rl.secret is not None,
-                            "services": SERVICES,
+                            "services": rl.mail_services,
                             **(
                                 {"app": {"via": app["via"], "from": app["from"], "fromName": app.get("fromName", ""), "replaced": not is_app}}
                                 if app is not None
@@ -2415,8 +2425,7 @@ class Routes:
             try:
                 return oauth_response(self.oauth, request, url.pathname, url, context) or coded("Not found", "not_found", 404)
             except Exception as error:  # noqa: BLE001
-                print(f"Runlight: {error!r}", file=sys.stderr)
-                return coded("Internal error", "internal", 500)
+                return _failed(error)
         if base and url.pathname != base and not url.pathname.startswith(f"{base}/"):
             return coded("Not found", "not_found", 404)
         path = url.pathname[len(base) :] or "/"
@@ -2424,8 +2433,7 @@ class Routes:
         try:
             return self._route(request, path, url, context)
         except Exception as error:  # noqa: BLE001
-            print(f"Runlight: {error!r}", file=sys.stderr)
-            return coded("Internal error", "internal", 500)
+            return _failed(error)
 
     def _route(self, request: Request, path: str, url: Url, context: dict[str, Any]) -> Response:
         rl = self.rl

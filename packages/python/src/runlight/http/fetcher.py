@@ -45,7 +45,9 @@ class Fetcher(Protocol):
     - truncate: bool, with maxBytes, hand back the first maxBytes instead of raising (the start of a page)
     - resolve: a list of "host:port:address" pins, so a checked address is the one connected to
 
-    Raises FetchError when no answer comes back.
+    Raises FetchError when no answer comes back. A Fetcher given pins connects to the pinned address and nowhere
+    else, never through a proxy (which would look the name up again itself), and refuses a request it has no pin
+    for rather than fetch it unpinned.
     """
 
     def fetch(self, url: str, init: dict[str, Any] | None = None) -> Response: ...
@@ -76,7 +78,9 @@ class _PinnedHTTP(http.client.HTTPConnection):
 class UrllibFetcher:
     """Fetches with the standard library's http.client: redirects followed (up to 20) unless asked not to, with
     credentials dropped when one leaves their origin and none from https to http, one
-    deadline for the whole request, gzip and deflate bodies decoded, and pins honoured."""
+    deadline for the whole request, gzip and deflate bodies decoded, and pins honoured. It connects directly, never
+    through a proxy from HTTP_PROXY, HTTPS_PROXY, or the system's settings, so a pinned address is always the one
+    connected to."""
 
     def fetch(self, url: str, init: dict[str, Any] | None = None) -> Response:
         init = init or {}
@@ -145,6 +149,9 @@ class UrllibFetcher:
                 # A pin may list several addresses ("a,[b]"), as curl's does; the first is the one connected to.
                 address = pinned.split(",")[0].strip("[]")
                 break
+        # A request pinned to checked addresses goes nowhere else: one the pins do not cover is refused.
+        if pins and not address:
+            raise FetchError(f"fetch failed: {name} is not pinned to an address")
         try:
             if parsed.protocol == "https:":
                 context = ssl.create_default_context()

@@ -275,7 +275,9 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         manage = not cms and "manage" in scopes
         # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
         host = _site_host(redirect)
-        counting = [s for s in runlight.sites if not runlight.remote(s["id"]) and host in s["hostnames"]]
+        # As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+        local = [s for s in runlight.sites if not runlight.remote(s["id"])]
+        counting = local if len(local) == 1 and not local[0]["hostnames"] else [s for s in local if host in s["hostnames"]]
 
         if not ctx["isOwner"](request):
             # Someone signed in who may only read would be sent to sign in again and again.

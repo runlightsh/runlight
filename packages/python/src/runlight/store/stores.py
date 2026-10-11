@@ -1,5 +1,8 @@
-"""The stores stores/sqlite.ts, stores/postgres.ts, and stores/mysql.ts make. Tables are prefixed `rl_`, so the
-database can be the app's own, and a database made by the TypeScript SDK opens here."""
+"""The stores stores/sqlite.ts, stores/postgres.ts, and stores/mysql.ts make. Tables are prefixed `rl_` (or
+`prefix`), so the database can be the app's own, and a database made by the TypeScript SDK opens here.
+
+Every store takes `prefix`: what every table and index name starts with, in place of `rl_`, so two apps sharing one
+database each keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit."""
 
 from __future__ import annotations
 
@@ -27,44 +30,45 @@ class _RawConnection:
 
 class Stores:
     @staticmethod
-    def sqlite(path: str) -> SqlStore:
-        """Runlight's tables in a SQLite file (or ":memory:"), in WAL mode, as better-sqlite3 opens it there."""
-        return SqlStore(dbs.sqlite(path))
+    def sqlite(path: str, prefix: str = dbs.PREFIX) -> SqlStore:
+        """Runlight's tables in a SQLite file (or ":memory:"), in WAL mode, as better-sqlite3 opens it there. A file
+        it makes is for its owner and group alone (0660), and so are the -wal and -shm files SQLite makes beside it."""
+        return SqlStore(dbs.sqlite(path), prefix)
 
     @staticmethod
-    def postgres(url: Any, statement_timeout: int = 120_000, schema: str | None = None) -> SqlStore:
+    def postgres(url: Any, statement_timeout: int = 120_000, schema: str | None = None, prefix: str = dbs.PREFIX) -> SqlStore:
         """Runlight's tables in Postgres, from a connection string, or a psycopg connection the app already has, in
         autocommit mode (Runlight never closes a connection it did not open). `statement_timeout` is the longest one
         statement may run on a connection Runlight opens, in milliseconds (0 for no limit), and `schema` the search
         path for one it opens."""
         if not isinstance(url, str):
-            return SqlStore(dbs.PostgresDb(conn=_RawConnection(url)))
+            return SqlStore(dbs.PostgresDb(conn=_RawConnection(url)), prefix)
         if url == "":
             raise ValueError("Runlight: postgres() needs a url or a pool")
-        return SqlStore(dbs.postgres(url, statement_timeout, schema))
+        return SqlStore(dbs.postgres(url, statement_timeout, schema), prefix)
 
     @staticmethod
-    def mysql(url: Any, statement_timeout: int = 120_000) -> SqlStore:
+    def mysql(url: Any, statement_timeout: int = 120_000, prefix: str = dbs.PREFIX) -> SqlStore:
         """Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL, or a PyMySQL
         connection the app already has, in autocommit mode. Text is utf8mb4 with a binary collation, so it compares
         and sorts by code point, case and trailing spaces included, as SQLite and Postgres do. `statement_timeout`,
         in milliseconds (0 for no limit), is applied by MySQL to reads only and by MariaDB to every statement."""
         if not isinstance(url, str):
-            return SqlStore(dbs.MysqlDb(conn=url))
+            return SqlStore(dbs.MysqlDb(conn=url), prefix)
         if url == "":
             raise ValueError("Runlight: mysql() needs a url or a pool")
-        return SqlStore(dbs.mysql(url, statement_timeout))
+        return SqlStore(dbs.mysql(url, statement_timeout), prefix)
 
     @staticmethod
-    def url(database_url: str) -> SqlStore:
+    def url(database_url: str, prefix: str = dbs.PREFIX) -> SqlStore:
         """The store a DATABASE_URL names, as the standalone server picks one: postgres:// or postgresql:// for
         Postgres, mysql:// or mariadb:// for MySQL, and sqlite: or file: followed by a path for SQLite."""
-        return SqlStore(dbs.from_url(database_url))
+        return SqlStore(dbs.from_url(database_url), prefix)
 
     @staticmethod
-    def from_db(db: Any) -> SqlStore:
-        """A store over any Db."""
-        return SqlStore(db)
+    def from_db(db: Any, prefix: str = dbs.PREFIX) -> SqlStore:
+        """A store over any Db. One already prefixed keeps its own prefix."""
+        return SqlStore(db, prefix)
 
     @staticmethod
     def mysql_text(sql: str, params: list[Any] | None = None, escape: Any = None) -> str:

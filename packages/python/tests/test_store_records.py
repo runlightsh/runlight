@@ -6,10 +6,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from support.databases import kinds
+from support.databases import store_kinds
 from support.store import DAY, HOUR, MIN, NOW, event, goal, q, store, today, visit
 
-KINDS = kinds()
+KINDS = store_kinds()
 
 
 @pytest.mark.parametrize("kind", KINDS)

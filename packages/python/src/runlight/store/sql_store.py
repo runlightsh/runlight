@@ -29,6 +29,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from .. import _js
+from ..db import PREFIX, TABLES, PrefixedDb
 from ..query import EVENT_DIMENSIONS, SESSION_DIMENSIONS, is_session_dimension
 from .sql import (
     BOUNCE,
@@ -94,11 +95,32 @@ def _time(row: dict[str, Any] | None, key: str = "t") -> int | float | None:
 
 
 class SqlStore:
-    def __init__(self, db: Any) -> None:
+    def __init__(self, db: Any, prefix: str = PREFIX) -> None:
+        """`prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
+        Runlight's tables in one database. A Db that is already prefixed keeps its own."""
+        if isinstance(db, PrefixedDb):
+            prefix = db.prefix
+        elif prefix != PREFIX:
+            db = PrefixedDb(db, prefix)
         self.db = db
+        # What the store's table and index names start with: `rl_` unless it was given another.
+        self.prefix: str = prefix
         self._ready = False
         # Whether a full migrate went over every table and index in this process.
         self._checked_all = False
+
+    def tables(self) -> list[str]:
+        """The store's tables as named in the database, for an app removing Runlight: each one by name, since another
+        app's tables may well start with the same letters."""
+        return [f"{self.prefix}{table}" for table in TABLES]
+
+    def _unnamed(self, name: str) -> str:
+        """A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_."""
+        return f"{PREFIX}{name[len(self.prefix) :]}" if name.startswith(self.prefix) else name
+
+    def _named(self, name: str) -> str:
+        """A table or index name as the database has it, under the store's prefix."""
+        return f"{self.prefix}{name[len(PREFIX) :]}" if name.startswith(PREFIX) else name
 
     def migrate(self, full: bool = False) -> None:
         """Creates the tables on first use. Safe to call any number of times. A database already at the current
@@ -135,8 +157,7 @@ class SqlStore:
         self._ready = True
         self._checked_all = True
 
-    @staticmethod
-    def _upgrade(db: Any, postgres: bool) -> None:
+    def _upgrade(self, db: Any, postgres: bool) -> None:
         dialect = db.dialect()
         statements = schema(dialect)
         db.run(statements[0])
@@ -146,11 +167,13 @@ class SqlStore:
         if postgres:
             # A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
             broken = db.all(
-                """SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace"""
+                f"""SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+           WHERE NOT i.indisvalid AND c.relname LIKE '{self.prefix.replace("_", chr(92) + "_")}%' AND c.relnamespace = current_schema()::regnamespace"""
             )
+            # The name comes back as the database has it, so it goes back under rl_ before the prefix is put on again,
+            # which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
             for row in broken:
-                db.run(f'DROP INDEX IF EXISTS "{_string(row["name"]).replace(chr(34), "")}"')
+                db.run(f'DROP INDEX IF EXISTS "{self._unnamed(_string(row["name"])).replace(chr(34), "")}"')
         for statement in statements:
             index = _INDEX.match(statement)
             if index and dialect == "mysql":
@@ -158,7 +181,7 @@ class SqlStore:
                 unique, name, table = index.group(1), index.group(2), index.group(3)
                 there = db.all(
                     "SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
-                    [table, name],
+                    [self._named(table), self._named(name)],
                 )
                 if not there:
                     db.run(_INDEX_HEAD.sub(f"CREATE {unique or ''}INDEX", statement, count=1))

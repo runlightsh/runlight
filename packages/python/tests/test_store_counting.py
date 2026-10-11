@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from support.databases import kinds
+from support.databases import store_kinds
 from support.store import DAY, HOUR, MIN, NOW, build_days, event, goal, q, store, today, utc, visit
 
 from runlight import _js
@@ -16,7 +16,7 @@ from runlight.goals import click_rules, goal_from
 from runlight.sources import recorded_path
 from runlight.store import JOURNEY_VISITS, SqlStore
 
-KINDS = kinds()
+KINDS = store_kinds()
 
 
 def _pick(stats: dict[str, Any], *keys: str) -> list[Any]:

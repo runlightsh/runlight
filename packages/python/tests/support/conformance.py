@@ -1,6 +1,6 @@
 """Plays a scenario from conformance/http.json exactly as play() in packages/sdk/test/http-conformance.ts does,
 and returns each step's answer, normalized, in the shape of the file's `expect`: dicts with status, headers, body,
-text, files, found, fetched, or pass.
+text, files, found, fetched, mailed, or pass.
 
 The scenario's options become the Runlight options, and a target (the core) takes the requests. Keep this file in
 step with the TypeScript runner: FORMAT_SHA256 fails a test when the file's description of the format changes.
@@ -22,7 +22,7 @@ from runlight.http import BodyTooLong, FetchError, Headers, Request, Response, S
 FILE = Path(__file__).resolve().parents[4] / "conformance" / "http.json"
 
 # The SHA-256 of http.json's description this runner was written against.
-FORMAT_SHA256 = "87a6f2d7f8acd8026aa4c9ede697d21457a0b9c1a2bfc01488aa2d9598def68f"
+FORMAT_SHA256 = "9721f5d81842e566cbe725d3823b9e1b02580936b9366e0e7ea316d4f49c3acb"
 
 # Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.
 ENV = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV"]
@@ -208,7 +208,29 @@ def runlight_options(scenario: dict[str, Any]) -> dict[str, Any]:
         out["secret"] = options["secret"]
     if "rateLimit" in options:
         out["rateLimit"] = options["rateLimit"]
+    if "mailServices" in options:
+        out["mailServices"] = options["mailServices"]
     return out
+
+
+def app_mailer(spec: dict[str, Any], mailed: list[dict[str, Any]]) -> dict[str, Any]:
+    """The appMailer option as the mail option's {send, from, fromName, via}: send records each message it is handed
+    in `mailed`, or, with `fail`, raises an error with that message."""
+
+    def send(message: dict[str, Any]) -> None:
+        if "fail" in spec:
+            raise RuntimeError(spec["fail"])
+        mailed.append(
+            {
+                "to": message["to"],
+                "from": message["from"],
+                **({"fromName": message["fromName"]} if message.get("fromName") else {}),
+                "subject": message["subject"],
+                "text": message["text"],
+            }
+        )
+
+    return {"from": spec["from"], **({"fromName": spec["fromName"]} if "fromName" in spec else {}), "via": spec["via"], "send": send}
 
 
 def routes_options(scenario: dict[str, Any]) -> dict[str, Any]:
@@ -224,6 +246,8 @@ def routes_options(scenario: dict[str, Any]) -> dict[str, Any]:
         out["accounts"] = True
     if options.get("origin"):
         out["origin"] = options["origin"]
+    if options.get("cms"):
+        out["cms"] = options["cms"]
     return out
 
 
@@ -254,6 +278,8 @@ class Player:
     def __init__(self) -> None:
         # The clock, in epoch milliseconds, as the scenario's steps move it.
         self.now = 0
+        # The messages the app's own mailer was handed during the step being played.
+        self.mailed: list[dict[str, Any]] = []
 
     def play(self, scenario: dict[str, Any], make_target: Callable[[dict, dict], Any], store: Any = None) -> list[dict[str, Any]]:
         saved = {name: os.environ.pop(name, None) for name in ENV}
@@ -263,6 +289,9 @@ class Player:
             options = {**({} if store is None else {"store": store}), **runlight_options(scenario)}
             options["now"] = lambda: self.now
             options["fetcher"] = fetcher
+            app = (scenario.get("options") or {}).get("appMailer")
+            if app:
+                options["mail"] = app_mailer(app, self.mailed)
             target = make_target(options, routes_options(scenario))
             kept: dict[str, str] = {}
             jars: dict[str, dict[str, str]] = {}
@@ -310,6 +339,7 @@ class Player:
         parsed = Url.parse(raw)
         request = Request(parsed.href if parsed else raw, step["method"], headers, body)
         fetcher.take()
+        self.mailed.clear()
         if to == "links":
             answer = target.links(request)
         elif to == "linkDomain":
@@ -320,14 +350,19 @@ class Player:
         target.idle()
         sent_out = fetcher.take()
         outbound = [normalize(f["seen"]) for f in sent_out]
+        handed = [normalize(m) for m in self.mailed]
         if answer is None:
             out: dict[str, Any] = {"pass": True}
             if outbound:
                 out["fetched"] = outbound
+            if handed:
+                out["mailed"] = handed
             return out
-        return self._answer(step, answer, sent_out, outbound, kept, jar)
+        return self._answer(step, answer, sent_out, outbound, handed, kept, jar)
 
-    def _answer(self, step: dict, answer: Response, sent_out: list, outbound: list, kept: dict, jar: dict | None) -> dict:
+    def _answer(
+        self, step: dict, answer: Response, sent_out: list, outbound: list, handed: list, kept: dict, jar: dict | None
+    ) -> dict:
         data = answer.content()
         text = _js.utf8(data)
         media = (answer.headers.get("content-type") or "").split(";")[0].strip()
@@ -373,6 +408,8 @@ class Player:
             out["found"] = [s in text for s in step["look"]]
         if outbound:
             out["fetched"] = outbound
+        if handed:
+            out["mailed"] = handed
         return out
 
     def _fill_totp(self, text: str, kept: dict) -> str:

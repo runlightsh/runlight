@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import _js
 from ..http import Fetcher, FetchError, SearchParams, Url, UrllibFetcher
+from ..safefetch import MetadataAddressError, service_fetch
 
 
 class MailError(Exception):
@@ -112,7 +113,12 @@ def service_message(reply: str) -> str:
 
 def _post(fetcher: Fetcher, url: str, init: dict[str, Any], explains: bool = True) -> None:
     try:
-        response = fetcher.fetch(url, {"method": "POST", "headers": init["headers"], "body": init["body"], "timeoutMs": 20_000, "maxBytes": 65_536, "truncate": True})
+        # A webhook can be at any address, so it and each redirect are checked, as for every service.
+        response = service_fetch(
+            url, {"method": "POST", "headers": init["headers"], "body": init["body"], "timeoutMs": 20_000, "maxBytes": 65_536, "truncate": True}, fetcher
+        )
+    except MetadataAddressError as error:
+        raise MailError(str(error), "address_refused", {"host": error.host}) from None
     except FetchError as error:
         host = Url(url).host
         raise MailError(f"Could not reach {host}: {error}", "mail_unreachable", {"host": host, "detail": str(error)}) from None
