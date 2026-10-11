@@ -143,6 +143,9 @@ test("a link domain never takes over the dashboard's own name, sign-in, or API",
   await handle(req("/api/links?site=blog.example.com", { method: "POST", headers: auth, body: JSON.stringify({ url: "https://blog.example.com/b", slug: "sale", domain: "stats.example.com" }) }));
   assert.equal((await handle(req("/sale"))).status, 302);
   assert.equal((await handle(req("/login"))).status, 200, "sign-in is still the sign-in page");
+  // Broken percent escapes are a link nobody has, here and at /go/, never an error.
+  assert.equal((await handle(req("/%E0"))).status, 404);
+  assert.equal((await handle(req("/go/%zz"))).status, 404);
   assert.equal((await handle(req("/", { headers: { cookie } }))).status, 200, "the dashboard opens for someone signed in");
   assert.equal((await handle(req("/", {}))).status, 404);
   assert.equal((await handle(req("/api/link-domains/stats.example.com?site=blog.example.com", { method: "DELETE", headers: { cookie } }))).status, 200, "so it can be removed");

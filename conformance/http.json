@@ -51019,6 +51019,364 @@
           }
         }
       ]
+    },
+    {
+      "name": "broken percent escapes in a path answer as a name nobody has",
+      "site": {
+        "hostnames": [
+          "blog.example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "sites": [
+        {
+          "id": "blog",
+          "hostnames": [
+            "blog.example.com"
+          ],
+          "timezone": "UTC"
+        }
+      ],
+      "start": 1791374400000,
+      "token": "conformance",
+      "steps": [
+        {
+          "method": "PATCH",
+          "path": "/api/goals/%E0?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "X",
+            "kind": "event",
+            "match": "X"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown goal",
+              "code": "unknown_goal"
+            }
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/goals/%C3%28?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown goal",
+              "code": "unknown_goal"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/shares/%E0%A4?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "X"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown share",
+              "code": "unknown_share"
+            }
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/shares/%FF?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown share",
+              "code": "unknown_share"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/sites/%E0",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "X"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown site",
+              "code": "unknown_site"
+            }
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/sites/%E0",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown site",
+              "code": "unknown_site"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/link-domains/%E0/check?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown domain",
+              "code": "unknown_domain"
+            }
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/link-domains/%E0?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown domain",
+              "code": "unknown_domain"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/tokens",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "Hub",
+            "scope": "manage",
+            "site": "blog"
+          },
+          "capture": {
+            "hub": "secret"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "token": {
+                "id": "<id>",
+                "name": "Hub",
+                "site": "blog",
+                "scope": "manage",
+                "hint": "<hint>",
+                "createdAt": 1791374400000,
+                "lastUsedAt": null
+              },
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/sites/%E0",
+          "headers": {
+            "authorization": "Bearer {{hub}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "X"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unknown site",
+              "code": "unknown_site"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/share/%E0",
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+              "referrer-policy": "no-referrer"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/unsubscribe/%E0",
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+              "referrer-policy": "no-referrer"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/assets/app.%E0.js",
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Not found",
+              "code": "not_found"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/assets/locale.%E0.json",
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Not found",
+              "code": "not_found"
+            }
+          }
+        },
+        {
+          "to": "links",
+          "method": "GET",
+          "path": "/go/%E0",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "text/plain"
+            },
+            "text": "Not found"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "go.runlight-conformance.com"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "domain": "go.runlight-conformance.com"
+            }
+          }
+        },
+        {
+          "to": "linkDomain",
+          "host": "go.runlight-conformance.com",
+          "method": "GET",
+          "path": "/%E0",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+          },
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "text/plain"
+            },
+            "text": "Not found"
+          }
+        }
+      ]
     }
   ]
 }
