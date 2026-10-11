@@ -149,7 +149,12 @@ public static partial class Transports
         Response response;
         try
         {
-            response = await fetcher.FetchAsync(url, new FetchInit { Method = "POST", Headers = h, BodyText = body, TimeoutMs = 20_000 }, cancellationToken).ConfigureAwait(false);
+            // A webhook can be at any address, so it and each redirect are checked, as for every service.
+            response = await Safefetch.ServiceFetchAsync(url, new FetchInit { Method = "POST", Headers = h, BodyText = body, TimeoutMs = 20_000 }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (MetadataAddressError error)
+        {
+            throw new MailError(error.Message, "address_refused", new JsObject { ["host"] = error.Host });
         }
         catch (FetchException error)
         {

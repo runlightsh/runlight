@@ -73,6 +73,10 @@ public sealed class PlayerTests
 
         scenario = (JsObject)Json.Parse("{\"site\":{\"hostnames\":[],\"timezone\":\"UTC\"},\"sites\":[],\"token\":\"t\",\"options\":{\"managedSites\":true,\"rateLimit\":4}}")!;
         Assert.Equal("{\"managedSites\":true,\"rateLimit\":4}", Json.Stringify(Player.RunlightOptions(scenario)));
+
+        scenario = (JsObject)Json.Parse("{\"site\":{\"hostnames\":[],\"timezone\":\"UTC\"},\"token\":\"t\",\"options\":{\"cms\":\"WordPress\",\"mailServices\":[\"webhook\"],\"appMailer\":{\"via\":\"Drupal\",\"from\":\"site@example.com\",\"fail\":\"no\"}}}")!;
+        Assert.Equal("{\"site\":{\"hostnames\":[],\"timezone\":\"UTC\"},\"mailServices\":[\"webhook\"],\"appMailer\":{\"via\":\"Drupal\",\"from\":\"site@example.com\",\"fail\":\"no\"}}", Json.Stringify(Player.RunlightOptions(scenario)));
+        Assert.Equal("{\"token\":\"t\",\"observeKey\":\"\",\"cronSecret\":\"\",\"cms\":\"WordPress\"}", Json.Stringify(Player.RoutesOptions(scenario)));
     }
 
     [Fact]
@@ -85,7 +89,8 @@ public sealed class PlayerTests
             (JsObject)Json.Parse("{\"token\":null,\"observeKey\":\"\",\"cronSecret\":\"c\",\"accounts\":true,\"origin\":\"https://o.example\"}")!,
             null,
             now,
-            fetcher);
+            fetcher,
+            new Mailbox());
         var r = CoreTarget.Runlight(options);
         Assert.Equal(["a.com"], r.Sites![0].Hostnames!);
         Assert.Equal("Europe/Paris", r.Sites[0].Timezone);

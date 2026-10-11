@@ -31,7 +31,7 @@ public sealed class CountingTests : StoreTestCase
         new() { ["id"] = id, ["site"] = "default", ["name"] = name, ["steps"] = steps.Cast<object?>().ToList(), ["createdAt"] = createdAt };
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Goals_funnels_and_event_properties_count_visits_by_when_they_started_with_or_without_a_filter(string kind)
     {
         var store = await StoreAsync(kind);
@@ -64,7 +64,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Contains_finds_capitals_beyond_ASCII_and_two_page_filters_count_both_pages(string kind)
     {
         var store = await StoreAsync(kind);
@@ -79,7 +79,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task A_page_goal_funnel_or_filter_written_in_plain_letters_matches_the_encoded_path(string kind)
     {
         var store = await StoreAsync(kind);
@@ -93,7 +93,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task An_event_that_joins_a_visit_already_ended_counts_without_reopening_it(string kind)
     {
         var store = await StoreAsync(kind);
@@ -108,7 +108,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Time_on_page_is_over_every_pageview_counting_quick_ones_as_none(string kind)
     {
         var store = await StoreAsync(kind);
@@ -152,7 +152,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task A_page_goal_or_funnel_step_for_a_hash_route_counts_that_route_only(string kind)
     {
         var store = await StoreAsync(kind);
@@ -176,7 +176,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Page_and_hostname_filters_together_count_pageviews_matching_both(string kind)
     {
         var store = await StoreAsync(kind);
@@ -188,7 +188,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Contains_ignores_case_in_any_mix_in_paths_too_and_filters_take_paths_as_the_browser_writes_them(string kind)
     {
         var store = await StoreAsync(kind);
@@ -210,7 +210,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Time_on_page_leaves_out_imported_views_which_can_report_no_time(string kind)
     {
         var store = await StoreAsync(kind);
@@ -232,7 +232,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task A_filter_picks_visits_and_the_numbers_describe_those_whole_visits(string kind)
     {
         var store = await StoreAsync(kind);
@@ -259,7 +259,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Goals_count_events_page_patterns_and_revenue_including_visits_from_before_the_goal(string kind)
     {
         var store = await StoreAsync(kind);
@@ -296,7 +296,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Renaming_a_click_goal_renames_its_past_clicks(string kind)
     {
         var store = await StoreAsync(kind);
@@ -313,7 +313,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Funnel_steps_in_the_same_millisecond_both_count_and_one_row_never_counts_as_two_steps(string kind)
     {
         var store = await StoreAsync(kind);
@@ -326,7 +326,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task A_funnel_counts_visits_that_took_each_step_in_order_within_one_visit(string kind)
     {
         var store = await StoreAsync(kind);
@@ -362,7 +362,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Journey_pages_reads_each_visits_pages_in_order(string kind)
     {
         var store = await StoreAsync(kind);
@@ -390,7 +390,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task An_events_properties_and_their_values_filtered_like_everything_else(string kind)
     {
         var store = await StoreAsync(kind);
@@ -417,7 +417,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task The_longest_values_the_tracker_accepts_are_kept_whole(string kind)
     {
         var store = await StoreAsync(kind);
@@ -457,7 +457,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Text_is_compared_exactly_and_sorted_by_code_point_case_and_trailing_spaces_included(string kind)
     {
         var store = await StoreAsync(kind);
@@ -478,7 +478,7 @@ public sealed class CountingTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Short_link_clicks_are_not_visits_in_the_heatmap_raw_or_rolled_up_nor_the_first_visit(string kind)
     {
         var store = await StoreAsync(kind);

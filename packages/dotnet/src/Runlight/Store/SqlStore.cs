@@ -24,17 +24,50 @@ public sealed partial class SqlStore
     public const int JourneyVisits = Sql.JourneyVisits;
     public const long EventTailMs = Sql.EventTailMs;
     public const string MysqlCollation = Sql.MysqlCollation;
+    public const int LockWaitMs = Sql.LockWaitMs;
 
     private bool _ready;
     private bool _checkedAll;
     private readonly SemaphoreSlim _migrating = new(1, 1);
 
-    public SqlStore(IDb db)
+    /// <param name="db">The database.</param>
+    /// <param name="prefix">
+    /// Takes the place of <c>rl_</c> at the start of every table and index name, so two apps can each keep
+    /// Runlight's tables in one database: up to 32 letters, digits, and underscores, not starting with a
+    /// digit. A <see cref="PrefixedDb"/> keeps its own.
+    /// </param>
+    /// <exception cref="ArgumentException">For a prefix that is not one.</exception>
+    public SqlStore(IDb db, string prefix = Sql.Prefix)
     {
+        ArgumentNullException.ThrowIfNull(db);
+        if (db is PrefixedDb own)
+        {
+            prefix = own.Prefix;
+        }
+        else if (prefix != Sql.Prefix)
+        {
+            db = new PrefixedDb(db, prefix);
+        }
         Db = db;
+        Prefix = prefix;
     }
 
     public IDb Db { get; }
+
+    /// <summary>What the store's table and index names start with: <c>rl_</c> unless it was given another.</summary>
+    public string Prefix { get; }
+
+    /// <summary>
+    /// The store's tables as named in the database, for an app removing Runlight: each one by name, since
+    /// another app's tables may well start with the same letters.
+    /// </summary>
+    public List<string> Tables() => Sql.Tables.Select(table => Prefix + table).ToList();
+
+    /// <summary>A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_.</summary>
+    private string Unnamed(string name) => name.StartsWith(Prefix, StringComparison.Ordinal) ? Sql.Prefix + name[Prefix.Length..] : name;
+
+    /// <summary>A table or index name as the database has it, under the store's prefix.</summary>
+    private string Named(string name) => name.StartsWith(Sql.Prefix, StringComparison.Ordinal) ? Prefix + name[Sql.Prefix.Length..] : name;
 
     private string Dialect => Db.Dialect;
 
@@ -118,7 +151,7 @@ public sealed partial class SqlStore
     private static readonly Regex IndexStatement = new("^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\\w+) ON (\\w+)", RegexOptions.CultureInvariant);
     private static readonly Regex IndexHead = new("^CREATE (UNIQUE )?INDEX IF NOT EXISTS", RegexOptions.CultureInvariant);
 
-    private static async Task UpgradeAsync(IDb db, bool postgres, CancellationToken cancellationToken)
+    private async Task UpgradeAsync(IDb db, bool postgres, CancellationToken cancellationToken)
     {
         var statements = Sql.Schema(db.Dialect);
         await db.RunAsync(statements[0], null, cancellationToken).ConfigureAwait(false);
@@ -128,15 +161,15 @@ public sealed partial class SqlStore
         {
             // A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
             var broken = await db.AllAsync(
-                """
-                SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-                           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\_%' AND c.relnamespace = current_schema()::regnamespace
-                """,
+                "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relname LIKE '"
+                    + Prefix.Replace("_", "\\_", StringComparison.Ordinal) + "%' AND c.relnamespace = current_schema()::regnamespace",
                 null,
                 cancellationToken).ConfigureAwait(false);
             foreach (var row in broken)
             {
-                await db.RunAsync("DROP INDEX IF EXISTS \"" + Sql.S(row.Get("name")).Replace("\"", "", StringComparison.Ordinal) + "\"", null, cancellationToken).ConfigureAwait(false);
+                // The name comes back as the database has it, so it goes back under rl_ before the prefix is put on again,
+                // which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
+                await db.RunAsync("DROP INDEX IF EXISTS \"" + Unnamed(Sql.S(row.Get("name"))).Replace("\"", "", StringComparison.Ordinal) + "\"", null, cancellationToken).ConfigureAwait(false);
             }
         }
         foreach (string statement in statements)
@@ -148,7 +181,7 @@ public sealed partial class SqlStore
                 string unique = index.Groups[1].Value;
                 var there = await db.AllAsync(
                     "SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
-                    A(index.Groups[3].Value, index.Groups[2].Value),
+                    A(Named(index.Groups[3].Value), Named(index.Groups[2].Value)),
                     cancellationToken).ConfigureAwait(false);
                 if (there.Count == 0)
                 {

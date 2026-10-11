@@ -54,6 +54,9 @@ public sealed partial class Runlight
 
     private const long RollupDelayMs = 2 * 3_600_000;
 
+    /// <summary>The longest a tracker hit waits for the tables while another process creates or upgrades them.</summary>
+    public const int TrackerWaitMs = 10_000;
+
     private static readonly AsyncLocal<bool> InCheck = new();
 
     private readonly object _gate = new();
@@ -92,7 +95,9 @@ public sealed partial class Runlight
     private Dictionary<string, JsObject> _overrides = new(StringComparer.Ordinal);
 
     private Task? _ready;
-    private bool _isReady;
+
+    /// <summary>Set once InitAsync has finished.</summary>
+    private volatile bool _isReady;
     private Task<JsObject>? _checking;
 
     /// <summary>When planner statistics were last gathered.</summary>
@@ -132,6 +137,15 @@ public sealed partial class Runlight
         }
         AppMailer = app;
         _mailInCode = options.Mail?.Service;
+        var offered = options.MailServices;
+        foreach (string id in offered ?? [])
+        {
+            if (!Transports.Services.Any(s => s.Str("id") == id))
+            {
+                throw new ArgumentException("Runlight: MailServices names \"" + id + "\", which is not a mail service", nameof(options));
+            }
+        }
+        _mailServices = offered == null ? null : Transports.Services.Where(s => offered.Contains(s.Str("id")!, StringComparer.Ordinal)).Select(s => s.Str("id")!).ToList();
         Secret = options.Secret ?? Env.Get("RUNLIGHT_SECRET") ?? Env.Get("RUNLIGHT_TOKEN");
         LocalInstalls = options.LocalInstalls;
     }
@@ -221,6 +235,15 @@ public sealed partial class Runlight
     /// <summary>The app's own mailer, used while no service is saved in the dashboard. Null when there is none.</summary>
     public AppMailer? AppMailer { get; }
 
+    /// <summary>The ids of the mail services Settings offers, in Transports.Services order; null for every one.</summary>
+    private readonly List<string>? _mailServices;
+
+    /// <summary>The mail services Settings offers and saves: every one, unless <see cref="RunlightOptions.MailServices"/> names fewer. A fresh copy each time.</summary>
+    public List<JsObject> MailServices => _mailServices == null ? Transports.Services : Transports.Services.Where(Offered).ToList();
+
+    /// <summary>Whether Settings offers a service.</summary>
+    private bool Offered(JsObject service) => _mailServices == null || _mailServices.Contains(service.Str("id") ?? "", StringComparer.Ordinal);
+
     /// <summary>
     /// The mail Runlight sends with, with <c>source</c>: a service from code, or as saved in the dashboard, or
     /// else the app's own mailer, as service "app" with its <c>via</c>. Null when there is none.
@@ -234,9 +257,11 @@ public sealed partial class Runlight
         await InitAsync(cancellationToken).ConfigureAwait(false);
         string? sealedValue = await Store.SettingAsync("mail", cancellationToken).ConfigureAwait(false);
         string? opened = string.IsNullOrEmpty(sealedValue) ? null : Mail.Secret.Unseal(sealedValue, Secret);
-        if (!string.IsNullOrEmpty(opened))
+        var saved = string.IsNullOrEmpty(opened) ? null : Json.Parse(opened) as JsObject ?? new JsObject();
+        // A service no longer offered counts as none, so it is never sent through.
+        if (saved != null && (_mailServices == null || _mailServices.Contains(saved.Get("service") as string ?? "", StringComparer.Ordinal)))
         {
-            return (Json.Parse(opened) as JsObject ?? new JsObject()).With(new JsObject { ["source"] = "dashboard" });
+            return saved.With(new JsObject { ["source"] = "dashboard" });
         }
         var app = AppMailer;
         if (app == null)
@@ -271,6 +296,10 @@ public sealed partial class Runlight
         var current = await MailSettingsAsync(cancellationToken).ConfigureAwait(false);
         var before = current?.Str("source") == "dashboard" ? current : null;
         var service = Transports.Services.FirstOrDefault(s => Same(s.Get("id"), input.Prop("service"))) ?? throw new MailError("Pick a mail service", "mail_service", new JsObject());
+        if (!Offered(service))
+        {
+            throw new MailError(service.Str("name") + " is not offered here. Pick another mail service", "mail_service", new JsObject { ["service"] = service.Get("id") });
+        }
         var fields = service.Arr("fields")!.Cast<JsObject>().ToList();
         var settings = new JsObject { ["service"] = service.Get("id") };
         foreach (var f in fields.Where(f => !f.Bool("secret")))
@@ -450,6 +479,34 @@ public sealed partial class Runlight
             }
             throw;
         }
+    }
+
+    /// <summary>How long a tracker hit waits for the tables: <see cref="TrackerWaitMs"/>, unless a test has set another.</summary>
+    internal int TrackerWait { get; set; } = TrackerWaitMs;
+
+    /// <summary>
+    /// Whether InitAsync finished within <paramref name="ms"/>; false while it is still waiting, such as on another
+    /// process creating the tables, which goes on for later callers. Its errors are thrown.
+    /// </summary>
+    private async Task<bool> ReadyWithinAsync(int ms, CancellationToken cancellationToken)
+    {
+        if (_isReady)
+        {
+            return true;
+        }
+        var init = InitAsync(cancellationToken);
+        using var late = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var timer = Task.Delay(ms, late.Token);
+        if (await Task.WhenAny(init, timer).ConfigureAwait(false) == timer)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Its failure, if it comes, is the next caller's to hear.
+            _ = init.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            return false;
+        }
+        await late.CancelAsync().ConfigureAwait(false);
+        await init.ConfigureAwait(false);
+        return true;
     }
 
     private async Task RunInitAsync()
@@ -1427,6 +1484,13 @@ public sealed partial class Runlight
             return;
         }
         if (_limit != null && !_limit.Allow(ClientIp(request, ip)))
+        {
+            return;
+        }
+
+        // While another process creates or upgrades the tables (an index on a big table takes a while), a hit
+        // waits a moment at most and is then dropped, rather than holding its request until that is done.
+        if (!await ReadyWithinAsync(TrackerWait, cancellationToken).ConfigureAwait(false))
         {
             return;
         }

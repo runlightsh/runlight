@@ -6,7 +6,7 @@ namespace Runlight.Store;
 
 /// <summary>
 /// The stores stores/sqlite.ts, stores/postgres.ts, and stores/mysql.ts make, over ADO.NET. Tables
-/// are prefixed <c>rl_</c>, so the database can be the app's own, and a database made by the
+/// are prefixed <c>rl_</c> (or the <c>prefix</c> each takes), so the database can be the app's own, and a database made by the
 /// TypeScript SDK or the PHP package opens here. No database driver is a dependency of this
 /// package: the app hands over a <see cref="DbDataSource"/> from its own (Microsoft.Data.Sqlite,
 /// Npgsql, or MySqlConnector), and Runlight shares its pool.
@@ -14,27 +14,68 @@ namespace Runlight.Store;
 public static class Stores
 {
     /// <summary>Runlight's tables in a SQLite database, in WAL mode, as better-sqlite3 opens it.</summary>
-    public static SqlStore Sqlite(DbDataSource source) => new(new AdoDb(source, "sqlite"));
+    /// <param name="source">The database's data source.</param>
+    /// <param name="prefix">
+    /// What every table and index name starts with, in place of <c>rl_</c>, so two apps sharing one database
+    /// each keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+    /// </param>
+    public static SqlStore Sqlite(DbDataSource source, string prefix = Sql.Prefix) => new(new AdoDb(source, "sqlite"), prefix);
 
     /// <summary>
     /// Runlight's tables in a SQLite file (or ":memory:"), from Microsoft.Data.Sqlite's factory
-    /// (<c>SqliteFactory.Instance</c>). A file in a folder that is not there yet gets the folder.
+    /// (<c>SqliteFactory.Instance</c>). A file in a folder that is not there yet gets the folder. A file
+    /// made here is for its owner and group alone (0660), and so is a folder made for it (0770).
     /// </summary>
-    public static SqlStore Sqlite(DbProviderFactory factory, string path)
+    /// <param name="factory">Microsoft.Data.Sqlite's factory.</param>
+    /// <param name="path">A file path, or ":memory:".</param>
+    /// <param name="prefix">
+    /// What every table and index name starts with, in place of <c>rl_</c>, so two apps sharing one database
+    /// each keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+    /// </param>
+    public static SqlStore Sqlite(DbProviderFactory factory, string path, string prefix = Sql.Prefix)
     {
-        if (path.Length > 0 && path != ":memory:" && !path.StartsWith("file:", StringComparison.Ordinal))
+        ArgumentNullException.ThrowIfNull(factory);
+        ArgumentNullException.ThrowIfNull(path);
+        bool file = path.Length > 0 && path != ":memory:" && !path.StartsWith("file:", StringComparison.Ordinal);
+        if (file)
         {
             string? dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
             if (dir != null)
             {
-                System.IO.Directory.CreateDirectory(dir);
+                Folder(dir);
             }
         }
         var builder = factory.CreateConnectionStringBuilder() ?? new DbConnectionStringBuilder();
         builder["Data Source"] = path;
         // better-sqlite3 waits up to five seconds for a lock.
         builder["Default Timeout"] = 5;
-        return new SqlStore(new AdoDb(factory.CreateDataSource(builder.ConnectionString), "sqlite", owned: true));
+        return new SqlStore(new AdoDb(factory.CreateDataSource(builder.ConnectionString), "sqlite", owned: true) { File = file ? path : null }, prefix);
+    }
+
+    /// <summary>A folder and those above it that are not there yet, made for their owner and group alone (0770).</summary>
+    private static void Folder(string dir)
+    {
+        var missing = new System.Collections.Generic.List<string>();
+        for (string? at = dir; at != null && !System.IO.Directory.Exists(at); at = System.IO.Path.GetDirectoryName(at))
+        {
+            missing.Add(at);
+        }
+        System.IO.Directory.CreateDirectory(dir);
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        foreach (string made in missing)
+        {
+            try
+            {
+                System.IO.File.SetUnixFileMode(made, System.IO.UnixFileMode.UserRead | System.IO.UnixFileMode.UserWrite | System.IO.UnixFileMode.UserExecute | System.IO.UnixFileMode.GroupRead | System.IO.UnixFileMode.GroupWrite | System.IO.UnixFileMode.GroupExecute);
+            }
+            catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException)
+            {
+                // Not a folder this process may change.
+            }
+        }
     }
 
     /// <summary>
@@ -42,20 +83,39 @@ public static class Stores
     /// any one statement after that many milliseconds; 0 (the default, for a pool the app keeps) leaves
     /// the server's own.
     /// </summary>
-    public static SqlStore Postgres(DbDataSource source, int statementTimeout = 0) => new(new AdoDb(source, "postgres", statementTimeout: statementTimeout));
+    /// <param name="source">The database's data source.</param>
+    /// <param name="statementTimeout">The longest one statement may run, in milliseconds; 0 for the server's own.</param>
+    /// <param name="prefix">
+    /// What every table and index name starts with, in place of <c>rl_</c>, so two apps sharing one database
+    /// each keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+    /// </param>
+    public static SqlStore Postgres(DbDataSource source, int statementTimeout = 0, string prefix = Sql.Prefix) => new(new AdoDb(source, "postgres", statementTimeout: statementTimeout), prefix);
 
     /// <summary>
     /// Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, over MySqlConnector's data source.
     /// Text is utf8mb4 with a binary collation, so it compares and sorts by code point, case and
     /// trailing spaces included, as SQLite and Postgres do.
     /// </summary>
-    public static SqlStore MySql(DbDataSource source, int statementTimeout = 0) => new(new AdoDb(source, "mysql", statementTimeout: statementTimeout));
+    /// <param name="source">The database's data source.</param>
+    /// <param name="statementTimeout">The longest one statement may run, in milliseconds; 0 for the server's own.</param>
+    /// <param name="prefix">
+    /// What every table and index name starts with, in place of <c>rl_</c>, so two apps sharing one database
+    /// each keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+    /// </param>
+    public static SqlStore MySql(DbDataSource source, int statementTimeout = 0, string prefix = Sql.Prefix) => new(new AdoDb(source, "mysql", statementTimeout: statementTimeout), prefix);
 
     /// <summary>The store for a data source, its database read from the type of its connections.</summary>
-    public static SqlStore For(DbDataSource source) => new(new AdoDb(source, AdoDb.DialectOf(source)));
+    /// <param name="source">The database's data source.</param>
+    /// <param name="prefix">
+    /// What every table and index name starts with, in place of <c>rl_</c>, so two apps sharing one database
+    /// each keep a set of their own: up to 32 letters, digits, and underscores, not starting with a digit.
+    /// </param>
+    public static SqlStore For(DbDataSource source, string prefix = Sql.Prefix) => new(new AdoDb(source, AdoDb.DialectOf(source)), prefix);
 
     /// <summary>A store over any <see cref="IDb"/>.</summary>
-    public static SqlStore FromDb(IDb db) => new(db);
+    /// <param name="db">The database.</param>
+    /// <param name="prefix">What every table and index name starts with, in place of <c>rl_</c>; a <see cref="PrefixedDb"/> keeps its own.</param>
+    public static SqlStore FromDb(IDb db, string prefix = Sql.Prefix) => new(db, prefix);
 
     /// <summary>SQL written for SQLite and Postgres as MySQL and MariaDB read it, each <c>?</c> filled in as mysql2 escapes it.</summary>
     public static string MysqlText(string sql, System.Collections.Generic.IReadOnlyList<object?>? args = null, Func<object?, string>? escape = null) =>

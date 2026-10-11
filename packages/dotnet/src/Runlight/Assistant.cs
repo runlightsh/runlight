@@ -174,23 +174,15 @@ public static class Assistant
     }
 
     /// <summary>
-    /// Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
-    /// private network is allowed, as the person setting it up means it to be.
+    /// A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+    /// (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
     /// </summary>
-    /// <exception cref="AssistantError">Coded address_refused.</exception>
-    public static async Task RefuseMetadataAsync(string url)
-    {
-        string host = new Url(url).Hostname;
-        if (await Safefetch.MetadataHostAsync(host).ConfigureAwait(false))
-        {
-            throw new AssistantError(host + " is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", new JsObject { ["host"] = host });
-        }
-    }
+    private static AssistantError Refused(MetadataAddressError error) =>
+        new(error.Message, "address_refused", new JsObject { ["host"] = error.Host });
 
     private static async Task<object?> PostAsync(IFetcher fetcher, string url, Headers headers, object? body, long deadline, Func<long> now, CancellationToken cancellationToken)
     {
         InTime(deadline, now, cancellationToken);
-        await RefuseMetadataAsync(url).ConfigureAwait(false);
         long left = deadline - now();
         var all = new Headers { ["content-type"] = "application/json" };
         foreach (var (name, values) in headers.All())
@@ -201,14 +193,18 @@ public static class Assistant
         byte[] bytes;
         try
         {
-            answer = await fetcher.FetchAsync(url, new FetchInit
+            answer = await Safefetch.ServiceFetchAsync(url, new FetchInit
             {
                 Method = "POST",
                 Headers = all,
                 BodyText = Json.Stringify(body),
                 TimeoutMs = (int)Math.Min(90_000, left),
-            }, cancellationToken).ConfigureAwait(false);
+            }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
             bytes = await answer.BytesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (MetadataAddressError error)
+        {
+            throw Refused(error);
         }
         catch (Exception error)
         {
@@ -526,13 +522,16 @@ public static class Assistant
         var headers = provider.Protocol == "anthropic"
             ? new Headers { ["x-api-key"] = key, ["anthropic-version"] = "2023-06-01" }
             : key.Length > 0 ? new Headers { ["authorization"] = "Bearer " + key } : new Headers();
-        await RefuseMetadataAsync(@base).ConfigureAwait(false);
         Response answer;
         byte[] bytes;
         try
         {
-            answer = await fetcher.FetchAsync(@base + "/models" + (provider.Protocol == "anthropic" ? "?limit=100" : ""), new FetchInit { Headers = headers, TimeoutMs = 20_000 }, cancellationToken).ConfigureAwait(false);
+            answer = await Safefetch.ServiceFetchAsync(@base + "/models" + (provider.Protocol == "anthropic" ? "?limit=100" : ""), new FetchInit { Headers = headers, TimeoutMs = 20_000 }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
             bytes = await answer.BytesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (MetadataAddressError error)
+        {
+            throw Refused(error);
         }
         catch (Exception)
         {

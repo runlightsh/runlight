@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -34,8 +35,37 @@ public sealed class CoreTarget : ITarget
             RateLimit = !o.Has("rateLimit") ? 120 : o.Get("rateLimit") is false or null ? null : o.Num("rateLimit"),
             Now = options.Now,
             Fetcher = options.Fetcher,
+            MailServices = o.Arr("mailServices")?.Select(id => Js.String(id)).ToList(),
+            Mail = o.Obj("appMailer") is JsObject app ? AppMailer(app, options.Mailed) : null,
         };
     }
+
+    /// <summary>
+    /// The scenario's app mailer: its send keeps each message in the mailbox, as http.json's mailed lists them,
+    /// or fails with <c>fail</c> as its error's message.
+    /// </summary>
+    private static AppMailer AppMailer(JsObject app, Mailbox mailbox) => new()
+    {
+        From = app.Str("from")!,
+        FromName = app.Str("fromName"),
+        Via = app.Str("via")!,
+        Send = (message, _) =>
+        {
+            if (app.Str("fail") is string fail)
+            {
+                throw new InvalidOperationException(fail);
+            }
+            var kept = new JsObject { ["to"] = message.Get("to"), ["from"] = message.Get("from") };
+            if (Js.Truthy(message.Get("fromName")))
+            {
+                kept["fromName"] = message.Get("fromName");
+            }
+            kept["subject"] = message.Get("subject");
+            kept["text"] = message.Get("text");
+            mailbox.Add(kept);
+            return Task.CompletedTask;
+        },
+    };
 
     /// <summary>The routes' options; the token is always set, null included, since unset reads RUNLIGHT_TOKEN.</summary>
     public static RoutesOptions Routes(JsObject o) => new()
@@ -45,6 +75,7 @@ public sealed class CoreTarget : ITarget
         CronSecret = o.Str("cronSecret"),
         Accounts = o.Bool("accounts"),
         Origin = o.Str("origin"),
+        Cms = o.Str("cms"),
     };
 
     private static SiteOptions Site(JsObject site) => new()

@@ -33,7 +33,11 @@ public sealed class FetchInit
     /// <summary>With MaxBytes, hand back the first MaxBytes instead of throwing (the start of a page).</summary>
     public bool Truncate { get; set; }
 
-    /// <summary>"host:port:address" pins, so a checked address is the one connected to.</summary>
+    /// <summary>
+    /// "host:port:address" pins, so a checked address is the one connected to. A fetcher given pins connects
+    /// only to those addresses, never through a proxy or a lookup of its own, and refuses the request (with a
+    /// <see cref="FetchException"/>) when it cannot.
+    /// </summary>
     public List<string> Resolve { get; set; } = [];
 }
 

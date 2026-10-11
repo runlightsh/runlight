@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Runlight.Store;
 
 namespace Runlight.Db;
 
@@ -75,6 +76,15 @@ public sealed class AdoDb : IDb
     }
 
     public string Dialect { get; }
+
+    /// <summary>
+    /// SQLite: the file the data source opens, when it is a path, so a file made by opening it is for its
+    /// owner and group alone. Null for ":memory:", a URI, or a data source the app made.
+    /// </summary>
+    internal string? File { get; init; }
+
+    /// <summary>How long <see cref="ExclusiveAsync"/> waits for the lock: <see cref="Sql.LockWaitMs"/>, unless a test has set another.</summary>
+    internal int LockWait { get; set; } = Sql.LockWaitMs;
 
     /// <summary>The dialect a data source's connections speak, read from their type's name.</summary>
     public static string DialectOf(DbDataSource source)
@@ -201,6 +211,9 @@ public sealed class AdoDb : IDb
         return await HoldAsync(
             async scope =>
             {
+                // Up to LockWait, so a request does not wait on a long index build for good.
+                int wait = LockWait;
+                var clock = System.Diagnostics.Stopwatch.StartNew();
                 if (Dialect == "postgres")
                 {
                     // Asked for again and again rather than waited on: a waiting statement would hold up
@@ -208,6 +221,10 @@ public sealed class AdoDb : IDb
                     // on each other for good.
                     while (!Truthy((await AllAsync("SELECT pg_try_advisory_lock(?) AS ok", [MigrationLock], cancellationToken).ConfigureAwait(false))[0].Get("ok")))
                     {
+                        if (clock.ElapsedMilliseconds >= wait)
+                        {
+                            throw new TablesBusyError(wait);
+                        }
                         await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                     }
                     try
@@ -228,7 +245,8 @@ public sealed class AdoDb : IDb
                 }
                 while (true)
                 {
-                    object? ok = (await AllAsync("SELECT GET_LOCK(" + MysqlLock + ", 5) AS ok", null, cancellationToken).ConfigureAwait(false))[0].Get("ok");
+                    long left = Math.Max(1, Math.Min(5, (long)Math.Ceiling((wait - clock.ElapsedMilliseconds) / 1000.0)));
+                    object? ok = (await AllAsync("SELECT GET_LOCK(" + MysqlLock + ", " + left.ToString(CultureInfo.InvariantCulture) + ") AS ok", null, cancellationToken).ConfigureAwait(false))[0].Get("ok");
                     if (ok == null)
                     {
                         throw new InvalidOperationException("Runlight: MySQL refused the lock for creating tables");
@@ -237,7 +255,11 @@ public sealed class AdoDb : IDb
                     {
                         break;
                     }
-                    // Not got within 5 seconds: another process is creating the tables. Ask again.
+                    // Not got in time: another process is creating the tables. Ask again, until the wait is up.
+                    if (clock.ElapsedMilliseconds >= wait)
+                    {
+                        throw new TablesBusyError(wait);
+                    }
                 }
                 try
                 {
@@ -381,7 +403,12 @@ public sealed class AdoDb : IDb
         {
             return _sqlite;
         }
+        bool made = File != null && !System.IO.File.Exists(File);
         var connection = await _source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        if (made)
+        {
+            OwnerAndGroup(File!);
+        }
         // secure_delete overwrites deleted rows, such as a day's salt once it is gone, where that costs no extra
         // writes, so they do not linger in the file's free space.
         foreach (string pragma in new[] { "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA busy_timeout = 5000", "PRAGMA secure_delete = FAST" })
@@ -392,6 +419,28 @@ public sealed class AdoDb : IDb
         }
         _sqlite = connection;
         return connection;
+    }
+
+    /// <summary>
+    /// A database file just made is for its owner and group alone (0660), whatever the umask: the visits in it
+    /// are nobody else's to read, and a scheduled job running as another user of the same group can still
+    /// write to it. Set before WAL is turned on, so SQLite gives the -wal and -shm files it makes later the
+    /// same mode. Systems without such modes ignore it.
+    /// </summary>
+    private static void OwnerAndGroup(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        try
+        {
+            System.IO.File.SetUnixFileMode(path, System.IO.UnixFileMode.UserRead | System.IO.UnixFileMode.UserWrite | System.IO.UnixFileMode.GroupRead | System.IO.UnixFileMode.GroupWrite);
+        }
+        catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException)
+        {
+            // Not a file this process may change.
+        }
     }
 
     private async Task<DbConnection> OpenAsync(CancellationToken cancellationToken)

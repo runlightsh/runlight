@@ -11,15 +11,16 @@ namespace Runlight.Tests.ConformanceRunner;
 
 /// <summary>
 /// What a target is made from: the options new Runlight(...) gets (as JSON, without the store, the clock,
-/// and the fetcher), the options rl.Routes(...) gets, and the store, clock, and fetcher themselves.
+/// and the fetcher), the options rl.Routes(...) gets, the store, clock, and fetcher themselves, and the
+/// mailbox an app mailer (the appMailer option) keeps what it is handed in.
 /// </summary>
-public sealed record PlayOptions(JsObject Runlight, JsObject Routes, object? Store, Func<long> Now, UpstreamFetcher Fetcher);
+public sealed record PlayOptions(JsObject Runlight, JsObject Routes, object? Store, Func<long> Now, UpstreamFetcher Fetcher, Mailbox Mailed);
 
 /// <summary>
 /// Plays a scenario from conformance/http.json exactly as play() in packages/sdk/test/http-conformance.ts
 /// does (ported from the PHP's tests/Conformance/Player.php), and returns each step's answer, normalized,
 /// in the shape of the file's <c>expect</c>: objects with status, headers, body, text, files, found,
-/// fetched, or pass.
+/// fetched, mailed, or pass.
 ///
 /// The scenario's options become the options the port conventions name, and a target (the core, or a fake)
 /// takes the requests. Keep this file in step with the TypeScript runner: <see cref="FormatSha256"/> fails a
@@ -28,7 +29,7 @@ public sealed record PlayOptions(JsObject Runlight, JsObject Routes, object? Sto
 public sealed class Player
 {
     /// <summary>The SHA-256 of http.json's description this runner was written against.</summary>
-    public const string FormatSha256 = "87a6f2d7f8acd8026aa4c9ede697d21457a0b9c1a2bfc01488aa2d9598def68f";
+    public const string FormatSha256 = "9721f5d81842e566cbe725d3823b9e1b02580936b9366e0e7ea316d4f49c3acb";
 
     /// <summary>Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.</summary>
     public static readonly string[] Env = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV"];
@@ -92,6 +93,14 @@ public sealed class Player
         {
             output["rateLimit"] = options.Get("rateLimit");
         }
+        if (options.Get("mailServices") is List<object?> services)
+        {
+            output["mailServices"] = Plain(services);
+        }
+        if (options.Get("appMailer") is JsObject app)
+        {
+            output["appMailer"] = Plain(app);
+        }
         return output;
     }
 
@@ -116,13 +125,18 @@ public sealed class Player
         {
             output["origin"] = options.Get("origin");
         }
+        if (Js.Truthy(options.Get("cms")))
+        {
+            output["cms"] = options.Get("cms");
+        }
         return output;
     }
 
     private async Task<List<JsObject>> StepsAsync(JsObject scenario, Func<PlayOptions, ITarget> makeTarget, object? store, UpstreamFetcher fetcher)
     {
         _now = (long)scenario.Num("start");
-        var target = makeTarget(new PlayOptions(RunlightOptions(scenario), RoutesOptions(scenario), store, () => _now, fetcher));
+        var mailbox = new Mailbox();
+        var target = makeTarget(new PlayOptions(RunlightOptions(scenario), RoutesOptions(scenario), store, () => _now, fetcher, mailbox));
         var kept = new Dictionary<string, string>(StringComparer.Ordinal);
         var jars = new Dictionary<string, OrderedDictionary<string, string>>(StringComparer.Ordinal);
         var answers = new List<JsObject>();
@@ -132,7 +146,7 @@ public sealed class Player
             var step = steps[i];
             try
             {
-                answers.Add(await StepAsync(step, target, fetcher, kept, jars));
+                answers.Add(await StepAsync(step, target, fetcher, mailbox, kept, jars));
             }
             catch (Exception error)
             {
@@ -144,7 +158,7 @@ public sealed class Player
         return answers;
     }
 
-    private async Task<JsObject> StepAsync(JsObject step, ITarget target, UpstreamFetcher fetcher, Dictionary<string, string> kept, Dictionary<string, OrderedDictionary<string, string>> jars)
+    private async Task<JsObject> StepAsync(JsObject step, ITarget target, UpstreamFetcher fetcher, Mailbox mailbox, Dictionary<string, string> kept, Dictionary<string, OrderedDictionary<string, string>> jars)
     {
         _now += step.Has("advance") ? (long)step.Num("advance") : 0;
         var headers = new OrderedDictionary<string, string>(StringComparer.Ordinal);
@@ -195,6 +209,7 @@ public sealed class Player
         string url = Url.Parse(raw)?.Href ?? raw;
         var request = new Request(url, step.Str("method")!, new Headers(headers), body ?? "");
         fetcher.Take();
+        mailbox.Take();
         Response? answer = to switch
         {
             "links" => await target.LinksAsync(request),
@@ -205,6 +220,7 @@ public sealed class Player
         await target.IdleAsync();
         var sentOut = fetcher.Take();
         var outbound = sentOut.Select(f => Normalizer.Normalize(f.Seen)).ToList();
+        var handed = mailbox.Take().Select(m => Normalizer.Normalize(m)).ToList();
         if (answer == null)
         {
             var passed = new JsObject { ["pass"] = true };
@@ -212,12 +228,16 @@ public sealed class Player
             {
                 passed["fetched"] = outbound;
             }
+            if (handed.Count > 0)
+            {
+                passed["mailed"] = handed;
+            }
             return passed;
         }
-        return await AnswerAsync(step, answer, sentOut, outbound, kept, jar);
+        return await AnswerAsync(step, answer, sentOut, outbound, handed, kept, jar);
     }
 
-    private static async Task<JsObject> AnswerAsync(JsObject step, Response answer, List<Fetched> sentOut, List<object?> outbound, Dictionary<string, string> kept, OrderedDictionary<string, string>? jar)
+    private static async Task<JsObject> AnswerAsync(JsObject step, Response answer, List<Fetched> sentOut, List<object?> outbound, List<object?> handed, Dictionary<string, string> kept, OrderedDictionary<string, string>? jar)
     {
         byte[] bytes = await answer.BytesAsync();
         string text = Body.Utf8(bytes);
@@ -296,6 +316,10 @@ public sealed class Player
         if (outbound.Count > 0)
         {
             output["fetched"] = outbound;
+        }
+        if (handed.Count > 0)
+        {
+            output["mailed"] = handed;
         }
         return output;
     }

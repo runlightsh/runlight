@@ -14,7 +14,7 @@ public sealed class ConformanceTests : IAsyncLifetime
     public static TheoryData<string, string> ScenarioData()
     {
         var data = new TheoryData<string, string>();
-        foreach (string kind in Databases.Kinds())
+        foreach (string kind in Databases.StoreKinds())
         {
             foreach (var scenario in Scenarios.All())
             {

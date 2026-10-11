@@ -438,4 +438,47 @@ public sealed class MailTests
         Assert.Null(answer.Get("source"));
         Assert.False(answer.Has("app")); // an install without an app mailer answers as before
     }
+
+    [Fact]
+    public async Task Settings_offers_only_the_mail_services_named_and_a_saved_one_no_longer_offered_counts_as_none()
+    {
+        var store = await Databases.FreshAsync("sqlite");
+        var error = Assert.Throws<ArgumentException>(() => new Runlight(new RunlightOptions { Store = store, MailServices = ["resend", "carrier-pigeon"] }));
+        Assert.StartsWith("Runlight: MailServices names \"carrier-pigeon\", which is not a mail service", error.Message, StringComparison.Ordinal);
+        Assert.Equal(Transports.Services.Select(s => s.Str("id")), new Runlight(new RunlightOptions { Store = store }).MailServices.Select(s => s.Str("id")));
+        Assert.Empty(new Runlight(new RunlightOptions { Store = store, MailServices = [] }).MailServices);
+
+        // A webhook saved while every service was offered.
+        var before = new Runlight(new RunlightOptions { Store = store });
+        await before.SaveMailSettingsAsync(new JsObject { ["service"] = "webhook", ["url"] = "https://example.com/hooks/mail", ["from"] = "reports@example.com" });
+        Assert.Equal("dashboard", (await before.MailSettingsAsync())!.Str("source"));
+
+        var rl = new Runlight(new RunlightOptions
+        {
+            Store = store,
+            MailServices = ["webhook", "resend"],
+            Mail = new AppMailer { From = "site@example.com", Via = "Drupal", Send = (_, _) => Task.CompletedTask },
+        });
+        // Kept in the order of every service, whatever order they are named in.
+        Assert.Equal(["resend", "webhook"], rl.MailServices.Select(s => s.Str("id")));
+        Assert.Equal("dashboard", (await rl.MailSettingsAsync())!.Str("source"));
+
+        var only = new Runlight(new RunlightOptions
+        {
+            Store = store,
+            MailServices = ["resend"],
+            Mail = new AppMailer { From = "site@example.com", Via = "Drupal", Send = (_, _) => Task.CompletedTask },
+        });
+        // The webhook is not offered here, so the app's mailer sends.
+        Assert.Equal("app", (await only.MailSettingsAsync())!.Str("source"));
+        var refused = await Assert.ThrowsAsync<MailError>(() => only.SaveMailSettingsAsync(new JsObject { ["service"] = "smtp", ["host"] = "smtp.example.com", ["port"] = "587", ["security"] = "starttls", ["from"] = "reports@example.com" }));
+        Assert.Equal(("SMTP is not offered here. Pick another mail service", "mail_service", "{\"service\":\"smtp\"}"), (refused.Message, refused.Code, J(refused.Params)));
+        refused = await Assert.ThrowsAsync<MailError>(() => only.SaveMailSettingsAsync(new JsObject { ["service"] = "carrier-pigeon" }));
+        Assert.Equal(("Pick a mail service", "mail_service", "{}"), (refused.Message, refused.Code, J(refused.Params)));
+
+        var headers = new Headers();
+        headers.Set("authorization", "Bearer t");
+        var answer = (JsObject)Json.Parse((await only.Routes(new RoutesOptions { Token = "t" }).HandleAsync(new Request("https://stats.example.com/runlight/api/mail", "GET", headers))).Text())!;
+        Assert.Equal(["resend"], answer.Arr("services")!.Cast<JsObject>().Select(s => s.Str("id")));
+    }
 }

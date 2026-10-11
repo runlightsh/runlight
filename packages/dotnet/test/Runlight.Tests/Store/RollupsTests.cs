@@ -95,7 +95,7 @@ public sealed class RollupsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Reports_read_from_daily_rollups_match_reports_read_from_every_visit(string kind)
     {
         var store = await StoreAsync(kind);
@@ -123,7 +123,7 @@ public sealed class RollupsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task A_late_event_and_engagement_on_an_old_pageview_are_counted_once_the_day_is_built_again(string kind)
     {
         var store = await StoreAsync(kind);
@@ -155,7 +155,7 @@ public sealed class RollupsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Ties_come_in_code_point_order_the_same_before_and_after_the_days_are_built(string kind)
     {
         var store = await StoreAsync(kind);
@@ -187,7 +187,7 @@ public sealed class RollupsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task A_day_built_by_another_process_while_it_is_being_cleared_is_never_left_marked_built_without_its_numbers(string kind)
     {
         var (store, month, before) = await BuiltAsync(kind, 4);
@@ -210,7 +210,7 @@ public sealed class RollupsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Clearing_days_that_stops_part_way_leaves_none_marked_built_without_its_numbers(string kind)
     {
         var (store, month, before) = await BuiltAsync(kind, 8);
@@ -233,7 +233,7 @@ public sealed class RollupsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Retention_drops_old_visits_with_their_events_and_forgets_the_days_they_were_in(string kind)
     {
         var store = await StoreAsync(kind);
