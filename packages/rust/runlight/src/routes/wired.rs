@@ -111,7 +111,10 @@ pub(crate) async fn fetch_icon(rl: &Runlight, url: &str) -> Option<(Vec<u8>, Str
 pub(crate) async fn mail_view(rl: &Runlight, managed: bool) -> Result<Value, Error> {
     let settings = rl.mail_settings().await?;
     let config = settings.as_ref().map(|s| &s.0);
-    let service = SERVICES.iter().find(|s| config.and_then(|c| c.get("service")).and_then(Value::as_str) == Some(s.id));
+    let app_in_use = settings.as_ref().is_some_and(|s| s.1 == "app");
+    let service = SERVICES
+        .iter()
+        .find(|s| !app_in_use && config.and_then(|c| c.get("service")).and_then(Value::as_str) == Some(s.id));
     // Secret fields come back only as "saved", never as their value.
     let mut fields = js::Object::new();
     let mut saved = Vec::new();
@@ -126,16 +129,29 @@ pub(crate) async fn mail_view(rl: &Runlight, managed: bool) -> Result<Value, Err
         }
     }
     let get = |k: &str| config.and_then(|c| c.get(k)).cloned();
-    Ok(obj! {
+    let mut view = obj! {
         "source" => settings.as_ref().map(|s| s.1),
-        "service" => get("service").unwrap_or_else(|| Value::from("")),
+        "service" => if app_in_use { Value::from("") } else { get("service").unwrap_or_else(|| Value::from("")) },
         "from" => get("from").unwrap_or_else(|| Value::from("")),
         "fromName" => get("fromName").unwrap_or_else(|| Value::from("")),
         "fields" => if managed { Value::Object(js::Object::new()) } else { Value::Object(fields) },
         "saved" => if managed { Value::Array(vec![]) } else { Value::Array(saved) },
         "encrypted" => rl.secret().is_some(),
         "services" => services_value(),
-    })
+    };
+    // The app's own mailer, named only when there is one, so the answer without it stays as it was.
+    if let (Some(app), Value::Object(o)) = (rl.app_mailer(), &mut view) {
+        o.set(
+            "app",
+            obj! {
+                "via" => app.via.as_str(),
+                "from" => app.from.as_str(),
+                "fromName" => app.from_name.as_deref().unwrap_or(""),
+                "replaced" => !app_in_use,
+            },
+        );
+    }
+    Ok(view)
 }
 
 pub(crate) async fn save_mail_settings(rl: &Runlight, input: Option<&Value>) -> Result<(), Error> {
@@ -149,13 +165,17 @@ pub(crate) async fn send_mail(rl: &Runlight, message: Message) -> Result<(), Err
 }
 
 pub(crate) async fn send_test_mail(rl: &Runlight, to: &str, lang: &str) -> R {
-    let Some((settings, _)) = rl.mail_settings().await? else {
+    let Some((settings, source)) = rl.mail_settings().await? else {
         return Ok(coded("Set up a mail service first", "mail_unset", 400, None));
     };
     let (t, _) = translator(lang);
     let id = settings.get("service").and_then(Value::as_str).unwrap_or("");
-    let name = SERVICES.iter().find(|s| s.id == id).map_or("", |s| s.name);
-    let body = t("email.test.body", &[("service", name)]);
+    let name = if source == "app" {
+        js::str_or_empty(settings.get("via"))
+    } else {
+        SERVICES.iter().find(|s| s.id == id).map_or("", |s| s.name).to_string()
+    };
+    let body = t("email.test.body", &[("service", &name)]);
     rl.send_mail(Message {
         to: to.to_string(),
         subject: t("email.test.subject", &[]),

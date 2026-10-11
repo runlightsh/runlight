@@ -7,10 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static sh.runlight.core.Harness.utc;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import sh.runlight.Fixtures;
@@ -19,15 +21,18 @@ import sh.runlight.Js;
 import sh.runlight.Json;
 import sh.runlight.RecordingFetcher;
 import sh.runlight.Reports;
+import sh.runlight.Routes;
 import sh.runlight.Runlight;
 import sh.runlight.http.Response;
+import sh.runlight.mail.AppMailer;
 import sh.runlight.mail.MailError;
+import sh.runlight.routes.Make;
 import sh.runlight.store.SqlStore;
 import sh.runlight.store.Stores;
 
 /**
  * The mail service's settings and the reports sent through it, as mail.test.ts and audit.test.ts
- * test them without routes.
+ * test them without routes, and the app's own mailer, through the routes as mail.test.ts tests it.
  */
 class ReportMailTest {
   private int status = 200;
@@ -256,5 +261,176 @@ class ReportMailTest {
         Json.object("service", "resend", "apiKey", "re_1", "from", "r@example.com"));
     Runlight two = new Runlight(new Runlight.Options().store(store).secret("two"));
     assertNull(two.mailSettings());
+  }
+
+  @Test
+  void theAppsOwnMailerSendsUntilAServiceSavedInTheDashboardTakesItsPlace() {
+    AtomicLong now = new AtomicLong(utc(2026, 10, 5, 12));
+    List<Map<String, Object>> sent = new ArrayList<>();
+    AtomicReference<String> fail = new AtomicReference<>("");
+    Runlight rl =
+        runlight(
+            now,
+            example("UTC")
+                .mail(
+                    new AppMailer(
+                        m -> {
+                          if (!fail.get().isEmpty()) {
+                            throw new IllegalStateException(fail.get());
+                          }
+                          sent.add(m);
+                        },
+                        "site@example.com",
+                        "Example",
+                        "WordPress (WP Mail SMTP)")));
+    Routes routes = rl.routes(new Routes.Options().token("t"));
+    MailCall call =
+        (method, path, body) -> routes.handle(Make.owner("/runlight" + path, method, body, "t"));
+
+    Map<String, Object> app = Make.body(call.call("GET", "/api/mail", null));
+    Fixtures.assertJson(
+        Json.object(
+            "source",
+            "app",
+            "service",
+            "",
+            "from",
+            "site@example.com",
+            "fromName",
+            "Example",
+            "fields",
+            Map.of(),
+            "saved",
+            List.of(),
+            "app",
+            Json.object(
+                "via",
+                "WordPress (WP Mail SMTP)",
+                "from",
+                "site@example.com",
+                "fromName",
+                "Example",
+                "replaced",
+                false)),
+        Json.object(
+            "source",
+            app.get("source"),
+            "service",
+            app.get("service"),
+            "from",
+            app.get("from"),
+            "fromName",
+            app.get("fromName"),
+            "fields",
+            app.get("fields"),
+            "saved",
+            app.get("saved"),
+            "app",
+            app.get("app")));
+
+    Map<String, Object> test = Json.object("to", "jon@example.com");
+    assertEquals(200, call.call("POST", "/api/mail/test", test).status());
+    assertEquals(1, sent.size());
+    Fixtures.assertJson(
+        List.of("jon@example.com", "site@example.com", "Example"),
+        List.of(sent.get(0).get("to"), sent.get(0).get("from"), sent.get(0).get("fromName")));
+    assertTrue(
+        ((String) sent.get(0).get("text")).contains("WordPress (WP Mail SMTP)"),
+        "the test names the app's mailer");
+
+    // Reports go through it too, with the unsubscribe headers.
+    assertEquals(
+        201,
+        call.call(
+                "POST",
+                "/api/reports",
+                Json.object("email", "jon@example.com", "frequency", "weekly"))
+            .status());
+    now.addAndGet(7 * 86_400_000L);
+    Fixtures.assertJson(counts(1, 0), rl.sendReports());
+    Map<String, Object> headers = Js.map(sent.get(1).get("headers"));
+    assertTrue(
+        ((String) headers.get("List-Unsubscribe"))
+            .matches("^<https://example\\.com/runlight/unsubscribe/[a-f0-9]{32}>\\z"));
+    assertEquals("List-Unsubscribe=One-Click", headers.get("List-Unsubscribe-Post"));
+
+    // A failure comes back as a mail error naming the mailer.
+    fail.set("SMTP connect() failed");
+    Response failed = call.call("POST", "/api/mail/test", test);
+    assertEquals(400, failed.status());
+    Fixtures.assertJson(
+        Json.object(
+            "error",
+            "WordPress (WP Mail SMTP) could not send it: SMTP connect() failed",
+            "code",
+            "mail_app_failed",
+            "params",
+            Json.object("via", "WordPress (WP Mail SMTP)", "detail", "SMTP connect() failed")),
+        Make.body(failed));
+    fail.set("");
+
+    // A service saved in the dashboard takes its place.
+    assertEquals(
+        200,
+        call.call(
+                "PUT",
+                "/api/mail",
+                Json.object(
+                    "service", "resend", "apiKey", "re_live_key", "from", "reports@example.com"))
+            .status());
+    Map<String, Object> replaced = Make.body(call.call("GET", "/api/mail", null));
+    Fixtures.assertJson(
+        List.of(
+            "dashboard",
+            "resend",
+            "reports@example.com",
+            Json.object(
+                "via",
+                "WordPress (WP Mail SMTP)",
+                "from",
+                "site@example.com",
+                "fromName",
+                "Example",
+                "replaced",
+                true)),
+        List.of(
+            replaced.get("source"),
+            replaced.get("service"),
+            replaced.get("from"),
+            replaced.get("app")));
+    assertEquals(200, call.call("POST", "/api/mail/test", test).status());
+    assertEquals(1, fetcher.requests.size(), "through the saved service");
+    assertEquals(2, sent.size(), "and not the app's mailer");
+
+    // Removing it goes back to the app's mailer.
+    assertEquals(200, call.call("DELETE", "/api/mail", null).status());
+    assertEquals("app", Make.body(call.call("GET", "/api/mail", null)).get("source"));
+    assertEquals(200, call.call("POST", "/api/mail/test", test).status());
+    assertEquals(3, sent.size());
+  }
+
+  @Test
+  void theAppsMailerNeedsAFromAddressAndWithoutOneTheAnswerHasNoApp() {
+    IllegalArgumentException noFrom =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                runlight(
+                    new AtomicLong(0),
+                    new Runlight.Options().mail(new AppMailer(m -> {}, "", "Drupal"))));
+    assertTrue(noFrom.getMessage().contains("from address"), noFrom.getMessage());
+    Runlight rl = runlight(new AtomicLong(0), new Runlight.Options());
+    Map<String, Object> answer =
+        Make.body(
+            rl.routes(new Routes.Options().token("t"))
+                .handle(Make.owner("/runlight/api/mail", "GET", null, "t")));
+    assertNull(answer.get("source"));
+    assertFalse(answer.containsKey("app"), "an install without an app mailer answers as before");
+  }
+
+  /** A JSON request to the routes, with the owner's token. */
+  @FunctionalInterface
+  private interface MailCall {
+    Response call(String method, String path, Object body);
   }
 }

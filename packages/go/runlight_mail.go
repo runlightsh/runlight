@@ -61,8 +61,39 @@ type MailMessage struct {
 	Headers *js.Object
 }
 
-// MailSettings is the mail service, from code or as saved in the
-// dashboard, with its source; nil when there is none.
+// AppMessage is one email as the app's own mailer is given it.
+type AppMessage = mail.Message
+
+// MailError is a mail problem to show the person setting it up. An app's
+// mailer may return one, and it reaches the dashboard as it is.
+type MailError = mail.MailError
+
+// AppMailer is a mailer of the app's own, such as a CMS's, that sends each
+// message itself.
+type AppMailer struct {
+	// Send sends one message. Any error but a *MailError is reported as the
+	// mailer's failure, with its text.
+	Send func(ctx context.Context, message AppMessage) error
+	// From is the address messages come from.
+	From     string
+	FromName string
+	// Via is what the dashboard calls it, such as "WordPress (WP Mail SMTP)".
+	Via string
+}
+
+// AppMailer is the app's own mailer, used while no service is saved in the
+// dashboard; nil when there is none.
+func (r *Runlight) AppMailer() *AppMailer {
+	if r.appMailer == nil {
+		return nil
+	}
+	app := *r.appMailer
+	return &app
+}
+
+// MailSettings is the mail Runlight sends with, with its source: a service
+// from code, or as saved in the dashboard, or else the app's own mailer, as
+// service "app". nil when there is none.
 func (r *Runlight) MailSettings(ctx context.Context) (*js.Object, error) {
 	if r.mailCode != nil {
 		out := r.mailCode.Clone()
@@ -72,13 +103,26 @@ func (r *Runlight) MailSettings(ctx context.Context) (*js.Object, error) {
 	if err := r.Init(ctx); err != nil {
 		return nil, err
 	}
-	sealed, ok, err := r.Store.Setting(ctx, "mail")
-	if err != nil || !ok || sealed == "" {
+	sealed, found, err := r.Store.Setting(ctx, "mail")
+	if err != nil {
 		return nil, err
 	}
-	opened, ok := r.unseal(sealed)
+	opened, ok := "", false
+	if found && sealed != "" {
+		opened, ok = r.unseal(sealed)
+	}
 	if !ok {
-		return nil, nil
+		app := r.appMailer
+		if app == nil {
+			return nil, nil
+		}
+		out := js.NewObject("service", "app", "from", app.From)
+		if app.FromName != "" {
+			out.Set("fromName", app.FromName)
+		}
+		out.Set("via", app.Via)
+		out.Set("source", "app")
+		return out, nil
 	}
 	parsed, err := js.Parse(opened)
 	if err != nil {
@@ -115,6 +159,10 @@ func (r *Runlight) SaveMailSettings(ctx context.Context, input *js.Object) error
 	before, err := r.MailSettings(ctx)
 	if err != nil {
 		return err
+	}
+	// Only a service saved here has secrets to keep, never the app's mailer.
+	if before != nil && before.Value("source") != "dashboard" {
+		before = nil
 	}
 	serviceID, _ := input.Value("service").(string)
 	service := mailService(serviceID)
@@ -170,7 +218,7 @@ func (r *Runlight) SaveMailSettings(ctx context.Context, input *js.Object) error
 	return r.Store.SetSetting(ctx, "mail", &sealed)
 }
 
-// SendMail sends one email through the mail service.
+// SendMail sends one email through the mail service, or the app's own mailer when no service is saved.
 func (r *Runlight) SendMail(ctx context.Context, message MailMessage) error {
 	settings, err := r.MailSettings(ctx)
 	if err != nil {
@@ -179,10 +227,27 @@ func (r *Runlight) SendMail(ctx context.Context, message MailMessage) error {
 	if settings == nil {
 		return &mail.MailError{Message: "Set up a mail service first", Code: "mail_unset", Params: &js.Object{}}
 	}
-	return mail.Send(ctx, r.fetcher, configOf(settings), mail.Message{
+	full := mail.Message{
 		To: message.To, From: field(settings, "from"), FromName: field(settings, "fromName"),
 		Subject: message.Subject, HTML: message.HTML, Text: message.Text, Headers: message.Headers,
-	})
+	}
+	if settings.Value("source") != "app" {
+		return mail.Send(ctx, r.fetcher, configOf(settings), full)
+	}
+	err = r.appMailer.Send(ctx, full)
+	if err == nil {
+		return nil
+	}
+	var me *mail.MailError
+	if errors.As(err, &me) {
+		return err
+	}
+	via, detail := r.appMailer.Via, err.Error()
+	text := via + " could not send it"
+	if detail != "" {
+		text += ": " + detail
+	}
+	return &mail.MailError{Message: text, Code: "mail_app_failed", Params: js.NewObject("via", via, "detail", detail)}
 }
 
 func (rt *Routes) mailView(c *call) (*Response, error) {
@@ -190,8 +255,9 @@ func (rt *Routes) mailView(c *call) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	app := settings != nil && settings.Value("source") == "app"
 	var service *mail.Service
-	if settings != nil {
+	if settings != nil && !app {
 		service = mailService(js.String(settings.Value("service")))
 	}
 	// Secret fields come back only as "saved", never as their value.
@@ -227,6 +293,15 @@ func (rt *Routes) mailView(c *call) (*Response, error) {
 		fields = &js.Object{}
 		saved = []string{}
 	}
-	return jsonAnswer(js.NewObject("source", source, "service", value("service"), "from", value("from"), "fromName", value("fromName"),
-		"fields", fields, "saved", saved, "encrypted", rt.r.HasSecret, "services", mail.Services), 200), nil
+	serviceID := value("service")
+	if app {
+		serviceID = ""
+	}
+	answer := js.NewObject("source", source, "service", serviceID, "from", value("from"), "fromName", value("fromName"),
+		"fields", fields, "saved", saved, "encrypted", rt.r.HasSecret, "services", mail.Services)
+	// The app's own mailer, named only when there is one, so the answer without it stays as it was.
+	if mailer := rt.r.appMailer; mailer != nil {
+		answer.Set("app", js.NewObject("via", mailer.Via, "from", mailer.From, "fromName", mailer.FromName, "replaced", !app))
+	}
+	return jsonAnswer(answer, 200), nil
 }

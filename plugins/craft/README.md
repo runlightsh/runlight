@@ -22,6 +22,8 @@ Its hourly upkeep (daily salts, email reports, retention, and daily totals) runs
 0 * * * * php /path/to/craft runlight/check
 ```
 
+Email reports, test emails, and invites go through Craft's own mailer when Settings, Email uses a transport other than Sendmail, such as SMTP, from Craft's system email address and sender name. With Sendmail, Runlight's dashboard asks for a mail service under Settings, Email service, where you can also choose one in place of Craft's mailer, and go back to it later.
+
 Uninstalling the plugin removes Runlight's tables and its folder.
 
 ## On a Runlight you run elsewhere

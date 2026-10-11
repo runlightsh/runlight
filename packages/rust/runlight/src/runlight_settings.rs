@@ -6,7 +6,7 @@ use crate::goals::CodedError;
 use crate::http::Url;
 use crate::js::{self, Object, Value};
 use crate::mail::secret::{seal, unseal};
-use crate::mail::transports::{Message, SERVICES, check_config, send};
+use crate::mail::transports::{MailError, Message, SERVICES, check_config, send};
 use crate::reports::{ReportPeriod, build_report, last_period};
 use crate::runlight::{Runlight, is_email};
 use crate::safefetch::metadata_host;
@@ -17,18 +17,26 @@ fn mail_error(message: &str, code: &str) -> Error {
 }
 
 impl Runlight {
-    /// The mail service: from code, or as saved in the dashboard, with where it came from.
+    /// The mail Runlight sends with: a service from code, or as saved in the dashboard, or else the app's
+    /// own mailer, as service "app" with its `via`, with where it came from (`code`, `dashboard`, or `app`).
     pub async fn mail_settings(&self) -> Result<Option<(Object, &'static str)>, Error> {
         if let Some(code) = &self.0.mail_in_code {
             return Ok(Some((code.clone(), "code")));
         }
         self.init().await?;
-        let Some(sealed) = self.store().setting("mail").await? else { return Ok(None) };
-        let Some(opened) = unseal(&sealed, self.secret()) else { return Ok(None) };
-        Ok(match js::parse(&opened) {
-            Ok(Value::Object(o)) => Some((o, "dashboard")),
-            _ => None,
-        })
+        let sealed = self.store().setting("mail").await?;
+        if let Some(Value::Object(o)) =
+            sealed.and_then(|s| unseal(&s, self.secret())).and_then(|opened| js::parse(&opened).ok())
+        {
+            return Ok(Some((o, "dashboard")));
+        }
+        let Some(app) = &self.0.app_mailer else { return Ok(None) };
+        let mut settings = Object::new().with("service", "app").with("from", app.from.as_str());
+        if let Some(name) = &app.from_name {
+            settings.set("fromName", name.as_str());
+        }
+        settings.set("via", app.via.as_str());
+        Ok(Some((settings, "app")))
     }
 
     /// Saves the mail service from the dashboard. A secret field left blank keeps the saved value, so the
@@ -41,7 +49,8 @@ impl Runlight {
             self.store().set_setting("mail", None).await?;
             return Ok(());
         };
-        let before = self.mail_settings().await?.map(|b| b.0);
+        // Only a service saved in the dashboard has secrets to keep, never the app's mailer.
+        let before = self.mail_settings().await?.filter(|b| b.1 == "dashboard").map(|b| b.0);
         let Some(service) = SERVICES.iter().find(|s| input.get("service").and_then(Value::as_str) == Some(s.id)) else {
             return Err(mail_error("Pick a mail service", "mail_service"));
         };
@@ -92,14 +101,28 @@ impl Runlight {
         Ok(())
     }
 
-    /// Sends one email through the mail service.
+    /// Sends one email through the mail service, or the app's own mailer when no service is saved.
     pub async fn send_mail(&self, mut message: Message) -> Result<(), Error> {
-        let Some((settings, _)) = self.mail_settings().await? else {
+        let Some((settings, source)) = self.mail_settings().await? else {
             return Err(mail_error("Set up a mail service first", "mail_unset"));
         };
         message.from = js::str_or_empty(settings.get("from"));
         message.from_name = settings.get("fromName").map(js::js_string);
-        send(&settings, &message, self.fetcher(), self.now()).await.map_err(Error::Mail)
+        let Some(app) = self.0.app_mailer.as_ref().filter(|_| source == "app") else {
+            return send(&settings, &message, self.fetcher(), self.now()).await.map_err(Error::Mail);
+        };
+        (app.send)(message).await.map_err(|error| match error.downcast::<MailError>() {
+            Ok(mail) => Error::Mail(*mail),
+            Err(error) => {
+                let detail = error.to_string();
+                let message = if detail.is_empty() {
+                    format!("{} could not send it", app.via)
+                } else {
+                    format!("{} could not send it: {detail}", app.via)
+                };
+                Error::Mail(CodedError::new(message, "mail_app_failed", &[("via", &app.via), ("detail", &detail)]))
+            }
+        })
     }
 
     /// Sends every report that is due: last week's on Monday from 8am, last month's on the 1st, in each

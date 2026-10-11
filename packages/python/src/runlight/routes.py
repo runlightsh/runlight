@@ -1159,7 +1159,8 @@ class Routes:
             if path == "/api/mail":
                 if method == "GET":
                     settings = rl.mail_settings()
-                    service = next((x for x in SERVICES if settings and x["id"] == settings.get("service")), None)
+                    is_app = _or(settings, "source", None) == "app"
+                    service = next((x for x in SERVICES if settings and not is_app and x["id"] == settings.get("service")), None)
                     # Secret fields come back only as "saved", never as their value.
                     fields: dict[str, str] = {}
                     saved: list[str] = []
@@ -1172,16 +1173,23 @@ class Routes:
                             fields[f["name"]] = "" if value is None else _js.string(value)
                     # A hub with a manage token learns which service sends the reports and from where, nothing more.
                     via_manage = request in self.managed
+                    # The app's own mailer, named only when there is one, so the answer without it stays as it was.
+                    app = rl.app_mailer
                     return json(
                         {
                             "source": _or(settings, "source", None),
-                            "service": _or(settings, "service", ""),
+                            "service": "" if is_app else _or(settings, "service", ""),
                             "from": _or(settings, "from", ""),
                             "fromName": _or(settings, "fromName", ""),
                             "fields": {} if via_manage else fields,
                             "saved": [] if via_manage else saved,
                             "encrypted": rl.secret is not None,
                             "services": SERVICES,
+                            **(
+                                {"app": {"via": app["via"], "from": app["from"], "fromName": app.get("fromName", ""), "replaced": not is_app}}
+                                if app is not None
+                                else {}
+                            ),
                         }
                     )
                 if method == "PUT":
@@ -1206,7 +1214,10 @@ class Routes:
                 if not settings:
                     return coded("Set up a mail service first", "mail_unset", 400)
                 t, _ = _translator(_text(body, "lang", "en"))
-                name = next((x["name"] for x in SERVICES if x["id"] == settings.get("service")), "")
+                if settings["source"] == "app":
+                    name = settings["via"]
+                else:
+                    name = next((x["name"] for x in SERVICES if x["id"] == settings.get("service")), "")
                 rl.send_mail(
                     {
                         "to": to,

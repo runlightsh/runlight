@@ -33,6 +33,7 @@ import sh.runlight.http.Url;
 import sh.runlight.importers.ImportError;
 import sh.runlight.importers.Index;
 import sh.runlight.importers.Visits;
+import sh.runlight.mail.AppMailer;
 import sh.runlight.mail.MailError;
 import sh.runlight.mail.Transports;
 import sh.runlight.store.SqlStore;
@@ -2074,7 +2075,9 @@ public final class Routes {
       if (path.equals("/api/mail")) {
         if (method.equals("GET")) {
           Map<String, Object> settings = rl.mailSettings();
-          Map<String, Object> service = service(settings == null ? null : settings.get("service"));
+          boolean viaApp = settings != null && "app".equals(settings.get("source"));
+          Map<String, Object> service =
+              viaApp ? null : service(settings == null ? null : settings.get("service"));
           // Secret fields come back only as "saved", never as their value.
           Map<String, Object> fields = new LinkedHashMap<>();
           List<Object> saved = new ArrayList<>();
@@ -2094,13 +2097,29 @@ public final class Routes {
           boolean viaManage = managed.containsKey(request);
           Map<String, Object> out = new LinkedHashMap<>();
           out.put("source", settings == null ? null : settings.get("source"));
-          out.put("service", orEmpty(settings, "service"));
+          out.put("service", viaApp ? "" : orEmpty(settings, "service"));
           out.put("from", orEmpty(settings, "from"));
           out.put("fromName", orEmpty(settings, "fromName"));
           out.put("fields", viaManage ? new LinkedHashMap<>() : fields);
           out.put("saved", viaManage ? new ArrayList<>() : saved);
           out.put("encrypted", rl.secret != null);
           out.put("services", Transports.SERVICES);
+          // The app's own mailer, named only when there is one, so the answer without it stays as
+          // it was.
+          AppMailer app = rl.appMailer;
+          if (app != null) {
+            out.put(
+                "app",
+                Json.object(
+                    "via",
+                    app.via(),
+                    "from",
+                    app.from(),
+                    "fromName",
+                    app.fromName() == null ? "" : app.fromName(),
+                    "replaced",
+                    !viaApp));
+          }
           return json(out);
         }
         if (method.equals("PUT")) {
@@ -2134,7 +2153,10 @@ public final class Routes {
         }
         Messages.Translator t = Messages.translator(text(body, "lang", "en"));
         Map<String, Object> service = service(settings.get("service"));
-        String name = service == null ? "" : (String) service.get("name");
+        String name =
+            "app".equals(settings.get("source"))
+                ? Js.string(orEmpty(settings, "via"))
+                : service == null ? "" : (String) service.get("name");
         String said = t.t("email.test.body", Json.object("service", name));
         rl.sendMail(
             Json.object(

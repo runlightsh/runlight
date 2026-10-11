@@ -30,6 +30,7 @@ import sh.runlight.http.JdkFetcher;
 import sh.runlight.http.Request;
 import sh.runlight.http.Response;
 import sh.runlight.http.Url;
+import sh.runlight.mail.AppMailer;
 import sh.runlight.mail.MailError;
 import sh.runlight.mail.Secret;
 import sh.runlight.mail.Transports;
@@ -118,8 +119,11 @@ public final class Runlight
    *       them to read only that header. False reads only the connection's address.
    *   <li>linkPath: where short links on the app's own domain live, as {linkPath}/{slug}. Default
    *       "/go".
-   *   <li>mail: the mail service for email reports, in code (a Transports config plus from and
-   *       fromName). When set, the dashboard shows it and cannot change it.
+   *   <li>mail: how email reports, invites, and sign-in links are sent. Either a mail service in
+   *       code (a Transports config plus from and fromName), which the dashboard shows and cannot
+   *       change, or a mailer of the app's own, an {@link AppMailer}, such as a CMS's. The app's
+   *       mailer is a default: a service saved in the dashboard takes its place, and removing that
+   *       service goes back to it. Without either, the service is set up in Settings.
    *   <li>secret: encrypts the keys kept in the database. Default the RUNLIGHT_SECRET environment
    *       variable, then RUNLIGHT_TOKEN.
    *   <li>rateLimit: tracker requests allowed per visitor address per minute. Default 120; false or
@@ -142,7 +146,7 @@ public final class Runlight
     public Object rateLimit = 120L;
     public boolean localInstalls;
     public String linkPath = "/go";
-    public Map<String, Object> mail;
+    public Object mail;
     public String secret;
     public LongSupplier now;
     public Fetcher fetcher;
@@ -195,6 +199,11 @@ public final class Runlight
     }
 
     public Options mail(Map<String, Object> value) {
+      mail = value;
+      return this;
+    }
+
+    public Options mail(AppMailer value) {
       mail = value;
       return this;
     }
@@ -282,6 +291,9 @@ public final class Runlight
 
   private final Map<String, Object> mailInCode;
 
+  /** The app's own mailer, used while no service is saved in the dashboard. Null when none. */
+  public final AppMailer appMailer;
+
   /** Retention work asked for and not yet done: a site's id, or "" for every site. */
   private final ConcurrentLinkedQueue<String> pruning = new ConcurrentLinkedQueue<>();
 
@@ -346,7 +358,17 @@ public final class Runlight
     this.links = new Links(store, this::init, this::now);
     this.linkPath =
         "/" + (options.linkPath == null ? "/go" : options.linkPath).replaceAll("^/+|/+\\z", "");
-    this.mailInCode = options.mail;
+    if (options.mail instanceof AppMailer app) {
+      if (app.from() == null || !EMAIL.matcher(app.from()).find()) {
+        throw new IllegalArgumentException(
+            "Runlight: the app's mailer needs a from address, like reports@example.com");
+      }
+      this.appMailer = app;
+      this.mailInCode = null;
+    } else {
+      this.appMailer = null;
+      this.mailInCode = Js.map(options.mail);
+    }
     String secretFromEnv = Env.get("RUNLIGHT_SECRET");
     this.localInstalls = options.localInstalls;
     this.secret =
@@ -425,7 +447,10 @@ public final class Runlight
     return clock.getAsLong();
   }
 
-  /** The mail service: from code, or as saved in the dashboard. Null when there is none. */
+  /**
+   * The mail Runlight sends with: a service from code, or as saved in the dashboard, or else the
+   * app's own mailer, as service "app" with its via. Null when there is none.
+   */
   @Override
   public Map<String, Object> mailSettings() {
     if (mailInCode != null) {
@@ -435,15 +460,23 @@ public final class Runlight
     }
     init();
     String sealed = store.setting("mail");
-    if (sealed == null || sealed.isEmpty()) {
+    String opened = sealed == null || sealed.isEmpty() ? null : Secret.unseal(sealed, secret);
+    if (opened != null && !opened.isEmpty()) {
+      Map<String, Object> out = new LinkedHashMap<>(Js.map(Json.parse(opened)));
+      out.put("source", "dashboard");
+      return out;
+    }
+    if (appMailer == null) {
       return null;
     }
-    String opened = Secret.unseal(sealed, secret);
-    if (opened == null || opened.isEmpty()) {
-      return null;
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("service", "app");
+    out.put("from", appMailer.from());
+    if (appMailer.fromName() != null) {
+      out.put("fromName", appMailer.fromName());
     }
-    Map<String, Object> out = new LinkedHashMap<>(Js.map(Json.parse(opened)));
-    out.put("source", "dashboard");
+    out.put("via", appMailer.via());
+    out.put("source", "app");
     return out;
   }
 
@@ -459,7 +492,9 @@ public final class Runlight
       store.setSetting("mail", null);
       return;
     }
-    Map<String, Object> before = mailSettings();
+    Map<String, Object> current = mailSettings();
+    Map<String, Object> before =
+        current != null && "dashboard".equals(current.get("source")) ? current : null;
     Map<String, Object> service = null;
     for (Map<String, Object> s : Transports.SERVICES) {
       if (s.get("id").equals(input.get("service"))) {
@@ -536,7 +571,8 @@ public final class Runlight
   }
 
   /**
-   * Sends one email through the mail service: to, subject, html, text, and optional headers.
+   * Sends one email through the mail service, or the app's own mailer when no service is saved: to,
+   * subject, html, text, and optional headers.
    *
    * @throws MailError when there is no mail service or it refused the message
    */
@@ -548,10 +584,28 @@ public final class Runlight
     }
     Map<String, Object> full = new LinkedHashMap<>(message);
     full.put("from", settings.get("from"));
-    if (settings.get("fromName") != null) {
+    if (Js.truthy(settings.get("fromName"))) {
       full.put("fromName", settings.get("fromName"));
     }
-    Transports.send(settings, full, fetcher, now());
+    if (!"app".equals(settings.get("source"))) {
+      Transports.send(settings, full, fetcher, now());
+      return;
+    }
+    String via = appMailer.via() == null ? "" : appMailer.via();
+    try {
+      appMailer.send().send(full);
+    } catch (MailError e) {
+      throw e;
+    } catch (Exception e) {
+      if (e instanceof InterruptedException) {
+        Thread.currentThread().interrupt();
+      }
+      String detail = e.getMessage() == null ? "" : e.getMessage();
+      throw new MailError(
+          via + " could not send it" + (detail.isEmpty() ? "" : ": " + detail),
+          "mail_app_failed",
+          Json.object("via", via, "detail", detail));
+    }
   }
 
   /**

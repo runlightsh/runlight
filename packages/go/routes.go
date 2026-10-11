@@ -1219,6 +1219,9 @@ func (rt *Routes) mailRoutes(c *call, path string, u *whatwg.URL) (*Response, er
 		}
 		tr := NewTranslator(lang)
 		name := mailServiceName(js.String(settings.Value("service")))
+		if settings.Value("source") == "app" {
+			name = js.String(settings.Value("via"))
+		}
 		text := tr.T("email.test.body", Vars{"service": name})
 		if err := rt.r.SendMail(ctx, MailMessage{To: to, Subject: tr.T("email.test.subject", nil), Text: text, HTML: `<p style="font-family:sans-serif;font-size:15px">` + escapeHTML(text) + `</p>`}); err != nil {
 			return nil, err

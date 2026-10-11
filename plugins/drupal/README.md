@@ -25,6 +25,8 @@ Runlight keeps its numbers in Drupal's own database, in tables that start with `
 
 Run cron hourly: it rolls the day's salts, sends reports, applies retention, and builds the daily totals. With Locations on, it also downloads DB-IP's free country data once a month. Visitors' addresses are looked up on this server and never sent anywhere.
 
+Email reports, test emails, and invites go through Drupal's own mailer when the site has one beyond PHP's `mail()`, such as the SMTP module or Symfony Mailer, from the site's email address and name. Without one, Runlight's dashboard asks for a mail service under Settings, Email service, where you can also choose one in place of Drupal's mailer, and go back to it later. After updating the module, run `drush cr` so Drupal finds `runlight_mail()`.
+
 Uninstalling the module removes Runlight's tables or file, its folder, and its secret and keys.
 
 ## On a Runlight you run elsewhere

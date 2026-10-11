@@ -15,6 +15,16 @@
     var top = frame.getBoundingClientRect().top + window.scrollY;
     frame.style.height = Math.max(600, window.innerHeight - top - 24) + "px";
   }
+  // The admin's own bars stay on screen over the page, so the visible slice starts below them.
+  function covered() {
+    var bottom = 0;
+    document.querySelectorAll("#toolbar-bar, #toolbar-item-administration-tray.is-active.toolbar-tray-horizontal, .gin-secondary-toolbar, .region-sticky").forEach(function (bar) {
+      var position = getComputedStyle(bar).position;
+      var box = bar.getBoundingClientRect();
+      if ((position === "fixed" || position === "sticky") && box.top <= 1 && box.height > 0) bottom = Math.max(bottom, box.bottom);
+    });
+    return bottom;
+  }
   // Tells the dashboard which slice of the frame is on screen, so its drawers and sheets cover just that.
   var queued = false;
   function viewport() {
@@ -23,7 +33,7 @@
     requestAnimationFrame(function () {
       queued = false;
       var rect = frame.getBoundingClientRect();
-      var top = Math.max(rect.top, 0);
+      var top = Math.max(rect.top, covered());
       var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - top);
       if (frame.contentWindow) frame.contentWindow.postMessage({ type: "runlight:viewport", top: top - rect.top, height: height }, origin);
     });

@@ -24,8 +24,13 @@ module Runlight
   #   in front of. Left unset, it warns once when a request comes straight from a public address with none of
   #   those headers.
   # - linkPath: where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go".
-  # - mail: the mail service for email reports, in code (a Transports config plus `from` and `fromName`).
-  #   When set, the dashboard shows it and cannot change it. Otherwise it is set up in Settings.
+  # - mail: how email reports, invites, and sign-in links are sent. Either a mail service in code (a Transports
+  #   config plus `from` and `fromName`), which the dashboard shows and cannot change, or a mailer of the app's
+  #   own, such as a CMS's: `{ send: ->(message) { ... }, from:, from_name:, via: }`. The app's mailer is a
+  #   default: a service saved in the dashboard takes its place, and removing that service goes back to it.
+  #   `via` names it there, such as "WordPress (WP Mail SMTP)". The message has to, from, fromName (when there
+  #   is one), subject, html, text, and headers; `send` raises to say it failed. Without either, the service is
+  #   set up in Settings.
   # - secret: encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens
   #   for connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
   # - rateLimit: tracker requests allowed per visitor address per minute. Default 120, which a real visitor
@@ -78,7 +83,10 @@ module Runlight
                 # Whether a connected install may be on this machine, at http://localhost or http://127.0.0.1.
                 :local_installs,
                 # Every outgoing request goes through it.
-                :fetcher
+                :fetcher,
+                # The app's own mailer, used while no service is saved in the dashboard: { "send", "from",
+                # "fromName" (when there is one), "via" }. Nil when there is none.
+                :app_mailer
 
     # Where routes() serves the dashboard and API, which a link domain leaves alone, as a list without
     # repeats. Middleware often runs apart from the routes, where none were made, so the default "/runlight"
@@ -121,7 +129,21 @@ module Runlight
       @fetcher = options["fetcher"] || Http::NetFetcher.new
       @links = Links.new(self)
       @link_path = "/#{(options["linkPath"].nil? ? "/go" : options["linkPath"]).to_s.gsub(%r{\A/+|/+\z}, "")}"
-      @mail_in_code = options["mail"]
+      mail = options["mail"]
+      if mail.is_a?(Hash) && mail["send"].respond_to?(:call)
+        unless Js.string(mail["from"].nil? ? "" : mail["from"]).match?(EMAIL)
+          raise ArgumentError, "Runlight: the app's mailer needs a from address, like reports@example.com"
+        end
+
+        @app_mailer = { "send" => mail["send"], "from" => mail["from"].to_s }
+        @app_mailer["fromName"] = mail["fromName"].to_s unless mail["fromName"].nil? || mail["fromName"].to_s == ""
+        @app_mailer["via"] = Js.string(mail["via"].nil? ? "" : mail["via"])
+        @app_mailer.freeze
+        @mail_in_code = nil
+      else
+        @app_mailer = nil
+        @mail_in_code = mail
+      end
       @local_installs = options["localInstalls"] ? true : false
       @secret = if options.key?("secret") && !options["secret"].nil?
                   options["secret"].to_s
@@ -157,18 +179,23 @@ module Runlight
       @clock.call.to_i
     end
 
-    # The mail service: from code, or as saved in the dashboard. Nil when there is none.
+    # The mail Runlight sends with: a service from code, or as saved in the
+    # dashboard, or else the app's own mailer, as service "app" with its
+    # `via`. Nil when there is none.
     def mail_settings
       return @mail_in_code.merge("source" => "code") unless @mail_in_code.nil?
 
       init
       sealed = @store.setting("mail")
-      return nil if sealed.nil? || sealed == ""
+      opened = sealed.nil? || sealed == "" ? nil : Mail::Secret.unseal(sealed, @secret)
+      return Json.decode(opened).merge("source" => "dashboard") unless opened.nil? || opened == ""
 
-      opened = Mail::Secret.unseal(sealed, @secret)
-      return nil if opened.nil? || opened == ""
+      app = @app_mailer
+      return nil if app.nil?
 
-      Json.decode(opened).merge("source" => "dashboard")
+      settings = { "service" => "app", "from" => app["from"] }
+      settings["fromName"] = app["fromName"] if app.key?("fromName")
+      settings.merge("via" => app["via"], "source" => "app")
     end
 
     # Saves the mail service from the dashboard. A secret field left blank
@@ -180,7 +207,8 @@ module Runlight
         @store.set_setting("mail", nil)
         return
       end
-      before = mail_settings || {}
+      current = mail_settings
+      before = current && current["source"] == "dashboard" ? current : {}
       service = Mail::Transports::SERVICES.find { |s| s["id"] == input["service"] }
       raise Mail::MailError.new("Pick a mail service", "mail_service", {}) if service.nil?
 
@@ -222,14 +250,26 @@ module Runlight
       @store.set_setting("mail", Mail::Secret.seal(Json.encode(config), @secret))
     end
 
-    # Sends one email through the mail service: { "to", "subject", "html", "text", "headers" (optional) }.
+    # Sends one email through the mail service, or the app's own mailer when no service is saved: { "to",
+    # "subject", "html", "text", "headers" (optional) }.
     def send_mail(message)
       settings = mail_settings
       raise Mail::MailError.new("Set up a mail service first", "mail_unset", {}) if settings.nil?
 
       full = message.merge("from" => settings["from"])
       full["fromName"] = settings["fromName"] unless settings["fromName"].nil?
-      Mail::Transports.deliver(settings, full, @fetcher, now)
+      return Mail::Transports.deliver(settings, full, @fetcher, now) unless settings["source"] == "app"
+
+      begin
+        @app_mailer["send"].call(full.merge("headers" => message["headers"] || {}))
+      rescue Mail::MailError
+        raise
+      rescue StandardError => e
+        detail = e.message
+        via = settings["via"]
+        raise Mail::MailError.new("#{via} could not send it#{": #{detail}" unless detail == ""}", "mail_app_failed",
+                                  { "via" => via, "detail" => detail })
+      end
     end
 
     # Sends every report that is due: last week's on Monday from 8am, last

@@ -9,6 +9,7 @@
 - `php craft runlight/check` runs Runlight's hourly upkeep for a cron job; without one, a visit queues it in Craft's queue once an hour.
 - Uninstalling removes Runlight's tables and its folder under `storage`.
 - A Connect button under the Runlight address in the settings. It asks your Runlight to pick this site, then fills in the site id and both keys, so nothing needs copying.
+- With Runlight in your site, email reports go through Craft's own mailer when its email settings use a transport other than Sendmail, such as SMTP. Runlight's dashboard can still pick another mail service, and go back to Craft's.
 
 ### Changed
 - The plugin needs the runlight/runlight package, which Composer installs with it.

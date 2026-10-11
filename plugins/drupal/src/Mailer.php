@@ -46,13 +46,15 @@ final class Mailer {
     // The Mail System module, when it is installed, picks the sender in its own settings.
     $mailsystem = $config->get('mailsystem.settings');
     $id = (string) ($mailsystem->get('modules.runlight.none.sender') ?: ($mailsystem->get('defaults.sender') ?: ($interface['runlight'] ?? $interface['default'] ?? 'php_mail')));
-    if (in_array($id, self::PLAIN, TRUE)) {
+    // A sender whose module is gone sends nothing.
+    if (in_array($id, self::PLAIN, TRUE) || !$mail->hasDefinition($id)) {
       return NULL;
     }
-    $definition = $mail->hasDefinition($id) ? (array) $mail->getDefinition($id) : [];
-    // Core's own Symfony mailer sends with the server's sendmail unless it is given another transport.
-    if (($definition['provider'] ?? '') === 'core' && in_array($config->get('system.mail')->get('mailer_dsn.scheme') ?? 'sendmail', ['sendmail', 'native', 'null'], TRUE)) {
-      return NULL;
+    $definition = (array) $mail->getDefinition($id);
+    // Core's own Symfony mailer sends with the server's sendmail unless it is given another transport, named by its scheme.
+    if (($definition['provider'] ?? '') === 'core') {
+      $scheme = (string) ($config->get('system.mail')->get('mailer_dsn.scheme') ?? 'sendmail');
+      return in_array($scheme, ['sendmail', 'native', 'null'], TRUE) ? NULL : 'Drupal (' . strtoupper($scheme) . ')';
     }
     $label = trim(strip_tags((string) ($definition['label'] ?? '')));
     return $label !== '' ? "Drupal ($label)" : 'Drupal';

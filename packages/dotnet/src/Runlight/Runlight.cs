@@ -125,7 +125,13 @@ public sealed partial class Runlight
         Fetcher = options.Fetcher ?? new HttpClientFetcher();
         Links = new Links(Store, Now, InitAsync);
         LinkPath = "/" + EdgeSlashes().Replace(options.LinkPath ?? "/go", "");
-        _mailInCode = options.Mail;
+        var app = options.Mail?.App;
+        if (app != null && !Email.IsMatch(app.From ?? ""))
+        {
+            throw new ArgumentException("Runlight: the app's mailer needs a from address, like reports@example.com", nameof(options));
+        }
+        AppMailer = app;
+        _mailInCode = options.Mail?.Service;
         Secret = options.Secret ?? Env.Get("RUNLIGHT_SECRET") ?? Env.Get("RUNLIGHT_TOKEN");
         LocalInstalls = options.LocalInstalls;
     }
@@ -212,7 +218,13 @@ public sealed partial class Runlight
 
     // ---- mail
 
-    /// <summary>The mail service: from code, or as saved in the dashboard, with <c>source</c>. Null when there is none.</summary>
+    /// <summary>The app's own mailer, used while no service is saved in the dashboard. Null when there is none.</summary>
+    public AppMailer? AppMailer { get; }
+
+    /// <summary>
+    /// The mail Runlight sends with, with <c>source</c>: a service from code, or as saved in the dashboard, or
+    /// else the app's own mailer, as service "app" with its <c>via</c>. Null when there is none.
+    /// </summary>
     public async Task<JsObject?> MailSettingsAsync(CancellationToken cancellationToken = default)
     {
         if (_mailInCode != null)
@@ -221,16 +233,24 @@ public sealed partial class Runlight
         }
         await InitAsync(cancellationToken).ConfigureAwait(false);
         string? sealedValue = await Store.SettingAsync("mail", cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrEmpty(sealedValue))
+        string? opened = string.IsNullOrEmpty(sealedValue) ? null : Mail.Secret.Unseal(sealedValue, Secret);
+        if (!string.IsNullOrEmpty(opened))
+        {
+            return (Json.Parse(opened) as JsObject ?? new JsObject()).With(new JsObject { ["source"] = "dashboard" });
+        }
+        var app = AppMailer;
+        if (app == null)
         {
             return null;
         }
-        string? opened = Mail.Secret.Unseal(sealedValue, Secret);
-        if (string.IsNullOrEmpty(opened))
+        var settings = new JsObject { ["service"] = "app", ["from"] = app.From };
+        if (!string.IsNullOrEmpty(app.FromName))
         {
-            return null;
+            settings["fromName"] = app.FromName;
         }
-        return (Json.Parse(opened) as JsObject ?? new JsObject()).With(new JsObject { ["source"] = "dashboard" });
+        settings["via"] = app.Via;
+        settings["source"] = "app";
+        return settings;
     }
 
     /// <summary>
@@ -248,7 +268,8 @@ public sealed partial class Runlight
             await Store.SetSettingAsync("mail", null, cancellationToken).ConfigureAwait(false);
             return;
         }
-        var before = await MailSettingsAsync(cancellationToken).ConfigureAwait(false);
+        var current = await MailSettingsAsync(cancellationToken).ConfigureAwait(false);
+        var before = current?.Str("source") == "dashboard" ? current : null;
         var service = Transports.Services.FirstOrDefault(s => Same(s.Get("id"), input.Prop("service"))) ?? throw new MailError("Pick a mail service", "mail_service", new JsObject());
         var fields = service.Arr("fields")!.Cast<JsObject>().ToList();
         var settings = new JsObject { ["service"] = service.Get("id") };
@@ -296,7 +317,10 @@ public sealed partial class Runlight
         await Store.SetSettingAsync("mail", Mail.Secret.Seal(Json.Stringify(config), Secret), cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Sends one email through the mail service: { to, subject, html, text, headers? }.</summary>
+    /// <summary>
+    /// Sends one email through the mail service, or the app's own mailer when no service is saved:
+    /// { to, subject, html, text, headers? }.
+    /// </summary>
     public async Task SendMailAsync(JsObject message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -306,7 +330,21 @@ public sealed partial class Runlight
         {
             full["fromName"] = settings.Get("fromName");
         }
-        await Transports.SendAsync(settings, full, Fetcher, Now(), cancellationToken).ConfigureAwait(false);
+        if (settings.Str("source") != "app")
+        {
+            await Transports.SendAsync(settings, full, Fetcher, Now(), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        try
+        {
+            await AppMailer!.Send(full, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not MailError and not OperationCanceledException)
+        {
+            string via = settings.Str("via") ?? "";
+            string detail = error.Message;
+            throw new MailError(via + " could not send it" + (detail.Length > 0 ? ": " + detail : ""), "mail_app_failed", new JsObject { ["via"] = via, ["detail"] = detail });
+        }
     }
 
     /// <summary>

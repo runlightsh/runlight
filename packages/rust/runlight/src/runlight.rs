@@ -11,6 +11,7 @@ use crate::hash::{new_id, random_salt, visitor_hash};
 use crate::http::{FetchInit, Headers, Request, Response, SharedFetcher, Url, default_fetcher};
 use crate::js::{self, Object, Value};
 use crate::limit::{RateLimit, Turns};
+use crate::mail::Message;
 use crate::payload::{MAX_BODY, Payload, parse_payload};
 use crate::re::{js_re, test};
 use crate::safefetch::{Lookup, public_address};
@@ -18,6 +19,7 @@ use crate::sources::{Page, attribute, decode_uri_component, parse_page, strip_ww
 use crate::store::{EVENT_TAIL_MS, EventRow, SessionRow, SiteOverrides, SiteRow, SqlStore};
 use crate::time::{add_days, is_timezone, local_date, start_of};
 use crate::ua::{ClientHints, ai_agent, is_bot, parse_client};
+use crate::{BoxError, BoxFuture};
 
 /// A path on every link domain that answers when the domain reaches this Runlight.
 pub const LINK_DOMAIN_CHECK: &str = "/.well-known/runlight-link-domain";
@@ -63,6 +65,33 @@ pub enum TrustProxy {
 /// A clock in epoch milliseconds.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
+/// Sends one message through the app's own mailer. A [`MailError`](crate::mail::MailError) it gives back
+/// passes through as it is; any other error becomes one coded `mail_app_failed`.
+pub type AppSend = Arc<dyn Fn(Message) -> BoxFuture<'static, Result<(), BoxError>> + Send + Sync>;
+
+/// A mailer of the app's own, such as a CMS's, that sends each message itself.
+#[derive(Clone)]
+pub struct AppMailer {
+    /// Sends one message, already addressed from `from` and `from_name`.
+    pub send: AppSend,
+    /// The address messages come from.
+    pub from: String,
+    /// The name they come from; `None` or empty for none.
+    pub from_name: Option<String>,
+    /// What the dashboard calls it, such as "WordPress (WP Mail SMTP)".
+    pub via: String,
+}
+
+impl std::fmt::Debug for AppMailer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppMailer")
+            .field("from", &self.from)
+            .field("from_name", &self.from_name)
+            .field("via", &self.via)
+            .finish_non_exhaustive()
+    }
+}
+
 /// How a Runlight is made.
 #[derive(Clone)]
 pub struct RunlightOptions {
@@ -81,8 +110,13 @@ pub struct RunlightOptions {
     pub trust_proxy: Option<TrustProxy>,
     /// Where short links on the app's own domain live. Default "/go".
     pub link_path: Option<String>,
-    /// The mail service for email reports, in code, as the SDK's MailSettings object.
+    /// The mail service for email reports, invites, and sign-in links, in code, as the SDK's MailSettings
+    /// object. The dashboard shows it and cannot change it.
     pub mail: Option<Object>,
+    /// Or a mailer of the app's own, such as a CMS's, in place of `mail`, which it then overrides. It is a
+    /// default: a service saved in the dashboard takes its place, and removing that service goes back to
+    /// it. Without either, the service is set up in Settings.
+    pub app_mailer: Option<AppMailer>,
     /// Encrypts the keys kept in the database. Default RUNLIGHT_SECRET, then RUNLIGHT_TOKEN.
     pub secret: Option<String>,
     /// Tracker requests allowed per visitor address per minute. `None` is the default, 120; zero,
@@ -113,6 +147,7 @@ impl RunlightOptions {
             trust_proxy: None,
             link_path: None,
             mail: None,
+            app_mailer: None,
             secret: None,
             rate_limit: None,
             now: None,
@@ -237,6 +272,7 @@ pub(crate) struct Inner {
     clock: Clock,
     pub(crate) link_path: String,
     pub(crate) mail_in_code: Option<Object>,
+    pub(crate) app_mailer: Option<AppMailer>,
     pub(crate) secret: Option<String>,
     pub(crate) fetcher: SharedFetcher,
     local_installs: bool,
@@ -274,6 +310,15 @@ impl Runlight {
         if ids.len() != configured.len() {
             return Err("Runlight: two sites share an id".into());
         }
+        // The app's mailer takes the place of a service in code, as the SDK's mail option is one or the other.
+        let app_mailer = options.app_mailer.map(|mut app| {
+            app.from_name = app.from_name.filter(|n| !n.is_empty());
+            app
+        });
+        if app_mailer.as_ref().is_some_and(|app| !is_email(&app.from)) {
+            return Err("Runlight: the app's mailer needs a from address, like reports@example.com".into());
+        }
+        let mail_in_code = if app_mailer.is_some() { None } else { options.mail };
         let per_minute = options.rate_limit.unwrap_or(120.0);
         // Zero, or anything that is not a positive number, means no limit, never a limit of nothing.
         let limit = (per_minute > 0.0).then(|| RateLimit::new(per_minute));
@@ -295,7 +340,8 @@ impl Runlight {
             limit,
             clock,
             link_path,
-            mail_in_code: options.mail,
+            mail_in_code,
+            app_mailer,
             secret,
             fetcher: options.fetcher.unwrap_or_else(default_fetcher),
             local_installs: options.local_installs,
@@ -312,6 +358,11 @@ impl Runlight {
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The app's own mailer, used while no service is saved in the dashboard.
+    pub fn app_mailer(&self) -> Option<&AppMailer> {
+        self.0.app_mailer.as_ref()
     }
 
     /// The store.

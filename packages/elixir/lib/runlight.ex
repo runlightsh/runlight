@@ -41,7 +41,17 @@ defmodule Runlight do
       comes straight from a public address with none of those headers.
     * `:link_path` - where short links on the app's own domain live, default
       "/go".
-    * `:mail` - the mail service for email reports, set in code.
+    * `:mail` - how email reports, invites, and sign-in links are sent.
+      Either a mail service in code (a service's config plus `from` and
+      `fromName`), which the dashboard shows and cannot change, or a mailer
+      of the app's own: `[send: fun, from: ..., from_name: ..., via: ...]`.
+      The app's mailer is a default: a service saved in the dashboard takes
+      its place, and removing that service goes back to it. `via` names it
+      there, such as "Phoenix (Swoosh)". `send` gets
+      `%{to, from, from_name, subject, html, text, headers}` (`from_name`
+      only when there is one, `headers` a list of `{name, value}`), and
+      raises or answers `{:error, reason}` to say it failed. Without either,
+      the service is set up in Settings.
     * `:secret` - encrypts the keys kept in the database; default
       `RUNLIGHT_SECRET`, then `RUNLIGHT_TOKEN`.
     * `:rate_limit` - tracker requests per address per minute, default 120;
@@ -88,6 +98,7 @@ defmodule Runlight do
     :now,
     :link_path,
     :mail,
+    :app_mailer,
     :secret,
     :fetcher,
     :local_installs,
@@ -174,6 +185,7 @@ defmodule Runlight do
       end
 
     link_path = "/" <> String.replace(Keyword.get(opts, :link_path, "/go"), ~r/^\/+|\/+$/, "")
+    {mail, app_mailer} = mail_option(Keyword.get(opts, :mail))
 
     %__MODULE__{
       name: Keyword.get(opts, :name, __MODULE__),
@@ -186,7 +198,9 @@ defmodule Runlight do
       limit: limit,
       now: Keyword.get(opts, :now) || fn -> System.os_time(:millisecond) end,
       link_path: link_path,
-      mail: Keyword.get(opts, :mail),
+      mail: mail,
+      # The app's own mailer, used while no service is saved in the dashboard. Nil when there is none.
+      app_mailer: app_mailer,
       secret: Keyword.get(opts, :secret) || env("RUNLIGHT_SECRET") || env("RUNLIGHT_TOKEN"),
       fetcher: Keyword.get(opts, :fetcher) || (&Runlight.Fetch.httpc/2),
       local_installs: Keyword.get(opts, :local_installs, false) == true,
@@ -212,6 +226,24 @@ defmodule Runlight do
 
     rl
   end
+
+  # The `:mail` option's two forms, told apart by a `send` function: a service in code, or the app's own mailer.
+  defp mail_option(mail) when is_list(mail) or is_map(mail) do
+    o = Object.new(mail)
+
+    if is_function(o["send"], 1) do
+      unless email?(o["from"]),
+        do: raise(ArgumentError, "Runlight: the app's mailer needs a from address, like reports@example.com")
+
+      from_name = JS.string(JS.nullish(o["from_name"] || o["fromName"], ""))
+      app = %{send: o["send"], from: o["from"], via: JS.string(JS.nullish(o["via"], ""))}
+      {nil, if(from_name != "", do: Map.put(app, :from_name, from_name), else: app)}
+    else
+      {mail, nil}
+    end
+  end
+
+  defp mail_option(mail), do: {mail, nil}
 
   defp site_row(options, index) do
     options = Map.new(options, fn {k, v} -> {to_string(k), v} end)
@@ -251,7 +283,11 @@ defmodule Runlight do
 
   ## Mail
 
-  @doc "The mail service: from code, or as saved in the dashboard. Nil when there is none."
+  @doc """
+  The mail Runlight sends with: a service from code, or as saved in the
+  dashboard, or else the app's own mailer, as service "app" with its `via`.
+  Nil when there is none.
+  """
   @spec mail_settings(t()) :: Object.t() | nil
   def mail_settings(rl) do
     if rl.mail do
@@ -264,9 +300,18 @@ defmodule Runlight do
            {:ok, %Object{} = settings} <- JS.parse(opened) do
         Object.put(settings, "source", "dashboard")
       else
-        _ -> nil
+        _ -> app_settings(rl.app_mailer)
       end
     end
+  end
+
+  defp app_settings(nil), do: nil
+
+  defp app_settings(app) do
+    JS.obj(
+      [service: "app", from: app.from] ++
+        if(app[:from_name], do: [fromName: app.from_name], else: []) ++ [via: app.via, source: "app"]
+    )
   end
 
   @doc """
@@ -281,7 +326,9 @@ defmodule Runlight do
     if input == nil do
       Store.set_setting(rl.store, "mail", nil)
     else
-      before = mail_settings(rl)
+      current = mail_settings(rl)
+      # Only a service saved in the dashboard has a secret to keep, never the app's mailer.
+      before = if current != nil and current["source"] == "dashboard", do: current
       service = Enum.find(Runlight.Mail.services(), &(&1["id"] == input["service"]))
 
       if service == nil,
@@ -346,7 +393,10 @@ defmodule Runlight do
     end
   end
 
-  @doc "Sends one email through the mail service: `%{to, subject, html, text, headers}`."
+  @doc """
+  Sends one email through the mail service, or the app's own mailer when no
+  service is saved: `%{to, subject, html, text, headers}`.
+  """
   @spec send_mail(t(), map()) :: :ok
   def send_mail(rl, message) do
     settings = mail_settings(rl)
@@ -354,7 +404,38 @@ defmodule Runlight do
     if settings == nil,
       do: raise(Runlight.MailError, message: "Set up a mail service first", code: "mail_unset", params: %{})
 
-    Runlight.Mail.send(rl, settings, Map.merge(message, %{from: settings["from"], from_name: settings["fromName"]}))
+    if settings["source"] == "app" do
+      full = Map.merge(message, %{from: settings["from"], headers: Map.get(message, :headers) || []})
+      full = if settings["fromName"], do: Map.put(full, :from_name, settings["fromName"]), else: full
+      send_app_mail(rl.app_mailer, full)
+    else
+      Runlight.Mail.send(rl, settings, Map.merge(message, %{from: settings["from"], from_name: settings["fromName"]}))
+    end
+  end
+
+  # The app's mailer says it failed by raising or answering {:error, reason}; a MailError passes through as it is.
+  defp send_app_mail(app, message) do
+    case app.send.(message) do
+      {:error, reason} -> app_failed(app, reason)
+      _ -> :ok
+    end
+  rescue
+    error in Runlight.MailError -> reraise error, __STACKTRACE__
+    error -> app_failed(app, error)
+  end
+
+  defp app_failed(app, reason) do
+    detail =
+      cond do
+        is_exception(reason) -> Exception.message(reason)
+        is_binary(reason) -> reason
+        true -> inspect(reason)
+      end
+
+    raise Runlight.MailError,
+      message: "#{app.via} could not send it" <> if(detail != "", do: ": #{detail}", else: ""),
+      code: "mail_app_failed",
+      params: [{"via", app.via}, {"detail", detail}]
   end
 
   @doc """

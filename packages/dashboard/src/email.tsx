@@ -178,7 +178,7 @@ function MailService({ site, admin }: { site: Site; admin: boolean }) {
           <div class="domain-main">
             <span class="share-name">{serviceName}</span>
             <span class="share-meta">
-              {state.source === "app" ? t("mail.viaApp", { via: serviceName, from: fromLine }) : t(state.source === "code" ? "mail.fromCode" : "mail.fromLine", { from: fromLine })}
+              {state.source === "app" ? t("mail.viaApp", { via: serviceName, from: state.from }) : t(state.source === "code" ? "mail.fromCode" : "mail.fromLine", { from: fromLine })}
             </span>
           </div>
           {state.source === "app" && admin ? (

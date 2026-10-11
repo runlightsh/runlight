@@ -136,7 +136,8 @@ final class Dashboard {
 					<a href="<?php echo esc_url( $setup ); ?>"><?php esc_html_e( 'Check the settings', 'runlight' ); ?></a>
 				</p></div>
 			<?php else : ?>
-				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $address ) ); ?>" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads<?php echo $local ? ' allow-forms allow-modals' : ''; ?>" style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
+				<?php // Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. ?>
+				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $address ) ); ?>" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer"<?php echo $local ? '' : ' sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"'; ?> style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -169,6 +170,16 @@ final class Dashboard {
     var top = frame.getBoundingClientRect().top + window.scrollY;
     frame.style.height = Math.max(600, window.innerHeight - top - 24) + "px";
   }
+  // The admin's own bars stay on screen over the page, so the visible slice starts below them.
+  function covered() {
+    var bottom = 0;
+    document.querySelectorAll("#wpadminbar").forEach(function (bar) {
+      var position = getComputedStyle(bar).position;
+      var box = bar.getBoundingClientRect();
+      if ((position === "fixed" || position === "sticky") && box.top <= 1 && box.height > 0) bottom = Math.max(bottom, box.bottom);
+    });
+    return bottom;
+  }
   // Tells the dashboard which slice of the frame is on screen, so its drawers and sheets cover just that.
   var queued = false;
   function viewport() {
@@ -177,7 +188,7 @@ final class Dashboard {
     requestAnimationFrame(function () {
       queued = false;
       var rect = frame.getBoundingClientRect();
-      var top = Math.max(rect.top, 0);
+      var top = Math.max(rect.top, covered());
       var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - top);
       if (frame.contentWindow) frame.contentWindow.postMessage({ type: "runlight:viewport", top: top - rect.top, height: height }, origin);
     });
