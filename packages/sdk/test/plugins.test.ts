@@ -652,3 +652,175 @@ test("the Drupal module keeps rate counts in two cache items, however many visit
   if (answer === null) return;
   assert.deepEqual(JSON.parse(answer), { most: 2, allowed: 700, refused: 10, tags: ["runlight"], after: [] });
 });
+
+/** Runs PHP with the Craft stand-ins loaded, or skips the test where PHP is not installed. */
+function craftPhp(t: { skip: (message: string) => void }, script: string): string | null {
+  try {
+    return execFileSync("php", ["-r", `namespace { require ${JSON.stringify(CRAFT + "tests/craft.php")}; } ${script}`], { encoding: "utf8" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) {
+      t.skip("PHP is not installed");
+      return null;
+    }
+    throw error;
+  }
+}
+
+test("the Craft plugin keeps its tables under Craft's prefix, beside anyone else's, and drops only its own by name", (t) => {
+  const run = (tables: string[], options: { prefix?: string; owner?: string; driver?: string; version?: string; sqlite?: boolean; remove?: boolean } = {}) =>
+    craftPhp(t, `
+      namespace CraftTest {
+        $storage = sys_get_temp_dir() . "/runlight-craft-" . getmypid() . "-" . bin2hex(random_bytes(4));
+        $db = new Db(${JSON.stringify(tables)}, ${JSON.stringify(options.prefix ?? "")}, ${JSON.stringify(options.driver ?? "mysql")}, ${JSON.stringify(options.version ?? "8.4.3")});
+        ${options.owner ? `$db->owners[${JSON.stringify((options.prefix ?? "") + "rl_meta")}] = ${JSON.stringify(options.owner)};` : ""}
+        \\Craft::$app = new App($db, new Cache(), $storage);
+        if (${options.sqlite ? "true" : "false"}) {
+          mkdir($storage . "/runlight", 0700, true);
+          touch($storage . "/runlight/runlight.db");
+        }
+        $kind = \\Runlight\\Craft\\Storage::kind();
+        $clash = \\Runlight\\Craft\\Storage::clash();
+        if (${options.remove ? "true" : "false"}) {
+          \\Runlight\\Craft\\Storage::remove();
+        }
+        echo json_encode(["kind" => $kind, "clash" => $clash, "prefix" => \\Runlight\\Craft\\Storage::prefix(), "dropped" => $db->dropped, "removed" => count(\\craft\\helpers\\FileHelper::$removed), "log" => \\Craft::$logged]);
+      }
+    `);
+  const own = (prefix: string) => ["meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings", "reports", "tokens", "funnels", "rollup_days", "rollups"].map((n) => `${prefix}rl_${n}`);
+  const fresh = run(["craft_entries", "craft_users", "rl_events"], { prefix: "craft_" });
+  if (fresh === null) return;
+  // A standalone Runlight's rl_events beside Craft's craft_ tables is no concern under craft_rl_.
+  assert.deepEqual(JSON.parse(fresh), { kind: "craft", clash: false, prefix: "craft_rl_", dropped: [], removed: 0, log: [] });
+  assert.equal(JSON.parse(run(["entries"], { driver: "pgsql" })!).kind, "craft");
+  assert.equal(JSON.parse(run(["entries"], { version: "10.11.6-MariaDB" })!).kind, "sqlite");
+  // This install's own tables: used, whether or not its folder is here.
+  assert.equal(JSON.parse(run([...own(""), "entries"], { owner: "install-1" })!).kind, "craft");
+  // A SQLite file already made stays the choice.
+  assert.equal(JSON.parse(run(["entries"], { sqlite: true })!).kind, "sqlite");
+  // Tables named as Runlight's that are a standalone Runlight's or another install's: a SQLite file instead.
+  assert.deepEqual(JSON.parse(run([...own(""), "entries"])!).clash, true);
+  assert.deepEqual(JSON.parse(run([...own(""), "entries"], { owner: "install-2" })!).kind, "sqlite");
+  assert.deepEqual(JSON.parse(run(["rl_events", "rl_meta", "rl_extra"], { owner: "install-1" })!).clash, true);
+  // Uninstalling drops Runlight's tables by name, only this install's, even with its folder gone.
+  const removed = JSON.parse(run([...own("craft_"), "craft_entries", "rl_events"], { prefix: "craft_", owner: "install-1", remove: true })!);
+  assert.deepEqual(removed.dropped, own("craft_").sort((a, b) => own("craft_").indexOf(a) - own("craft_").indexOf(b)));
+  assert.deepEqual(JSON.parse(run([...own(""), "entries"], { owner: "install-2", remove: true })!).dropped, []);
+  const extra = JSON.parse(run([...own(""), "rl_extra"], { owner: "install-1", remove: true })!);
+  assert.deepEqual(extra.dropped, []);
+  assert.match(extra.log.at(-1), /left the tables starting rl_ in place/);
+});
+
+test("the Craft plugin counts a visitor by the address Craft works out, and lets managers own Runlight and viewers read it", (t) => {
+  const answer = craftPhp(t, `
+    namespace CraftTest {
+      \\Craft::$app = new App(new Db([]), new Cache(), sys_get_temp_dir());
+      $_SERVER["REQUEST_METHOD"] = "GET";
+      $runlight = new \\Runlight\\Runlight(["store" => \\Runlight\\Store\\Stores::sqlite(":memory:"), "site" => ["id" => "default", "hostnames" => []], "secret" => str_repeat("s", 32), "trustProxy" => false]);
+      // Craft's getUserIP() as its trustedHosts and ipHeaders give it; the headers themselves count for nothing here.
+      $request = new \\craft\\web\\Request("https://www.example.com/runlight/e", ["x-forwarded-for" => "198.51.100.23", "cf-connecting-ip" => "198.51.100.24"], "203.0.113.9");
+      $ours = \\Runlight\\Craft\\Local::visitorRequest($request);
+      $out = [[$ours->remoteAddress, $runlight->clientIp($ours, ["ip" => $ours->remoteAddress]), $ours->url]];
+      $post = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["sec-fetch-site" => "same-origin"]);
+      $crossSite = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["origin" => "https://evil.example"]);
+      $read = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/stats", "GET");
+      $as = static function (User $user, \\Runlight\\Http\\Request $request): mixed {
+        \\Craft::$app->user = $user;
+        return \\Runlight\\Craft\\Local::access($request);
+      };
+      $out[] = [
+        $as(new User(admin: true), $post),
+        $as(new User(permissions: ["runlight-manage"]), $post),
+        $as(new User(permissions: ["runlight-view"]), $read),
+        $as(new User(permissions: ["accessPlugin-runlight"]), $read),
+        $as(new User(guest: true), $read),
+        $as(new User(admin: true), $crossSite),
+      ];
+      echo json_encode($out);
+    }
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [
+    ["203.0.113.9", "203.0.113.9", "https://www.example.com/runlight/e"],
+    [true, true, "read", false, false, false],
+  ]);
+});
+
+test("the Craft plugin's Connect gets the site's keys from a Runlight over OAuth", (t) => {
+  const answer = craftPhp(t, `
+    namespace CraftTest {
+      $rl = new \\Runlight\\Runlight([
+        "store" => \\Runlight\\Store\\Stores::sqlite(":memory:"),
+        "site" => ["id" => "blog", "name" => "Blog", "hostnames" => ["cms.example"]],
+        "secret" => str_repeat("s", 32),
+        "trustProxy" => false,
+      ]);
+      $routes = $rl->routes(["basePath" => "/runlight", "token" => null, "authorize" => static fn (): bool => true]);
+      $client = new Client(static fn (\\Runlight\\Http\\Request $request): \\Runlight\\Http\\Response => $routes->handle($request));
+      $cache = new Cache();
+      $connect = new \\Runlight\\Craft\\Connect($client, $cache, 7, "https://cms.example/admin/runlight/connected");
+      $out = [];
+      // A default port makes no difference to where its endpoints must be; the address is saved as entered.
+      [$to, $error] = $connect->start("https://stats.example:443/runlight", '$RUNLIGHT_URL');
+      parse_str((string) parse_url((string) $to, PHP_URL_QUERY), $asked);
+      $out[] = [$error, $asked["scope"] ?? null];
+      $allowed = $routes->handle(new \\Runlight\\Http\\Request("https://stats.example/runlight/oauth/authorize", "POST", ["content-type" => "application/x-www-form-urlencoded"], http_build_query($asked + ["site" => "blog", "decision" => "allow"])));
+      parse_str((string) parse_url((string) $allowed->headers->get("location"), PHP_URL_QUERY), $back);
+      // Another admin's attempt, or a second use, gets nowhere.
+      $pending = $cache->entries["runlight-connect-7"];
+      $out[] = (new \\Runlight\\Craft\\Connect($client, $cache, 8, "https://cms.example/admin/runlight/connected"))->finish($back)[1];
+      [$granted, $message] = $connect->finish($back);
+      $out[] = [$granted["address"], $granted["site"], $message];
+      $out[] = $connect->finish($back)[1];
+      // The keys work: the dashboard key opens the dashboard, and the agents key reports agents.
+      $embed = $routes->handle(new \\Runlight\\Http\\Request("https://stats.example/runlight/api/embed", "POST", ["authorization" => "Bearer " . $granted["dashboardKey"], "content-type" => "application/json"], json_encode(["origin" => "https://cms.example"])));
+      $observe = $routes->handle(new \\Runlight\\Http\\Request("https://stats.example/runlight/api/observe", "POST", ["authorization" => "Bearer " . $granted["observeKey"], "content-type" => "application/json"], json_encode(["url" => "https://cms.example/", "userAgent" => "ChatGPT-User/1.0"])));
+      $out[] = [$embed->status, $observe->status];
+      // Denied on the consent page, and unreachable, each says so.
+      $cache->entries["runlight-connect-7"] = $pending;
+      $out[] = $connect->finish(["state" => $back["state"], "error" => "access_denied"])[1];
+      $client->fail = "cURL error 28: Operation timed out";
+      $out[] = $connect->start("https://stats.example/runlight", "https://stats.example/runlight")[1];
+      // A Control Panel on plain http elsewhere than this computer cannot be sent back to.
+      $out[] = (new \\Runlight\\Craft\\Connect($client, $cache, 7, "http://cms.example/admin/runlight/connected"))->start("https://stats.example/runlight", "")[1];
+      echo json_encode($out);
+    }
+  `);
+  if (answer === null) return;
+  const [started, otherAdmin, finished, again, keys, denied, unreachable, plain] = JSON.parse(answer);
+  assert.deepEqual(started, ["", "cms"]);
+  assert.match(otherAdmin, /took too long or was already used/);
+  assert.deepEqual(finished, ["$RUNLIGHT_URL", "blog", "Connected. Runlight counts this site as blog."]);
+  assert.match(again, /took too long or was already used/);
+  assert.deepEqual(keys, [201, 204]);
+  assert.equal(denied, "The connection was not allowed.");
+  assert.match(unreachable, /Could not reach a Runlight at https:\/\/stats\.example\/runlight: cURL error 28/);
+  assert.match(plain, /needs this site’s Control Panel on https/);
+});
+
+test("the Craft plugin keeps rate counts in two cache entries, however many visitors and minutes", (t) => {
+  const answer = craftPhp(t, `
+    namespace CraftTest {
+      $now = 1_791_288_000_000;
+      $cache = new Cache();
+      $clock = static function () use (&$now): int { return intdiv($now, 1000); };
+      $limit = new \\Runlight\\RateLimit(120, function () use (&$now): int { return $now; }, "/nonexistent/never-written", true, new \\Runlight\\Craft\\Cache($cache, $clock));
+      $most = 0;
+      for ($minute = 0; $minute < 3 * 1440; $minute += 7) {
+        $now = 1_791_288_000_000 + $minute * 60_000;
+        $cache->now = intdiv($now, 1000);
+        $limit->allow("198.51.100." . ($minute % 250));
+        $most = max($most, count($cache->entries));
+      }
+      $refused = 0;
+      for ($i = 0; $i < 130; $i++) {
+        $refused += $limit->allow("203.0.113.1") ? 0 : 1;
+      }
+      $now += 2 * 86_400_000;
+      $cache->now = intdiv($now, 1000);
+      (new \\Runlight\\Craft\\Cache($cache, $clock))->sweep();
+      echo json_encode(["most" => $most, "refused" => $refused, "after" => array_keys($cache->entries)]);
+    }
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), { most: 2, refused: 10, after: [] });
+});

@@ -10,9 +10,9 @@ use craft\helpers\App;
 
 /**
  * Where Runlight runs, and what it sends. Every string may name an
- * environment variable ("$RUNLIGHT_OBSERVE_KEY"), so the keys need not be in
- * project config; config/runlight.php wins over the form, as every plugin's
- * config file does.
+ * environment variable ("$RUNLIGHT_AGENTS_KEY"), so the keys need not be in
+ * project config, and Connect saves them that way; config/runlight.php wins
+ * over the form, as every plugin's config file does.
  */
 final class Settings extends Model
 {
@@ -126,7 +126,7 @@ final class Settings extends Model
         $parts = parse_url($address);
         $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
         if (!in_array($scheme, ['http', 'https'], true) || empty($parts['host'])) {
-            $this->addError($attribute, Craft::t('runlight', 'Enter a web address starting with https://, such as https://stats.example.com.'));
+            $this->addError($attribute, Craft::t('runlight', 'Enter a web address, such as https://stats.example.com.'));
         }
     }
 

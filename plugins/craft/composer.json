@@ -1,6 +1,6 @@
 {
     "name": "runlight/craft",
-    "description": "Privacy friendly analytics with no cookies, kept in your own database. Runs Runlight inside your Craft site, or sends to one you run elsewhere, counts AI agents that read your pages, and shows your dashboard in the Control Panel.",
+    "description": "Privacy friendly analytics with no cookies, run inside your Craft site or sent to a Runlight elsewhere.",
     "type": "craft-plugin",
     "license": "MIT",
     "keywords": ["craft", "craftcms", "craft-plugin", "analytics", "privacy", "cookieless", "ai"],

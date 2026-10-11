@@ -12,6 +12,17 @@
 declare(strict_types=1);
 
 $plugin = dirname(__DIR__) . '/plugins/craft';
+// The plugin is released with the library in this repository, which may be newer than the one Composer
+// installs from Packagist, so Runlight's own classes load from here first.
+$library = dirname(__DIR__) . '/packages/php/src/';
+spl_autoload_register(static function (string $class) use ($library): void {
+    if (str_starts_with($class, 'Runlight\\') && !str_starts_with($class, 'Runlight\\Craft\\')) {
+        $file = $library . str_replace('\\', '/', substr($class, strlen('Runlight\\'))) . '.php';
+        if (is_file($file)) {
+            require $file;
+        }
+    }
+}, true, true);
 require $plugin . '/vendor/autoload.php';
 require $plugin . '/vendor/yiisoft/yii2/Yii.php';
 require $plugin . '/vendor/craftcms/cms/src/Craft.php';
@@ -19,7 +30,8 @@ require $plugin . '/vendor/craftcms/cms/src/Craft.php';
 $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($plugin . '/src', FilesystemIterator::SKIP_DOTS));
 $count = 0;
 foreach ($files as $file) {
-    if ($file->getExtension() !== 'php') {
+    // Translations are arrays of messages, not classes.
+    if ($file->getExtension() !== 'php' || str_contains($file->getPathname(), '/translations/')) {
         continue;
     }
     $class = 'Runlight\\Craft\\' . str_replace('/', '\\', substr($file->getPathname(), strlen($plugin . '/src/'), -4));

@@ -11,6 +11,7 @@ use Runlight\Craft\Local;
 use Runlight\Http\BodyTooLarge;
 use Runlight\Http\Request;
 use Runlight\Http\Response as RunlightResponse;
+use Runlight\Server\FrontController;
 use yii\base\Event;
 use yii\web\ForbiddenHttpException;
 use yii\web\NotFoundHttpException;
@@ -22,9 +23,10 @@ use yii\web\Response;
  * the site answers itself when no link has the name.
  *
  * Anyone may reach these, since the tracker posts from every visitor's page,
- * and Craft's CSRF check is off for them: Runlight's API takes changes only
- * as JSON, which a form on another site cannot send, and it signs people in
- * through Craft's own session.
+ * so Craft's CSRF check, whose token Runlight's dashboard has no way to send,
+ * is off for them. Runlight's API takes changes only as JSON, which a form on
+ * another site cannot send, and only from the site's own pages (Local::sameSite),
+ * and it signs people in through Craft's own session.
  */
 final class ServeController extends Controller
 {
@@ -56,7 +58,7 @@ final class ServeController extends Controller
         $back = Local::origin() . ($next === $base || str_starts_with($next, $base . '/') ? $next : $base . '/');
         $user = Craft::$app->getUser();
         if (!$user->getIsGuest()) {
-            if (!$user->checkPermission('accessPlugin-runlight')) {
+            if (!Local::canView()) {
                 throw new ForbiddenHttpException(Craft::t('runlight', 'Your account cannot open Runlight. An admin can allow it under Users, Permissions, Runlight.'));
             }
             return $this->redirect($back);
@@ -72,42 +74,17 @@ final class ServeController extends Controller
             throw new NotFoundHttpException();
         }
         Local::$served = true;
-        $url = $this->request->getAbsoluteUrl();
-        $headers = [];
-        foreach ($this->request->getHeaders()->toArray() as $name => $values) {
-            $headers[strtolower((string) $name)] = array_map('strval', (array) $values);
-        }
-        // The method as sent, never one a header or field overrides, as Yii allows.
-        $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
-        // Runlight's address for the visitor is the connection's own; it reads proxy headers itself.
-        $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
         try {
-            $body = '';
-            if (!in_array($method, ['GET', 'HEAD'], true)) {
-                $input = fopen('php://input', 'rb');
-                $body = $input === false ? '' : Request::readBody($input, $url, $headers['content-length'][0] ?? null);
-            }
-            $request = new Request($url, $method, $headers, $body, $remote);
+            $request = Local::visitorRequest($this->request);
         } catch (BodyTooLarge $e) {
             return $this->send(Request::tooLarge());
         }
-        $context = ['ip' => $remote];
-        try {
-            if ($link) {
-                $answer = (Local::runlight()->linkHandler())($request, $context);
-                // No link by that name: the page is the site's to answer.
-                if ($answer->status === 404) {
-                    Local::$served = false;
-                    throw new NotFoundHttpException();
-                }
-            } else {
-                $answer = Local::routes()->handle($request, $context);
-            }
-        } catch (NotFoundHttpException $e) {
-            throw $e;
-        } catch (\Throwable $e) {
-            Craft::error('Runlight: ' . $e->getMessage(), 'runlight');
-            $answer = new RunlightResponse('{"error":"Internal error","code":"internal"}', 500, ['content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store']);
+        // As Runlight's own front controller answers: a link domain, then a short link, then the routes.
+        $answer = FrontController::answer(Local::runlight(), Local::routes(), $request);
+        // No link by that name, or a link's path asked for with another method: the page is the site's to answer.
+        if ($link && $answer->status === 404) {
+            Local::$served = false;
+            throw new NotFoundHttpException();
         }
         return $this->send($answer);
     }

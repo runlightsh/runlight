@@ -14,6 +14,8 @@
     <p>{{ 'Connect this site to your Runlight on the <a href="{url}">settings page</a> to see its numbers here.'|t('runlight', { url: cpUrl(settingsUrl) })|raw }}</p>
   {% elseif not hasKey %}
     <p>{{ 'To see this site’s numbers here, press Connect on the <a href="{url}">settings page</a>, or make a dashboard key in Runlight under Settings, Install and enter it there.'|t('runlight', { url: cpUrl(settingsUrl) })|raw }}</p>
+  {% elseif note %}
+    <p>{{ note }}</p>
   {% elseif error %}
     <p class="error">{{ error }} <a href="{{ cpUrl(settingsUrl) }}">{{ 'Check the settings'|t('runlight') }}</a></p>
   {% else %}

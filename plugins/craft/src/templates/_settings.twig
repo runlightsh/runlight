@@ -11,6 +11,10 @@
 {% if counting %}
   <div class="readable" style="margin: 16px 0;">
     <p class="success">{{ 'Runlight is counting this site.'|t('runlight') }} <a href="{{ cpUrl('runlight') }}">{{ 'See the numbers'|t('runlight') }}</a></p>
+    {% if overdue %}
+      <p class="warning">{{ 'Runlight’s upkeep has not run for over a day, so email reports are not sent and old visits are not deleted. Run Craft’s queue, or add `php craft runlight/check` to your server’s cron, hourly.'|t('runlight')|md(null, true) }}</p>
+    {% endif %}
+    <p class="light">{{ 'Admins and people who may manage Runlight own it, and people who may only see its numbers can read them. Set who may do which under Users, Permissions, Runlight.'|t('runlight') }}</p>
   </div>
 {% endif %}
 
@@ -71,7 +75,7 @@
 <div id="runlight-local"{% if remote %} class="hidden"{% endif %}>
 {{ forms.lightswitchField({
   label: 'Show which countries visitors come from'|t('runlight'),
-  instructions: 'With DB-IP’s free country data, which the plugin downloads from db-ip.com once a month and keeps in Craft’s storage folder. Visitors’ addresses are looked up on this server and never sent anywhere. Sites behind Cloudflare get countries without it.'|t('runlight'),
+  instructions: 'With DB-IP’s free country data, which the plugin downloads from db-ip.com once a month and keeps in Craft’s storage folder, on each server. Visitors’ addresses are looked up on this server and never sent anywhere. Sites behind Cloudflare get countries without it.'|t('runlight'),
   id: 'locations',
   name: 'locations',
   on: settings.locations,
@@ -110,7 +114,7 @@
 {# A key typed in is hidden like a password; one named by an environment variable shows the variable, with suggestions. #}
 {% set observeKey = {
   label: 'Agents key'|t('runlight'),
-  instructions: 'Optional. Shown in Runlight under Settings, Install. With it, the plugin reports AI agents such as ChatGPT and Claude reading your pages, which run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else. Use an environment variable, such as `$RUNLIGHT_OBSERVE_KEY`, to keep it out of project config.'|t('runlight'),
+  instructions: 'Optional. Shown in Runlight under Settings, Install. With it, the plugin reports AI agents such as ChatGPT and Claude reading your pages, which run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else. Use an environment variable, such as `$RUNLIGHT_AGENTS_KEY`, which Connect sets up in `.env` itself, to keep it out of project config.'|t('runlight'),
   id: 'observeKey',
   name: 'observeKey',
   value: settings.observeKey,
@@ -123,7 +127,7 @@
 
 {% set dashboardKey = {
   label: 'Dashboard key'|t('runlight'),
-  instructions: 'Optional. Made in Runlight under Settings, Install. With it, the Runlight item in the Control Panel shows this site’s numbers right there, in the same read-only view a share link shows, framed only by this Control Panel. The key cannot read anything itself. Use an environment variable, such as `$RUNLIGHT_DASHBOARD_KEY`, to keep it out of project config.'|t('runlight'),
+  instructions: 'Optional. Made in Runlight under Settings, Install. With it, the Runlight item in the Control Panel shows this site’s numbers right there, in the same read-only view a share link shows, framed only by this Control Panel. Anyone holding the key can read this site’s dashboard, so keep it as you would a password. Use an environment variable, such as `$RUNLIGHT_DASHBOARD_KEY`, which Connect sets up in `.env` itself, to keep it out of project config.'|t('runlight'),
   id: 'dashboardKey',
   name: 'dashboardKey',
   value: settings.dashboardKey,
