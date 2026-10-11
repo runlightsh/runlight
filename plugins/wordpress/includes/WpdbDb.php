@@ -40,7 +40,7 @@ final class WpdbDb implements Db {
 	 * @return list<array<string, mixed>>
 	 */
 	public function all( string $sql, array $params = array() ): array {
-		$rows = $this->wpdb->get_results( $this->text( $sql, $params ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
+		$rows = $this->wpdb->get_results( $this->text( $sql, $params ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
 		$this->check();
 		return is_array( $rows ) ? array_values( $rows ) : array();
 	}
@@ -116,14 +116,14 @@ final class WpdbDb implements Db {
 	 * @param string $sql A statement with its values in place.
 	 */
 	private function query( string $sql ): void {
-		$this->wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
+		$this->wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
 		$this->check();
 	}
 
 	/** $wpdb reports a failed statement in last_error rather than throwing, and Runlight expects it thrown. */
 	private function check(): void {
 		if ( '' !== $this->wpdb->last_error ) {
-			throw new \RuntimeException( 'Runlight: ' . $this->wpdb->last_error );
+			throw new \RuntimeException( 'Runlight: ' . $this->wpdb->last_error ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- never printed: Local::serve() catches it, logs it, and answers a fixed JSON error.
 		}
 	}
 
