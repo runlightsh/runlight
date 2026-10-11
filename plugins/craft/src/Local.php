@@ -6,6 +6,7 @@ namespace Runlight\Craft;
 
 use Craft;
 use craft\helpers\Queue;
+use Runlight\Cms\Connect as CmsConnect;
 use Runlight\Craft\jobs\Check;
 use Runlight\Http\Request;
 use Runlight\Log;
@@ -95,14 +96,7 @@ final class Local
      */
     public static function originOf(string $address): string
     {
-        $parts = parse_url($address);
-        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
-            return '';
-        }
-        $scheme = strtolower($parts['scheme']);
-        $port = (int) ($parts['port'] ?? 0);
-        $default = ($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80);
-        return $scheme . '://' . strtolower($parts['host']) . ($port && !$default ? ':' . $port : '');
+        return CmsConnect::origin($address);
     }
 
     /** The path of the folder the site lives in, if any, without a trailing slash. */
