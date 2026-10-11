@@ -126,7 +126,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 * Running inside WordPress, Runlight counts each visitor by the address the connection came from, and believes X-Forwarded-For only from a proxy on this server or a private network, and Cloudflare's header only from Cloudflare. The runlight_client_ip filter can change it.
 * Countries can come from DB-IP's free data, downloaded once a month when you turn it on.
 * Email reports go through wp_mail when an SMTP or mail plugin is active.
-* A Connect button fills in the site id, agents key, and dashboard key from a Runlight you run elsewhere, once you enter its address.
+* A Connect button fills in the site id, agents key, and dashboard key from a Runlight you run elsewhere, once you enter its address, and says why when it cannot reach it.
 * The observe key is now called the agents key.
 * The dashboard in wp-admin grows to its full height, and the Runlight menu item sits below the core items.
 * Deleting the plugin on a network removes what it kept for every site, and drops only Runlight's own tables, each by name.
