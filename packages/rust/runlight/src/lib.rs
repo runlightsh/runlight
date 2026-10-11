@@ -42,7 +42,7 @@ pub mod routes;
 pub mod runlight;
 mod runlight_settings;
 pub use routes::{Routes, RoutesOptions, TokenOption};
-pub use runlight::{Runlight, RunlightOptions, SiteOptions, TrustProxy};
+pub use runlight::{AppMailer, AppSend, Runlight, RunlightOptions, SiteOptions, TrustProxy};
 pub(crate) mod re;
 pub mod reports;
 pub mod safefetch;

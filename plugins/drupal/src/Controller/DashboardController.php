@@ -97,11 +97,11 @@ final class DashboardController extends ControllerBase {
   }
 
   /**
-   * The frame the dashboard opens in, from the Runlight at the address. The
-   * whole dashboard also submits forms and asks to confirm.
+   * The frame the dashboard opens in, from the Runlight at the address: the
+   * whole dashboard for Runlight in this site, else another one's read-only view.
    */
   private function frame(string $url, string $address, bool $full = FALSE): array {
-    return [
+    $frame = [
       '#type' => 'html_tag',
       '#tag' => 'iframe',
       '#value' => '',
@@ -111,11 +111,15 @@ final class DashboardController extends ControllerBase {
         'data-runlight-origin' => self::originOf($address),
         'title' => $this->t('Runlight dashboard'),
         'referrerpolicy' => 'no-referrer',
-        'sandbox' => 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads' . ($full ? ' allow-forms allow-modals' : ''),
         'style' => 'display:block;width:100%;height:calc(100vh - 200px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent',
       ],
       '#attached' => ['library' => ['runlight/embed']],
     ];
+    // Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed.
+    if (!$full) {
+      $frame['#attributes']['sandbox'] = 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads';
+    }
+    return $frame;
   }
 
   /**

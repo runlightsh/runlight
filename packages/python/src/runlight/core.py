@@ -18,8 +18,13 @@ Options, with the TS names (as a dict, or as keyword arguments in snake_case, `r
   X-Real-IP, then CF-Connecting-IP. Name one of them to read only that header. False reads only the
   connection's address, for an app nothing sits in front of.
 - linkPath: where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go".
-- mail: the mail service for email reports, in code (a transports config plus `from` and `fromName`). When
-  set, the dashboard shows it and cannot change it. Otherwise it is set up in Settings.
+- mail: how email reports, invites, and sign-in links are sent. Either a mail service in code (a transports
+  config plus `from` and `fromName`), which the dashboard shows and cannot change, or a mailer of the app's own,
+  such as a CMS's: {"send": callable(message), "from", "fromName"?, "via"}. The app's mailer is a default: a
+  service saved in the dashboard takes its place, and removing that service goes back to it. `via` names it
+  there, such as "WordPress (WP Mail SMTP)". The message is a dict of to, from, fromName (when there is one),
+  subject, html, text, and headers (when there are any); `send` raises to say it failed. Without either, the
+  service is set up in Settings.
 - secret: encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens for
   connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
 - rateLimit: tracker requests allowed per visitor address per minute. Default 120, which a real visitor never
@@ -208,7 +213,22 @@ class Runlight:
         # Where links on the app's own domain are served, such as "/go".
         link_path = opts.get("linkPath")
         self.link_path = "/" + re.sub(r"^/+|/+$", "", str("/go" if link_path is None else link_path))
-        self._mail_in_code: dict[str, Any] | None = opts.get("mail")
+        mail = opts.get("mail")
+        self._app_mailer: dict[str, Any] | None = None
+        self._mail_in_code: dict[str, Any] | None = None
+        if isinstance(mail, Mapping) and callable(mail.get("send")):
+            sender = _js.string(_or(mail.get("from"), ""))
+            if not EMAIL.match(sender):
+                raise ValueError("Runlight: the app's mailer needs a from address, like reports@example.com")
+            from_name = _js.string(_or(mail.get("fromName"), ""))
+            self._app_mailer = {
+                "send": mail["send"],
+                "from": sender,
+                **({"fromName": from_name} if from_name else {}),
+                "via": _js.string(_or(mail.get("via"), "")),
+            }
+        else:
+            self._mail_in_code = mail
         # Encrypts the keys kept in the database; None leaves them readable, and the dashboard says so.
         secret = opts.get("secret")
         self.secret: str | None = str(secret) if secret is not None else (env_value("RUNLIGHT_SECRET") or env_value("RUNLIGHT_TOKEN"))
@@ -239,20 +259,34 @@ class Runlight:
 
     # Mail
 
+    @property
+    def app_mailer(self) -> dict[str, Any] | None:
+        """The app's own mailer, {send, from, fromName?, via}, used while no service is saved in the dashboard.
+        None when there is none."""
+        return self._app_mailer
+
     def mail_settings(self) -> dict[str, Any] | None:
-        """The mail service: from code, or as saved in the dashboard. None when there is none."""
+        """The mail Runlight sends with: a service from code, or as saved in the dashboard, or else the app's own
+        mailer, as service "app" with its `via`. None when there is none."""
         from .mail.secret import unseal
 
         if self._mail_in_code is not None:
             return {**self._mail_in_code, "source": "code"}
         self.init()
         sealed = self.store.setting("mail")
-        if not sealed:
+        opened = unseal(sealed, self.secret) if sealed else None
+        if opened:
+            return {**_js.loads(opened), "source": "dashboard"}
+        app = self._app_mailer
+        if app is None:
             return None
-        opened = unseal(sealed, self.secret)
-        if not opened:
-            return None
-        return {**_js.loads(opened), "source": "dashboard"}
+        return {
+            "service": "app",
+            "from": app["from"],
+            **({"fromName": app["fromName"]} if "fromName" in app else {}),
+            "via": app["via"],
+            "source": "app",
+        }
 
     def save_mail_settings(self, input: Mapping[str, Any] | None) -> None:
         """Saves the mail service from the dashboard. A secret field left blank keeps the saved value, so the
@@ -265,7 +299,8 @@ class Runlight:
         if input is None:
             self.store.set_setting("mail", None)
             return
-        before = self.mail_settings()
+        current = self.mail_settings()
+        before = current if current is not None and current["source"] == "dashboard" else None
         service = next((s for s in SERVICES if s["id"] == input.get("service")), None)
         if service is None:
             raise MailError("Pick a mail service", "mail_service", {})
@@ -299,7 +334,8 @@ class Runlight:
         self.store.set_setting("mail", seal(_js.dumps(config), self.secret))
 
     def send_mail(self, message: Mapping[str, Any]) -> None:
-        """Sends one email through the mail service: {to, subject, html, text, headers?}."""
+        """Sends one email through the mail service, or the app's own mailer when no service is saved:
+        {to, subject, html, text, headers?}."""
         from .mail.transports import MailError, send
 
         settings = self.mail_settings()
@@ -308,7 +344,17 @@ class Runlight:
         full = {**message, "from": settings["from"]}
         if settings.get("fromName") is not None:
             full["fromName"] = settings["fromName"]
-        send(settings, full, self.fetcher, self.now())
+        if settings["source"] != "app" or self._app_mailer is None:
+            send(settings, full, self.fetcher, self.now())
+            return
+        try:
+            self._app_mailer["send"](full)
+        except MailError:
+            raise
+        except Exception as error:
+            detail = str(error)
+            via = settings["via"]
+            raise MailError(f"{via} could not send it" + (f": {detail}" if detail else ""), "mail_app_failed", {"via": via, "detail": detail}) from error
 
     def send_reports(self) -> dict[str, int]:
         """Sends every report that is due: last week's on Monday from 8am, last month's on the 1st, in each site's

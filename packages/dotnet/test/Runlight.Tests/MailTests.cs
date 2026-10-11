@@ -342,4 +342,100 @@ public sealed class MailTests
         Assert.Equal("{\"detail\":\"Something\"}", J(error.Params));
         Assert.Equal("ses", Transports.Services[0].Str("id"));
     }
+
+    [Fact]
+    public async Task The_apps_own_mailer_sends_until_a_service_saved_in_the_dashboard_takes_its_place()
+    {
+        long now = DateTimeOffset.Parse("2026-10-05T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture).ToUnixTimeMilliseconds();
+        var sent = new List<JsObject>();
+        string fail = "";
+        var calls = Capture();
+        var rl = new Runlight(new RunlightOptions
+        {
+            Store = await Databases.FreshAsync("sqlite"),
+            Site = new SiteOptions { Name = "Example", Hostnames = ["example.com"] },
+            Now = () => now,
+            Fetcher = calls,
+            Mail = new AppMailer
+            {
+                From = "site@example.com",
+                FromName = "Example",
+                Via = "WordPress (WP Mail SMTP)",
+                Send = (m, _) =>
+                {
+                    if (fail.Length > 0)
+                    {
+                        throw new InvalidOperationException(fail);
+                    }
+                    sent.Add(m);
+                    return Task.CompletedTask;
+                },
+            },
+        });
+        var routes = rl.Routes(new RoutesOptions { Token = "t" });
+        async Task<(int Status, JsObject Body)> Call(string method, string path, object? body = null)
+        {
+            var headers = new Headers();
+            headers.Set("authorization", "Bearer t");
+            headers.Set("content-type", "application/json");
+            var answer = await routes.HandleAsync(new Request("https://stats.example.com/runlight" + path, method, headers, body == null ? "" : Json.Stringify(body)));
+            return (answer.Status, (JsObject)Json.Parse(answer.Text())!);
+        }
+
+        var app = (await Call("GET", "/api/mail")).Body;
+        Assert.Equal(
+            "{\"source\":\"app\",\"service\":\"\",\"from\":\"site@example.com\",\"fromName\":\"Example\",\"fields\":{},\"saved\":[],\"app\":{\"via\":\"WordPress (WP Mail SMTP)\",\"from\":\"site@example.com\",\"fromName\":\"Example\",\"replaced\":false}}",
+            J(new JsObject { ["source"] = app.Get("source"), ["service"] = app.Get("service"), ["from"] = app.Get("from"), ["fromName"] = app.Get("fromName"), ["fields"] = app.Get("fields"), ["saved"] = app.Get("saved"), ["app"] = app.Get("app") }));
+        Assert.Equal("app", app.Keys[^1]); // after the keys an install without one answers with
+
+        Assert.Equal(200, (await Call("POST", "/api/mail/test", new JsObject { ["to"] = "jon@example.com" })).Status);
+        Assert.Single(sent);
+        Assert.Equal("[\"jon@example.com\",\"site@example.com\",\"Example\"]", J(new List<object?> { sent[0].Get("to"), sent[0].Get("from"), sent[0].Get("fromName") }));
+        Assert.Contains("WordPress (WP Mail SMTP)", sent[0].Str("text"), StringComparison.Ordinal); // the test names the app's mailer
+
+        // Reports go through it too, with the unsubscribe headers.
+        Assert.Equal(201, (await Call("POST", "/api/reports", new JsObject { ["email"] = "jon@example.com", ["frequency"] = "weekly" })).Status);
+        now += 7 * 86_400_000L;
+        Assert.Equal("{\"sent\":1,\"failed\":0}", J(await rl.SendReportsAsync()));
+        Assert.Matches("^<https://stats\\.example\\.com/runlight/unsubscribe/[a-f0-9]{32}>$", sent[1].Obj("headers")!.Str("List-Unsubscribe")!);
+        Assert.Equal("List-Unsubscribe=One-Click", sent[1].Obj("headers")!.Str("List-Unsubscribe-Post"));
+
+        // A failure comes back as a mail error naming the mailer.
+        fail = "SMTP connect() failed";
+        var failed = await Call("POST", "/api/mail/test", new JsObject { ["to"] = "jon@example.com" });
+        Assert.Equal(400, failed.Status);
+        Assert.Equal("{\"error\":\"WordPress (WP Mail SMTP) could not send it: SMTP connect() failed\",\"code\":\"mail_app_failed\",\"params\":{\"via\":\"WordPress (WP Mail SMTP)\",\"detail\":\"SMTP connect() failed\"}}", J(failed.Body));
+        fail = "";
+
+        // A service saved in the dashboard takes its place.
+        Assert.Equal(200, (await Call("PUT", "/api/mail", new JsObject { ["service"] = "resend", ["apiKey"] = "re_live_key", ["from"] = "reports@example.com" })).Status);
+        var replaced = (await Call("GET", "/api/mail")).Body;
+        Assert.Equal(
+            "[\"dashboard\",\"resend\",\"reports@example.com\",{\"via\":\"WordPress (WP Mail SMTP)\",\"from\":\"site@example.com\",\"fromName\":\"Example\",\"replaced\":true}]",
+            J(new List<object?> { replaced.Get("source"), replaced.Get("service"), replaced.Get("from"), replaced.Get("app") }));
+        calls.Requests.Clear();
+        Assert.Equal(200, (await Call("POST", "/api/mail/test", new JsObject { ["to"] = "jon@example.com" })).Status);
+        Assert.Single(calls.Requests); // through the saved service
+        Assert.Equal(2, sent.Count); // and not the app's mailer
+
+        // Removing it goes back to the app's mailer.
+        Assert.Equal(200, (await Call("DELETE", "/api/mail")).Status);
+        Assert.Equal("app", (await Call("GET", "/api/mail")).Body.Str("source"));
+        Assert.Equal(200, (await Call("POST", "/api/mail/test", new JsObject { ["to"] = "jon@example.com" })).Status);
+        Assert.Equal(3, sent.Count);
+    }
+
+    [Fact]
+    public async Task The_apps_mailer_needs_a_from_address_and_without_one_the_answer_has_no_app()
+    {
+        var store = await Databases.FreshAsync("sqlite");
+        var error = Assert.Throws<ArgumentException>(() => new Runlight(new RunlightOptions { Store = store, Mail = new AppMailer { From = "", Via = "Drupal", Send = (_, _) => Task.CompletedTask } }));
+        Assert.Contains("from address", error.Message, StringComparison.Ordinal);
+        var rl = new Runlight(new RunlightOptions { Store = store });
+        var headers = new Headers();
+        headers.Set("authorization", "Bearer t");
+        var answer = (JsObject)Json.Parse((await rl.Routes(new RoutesOptions { Token = "t" }).HandleAsync(new Request("https://stats.example.com/runlight/api/mail", "GET", headers))).Text())!;
+        Assert.Null(answer.Get("source"));
+        Assert.False(answer.Has("app")); // an install without an app mailer answers as before
+    }
 }

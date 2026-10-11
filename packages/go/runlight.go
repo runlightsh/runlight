@@ -79,6 +79,10 @@ type Options struct {
 	// Mail is the mail service for email reports, in code. When set, the
 	// dashboard shows it and cannot change it.
 	Mail *js.Object
+	// AppMailer is a mailer of the app's own, such as a CMS's, in place of
+	// Mail. It is a default: a service saved in the dashboard takes its
+	// place, and removing that service goes back to it.
+	AppMailer *AppMailer
 	// Secret encrypts the keys kept in the database. nil reads the
 	// RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
 	Secret *string
@@ -231,6 +235,7 @@ type Runlight struct {
 	trust     string // "" none, "*" the defaults, or one header's name
 	limit     *rateLimit
 	mailCode  *js.Object
+	appMailer *AppMailer
 	readyMu   sync.Mutex
 	ready     bool
 	checkMu   sync.Mutex
@@ -293,6 +298,7 @@ func New(options Options) (*Runlight, error) {
 		logf:          options.Logf,
 		geo:           options.Geo,
 		mailCode:      options.Mail,
+		appMailer:     options.AppMailer,
 		turns:         map[string]*turn{},
 		overrides:     map[string]*js.Object{},
 		remotes:       map[string]Remote{},
@@ -357,6 +363,18 @@ func New(options Options) (*Runlight, error) {
 	// 0, or anything that is not a positive number, means no limit, never a limit of nothing.
 	if perMinute > 0 {
 		r.limit = newRateLimit(perMinute, r.now)
+	}
+	if app := r.appMailer; app != nil {
+		switch {
+		case r.mailCode != nil:
+			return nil, errors.New("Runlight: pass Mail or AppMailer, not both")
+		case app.Send == nil:
+			return nil, errors.New("Runlight: the app's mailer needs a Send function")
+		case !emailPattern.MatchString(app.From):
+			return nil, errors.New("Runlight: the app's mailer needs a from address, like reports@example.com")
+		}
+		copied := *app
+		r.appMailer = &copied
 	}
 	r.Links = &Links{r: r}
 	r.LinkPath = "/" + strings.Trim(firstNonEmpty(options.LinkPath, "/go"), "/")

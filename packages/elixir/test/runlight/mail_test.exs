@@ -8,6 +8,7 @@ defmodule Runlight.MailTest do
   use ExUnit.Case, async: true
 
   alias Runlight.Crypto
+  alias Runlight.Http.Request
   alias Runlight.Http.Response
   alias Runlight.JS
   alias Runlight.JS.Object
@@ -15,8 +16,10 @@ defmodule Runlight.MailTest do
   alias Runlight.Mail.Ses
   alias Runlight.Mail.Smtp
   alias Runlight.MailError
+  alias Runlight.Test.FakeFetcher
   alias Runlight.Test.Fixtures
   alias Runlight.Test.SmtpServer
+  alias Runlight.Test.Stores
 
   @message %{
     to: "jon@example.com",
@@ -347,5 +350,137 @@ defmodule Runlight.MailTest do
     assert error.code == "mail_unreachable"
     assert List.keyfind(error.params, "host", 0) == {"host", "127.0.0.1:#{port}"}
     assert String.starts_with?(error.message, "SMTP: could not connect to 127.0.0.1:#{port}: ")
+  end
+
+  test "the app's own mailer sends until a service saved in the dashboard takes its place" do
+    {store, cleanup} = Stores.store(:sqlite)
+    on_exit(cleanup)
+    {:ok, clock} = Agent.start_link(fn -> JS.date_utc(2026, 9, 5, 12) end)
+    {:ok, sent} = Agent.start_link(fn -> [] end)
+    {:ok, fail} = Agent.start_link(fn -> "" end)
+    {fetcher, requests} = FakeFetcher.new(fn _, _ -> {:ok, Response.new("{}")} end)
+
+    send_app = fn m ->
+      case Agent.get(fail, & &1) do
+        "" -> Agent.update(sent, &(&1 ++ [m]))
+        reason -> raise reason
+      end
+    end
+
+    rl =
+      Runlight.new(
+        store: store,
+        site: [name: "Example", hostnames: ["example.com"]],
+        now: fn -> Agent.get(clock, & &1) end,
+        fetcher: fetcher,
+        mail: [from: "site@example.com", from_name: "Example", via: "WordPress (WP Mail SMTP)", send: send_app]
+      )
+
+    routes = Runlight.routes(rl, token: "t")
+
+    call = fn method, path, body ->
+      answer =
+        Runlight.Routes.handle(
+          routes,
+          Request.new("https://stats.example.com/runlight#{path}",
+            method: method,
+            headers: [{"authorization", "Bearer t"}, {"content-type", "application/json"}],
+            body: if(body, do: Jason.encode!(body), else: "")
+          )
+        )
+
+      {answer.status, Jason.decode!(answer.body)}
+    end
+
+    sent_list = fn -> Agent.get(sent, & &1) end
+
+    {200, app} = call.("GET", "/api/mail", nil)
+
+    assert Map.take(app, ~w(source service from fromName fields saved app)) == %{
+             "source" => "app",
+             "service" => "",
+             "from" => "site@example.com",
+             "fromName" => "Example",
+             "fields" => %{},
+             "saved" => [],
+             "app" => %{
+               "via" => "WordPress (WP Mail SMTP)",
+               "from" => "site@example.com",
+               "fromName" => "Example",
+               "replaced" => false
+             }
+           }
+
+    assert {200, _} = call.("POST", "/api/mail/test", %{to: "jon@example.com"})
+    assert [first] = sent_list.()
+    assert {first.to, first.from, first.from_name} == {"jon@example.com", "site@example.com", "Example"}
+    assert first.text =~ "WordPress (WP Mail SMTP)", "the test names the app's mailer"
+
+    # Reports go through it too, with the unsubscribe headers.
+    assert {201, _} = call.("POST", "/api/reports", %{email: "jon@example.com", frequency: "weekly"})
+    Agent.update(clock, &(&1 + 7 * 86_400_000))
+    assert Runlight.send_reports(rl) == %{sent: 1, failed: 0}
+    headers = Map.new(Enum.at(sent_list.(), 1).headers)
+    assert headers["List-Unsubscribe"] =~ ~r"\A<https://stats\.example\.com/runlight/unsubscribe/[a-f0-9]{32}>\z"
+    assert headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+    # A failure comes back as a mail error naming the mailer.
+    Agent.update(fail, fn _ -> "SMTP connect() failed" end)
+
+    assert call.("POST", "/api/mail/test", %{to: "jon@example.com"}) ==
+             {400,
+              %{
+                "error" => "WordPress (WP Mail SMTP) could not send it: SMTP connect() failed",
+                "code" => "mail_app_failed",
+                "params" => %{"via" => "WordPress (WP Mail SMTP)", "detail" => "SMTP connect() failed"}
+              }}
+
+    Agent.update(fail, fn _ -> "" end)
+
+    # A service saved in the dashboard takes its place.
+    assert {200, _} =
+             call.("PUT", "/api/mail", %{service: "resend", apiKey: "re_live_key", from: "reports@example.com"})
+
+    {200, replaced} = call.("GET", "/api/mail", nil)
+
+    assert {replaced["source"], replaced["service"], replaced["from"], replaced["app"]} ==
+             {"dashboard", "resend", "reports@example.com",
+              %{
+                "via" => "WordPress (WP Mail SMTP)",
+                "from" => "site@example.com",
+                "fromName" => "Example",
+                "replaced" => true
+              }}
+
+    assert {200, _} = call.("POST", "/api/mail/test", %{to: "jon@example.com"})
+    assert length(FakeFetcher.requests(requests)) == 1, "through the saved service"
+    assert length(sent_list.()) == 2, "and not the app's mailer"
+
+    # Removing it goes back to the app's mailer.
+    assert {200, _} = call.("DELETE", "/api/mail", nil)
+    assert {200, %{"source" => "app"}} = call.("GET", "/api/mail", nil)
+    assert {200, _} = call.("POST", "/api/mail/test", %{to: "jon@example.com"})
+    assert length(sent_list.()) == 3
+  end
+
+  test "the app's mailer needs a from address, and without one the answer has no app" do
+    {store, cleanup} = Stores.store(:sqlite)
+    on_exit(cleanup)
+
+    assert_raise ArgumentError, ~r/from address/, fn ->
+      Runlight.new(store: store, mail: [from: "", via: "Drupal", send: fn _ -> :ok end])
+    end
+
+    rl = Runlight.new(store: store)
+
+    answer =
+      Runlight.Routes.handle(
+        Runlight.routes(rl, token: "t"),
+        Request.new("https://stats.example.com/runlight/api/mail", headers: [{"authorization", "Bearer t"}])
+      )
+
+    answer = Jason.decode!(answer.body)
+    assert answer["source"] == nil
+    refute Map.has_key?(answer, "app"), "an install without an app mailer answers as before"
   end
 end

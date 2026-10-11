@@ -1174,7 +1174,7 @@ module Runlight
           if request.method == "GET"
             settings = @rl.mail_settings
             known = settings || {}
-            service = Mail::Transports::SERVICES.find { |s| s["id"] == known["service"] }
+            service = known["source"] == "app" ? nil : Mail::Transports::SERVICES.find { |s| s["id"] == known["service"] }
             # Secret fields come back only as "saved", never as their value.
             fields = {}
             saved = []
@@ -1188,16 +1188,23 @@ module Runlight
             end
             # A hub with a manage token learns which service sends the reports and from where, nothing more.
             via_manage = @managed.key?(request)
-            return json({
+            answer = {
               "source" => known["source"],
-              "service" => known["service"] || "",
+              "service" => known["source"] == "app" ? "" : known["service"] || "",
               "from" => known["from"] || "",
               "fromName" => known["fromName"] || "",
               "fields" => via_manage ? {} : fields,
               "saved" => via_manage ? [] : saved,
               "encrypted" => !@rl.secret.nil?,
               "services" => Mail::Transports::SERVICES,
-            })
+            }
+            # The app's own mailer, named only when there is one, so the answer without it stays as it was.
+            app = @rl.app_mailer
+            unless app.nil?
+              answer["app"] = { "via" => app["via"], "from" => app["from"], "fromName" => app["fromName"] || "",
+                                "replaced" => known["source"] != "app" }
+            end
+            return json(answer)
           end
           if request.method == "PUT"
             body = read_json(request)
@@ -1224,7 +1231,11 @@ module Runlight
           return coded("Set up a mail service first", "mail_unset", 400) if settings.nil?
 
           t = Messages.translator(text(body, "lang", "en"))["t"]
-          name = Mail::Transports::SERVICES.find { |s| s["id"] == settings["service"] }&.[]("name") || ""
+          name = if settings["source"] == "app"
+                   settings["via"] || ""
+                 else
+                   Mail::Transports::SERVICES.find { |s| s["id"] == settings["service"] }&.[]("name") || ""
+                 end
           @rl.send_mail({
             "to" => to,
             "subject" => t.call("email.test.subject"),

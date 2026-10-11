@@ -1546,7 +1546,8 @@ public sealed class Routes
                 if (request.Method == "GET")
                 {
                     var settings = await _rl.MailSettingsAsync(cancellationToken).ConfigureAwait(false);
-                    object? serviceId = Or(settings, "service", null);
+                    bool viaApp = settings?.Str("source") == "app";
+                    object? serviceId = viaApp ? null : Or(settings, "service", null);
                     var service = Transports.Services.FirstOrDefault(s => serviceId is string sid && s.Str("id") == sid);
                     // Secret fields come back only as "saved", never as their value.
                     var fields = new JsObject();
@@ -1569,17 +1570,23 @@ public sealed class Routes
                     }
                     // A hub with a manage token learns which service sends the reports and from where, nothing more.
                     bool viaManage = _managed.TryGetValue(request, out _);
-                    return JsonResponse(new JsObject
+                    var answer = new JsObject
                     {
                         ["source"] = Or(settings, "source", null),
-                        ["service"] = Or(settings, "service", ""),
+                        ["service"] = viaApp ? "" : Or(settings, "service", ""),
                         ["from"] = Or(settings, "from", ""),
                         ["fromName"] = Or(settings, "fromName", ""),
                         ["fields"] = viaManage ? new JsObject() : fields,
                         ["saved"] = viaManage ? new List<object?>() : saved,
                         ["encrypted"] = _rl.Secret != null,
                         ["services"] = ToList(Transports.Services),
-                    });
+                    };
+                    // The app's own mailer, named only when there is one, so the answer without it stays as it was.
+                    if (_rl.AppMailer is { } app)
+                    {
+                        answer["app"] = new JsObject { ["via"] = app.Via, ["from"] = app.From, ["fromName"] = app.FromName ?? "", ["replaced"] = !viaApp };
+                    }
+                    return JsonResponse(answer);
                 }
                 if (request.Method == "PUT")
                 {
@@ -1617,10 +1624,11 @@ public sealed class Routes
                     return Coded("Set up a mail service first", "mail_unset", 400);
                 }
                 var t = Messages.Translator(Text(body, "lang", "en"));
-                string name = "";
+                bool viaApp = settings.Str("source") == "app";
+                string name = viaApp ? settings.Str("via") ?? "" : "";
                 foreach (var s in Transports.Services)
                 {
-                    if (Same(s.Get("id"), settings.Get("service")))
+                    if (!viaApp && Same(s.Get("id"), settings.Get("service")))
                     {
                         name = s.Str("name")!;
                         break;

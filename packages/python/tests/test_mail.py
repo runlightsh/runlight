@@ -15,10 +15,11 @@ from support import fixtures
 from support.fake_fetcher import FakeFetcher
 from support.smtp_server import SmtpServer
 
-from runlight import _js
-from runlight.http import FetchError, Response, SearchParams
+from runlight import Runlight, _js
+from runlight.http import FetchError, Request, Response, SearchParams
 from runlight.mail import SERVICES, MailError, mime, seal, send, service_message, sign_v4, smtp_send, unseal
 from runlight.mail.smtp import _Session
+from runlight.store import Stores
 
 MESSAGE = {
     "to": "jon@example.com",
@@ -341,3 +342,90 @@ def test_a_webhook_address_that_is_not_a_url_is_refused_before_anything_is_saved
         assert _config_code({"service": "webhook", "url": url}) == "mail_url", url
     assert _config_code({"service": "webhook", "url": "https://hooks.example.com/mail"}) is None
     assert _config_code({"service": "webhook", "url": "http://example.com/x"}) == "mail_https"
+
+
+def test_the_apps_own_mailer_sends_until_a_service_saved_in_the_dashboard_takes_its_place():
+    now = int(datetime(2026, 10, 5, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    sent: list[dict] = []
+    fail = ""
+
+    def app_send(message: dict) -> None:
+        if fail:
+            raise RuntimeError(fail)
+        sent.append(message)
+
+    calls = capture()
+    rl = Runlight({
+        "store": Stores.sqlite(":memory:"),
+        "site": {"name": "Example", "hostnames": ["example.com"]},
+        "now": lambda: now,
+        "fetcher": calls,
+        "mail": {"from": "site@example.com", "fromName": "Example", "via": "WordPress (WP Mail SMTP)", "send": app_send},
+    })  # fmt: skip
+    routes = rl.routes(token="t")
+
+    def call(method: str, path: str, body: object = None):
+        headers = {"authorization": "Bearer t", "content-type": "application/json"}
+        return routes.handle(Request(f"https://stats.example.com/runlight{path}", method, headers, None if body is None else _js.dumps(body)))
+
+    app = _js.loads(call("GET", "/api/mail").text())
+    assert {k: app[k] for k in ("source", "service", "from", "fromName", "fields", "saved", "app")} == {
+        "source": "app",
+        "service": "",
+        "from": "site@example.com",
+        "fromName": "Example",
+        "fields": {},
+        "saved": [],
+        "app": {"via": "WordPress (WP Mail SMTP)", "from": "site@example.com", "fromName": "Example", "replaced": False},
+    }
+
+    assert call("POST", "/api/mail/test", {"to": "jon@example.com"}).status == 200
+    assert len(sent) == 1
+    assert [sent[0]["to"], sent[0]["from"], sent[0]["fromName"]] == ["jon@example.com", "site@example.com", "Example"]
+    assert re.search(r"WordPress \(WP Mail SMTP\)", sent[0]["text"]), "the test names the app's mailer"
+
+    # Reports go through it too, with the unsubscribe headers.
+    assert call("POST", "/api/reports", {"email": "jon@example.com", "frequency": "weekly"}).status == 201
+    now += 7 * 86_400_000
+    assert rl.send_reports() == {"sent": 1, "failed": 0}
+    assert re.fullmatch(r"<https://stats\.example\.com/runlight/unsubscribe/[a-f0-9]{32}>", sent[1]["headers"]["List-Unsubscribe"])
+    assert sent[1]["headers"]["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+    # A failure comes back as a mail error naming the mailer.
+    fail = "SMTP connect() failed"
+    failed = call("POST", "/api/mail/test", {"to": "jon@example.com"})
+    assert failed.status == 400
+    assert _js.loads(failed.text()) == {
+        "error": "WordPress (WP Mail SMTP) could not send it: SMTP connect() failed",
+        "code": "mail_app_failed",
+        "params": {"via": "WordPress (WP Mail SMTP)", "detail": "SMTP connect() failed"},
+    }
+    fail = ""
+
+    # A service saved in the dashboard takes its place.
+    assert call("PUT", "/api/mail", {"service": "resend", "apiKey": "re_live_key", "from": "reports@example.com"}).status == 200
+    replaced = _js.loads(call("GET", "/api/mail").text())
+    assert [replaced["source"], replaced["service"], replaced["from"], replaced["app"]] == [
+        "dashboard",
+        "resend",
+        "reports@example.com",
+        {"via": "WordPress (WP Mail SMTP)", "from": "site@example.com", "fromName": "Example", "replaced": True},
+    ]
+    assert call("POST", "/api/mail/test", {"to": "jon@example.com"}).status == 200
+    assert len(calls.requests) == 1, "through the saved service"
+    assert len(sent) == 2, "and not the app's mailer"
+
+    # Removing it goes back to the app's mailer.
+    assert call("DELETE", "/api/mail").status == 200
+    assert _js.loads(call("GET", "/api/mail").text())["source"] == "app"
+    assert call("POST", "/api/mail/test", {"to": "jon@example.com"}).status == 200
+    assert len(sent) == 3
+
+
+def test_the_apps_mailer_needs_a_from_address_and_without_one_the_answer_has_no_app():
+    with pytest.raises(ValueError, match="from address"):
+        Runlight({"store": Stores.sqlite(":memory:"), "mail": {"from": "", "via": "Drupal", "send": lambda message: None}})
+    rl = Runlight({"store": Stores.sqlite(":memory:")})
+    answer = _js.loads(rl.routes(token="t").handle(Request("https://stats.example.com/runlight/api/mail", headers={"authorization": "Bearer t"})).text())
+    assert answer["source"] is None
+    assert "app" not in answer, "an install without an app mailer answers as before"

@@ -310,4 +310,92 @@ class MailTest < Minitest::Test
     assert_equal({ "detail" => "Something" }, error.params)
     assert_equal "ses", Mail::Transports::SERVICES[0]["id"]
   end
+
+  def test_the_apps_own_mailer_sends_until_a_service_saved_in_the_dashboard_takes_its_place
+    now = Time.utc(2026, 10, 5, 12).to_i * 1000
+    sent = []
+    fail_with = ""
+    calls = capture
+    rl = Runlight::Core.new(
+      store: Runlight::Stores.sqlite(":memory:"),
+      site: { name: "Example", hostnames: ["example.com"] },
+      now: -> { now },
+      fetcher: calls,
+      mail: {
+        from: "site@example.com",
+        from_name: "Example",
+        via: "WordPress (WP Mail SMTP)",
+        send: lambda do |m|
+          raise fail_with unless fail_with == ""
+
+          sent << m
+        end,
+      }
+    )
+    routes = rl.routes({ "token" => "t" })
+    call = lambda do |method, path, body = nil|
+      routes.handle(Runlight::Http::Request.new("https://stats.example.com/runlight#{path}", method: method,
+                                                headers: { "authorization" => "Bearer t", "content-type" => "application/json" },
+                                                body: body.nil? ? "" : Runlight::Json.encode(body)))
+    end
+    get = ->(path) { Runlight::Json.decode(call.call("GET", path).text) }
+
+    app = get.call("/api/mail")
+    assert_equal(
+      { "source" => "app", "service" => "", "from" => "site@example.com", "fromName" => "Example", "fields" => {}, "saved" => [],
+        "app" => { "via" => "WordPress (WP Mail SMTP)", "from" => "site@example.com", "fromName" => "Example", "replaced" => false } },
+      app.slice("source", "service", "from", "fromName", "fields", "saved", "app")
+    )
+    assert_equal "app", app.keys.last
+
+    assert_equal 200, call.call("POST", "/api/mail/test", { "to" => "jon@example.com" }).status
+    assert_equal 1, sent.length
+    assert_equal ["jon@example.com", "site@example.com", "Example"], sent[0].values_at("to", "from", "fromName")
+    assert_match(/WordPress \(WP Mail SMTP\)/, sent[0]["text"], "the test names the app's mailer")
+
+    # Reports go through it too, with the unsubscribe headers.
+    assert_equal 201, call.call("POST", "/api/reports", { "email" => "jon@example.com", "frequency" => "weekly" }).status
+    now += 7 * 86_400_000
+    assert_equal({ "sent" => 1, "failed" => 0 }, rl.send_reports)
+    assert_match(%r{\A<https://stats\.example\.com/runlight/unsubscribe/[a-f0-9]{32}>\z}, sent[1]["headers"]["List-Unsubscribe"])
+    assert_equal "List-Unsubscribe=One-Click", sent[1]["headers"]["List-Unsubscribe-Post"]
+
+    # A failure comes back as a mail error naming the mailer.
+    fail_with = "SMTP connect() failed"
+    failed = call.call("POST", "/api/mail/test", { "to" => "jon@example.com" })
+    assert_equal 400, failed.status
+    assert_equal({ "error" => "WordPress (WP Mail SMTP) could not send it: SMTP connect() failed", "code" => "mail_app_failed",
+                   "params" => { "via" => "WordPress (WP Mail SMTP)", "detail" => "SMTP connect() failed" } }, Runlight::Json.decode(failed.text))
+    fail_with = ""
+
+    # A service saved in the dashboard takes its place.
+    assert_equal 200, call.call("PUT", "/api/mail", { "service" => "resend", "apiKey" => "re_live_key", "from" => "reports@example.com" }).status
+    replaced = get.call("/api/mail")
+    assert_equal ["dashboard", "resend", "reports@example.com",
+                  { "via" => "WordPress (WP Mail SMTP)", "from" => "site@example.com", "fromName" => "Example", "replaced" => true }],
+                 replaced.values_at("source", "service", "from", "app")
+    assert_equal 200, call.call("POST", "/api/mail/test", { "to" => "jon@example.com" }).status
+    assert_equal 1, calls.requests.length, "through the saved service"
+    assert_equal 2, sent.length, "and not the app's mailer"
+
+    # Removing it goes back to the app's mailer.
+    assert_equal 200, call.call("DELETE", "/api/mail").status
+    assert_equal "app", get.call("/api/mail")["source"]
+    assert_equal 200, call.call("POST", "/api/mail/test", { "to" => "jon@example.com" }).status
+    assert_equal 3, sent.length
+  end
+
+  def test_the_apps_mailer_needs_a_from_address_and_without_one_the_answer_has_no_app
+    error = assert_raises(ArgumentError) do
+      Runlight::Core.new(store: Runlight::Stores.sqlite(":memory:"), mail: { from: "", via: "Drupal", send: ->(_m) {} })
+    end
+    assert_match(/from address/, error.message)
+    rl = Runlight::Core.new(store: Runlight::Stores.sqlite(":memory:"))
+    assert_nil rl.app_mailer
+    response = rl.routes({ "token" => "t" }).handle(Runlight::Http::Request.new("https://stats.example.com/runlight/api/mail",
+                                                                                 headers: { "authorization" => "Bearer t" }))
+    answer = Runlight::Json.decode(response.text)
+    assert_nil answer["source"]
+    refute answer.key?("app"), "an install without an app mailer answers as before"
+  end
 end

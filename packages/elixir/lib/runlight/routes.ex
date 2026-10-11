@@ -1425,7 +1425,11 @@ defmodule Runlight.Routes do
         case request.method do
           "GET" ->
             settings = Runlight.mail_settings(rl)
-            service = Enum.find(Runlight.Mail.services(), &(settings != nil and &1["id"] == settings["service"]))
+            app? = settings != nil and settings["source"] == "app"
+
+            service =
+              Enum.find(Runlight.Mail.services(), &(settings != nil and not app? and &1["id"] == settings["service"]))
+
             # Secret fields come back only as "saved", never as their value.
             {fields, saved} =
               Enum.reduce((service && service["fields"]) || [], {Object.new(), []}, fn f, {fields, saved} ->
@@ -1438,17 +1442,25 @@ defmodule Runlight.Routes do
 
             # A hub with a manage token learns which service sends the reports and from where, nothing more.
             via_manage = managed(request) != nil
+            # The app's own mailer, named only when there is one, so the answer without it stays as it was.
+            app = rl.app_mailer
 
             json(
               JS.obj(
-                source: settings && settings["source"],
-                service: (settings && settings["service"]) || "",
-                from: JS.nullish(settings && settings["from"], ""),
-                fromName: JS.nullish(settings && settings["fromName"], ""),
-                fields: if(via_manage, do: Object.new(), else: fields),
-                saved: if(via_manage, do: [], else: saved),
-                encrypted: rl.secret != nil,
-                services: Runlight.Mail.services()
+                [
+                  source: settings && settings["source"],
+                  service: if(app?, do: "", else: (settings && settings["service"]) || ""),
+                  from: JS.nullish(settings && settings["from"], ""),
+                  fromName: JS.nullish(settings && settings["fromName"], ""),
+                  fields: if(via_manage, do: Object.new(), else: fields),
+                  saved: if(via_manage, do: [], else: saved),
+                  encrypted: rl.secret != nil,
+                  services: Runlight.Mail.services()
+                ] ++
+                  if(app,
+                    do: [app: JS.obj(via: app.via, from: app.from, fromName: app[:from_name] || "", replaced: not app?)],
+                    else: []
+                  )
               )
             )
 
@@ -1482,7 +1494,13 @@ defmodule Runlight.Routes do
 
             true ->
               lang = Messages.code(body |> JS.prop("lang") |> JS.nullish("en") |> JS.string())
-              name = Enum.find_value(Runlight.Mail.services(), "", &if(&1["id"] == settings["service"], do: &1["name"]))
+
+              name =
+                if settings["source"] == "app",
+                  do: settings["via"],
+                  else:
+                    Enum.find_value(Runlight.Mail.services(), "", &if(&1["id"] == settings["service"], do: &1["name"]))
+
               text = Messages.t(lang, "email.test.body", %{"service" => name})
 
               Runlight.send_mail(rl, %{
