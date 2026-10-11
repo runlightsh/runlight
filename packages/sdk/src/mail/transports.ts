@@ -1,5 +1,6 @@
 import { sesSend } from "./ses.js";
 import { smtpSend } from "./smtp.js";
+import { MetadataAddressError, serviceFetch } from "../safefetch.js";
 
 export interface Message {
   to: string;
@@ -100,8 +101,10 @@ export function serviceMessage(reply: string): string {
 async function post(url: string, init: { headers: Record<string, string>; body: string }, explains = true): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(url, { method: "POST", headers: init.headers, body: init.body, signal: AbortSignal.timeout(20_000) });
+    // A webhook can be at any address, so it and each redirect are checked, as for every service.
+    response = await serviceFetch(url, { method: "POST", headers: init.headers, body: init.body, signal: AbortSignal.timeout(20_000) });
   } catch (error) {
+    if (error instanceof MetadataAddressError) throw new MailError(error.message, "address_refused", { host: error.host });
     const host = new URL(url).host;
     throw new MailError(`Could not reach ${host}: ${(error as Error).message}`, "mail_unreachable", { host, detail: (error as Error).message });
   }

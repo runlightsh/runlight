@@ -9,7 +9,7 @@
  * OpenRouter, Ollama, LM Studio, and most others speak. Plain fetch, no SDKs.
  */
 import { INSTRUCTIONS, TOOLS, callTool, type ApiRead } from "./mcp.js";
-import { metadataHost } from "./safefetch.js";
+import { MetadataAddressError, serviceFetch } from "./safefetch.js";
 
 export interface Provider {
   id: string;
@@ -88,27 +88,24 @@ function inTime(deadline: number, signal?: AbortSignal): void {
 }
 
 /**
- * Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
- * private network is allowed, as the person setting it up means it to be.
+ * A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+ * (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
  */
-export async function refuseMetadata(url: string): Promise<void> {
-  const host = new URL(url).hostname;
-  if (await metadataHost(host)) throw new AssistantError(`${host} is a link-local or cloud metadata address, which Runlight never connects to`, "address_refused", { host });
-}
+const refused = (error: MetadataAddressError) => new AssistantError(error.message, "address_refused", { host: error.host });
 
 async function post(url: string, headers: Record<string, string>, body: unknown, deadline: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
   inTime(deadline, signal);
-  await refuseMetadata(url);
   const left = deadline - Date.now();
   let answer: Response;
   try {
-    answer = await fetch(url, {
+    answer = await serviceFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
       signal: AbortSignal.any([AbortSignal.timeout(Math.min(90_000, left)), ...(signal ? [signal] : [])]),
     });
   } catch (error) {
+    if (error instanceof MetadataAddressError) throw refused(error);
     const host = new URL(url).host;
     throw (error as Error).name === "TimeoutError"
       ? new AssistantError(`Could not reach ${host}: it took too long to answer`, "assistant_timeout", { host })
@@ -261,11 +258,11 @@ export async function listModels(settings: Omit<AssistantSettings, "model">): Pr
   if (provider.key === "yes" && !settings.key) throw new AssistantError(`Enter your ${provider.name} key first`, "assistant_key", { provider: provider.name });
   const headers: Record<string, string> =
     provider.protocol === "anthropic" ? { "x-api-key": settings.key, "anthropic-version": "2023-06-01" } : settings.key ? { authorization: `Bearer ${settings.key}` } : {};
-  await refuseMetadata(base);
   let answer: Response;
   try {
-    answer = await fetch(`${base}/models${provider.protocol === "anthropic" ? "?limit=100" : ""}`, { headers, signal: AbortSignal.timeout(20_000) });
-  } catch {
+    answer = await serviceFetch(`${base}/models${provider.protocol === "anthropic" ? "?limit=100" : ""}`, { headers, signal: AbortSignal.timeout(20_000) });
+  } catch (error) {
+    if (error instanceof MetadataAddressError) throw refused(error);
     throw new AssistantError(`Could not reach ${new URL(base).host}`, "unreachable", { host: new URL(base).host });
   }
   const data = (await answer.json().catch(() => null)) as { data?: Array<{ id?: unknown; display_name?: unknown; name?: unknown }>; error?: { message?: unknown } | string } | null;
