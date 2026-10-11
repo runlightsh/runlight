@@ -20,59 +20,7 @@
     <p class="error">{{ error }} <a href="{{ cpUrl(settingsUrl) }}">{{ 'Check the settings'|t('runlight') }}</a></p>
   {% else %}
     {# Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. #}
-    <iframe id="runlight-embed" src="{{ frame }}" data-runlight-origin="{{ origin }}" title="{{ 'Runlight dashboard'|t('runlight') }}" referrerpolicy="no-referrer"{% if not local %} sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"{% endif %} style="display:block;width:100%;height:calc(100vh - 220px);min-height:600px;border:0;border-radius:8px;background:transparent"></iframe>
-    {% js %}
-      (function () {
-        var frame = document.getElementById("runlight-embed");
-        if (!frame) return;
-        var origin = frame.getAttribute("data-runlight-origin");
-        // Until the dashboard says how tall it is, the frame fills the window below it; an older Runlight never says.
-        var sized = false;
-        function fit() {
-          if (sized) return;
-          var top = frame.getBoundingClientRect().top + window.scrollY;
-          frame.style.height = Math.max(600, window.innerHeight - top - 48) + "px";
-        }
-        // The admin's own bars stay on screen over the page, so the visible slice starts below them.
-        function covered() {
-          var bottom = 0;
-          document.querySelectorAll("#global-header, #header").forEach(function (bar) {
-            var position = getComputedStyle(bar).position;
-            var box = bar.getBoundingClientRect();
-            if ((position === "fixed" || position === "sticky") && box.top <= 1 && box.height > 0) bottom = Math.max(bottom, box.bottom);
-          });
-          return bottom;
-        }
-        // Tells the dashboard which slice of the frame is on screen, so its drawers and sheets cover just that.
-        var queued = false;
-        function viewport() {
-          if (queued) return;
-          queued = true;
-          requestAnimationFrame(function () {
-            queued = false;
-            var rect = frame.getBoundingClientRect();
-            var top = Math.max(rect.top, covered());
-            var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - top);
-            if (frame.contentWindow) frame.contentWindow.postMessage({ type: "runlight:viewport", top: top - rect.top, height: height }, origin);
-          });
-        }
-        fit();
-        window.addEventListener("resize", function () {
-          fit();
-          viewport();
-        });
-        window.addEventListener("scroll", viewport, { passive: true, capture: true });
-        frame.addEventListener("load", viewport);
-        window.addEventListener("message", function (event) {
-          if (event.origin !== origin || event.source !== frame.contentWindow || !event.data) return;
-          if (event.data.type === "runlight:reload") location.reload();
-          if (event.data.type === "runlight:height" && typeof event.data.height === "number" && isFinite(event.data.height)) {
-            sized = true;
-            frame.style.height = Math.max(600, Math.ceil(event.data.height)) + "px";
-            viewport();
-          }
-        });
-      })();
-    {% endjs %}
+    <iframe id="runlight-embed" src="{{ frame }}" data-runlight-origin="{{ origin }}" data-runlight-bars="#global-header, #header" data-runlight-gap="48" title="{{ 'Runlight dashboard'|t('runlight') }}" referrerpolicy="no-referrer"{% if not local %} sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"{% endif %} style="display:block;width:100%;height:calc(100vh - 220px);min-height:600px;border:0;border-radius:8px;background:transparent"></iframe>
+    {% js %}{{ frameScript|raw }}{% endjs %}
   {% endif %}
 {% endblock %}

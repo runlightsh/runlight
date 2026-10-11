@@ -10,6 +10,8 @@
 
 namespace Runlight\WordPress;
 
+use Runlight\Cms\Frame;
+
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
@@ -153,7 +155,7 @@ final class Dashboard {
 				</p></div>
 			<?php else : ?>
 				<?php // Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. ?>
-				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $address ) ); ?>" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer"<?php echo $local ? '' : ' sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"'; ?> style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
+				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $address ) ); ?>" data-runlight-bars="#wpadminbar" data-runlight-gap="24" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer"<?php echo $local ? '' : ' sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"'; ?> style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -162,69 +164,22 @@ final class Dashboard {
 	/**
 	 * Grows the frame to the dashboard's height, tells the dashboard which
 	 * part of it is on screen, and reloads the page when the dashboard asks,
-	 * which it does once its session has run out.
+	 * which it does once its session has run out: the package's frame script,
+	 * the same in every CMS plugin, given WordPress's admin bar by the frame's
+	 * data attributes.
+	 *
+	 * @param string $hook The admin page being shown.
 	 */
 	public static function scripts( string $hook ): void {
 		if ( 'toplevel_page_' . self::PAGE !== $hook ) {
 			return;
 		}
+		Library::load();
+		if ( ! class_exists( Frame::class ) ) {
+			return;
+		}
 		wp_register_script( 'runlight-dashboard', false, array(), RUNLIGHT_PLUGIN_VERSION, true );
 		wp_enqueue_script( 'runlight-dashboard' );
-		wp_add_inline_script( 'runlight-dashboard', self::SCRIPT );
+		wp_add_inline_script( 'runlight-dashboard', Frame::run() );
 	}
-
-	/** The frame's few lines of script, the same in every CMS plugin. */
-	private const SCRIPT = <<<'JS'
-(function () {
-  var frame = document.getElementById("runlight-embed");
-  if (!frame) return;
-  var origin = frame.getAttribute("data-runlight-origin");
-  // Until the dashboard says how tall it is, the frame fills the window below it; an older Runlight never says.
-  var sized = false;
-  function fit() {
-    if (sized) return;
-    var top = frame.getBoundingClientRect().top + window.scrollY;
-    frame.style.height = Math.max(600, window.innerHeight - top - 24) + "px";
-  }
-  // The admin's own bars stay on screen over the page, so the visible slice starts below them.
-  function covered() {
-    var bottom = 0;
-    document.querySelectorAll("#wpadminbar").forEach(function (bar) {
-      var position = getComputedStyle(bar).position;
-      var box = bar.getBoundingClientRect();
-      if ((position === "fixed" || position === "sticky") && box.top <= 1 && box.height > 0) bottom = Math.max(bottom, box.bottom);
-    });
-    return bottom;
-  }
-  // Tells the dashboard which slice of the frame is on screen, so its drawers and sheets cover just that.
-  var queued = false;
-  function viewport() {
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(function () {
-      queued = false;
-      var rect = frame.getBoundingClientRect();
-      var top = Math.max(rect.top, covered());
-      var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - top);
-      if (frame.contentWindow) frame.contentWindow.postMessage({ type: "runlight:viewport", top: top - rect.top, height: height }, origin);
-    });
-  }
-  fit();
-  window.addEventListener("resize", function () {
-    fit();
-    viewport();
-  });
-  window.addEventListener("scroll", viewport, { passive: true, capture: true });
-  frame.addEventListener("load", viewport);
-  window.addEventListener("message", function (event) {
-    if (event.origin !== origin || event.source !== frame.contentWindow || !event.data) return;
-    if (event.data.type === "runlight:reload") location.reload();
-    if (event.data.type === "runlight:height" && typeof event.data.height === "number" && isFinite(event.data.height)) {
-      sized = true;
-      frame.style.height = Math.max(600, Math.ceil(event.data.height)) + "px";
-      viewport();
-    }
-  });
-})();
-JS;
 }

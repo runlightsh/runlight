@@ -1,9 +1,15 @@
+# js/frame.js is a copy of the PHP package's assets/frame.js, the same in
+# every CMS plugin; the plugins' tests fail when the copy differs.
+frame:
+  js:
+    js/frame.js: {}
 embed:
   js:
     js/embed.js: {}
   dependencies:
     - core/drupal
     - core/once
+    - runlight/frame
 settings:
   js:
     js/settings.js: {}

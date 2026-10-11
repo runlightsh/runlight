@@ -167,6 +167,9 @@ final class DashboardController extends ControllerBase {
         'id' => 'runlight-embed',
         'src' => $url,
         'data-runlight-origin' => Connect::origin($address),
+        // Drupal's toolbar, and Gin's, stay on screen over the page.
+        'data-runlight-bars' => '#toolbar-bar, #toolbar-item-administration-tray.is-active.toolbar-tray-horizontal, .gin-secondary-toolbar, .region-sticky',
+        'data-runlight-gap' => '24',
         'title' => $this->t('Runlight dashboard'),
         'referrerpolicy' => 'no-referrer',
         'style' => 'display:block;width:100%;height:calc(100vh - 200px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent',
