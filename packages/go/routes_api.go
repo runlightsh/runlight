@@ -717,10 +717,8 @@ func (rt *Routes) siteWrites(c *call, raw string, u *whatwg.URL) (*Response, err
 	if access := rt.canRead(c); access != canFull {
 		return denied(access), nil
 	}
+	// An id with broken escapes is one no site has.
 	id, decoded := decodeURIComponent(raw)
-	if !decoded {
-		return nil, errors.New("URIError: URI malformed")
-	}
 	siteError := func(err error) (*Response, error) {
 		if isRangeError(err) {
 			if err.Error() == "Unknown site" {
@@ -731,6 +729,9 @@ func (rt *Routes) siteWrites(c *call, raw string, u *whatwg.URL) (*Response, err
 		return nil, err
 	}
 	if request.Method == "DELETE" {
+		if !decoded {
+			return Coded("Unknown site", "unknown_site", 404, nil), nil
+		}
 		if err := r.DeleteSite(ctx, id); err != nil {
 			return siteError(err)
 		}
@@ -766,6 +767,9 @@ func (rt *Routes) siteWrites(c *call, raw string, u *whatwg.URL) (*Response, err
 			list := retentionList()
 			return Coded("Keep visits for "+list+" months, or forever", "retention_bad", 400, params("months", list)), nil
 		}
+	}
+	if !decoded {
+		return Coded("Unknown site", "unknown_site", 404, nil), nil
 	}
 	remote, isRemote := r.Remote(id)
 	// How long a connected site keeps visits, and the timezone its days follow, are the install's settings:
