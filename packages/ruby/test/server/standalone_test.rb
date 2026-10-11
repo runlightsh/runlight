@@ -144,6 +144,8 @@ class ServerStandaloneTest < Minitest::Test
     server.handle(req("/api/links?site=blog.example.com", "POST", auth, json({ "url" => "https://blog.example.com/b", "slug" => "sale", "domain" => "stats.example.com" })))
     assert_equal 302, server.handle(req("/sale")).status
     assert_equal 200, server.handle(req("/login")).status, "sign-in is still the sign-in page"
+    assert_equal 200, server.handle(req("/pick-return")).status, "the picker's relay page is still the server's"
+    assert_equal 200, server.handle(req("/pick-return.js")).status
     # Broken percent escapes are a link nobody has, here and at /go/, never an error.
     assert_equal 404, server.handle(req("/%E0")).status
     assert_equal 404, server.handle(req("/go/%zz")).status

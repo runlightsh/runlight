@@ -47,6 +47,14 @@ module Runlight
     PICK_TARGET_PLACEHOLDER = '"__RUNLIGHT_PICK_TARGET__"'
     # Where the hostnames of the site its ticket names go, as JSON inside a string.
     PICK_HOSTS_PLACEHOLDER = '"__RUNLIGHT_PICK_HOSTS__"'
+    # Where the relay page the picker sends its choice to goes, the return address its ticket names.
+    PICK_RETURN_PLACEHOLDER = '"__RUNLIGHT_PICK_RETURN__"'
+    # Where the nonce the dashboard made for this pick goes, which the relay page hands back to it.
+    PICK_NONCE_PLACEHOLDER = '"__RUNLIGHT_PICK_NONCE__"'
+    # The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end.
+    PICK_RETURN = %r{\Ahttps?://[^/?#\s]+(/[^?#\s]*)?/pick-return\z}
+    # What the dashboard names one pick by, so its relay page answers only the tab that started it.
+    PICK_NONCE = /\A[a-f0-9]{32}\z/
     # How long a picker ticket works: long enough to find the element, not to be kept.
     PICK_TICKET_MS = 30 * 60_000
     # Questions one person may put to the assistant in an hour, and at once.
@@ -64,7 +72,8 @@ module Runlight
     LINK_DOMAIN_CHECK = "/.well-known/runlight-link-domain"
     # runlight.ts's RETENTION_MONTHS: the choices for how long a site keeps its visits.
     RETENTION_MONTHS = [6, 12, 24, 36, 60].freeze
-    private_constant :RULES_PLACEHOLDER, :PICK_TARGET_PLACEHOLDER, :PICK_HOSTS_PLACEHOLDER, :SHARE_ID,
+    private_constant :RULES_PLACEHOLDER, :PICK_TARGET_PLACEHOLDER, :PICK_HOSTS_PLACEHOLDER, :PICK_RETURN_PLACEHOLDER,
+                     :PICK_NONCE_PLACEHOLDER, :PICK_RETURN, :PICK_NONCE, :SHARE_ID,
                      :PATH_DIMENSIONS, :LINK_DOMAIN_CHECK, :RETENTION_MONTHS
 
     DASHBOARD_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -243,17 +252,22 @@ module Runlight
         Js.scrub(value).match?(EMAIL)
       end
 
-      # A plain page in a visitor's language, for unsubscribing and for a share link that is gone.
-      def small_page(lang, body, status = 200)
+      # A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's
+      # relay page, which alone runs a script: one file from this server, never inline.
+      def small_page(lang, body, status = 200, script = "")
         Http::Response.new(
           "<!doctype html><html lang=\"#{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>Runlight</title>\n" \
           '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>' \
-          "#{body}</main></body></html>",
+          "#{body}</main>#{script == "" ? "" : "<script src=\"#{escape_html(script)}\"></script>"}</body></html>",
           status: status,
           headers: {
             "content-type" => "text/html; charset=utf-8",
             "cache-control" => "no-store",
-            "content-security-policy" => "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+            "content-security-policy" => if script == ""
+                                           "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+                                         else
+                                           "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                                         end,
             "referrer-policy" => "no-referrer",
           },
         )
@@ -1006,21 +1020,30 @@ module Runlight
       made
     end
 
-    # A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half an hour.
-    def pick_ticket(origin, site)
+    # A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
+    # an hour. With a return address and a nonce it sends it there, to the relay page, which hands it to the dashboard
+    # tab that made the nonce; without them, as an older dashboard asks, to the tab that opened the site.
+    def pick_ticket(origin, site, back = nil)
       payload = "#{@rl.now + PICK_TICKET_MS}.#{site.unpack1("H*")}.#{origin.unpack1("H*")}"
+      payload += ".#{back["url"].unpack1("H*")}.#{back["nonce"]}" unless back.nil?
       "#{payload}.#{Hashing.hmac(pick_key, payload)}"
     end
 
-    # The dashboard origin and site a picker ticket names, or nil when it is not one this install signed or has run out.
+    # What a picker ticket names, or nil when it is not one this install signed or has run out.
     def pick_target(ticket)
-      parts = ticket.match(/\A(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})\z/)
+      parts = ticket.match(/\A(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]{2,2048})\.([a-f0-9]{32}))?\.([a-f0-9]{64})\z/)
       return nil if parts.nil? || Js.number(parts[1]) < @rl.now
-      return nil unless constant_time_equal(parts[4], Hashing.hmac(pick_key, "#{parts[1]}.#{parts[2]}.#{parts[3]}"))
+      return nil unless constant_time_equal(parts[6], Hashing.hmac(pick_key, ticket[0, ticket.rindex(".")]))
 
       unhex = ->(text) { Js.scrub([text[0, text.length - (text.length % 2)]].pack("H*")) }
       origin = unhex.call(parts[3])
-      origin?(origin) ? { "origin" => origin, "site" => unhex.call(parts[2]) } : nil
+      return nil unless origin?(origin)
+      return { "origin" => origin, "site" => unhex.call(parts[2]) } if parts[4].nil?
+
+      address = unhex.call(parts[4])
+      return nil unless address.match?(PICK_RETURN) && address.start_with?("#{origin}/")
+
+      { "origin" => origin, "site" => unhex.call(parts[2]), "back" => { "url" => address, "nonce" => parts[5] } }
     end
 
     # The key embed tickets and sessions are signed with, made on first use and kept in the database for every process.
@@ -1856,13 +1879,25 @@ module Runlight
         origin = text(body, "origin")
         return coded("Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400) unless origin?(origin)
 
+        # Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+        # listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+        back = nil
+        if given?(body, "return") || given?(body, "nonce")
+          address = Js.scrub(text(body, "return"))
+          nonce = text(body, "nonce")
+          if address.unpack1("H*").length > 2048 || !address.match?(PICK_RETURN) || !address.start_with?("#{origin}/") || !nonce.match?(PICK_NONCE)
+            return coded("Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits", "pick_return", 400)
+          end
+
+          back = { "url" => address, "nonce" => nonce }
+        end
         # A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
         hub = @managed[request]
         if !hub.nil? && store.setting("token-origin:#{hub["id"]}") != origin
           return coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403)
         end
 
-        return json({ "ticket" => pick_ticket(origin, site["id"]) })
+        return json({ "ticket" => pick_ticket(origin, site["id"], back) })
       end
 
       if (path == "/api/goals" && method == "POST") || (path.match?(%r{\A/api/goals/[^/]+\z}) && %w[PATCH DELETE].include?(method))
@@ -2422,9 +2457,30 @@ module Runlight
         target = pick_target(url.search_params.get("runlight_ticket") || "")
         rl.init unless target.nil?
         hosts = target.nil? ? [] : rl.site(target["site"])&.[]("hostnames")
-        script = replace_once(asset("picker.js"), PICK_TARGET_PLACEHOLDER, Json.encode(hosts.nil? || target.nil? ? "" : target["origin"]))
+        named = hosts.nil? ? nil : target
+        back = named&.[]("back")
+        script = replace_once(asset("picker.js"), PICK_TARGET_PLACEHOLDER, Json.encode(named.nil? ? "" : named["origin"]))
         script = replace_once(script, PICK_HOSTS_PLACEHOLDER, Json.encode(Json.encode(hosts || [])))
+        script = replace_once(script, PICK_RETURN_PLACEHOLDER, Json.encode(back.nil? ? "" : back["url"]))
+        script = replace_once(script, PICK_NONCE_PLACEHOLDER, Json.encode(back.nil? ? "" : back["nonce"]))
         return Http::Response.new(script, status: 200, headers: { "content-type" => "application/javascript; charset=utf-8", "cache-control" => "no-store" })
+      end
+
+      # The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+      # script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+      if path == "/pick-return" && method == "GET"
+        translator = Messages.translator(accepted_language(request))
+        t = translator["t"]
+        return small_page(
+          translator["lang"],
+          "<div id=\"done\" hidden><h1>#{escape_html(t.call("pick.doneTitle"))}</h1><p>#{escape_html(t.call("pick.done"))}</p></div>" \
+          "<div id=\"gone\" hidden><h1>#{escape_html(t.call("pick.goneTitle"))}</h1><p>#{escape_html(t.call("pick.gone"))}</p></div>",
+          200,
+          "#{base}/pick-return.js",
+        )
+      end
+      if path == "/pick-return.js" && method == "GET"
+        return Http::Response.new(asset("pick-return.js"), status: 200, headers: { "content-type" => "application/javascript; charset=utf-8", "cache-control" => "no-store" })
       end
 
       if path == "/assets/world.#{build_hash("worldHash")}.json" && method == "GET"
