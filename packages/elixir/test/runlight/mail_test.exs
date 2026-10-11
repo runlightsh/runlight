@@ -483,4 +483,44 @@ defmodule Runlight.MailTest do
     assert answer["source"] == nil
     refute Map.has_key?(answer, "app"), "an install without an app mailer answers as before"
   end
+
+  test "mail_services names the services Settings offers, and a saved one not offered counts as none" do
+    {store, cleanup} = Stores.store(:sqlite)
+    on_exit(cleanup)
+    secret = String.duplicate("k", 32)
+
+    assert_raise ArgumentError, ~s(Runlight: mail_services names "pigeon", which is not a mail service), fn ->
+      Runlight.new(store: store, mail_services: ["webhook", "pigeon"])
+    end
+
+    # Saved where every service is offered, then read where Resend is not.
+    everything = Runlight.new(store: store, secret: secret)
+    Runlight.save_mail_settings(everything, JS.obj(service: "resend", apiKey: "re_key", from: "r@example.com"))
+    assert Runlight.mail_settings(everything)["service"] == "resend"
+
+    app = [from: "site@example.com", via: "Drupal", send: fn _ -> :ok end]
+    rl = Runlight.new(store: store, secret: secret, mail: app, mail_services: ["webhook", "postmark"])
+    assert Enum.map(rl.mail_services, & &1["id"]) == ["postmark", "webhook"], "in the services' own order"
+    assert Runlight.mail_settings(rl)["source"] == "app", "a service not offered counts as none"
+    assert Runlight.mail_settings(Runlight.new(store: store, secret: secret, mail_services: [])) == nil
+
+    error =
+      assert_raise MailError, fn ->
+        Runlight.save_mail_settings(rl, JS.obj(service: "resend", apiKey: "re_key", from: "r@example.com"))
+      end
+
+    assert {error.message, error.code, error.params} ==
+             {"Resend is not offered here. Pick another mail service", "mail_service", [{"service", "resend"}]}
+
+    error = assert_raise MailError, fn -> Runlight.save_mail_settings(rl, JS.obj(service: "pigeon")) end
+    assert {error.message, error.code, error.params} == {"Pick a mail service", "mail_service", %{}}
+
+    answer =
+      Runlight.Routes.handle(
+        Runlight.routes(rl, token: "t"),
+        Request.new("https://stats.example.com/runlight/api/mail", headers: [{"authorization", "Bearer t"}])
+      )
+
+    assert answer.body |> Jason.decode!() |> Map.fetch!("services") |> Enum.map(& &1["id"]) == ["postmark", "webhook"]
+  end
 end

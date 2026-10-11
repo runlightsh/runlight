@@ -1455,7 +1455,7 @@ defmodule Runlight.Routes do
                   fields: if(via_manage, do: Object.new(), else: fields),
                   saved: if(via_manage, do: [], else: saved),
                   encrypted: rl.secret != nil,
-                  services: Runlight.Mail.services()
+                  services: rl.mail_services
                 ] ++
                   if(app,
                     do: [app: JS.obj(via: app.via, from: app.from, fromName: app[:from_name] || "", replaced: not app?)],
@@ -3511,6 +3511,12 @@ defmodule Runlight.Routes do
         try do
           route(routes, request, path, url)
         rescue
+          # Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+          Runlight.TablesBusyError ->
+            coded("Runlight is creating or upgrading its tables. Try again in a minute.", "tables_busy", 503, nil, [
+              {"retry-after", "30"}
+            ])
+
           error ->
             # What went wrong and where, but never the arguments of the calls on the way there, which hold the
             # request: its headers and tokens, and the visitor's address.

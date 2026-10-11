@@ -25,7 +25,11 @@ defmodule Runlight.Db do
   @callback affected(t(), String.t(), [term()]) :: non_neg_integer()
   @doc "Runs `fun` in one transaction on one connection, committing what it did, or rolling back when it raises."
   @callback transaction(t(), (t() -> term())) :: term()
-  @doc "Runs `fun` while holding a database-wide lock, so two processes starting at once do not race to create tables."
+  @doc """
+  Runs `fun` while holding a database-wide lock, so two processes starting at
+  once do not race to create tables. Waits for the lock at most
+  `Runlight.Store.lock_wait_ms/0`, then raises a `Runlight.TablesBusyError`.
+  """
   @callback exclusive(t(), (t() -> term())) :: term()
 
   @doc "The dialect's name, as the SDK writes it."

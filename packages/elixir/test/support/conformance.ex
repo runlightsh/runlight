@@ -25,6 +25,8 @@ defmodule Runlight.Test.Conformance do
     for name <- @env, do: System.delete_env(name)
     {:ok, clock} = Agent.start_link(fn -> scenario["start"] end)
     {:ok, fetched} = Agent.start_link(fn -> [] end)
+    # The messages the app's own mailer was handed during the step under way.
+    {:ok, mailed} = Agent.start_link(fn -> [] end)
     upstream = scenario["upstream"] || []
 
     try do
@@ -42,7 +44,9 @@ defmodule Runlight.Test.Conformance do
           [store: store, now: fn -> Agent.get(clock, & &1) end, fetcher: fetcher(upstream, fetched)] ++
             sites ++
             if(JS.truthy?(options["secret"]), do: [secret: options["secret"]], else: []) ++
-            if(Object.has_key?(options, "rateLimit"), do: [rate_limit: options["rateLimit"]], else: [])
+            if(Object.has_key?(options, "rateLimit"), do: [rate_limit: options["rateLimit"]], else: []) ++
+            if(options["mailServices"], do: [mail_services: options["mailServices"]], else: []) ++
+            if(options["appMailer"], do: [mail: app_mailer(options["appMailer"], mailed)], else: [])
         )
 
       routes =
@@ -54,13 +58,14 @@ defmodule Runlight.Test.Conformance do
             cron_secret: options["cronSecret"] || ""
           ] ++
             if(options["accounts"], do: [accounts: true], else: []) ++
-            if(JS.truthy?(options["origin"]), do: [origin: options["origin"]], else: [])
+            if(JS.truthy?(options["origin"]), do: [origin: options["origin"]], else: []) ++
+            if(JS.truthy?(options["cms"]), do: [cms: options["cms"]], else: [])
         )
 
       {answers, _, _} =
         Enum.reduce(scenario["steps"], {[], %{}, %{}}, fn step, {answers, kept, jars} ->
           try do
-            {answer, kept, jars} = step(step, rl, routes, clock, fetched, kept, jars)
+            {answer, kept, jars} = step(step, rl, routes, clock, {fetched, mailed}, kept, jars)
             {[answer | answers], kept, jars}
           rescue
             error ->
@@ -78,11 +83,32 @@ defmodule Runlight.Test.Conformance do
     after
       Agent.stop(clock)
       Agent.stop(fetched)
+      Agent.stop(mailed)
 
       for {name, value} <- saved do
         if value, do: System.put_env(name, value), else: System.delete_env(name)
       end
     end
+  end
+
+  # A mailer of the app's own, whose send records each message it is handed, or, with fail, raises with fail as its
+  # message.
+  defp app_mailer(app, mailed) do
+    send = fn message ->
+      if Object.has_key?(app, "fail"), do: raise(app["fail"])
+
+      seen =
+        JS.obj(
+          [to: message.to, from: message.from] ++
+            if(JS.truthy?(message[:from_name]), do: [fromName: message.from_name], else: []) ++
+            [subject: message.subject, text: message.text]
+        )
+
+      Agent.update(mailed, &(&1 ++ [seen]))
+    end
+
+    [send: send, from: app["from"], via: app["via"]] ++
+      if(Object.has_key?(app, "fromName"), do: [from_name: app["fromName"]], else: [])
   end
 
   defp plain(%Object{} = o), do: Map.new(Object.to_list(o), fn {k, v} -> {String.to_atom(k), v} end)
@@ -153,7 +179,7 @@ defmodule Runlight.Test.Conformance do
     end
   end
 
-  defp step(step, rl, routes, clock, fetched, kept, jars) do
+  defp step(step, rl, routes, clock, {fetched, mailed}, kept, jars) do
     Agent.update(clock, &(&1 + (step["advance"] || 0)))
     now = Agent.get(clock, & &1)
 
@@ -201,6 +227,7 @@ defmodule Runlight.Test.Conformance do
 
     request = Request.new(url, method: step["method"], headers: headers, body: body || "")
     Agent.update(fetched, fn _ -> [] end)
+    Agent.update(mailed, fn _ -> [] end)
 
     answer =
       case to do
@@ -212,10 +239,12 @@ defmodule Runlight.Test.Conformance do
     Runlight.idle(rl)
     sent_out = Agent.get(fetched, & &1)
     outbound = sent_out |> Enum.map(&normalize(&1.seen)) |> in_sent_order(step)
+    handed = mailed |> Agent.get(& &1) |> Enum.map(&normalize/1)
 
     if answer == nil do
       out = JS.obj(pass: true)
       out = if outbound != [], do: Object.put(out, "fetched", outbound), else: out
+      out = if handed != [], do: Object.put(out, "mailed", handed), else: out
       {out, kept, jars}
     else
       bytes = IO.iodata_to_binary(answer.body)
@@ -311,6 +340,7 @@ defmodule Runlight.Test.Conformance do
         if step["look"], do: Object.put(out, "found", Enum.map(step["look"], &String.contains?(text, &1))), else: out
 
       out = if outbound != [], do: Object.put(out, "fetched", outbound), else: out
+      out = if handed != [], do: Object.put(out, "mailed", handed), else: out
       {out, kept, jars}
     end
   end

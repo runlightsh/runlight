@@ -112,32 +112,22 @@ defmodule Runlight.Assistant do
 
   defp objects?(items), do: Enum.all?(items, &is_struct(&1, Object))
 
-  @doc """
-  Refuses a service at a link-local or cloud metadata address. One on this
-  computer (Ollama, LM Studio) or a private network is allowed, as the person
-  setting it up means it to be.
-  """
-  @spec refuse_metadata(String.t()) :: :ok
-  def refuse_metadata(url) do
-    host = Url.new(url).hostname
-
-    if Runlight.Safefetch.metadata_host?(host),
-      do:
-        raise(AssistantError,
-          message: "#{host} is a link-local or cloud metadata address, which Runlight never connects to",
-          code: "address_refused",
-          params: [{"host", host}]
-        )
-
-    :ok
+  # A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+  # (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
+  defp refused_address(host) do
+    raise AssistantError,
+      message: "#{host} is a link-local or cloud metadata address, which Runlight never connects to",
+      code: "address_refused",
+      params: [{"host", host}]
   end
+
+  defp service_fetch(rl, url, opts), do: Runlight.Safefetch.service_fetch(&Runlight.fetch(rl, &1, &2), url, opts)
 
   defp post(rl, url, headers, body, deadline) do
     in_time(deadline)
-    refuse_metadata(url)
     left = deadline - clock()
 
-    case Runlight.fetch(rl, url,
+    case service_fetch(rl, url,
            method: "POST",
            headers: [{"content-type", "application/json"} | headers],
            body: JS.stringify(body),
@@ -145,6 +135,9 @@ defmodule Runlight.Assistant do
            max_bytes: @max_bytes,
            truncate: true
          ) do
+      {:error, {:address_refused, host}} ->
+        refused_address(host)
+
       {:error, :timeout} ->
         host = host_of(url)
 
@@ -503,12 +496,14 @@ defmodule Runlight.Assistant do
 
     url = "#{base}/models#{if anthropic, do: "?limit=100", else: ""}"
     host = host_of(base)
-    refuse_metadata(base)
 
     answer =
-      case Runlight.fetch(rl, url, headers: headers, timeout: 20_000, max_bytes: @max_bytes, truncate: true) do
+      case service_fetch(rl, url, headers: headers, timeout: 20_000, max_bytes: @max_bytes, truncate: true) do
         {:ok, answer} ->
           answer
+
+        {:error, {:address_refused, refused}} ->
+          refused_address(refused)
 
         {:error, _} ->
           raise AssistantError, message: "Could not reach #{host}", code: "unreachable", params: [{"host", host}]

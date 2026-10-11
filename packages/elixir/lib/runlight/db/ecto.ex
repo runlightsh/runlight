@@ -232,12 +232,17 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
           fn ->
             # Asked for again and again rather than waited on: a waiting statement would hold up an index being
             # built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
+            # Up to the lock wait, so a request does not wait on a long index build for good.
+            wait = Runlight.Store.lock_wait_ms()
+            until = System.monotonic_time(:millisecond) + wait
+
             wait_for = fn wait_for ->
               case repo.query("SELECT pg_try_advisory_lock(#{@migration_lock}) AS ok", [], log: false) do
                 {:ok, %{rows: [[true]]}} ->
                   :ok
 
                 {:ok, _} ->
+                  if System.monotonic_time(:millisecond) >= until, do: raise(Runlight.TablesBusyError, waited: wait)
                   Process.sleep(100)
                   wait_for.(wait_for)
 
@@ -268,14 +273,30 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
             # One lock per database, so installs sharing a server do not wait on each other. Lock names are 64
             # characters at most.
             name = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))"
+            # Up to the lock wait, so a request does not wait on a long index build for good.
+            wait = Runlight.Store.lock_wait_ms()
+            until = System.monotonic_time(:millisecond) + wait
 
             wait_for = fn wait_for ->
-              case repo.query("SELECT GET_LOCK(#{name}, 5) AS ok", [], log: false, query_type: :text) do
-                {:ok, %{rows: [[1]]}} -> :ok
-                {:ok, %{rows: [[nil]]}} -> raise "Runlight: MySQL refused the lock for creating tables"
-                # Not got within 5 seconds: another process is creating the tables. Ask again.
-                {:ok, _} -> wait_for.(wait_for)
-                {:error, e} -> raise e
+              left = (until - System.monotonic_time(:millisecond)) |> Kernel./(1000) |> Float.ceil() |> trunc()
+
+              case repo.query("SELECT GET_LOCK(#{name}, #{left |> min(5) |> max(1)}) AS ok", [],
+                     log: false,
+                     query_type: :text
+                   ) do
+                {:ok, %{rows: [[1]]}} ->
+                  :ok
+
+                {:ok, %{rows: [[nil]]}} ->
+                  raise "Runlight: MySQL refused the lock for creating tables"
+
+                # Not got in time: another process is creating the tables. Ask again, until the wait is up.
+                {:ok, _} ->
+                  if System.monotonic_time(:millisecond) >= until, do: raise(Runlight.TablesBusyError, waited: wait)
+                  wait_for.(wait_for)
+
+                {:error, e} ->
+                  raise e
               end
             end
 
