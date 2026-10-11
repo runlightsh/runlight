@@ -28,38 +28,51 @@ final class Request
     }
 
     /**
-     * The request PHP is serving now. The scheme and host come from the server's own variables;
-     * the client's address is REMOTE_ADDR, and proxy headers are read later, only when trusted.
+     * The request PHP is serving now, from its superglobals, which only Globals reads.
      */
     public static function fromGlobals(): self
     {
-        $https = ($_SERVER['HTTPS'] ?? '') !== '' && strtolower((string) $_SERVER['HTTPS']) !== 'off';
+        return Globals::request();
+    }
+
+    /**
+     * A request from server variables shaped like $_SERVER, with the body read from `$input`, or else PHP's own
+     * input, for a method that has one. The scheme and host come from the server's own variables; the client's
+     * address is REMOTE_ADDR, and proxy headers are read later, only when trusted.
+     *
+     * @param array<array-key, mixed> $server
+     * @param resource|null $input
+     * @throws BodyTooLarge past the body's limit
+     */
+    public static function fromServer(array $server, $input = null): self
+    {
+        $https = ($server['HTTPS'] ?? '') !== '' && strtolower((string) $server['HTTPS']) !== 'off';
         $scheme = $https ? 'https' : 'http';
-        $host = (string) ($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost');
-        $uri = (string) ($_SERVER['REQUEST_URI'] ?? '/');
+        $host = (string) ($server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? 'localhost');
+        $uri = (string) ($server['REQUEST_URI'] ?? '/');
         $headers = [];
-        foreach ($_SERVER as $key => $value) {
+        foreach ($server as $key => $value) {
             if (str_starts_with((string) $key, 'HTTP_')) {
                 $headers[str_replace('_', '-', strtolower(substr((string) $key, 5)))] = (string) $value;
             }
         }
         // Apache under CGI or FPM passes Authorization only when a rewrite rule copies it, under this name.
-        if (!isset($headers['authorization']) && isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
-            $headers['authorization'] = (string) $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+        if (!isset($headers['authorization']) && isset($server['REDIRECT_HTTP_AUTHORIZATION'])) {
+            $headers['authorization'] = (string) $server['REDIRECT_HTTP_AUTHORIZATION'];
         }
-        if (isset($_SERVER['CONTENT_TYPE'])) {
-            $headers['content-type'] = (string) $_SERVER['CONTENT_TYPE'];
+        if (isset($server['CONTENT_TYPE'])) {
+            $headers['content-type'] = (string) $server['CONTENT_TYPE'];
         }
-        if (isset($_SERVER['CONTENT_LENGTH'])) {
-            $headers['content-length'] = (string) $_SERVER['CONTENT_LENGTH'];
+        if (isset($server['CONTENT_LENGTH'])) {
+            $headers['content-length'] = (string) $server['CONTENT_LENGTH'];
         }
-        $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
+        $method = (string) ($server['REQUEST_METHOD'] ?? 'GET');
         $body = '';
         if (!in_array(strtoupper($method), ['GET', 'HEAD'], true)) {
-            $input = fopen('php://input', 'rb');
-            $body = $input === false ? '' : self::readBody($input, $uri, $headers['content-length'] ?? null);
+            $stream = $input ?? fopen('php://input', 'rb');
+            $body = $stream === false ? '' : self::readBody($stream, $uri, $headers['content-length'] ?? null);
         }
-        return new self("$scheme://$host$uri", $method, $headers, $body, (string) ($_SERVER['REMOTE_ADDR'] ?? ''));
+        return new self("$scheme://$host$uri", $method, $headers, $body, (string) ($server['REMOTE_ADDR'] ?? ''));
     }
 
     /**

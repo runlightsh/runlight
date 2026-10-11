@@ -12,6 +12,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 - The dashboard's Powered by Runlight link opens in a new tab everywhere, so it works inside a CMS's admin too.
 - A broken percent escape in a path, such as `%E0`, answers as an unknown goal, share, site, link domain, or short link (a 404) instead of an internal error.
+- Running inside WordPress, Runlight read the request with the slashes WordPress adds to `$_SERVER`, so a path, user agent, cookie, or other header with a quote or backslash in it reached Runlight changed. The plugin now hands it an unslashed copy.
 
 ### Added
 
@@ -23,6 +24,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - Running inside WordPress, Drupal, or Craft, Runlight sends email through the CMS's own mailer when one is set up: with wp_mail when an SMTP or mail plugin such as WP Mail SMTP or FluentSMTP is active, through Drupal's mail manager when its mailer is not plain PHP `mail()`, or through Craft's mailer when its transport is not Sendmail. Without one, the dashboard asks for a mail service as before.
 - A `mailServices` option lists the mail services Settings offers and saves, such as every one but SMTP; `GET /api/mail` lists only those, saving another is refused with `mail_service`, and a service saved earlier that is not in the list counts as none, so the app's mailer sends instead. Every service by default. TypeScript and PHP for now; the other languages follow.
 - PHP: a `cache` option takes a `Runlight\Cache` of the app's own for the small values requests share (rate counts and their daily key, the site's icon, and the once-a-day proxy warning) in place of APCu and files, and `Server\DbIp` takes a `DbIpFiles` that works its folder, so a CMS can keep both in its own storage. PHP's file functions and curl, the defaults, moved to `Scratch`, `MmdbFile`, and `Server\DbIpDisk`, and SMTP's client is loaded only for SMTP.
+- PHP: `Runlight\Log::to()` sends Runlight's notes, such as a report that could not be sent, somewhere of the app's own in place of PHP's error log, and `Request::fromServer()` reads a request from an array shaped like `$_SERVER`, such as a CMS's unslashed copy of it. `Request::fromGlobals()` reads the superglobals as before.
 
 ### Changed
 

@@ -197,7 +197,7 @@ final class Intl
     private static function decimal(float $n): array
     {
         $negative = $n < 0 || ($n == 0 && fdiv(1, $n) < 0);
-        $text = var_export(abs($n), true);
+        $text = Json::digits(abs($n));
         $exponent = 0;
         if (preg_match('/^(.*)E([+-]?\d+)$/i', $text, $m)) {
             $text = $m[1];

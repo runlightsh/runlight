@@ -8,6 +8,7 @@ use Runlight\Http\BodyTooLarge;
 use Runlight\Http\Request;
 use Runlight\Http\Response;
 use Runlight\Json;
+use Runlight\Log;
 use Runlight\Routes;
 use Runlight\Runlight;
 
@@ -59,7 +60,7 @@ final class FrontController
             }
             return $routes->handle($request);
         } catch (\Throwable $error) {
-            error_log('Runlight: ' . $error->getMessage());
+            Log::write('Runlight: ' . $error->getMessage());
             return new Response(Json::encode(['error' => 'Internal error', 'code' => 'internal']), 500, [
                 'content-type' => 'application/json; charset=utf-8',
                 'cache-control' => 'no-store',

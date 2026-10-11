@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Server;
 
 use Runlight\Geo;
+use Runlight\Log;
 
 /**
  * Location for servers with no platform headers (Cloudflare, Vercel, and Netlify send their own, and those always
@@ -24,7 +25,7 @@ final class DbIp
      * @param 'city'|'country' $mode
      * @param (callable(string $url, string $file): bool)|null $download writes the gzipped file at the URL to
      *     the file, and says whether it got one; curl by default
-     * @param (callable(string): void)|null $log
+     * @param (callable(string): void)|null $log PHP's error log, through Log, by default
      * @param DbIpFiles|null $files makes the folder, unpacks, opens, moves, and deletes; PHP's own file
      *     functions by default
      */
@@ -37,9 +38,7 @@ final class DbIp
     ) {
         $this->download = $download ?? DbIpDisk::download(...);
         $this->files = $files ?? new DbIpDisk();
-        $this->log = $log ?? static function (string $line): void {
-            error_log($line);
-        };
+        $this->log = $log ?? Log::write(...);
     }
 
     /** "2026-10", the month DB-IP names each release after. */

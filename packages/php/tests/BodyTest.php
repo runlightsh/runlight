@@ -10,7 +10,10 @@ use Runlight\Http\BodyTooLong;
 use Runlight\Http\CurlFetcher;
 use Runlight\Http\Response;
 
-/** Capped reads: Body's checks, and the Fetcher's maxBytes, truncate, and resolve against a real server. */
+/**
+ * Capped reads: Body's checks, and the Fetcher's maxBytes, truncate, and resolve against a real server. The same
+ * server checks what Response::emit() sends and what Request::fromGlobals() reads.
+ */
 final class BodyTest extends TestCase
 {
     /** @var resource|null */
@@ -93,5 +96,46 @@ final class BodyTest extends TestCase
         $this->assertSame(str_repeat('a', 1000), $start->text());
         $this->expectException(BodyTooLong::class);
         $streams->invoke(new CurlFetcher(), "http://127.0.0.1:$port/bytes?n=50000", ['maxBytes' => 1000]);
+    }
+
+    /** The status line and headers of an answer from the test server, lower-cased names to values. */
+    private static function headersOf(string $path): array
+    {
+        $socket = stream_socket_client('tcp://127.0.0.1:' . self::$port, $errno, $errstr, 5);
+        fwrite($socket, "GET $path HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+        $answer = (string) stream_get_contents($socket);
+        fclose($socket);
+        $lines = explode("\r\n", explode("\r\n\r\n", $answer, 2)[0]);
+        $headers = ['status' => explode(' ', array_shift($lines))[1]];
+        foreach ($lines as $line) {
+            [$name, $value] = explode(':', $line, 2);
+            $headers[strtolower($name)] = trim($value);
+        }
+        return $headers;
+    }
+
+    public function testEmitSendsNoContentTypeForAnAnswerWithoutOneAndLeavesTheRestAlone(): void
+    {
+        $untyped = self::headersOf('/emit/untyped');
+        $this->assertSame('202', $untyped['status']);
+        $this->assertArrayNotHasKey('content-type', $untyped, 'PHP adds no default type');
+        $this->assertSame('no-store', $untyped['cache-control']);
+        $this->assertSame('application/json', self::headersOf('/emit/typed')['content-type']);
+        $this->assertSame('text/x-app;charset=UTF-8', self::headersOf('/emit/app-typed')['content-type'], 'a type the app set first stays');
+    }
+
+    public function testFromGlobalsReadsTheRequestAsSent(): void
+    {
+        $context = stream_context_create(['http' => [
+            'method' => 'POST',
+            'header' => "Content-Type: text/plain\r\nUser-Agent: Bot \"quoted\" O'Brien\r\nCookie: a=\"b\"",
+            'content' => 'it\'s "here"',
+        ]]);
+        $answer = json_decode((string) file_get_contents('http://127.0.0.1:' . self::$port . "/request?q=it's", false, $context), true);
+        $this->assertSame('http://127.0.0.1:' . self::$port . "/request?q=it's", $answer['url']);
+        $this->assertSame('POST', $answer['method']);
+        $this->assertSame(['Bot "quoted" O\'Brien'], $answer['headers']['user-agent']);
+        $this->assertSame(['a="b"'], $answer['headers']['cookie']);
+        $this->assertSame('it\'s "here"', $answer['body']);
     }
 }

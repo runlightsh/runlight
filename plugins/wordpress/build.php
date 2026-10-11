@@ -42,7 +42,9 @@ sort($files);
 // database through $wpdb, or a SQLite file through SQLite3 (includes/WpdbDb.php and includes/Sqlite3Db.php).
 // So is whatever the plugin always replaces with WordPress's own: curl (includes/Fetcher.php), the files shared
 // between requests (includes/Cache.php), the location data's files (includes/Locations.php), and the SMTP client,
-// which the plugin does not offer. Sign-in accounts are left out too, as WordPress's own users sign in.
+// which the plugin does not offer. Sign-in accounts are left out too, as WordPress's own users sign in. So is what
+// reads PHP's superglobals and environment, and its error log, as the plugin passes Runlight an unslashed copy of
+// the request (Local::request()), every setting it would look for in the environment, and a log of its own.
 $library = dirname($root, 2) . '/packages/php';
 $leftOut = [
     'src/Db/PdoDb.php', 'src/Db/Connect.php', 'src/Store/Stores.php',
@@ -51,6 +53,7 @@ $leftOut = [
     'src/Http/CurlFetcher.php', 'src/Scratch.php', 'src/MmdbFile.php', 'src/Server/DbIpDisk.php',
     'src/Mail/Smtp.php', 'src/Mail/SmtpSession.php',
     'src/Accounts/Web.php', 'src/Accounts/Slots.php', 'src/Accounts/Pages.php',
+    'src/Http/Globals.php', 'src/Env.php', 'src/ErrorLog.php',
 ];
 $bundled = ['LICENSE' => 'lib/LICENSE'];
 foreach (['src', 'assets'] as $folder) {

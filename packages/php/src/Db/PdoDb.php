@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Db;
 
 use Runlight\Json;
+use Runlight\Log;
 
 /**
  * A Db over PDO, for SQLite, Postgres, and MySQL or MariaDB, doing per connection what the TypeScript
@@ -322,7 +323,7 @@ final class PdoDb implements Db
             if ($this->depth > 0 || $this->held > 0 || $this->connect === null || $this->dialect === 'sqlite' || !self::lost($error)) {
                 throw $error;
             }
-            error_log('Runlight: a ' . ($this->dialect === 'mysql' ? 'MySQL' : 'Postgres') . ' connection was lost; it reconnects on the next query. ' . $error->getMessage());
+            Log::write('Runlight: a ' . ($this->dialect === 'mysql' ? 'MySQL' : 'Postgres') . ' connection was lost; it reconnects on the next query. ' . $error->getMessage());
             $this->discard();
             return $this->attempt($sql, $params);
         }
