@@ -40,12 +40,22 @@ final class Fetcher implements RunlightFetcher
         if (isset($init['body']) && !in_array($method, ['GET', 'HEAD'], true)) {
             $options['body'] = (string) $init['body'];
         }
-        // A pin connects to the address Runlight checked, with the name kept for the certificate.
-        if (!empty($init['resolve']) && defined('CURLOPT_RESOLVE')) {
+        $client = Craft::createGuzzleClient();
+        // A pin connects to the address Runlight checked, with the name kept for the certificate. Only cURL can,
+        // and only without a proxy, which would look the name up again, so without either the request is refused.
+        if (!empty($init['resolve'])) {
+            if (!defined('CURLOPT_RESOLVE') || !function_exists('curl_exec')) {
+                throw new FetchError('Runlight needs PHP’s curl extension to make this request safely.');
+            }
+            if (!empty($client->getConfig('proxy'))) {
+                throw new FetchError('Runlight cannot make this request safely through a proxy.');
+            }
             $options['curl'] = [CURLOPT_RESOLVE => array_values($init['resolve'])];
+            // Guzzle sends a streamed request with PHP's streams, which take no pin.
+            $options['stream'] = false;
         }
         try {
-            $answer = Craft::createGuzzleClient()->request($method, $url, $options);
+            $answer = $client->request($method, $url, $options);
         } catch (\Throwable $e) {
             $message = $e->getMessage() !== '' ? $e->getMessage() : 'fetch failed';
             throw new FetchError($message, (bool) preg_match('/timed out|error 28/i', $message), $e);
@@ -84,6 +94,7 @@ final class Fetcher implements RunlightFetcher
             if ($answer->getStatusCode() === 200) {
                 return true;
             }
+            Craft::warning('Runlight could not download location data: it answered ' . $answer->getStatusCode(), 'runlight');
         } catch (\Throwable $e) {
             Craft::warning('Runlight could not download location data: ' . $e->getMessage(), 'runlight');
         }

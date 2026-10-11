@@ -7,11 +7,11 @@ namespace Runlight\Craft;
 use Craft;
 use craft\base\Model;
 use craft\base\Plugin as BasePlugin;
-use craft\events\PluginEvent;
 use craft\events\RegisterUrlRulesEvent;
+use craft\events\RegisterUserPermissionsEvent;
 use craft\helpers\UrlHelper;
-use craft\services\Plugins;
 use craft\services\ProjectConfig;
+use craft\services\UserPermissions;
 use craft\web\UrlManager;
 use craft\web\View;
 use Runlight\Craft\models\Settings;
@@ -32,6 +32,12 @@ final class Plugin extends BasePlugin
     public bool $hasCpSettings = true;
     public bool $hasCpSection = true;
 
+    /** The cache key that says a Runlight elsewhere did not answer just now. */
+    public const DOWN = 'runlight-down';
+
+    /** Set while Connect saves the keys it was given, which are the new address's own. */
+    public bool $connecting = false;
+
     public function init(): void
     {
         parent::init();
@@ -49,12 +55,21 @@ final class Plugin extends BasePlugin
             $event->rules['runlight/<path:.+>'] = 'runlight/serve/index';
             $event->rules['go/<slug:.+>'] = 'runlight/serve/link';
         });
-        // Nothing is counted until the admin chooses where Runlight runs, so installing leads straight there.
-        Event::on(Plugins::class, Plugins::EVENT_AFTER_INSTALL_PLUGIN, function (PluginEvent $event): void {
-            $request = Craft::$app->getRequest();
-            if ($event->plugin === $this && !$request->getIsConsoleRequest() && $request->getIsCpRequest() && !$this->getSettings()->isSetUp()) {
-                Craft::$app->getResponse()->redirect(UrlHelper::cpUrl('settings/plugins/' . $this->handle))->send();
-            }
+        // Admins own Runlight; others may manage it, as owners too, or only see its numbers.
+        Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function (RegisterUserPermissionsEvent $event): void {
+            $event->permissions[] = [
+                'heading' => Craft::t('runlight', 'Runlight'),
+                'permissions' => [
+                    Local::VIEW => [
+                        'label' => Craft::t('runlight', 'See Runlight’s numbers'),
+                        'nested' => [
+                            Local::MANAGE => [
+                                'label' => Craft::t('runlight', 'Manage Runlight: its settings, keys, sites, people, and data'),
+                            ],
+                        ],
+                    ],
+                ],
+            ];
         });
 
         // The request is only looked at once Craft has finished starting up, as Craft asks of plugins.
@@ -63,14 +78,16 @@ final class Plugin extends BasePlugin
             if ($request->getIsConsoleRequest()) {
                 return;
             }
-            Event::on(Response::class, Response::EVENT_AFTER_SEND, function (): void {
-                if (Local::active()) {
-                    // Craft has no schedule of its own, so a request that has been answered queues the upkeep.
-                    Local::schedule();
-                }
-            });
             if (!$request->getIsSiteRequest()) {
                 return;
+            }
+            // Craft has no schedule of its own, so a page of the site, once answered, queues the upkeep.
+            if ($request->getIsGet()) {
+                Event::on(Response::class, Response::EVENT_AFTER_SEND, function (): void {
+                    if (Local::active()) {
+                        Local::schedule();
+                    }
+                });
             }
             // The script goes in at the end of the body, which is still before Craft writes the head.
             Event::on(View::class, View::EVENT_END_BODY, function (): void {
@@ -86,16 +103,34 @@ final class Plugin extends BasePlugin
     {
         $item = parent::getCpNavItem();
         if ($item !== null) {
-            $item['label'] = 'Runlight';
+            $item['label'] = Craft::t('runlight', 'Runlight');
         }
         return $item;
     }
 
-    /** Uninstalling removes what Runlight kept here: its tables in Craft's database, and its folder. */
+    /**
+     * Nothing is counted until the admin chooses where Runlight runs, so installing from the Control Panel
+     * leads straight there. An install the Plugin Store's updater makes over JSON is left alone.
+     */
+    protected function afterInstall(): void
+    {
+        $request = Craft::$app->getRequest();
+        if ($request->getIsConsoleRequest() || !$request->getIsCpRequest() || $request->getAcceptsJson() || $request->getIsAjax() || $this->getSettings()->isSetUp()) {
+            return;
+        }
+        Craft::$app->getResponse()->redirect(UrlHelper::cpUrl('settings/plugins/' . $this->handle))->send();
+    }
+
+    /**
+     * Uninstalling removes what Runlight kept here: its tables in Craft's database, its folder, and what it
+     * kept in Craft's cache. Craft removes the settings itself. Keys Connect put in .env stay there, since
+     * the file is the site's.
+     */
     protected function afterUninstall(): void
     {
         Storage::remove();
-        Craft::$app->getCache()->delete('runlight-checked');
+        Local::forget();
+        Craft::$app->getCache()->delete(self::DOWN);
     }
 
     protected function createSettingsModel(): ?Model
@@ -119,6 +154,7 @@ final class Plugin extends BasePlugin
             'missing' => $missing,
             'local' => Local::address(),
             'counting' => $settings->getMode() === 'local' && $missing === '',
+            'overdue' => $settings->getMode() === 'local' && $missing === '' && Local::overdue(),
         ]);
     }
 
@@ -129,8 +165,23 @@ final class Plugin extends BasePlugin
     public function beforeSaveSettings(): bool
     {
         $before = Craft::$app->getProjectConfig()->get(ProjectConfig::PATH_PLUGINS . '.' . $this->handle . '.settings');
-        $this->getSettings()->forgetKeysIfMoved(is_array($before) ? $before : []);
+        if (!$this->connecting) {
+            $this->getSettings()->forgetKeysIfMoved(is_array($before) ? $before : []);
+        }
         return parent::beforeSaveSettings();
+    }
+
+    /** Once Runlight is chosen to run here, it makes its tables, so the first visits never race to. */
+    public function afterSaveSettings(): void
+    {
+        parent::afterSaveSettings();
+        if ($this->getSettings()->getMode() === 'local') {
+            try {
+                Local::start();
+            } catch (\Throwable $e) {
+                Craft::error('Runlight could not open its store: ' . $e->getMessage(), 'runlight');
+            }
+        }
     }
 
     /** Whether the address answers as a Runlight, and what to say about it. */
@@ -217,6 +268,12 @@ final class Plugin extends BasePlugin
         if (!$ready || !$request->getIsGet() || !Agents::isAgent($agent)) {
             return;
         }
+        // A Runlight that did not answer is left alone for a minute, so a down server never ties up a worker
+        // for each agent's fetch.
+        $cache = Craft::$app->getCache();
+        if (!$local && $cache->get(self::DOWN) !== false) {
+            return;
+        }
         // The page has been sent, but under PHP-FPM or LiteSpeed the agent still waits until PHP
         // finishes. Closing the connection first means the report never keeps it waiting.
         if (session_status() === PHP_SESSION_ACTIVE) {
@@ -232,11 +289,14 @@ final class Plugin extends BasePlugin
                 Local::observe($request->getAbsoluteUrl(), $agent);
                 return;
             }
-            Craft::createGuzzleClient(['timeout' => 3])->post($settings->getAddress() . '/api/observe', [
+            Craft::createGuzzleClient(['connect_timeout' => 1, 'timeout' => 3])->post($settings->getAddress() . '/api/observe', [
                 'headers' => ['Authorization' => 'Bearer ' . $key],
                 'json' => ['url' => $request->getAbsoluteUrl(), 'userAgent' => $agent],
             ]);
         } catch (\Throwable $e) {
+            if (!$local) {
+                $cache->set(self::DOWN, true, 60);
+            }
             // Analytics must never break the page it watches; note it and move on.
             Craft::warning('Could not record an AI agent fetch: ' . $e->getMessage(), 'runlight');
         }

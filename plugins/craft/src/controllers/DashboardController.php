@@ -12,9 +12,8 @@ use Runlight\Craft\Plugin;
 use yii\web\Response;
 
 /**
- * The Control Panel's Runlight item: this site's dashboard, framed from
- * Runlight here, or from Runlight elsewhere with a ticket the plugin asks for
- * on every visit to the page.
+ * The Control Panel's Runlight item: this site's dashboard, framed from Runlight here, or from Runlight
+ * elsewhere with a ticket the plugin asks for on every visit to the page.
  */
 final class DashboardController extends Controller
 {
@@ -23,12 +22,21 @@ final class DashboardController extends Controller
         $this->requirePermission('accessPlugin-runlight');
         $settings = Plugin::getInstance()->getSettings();
         $mode = $settings->getMode();
+        $note = null;
         if ($mode === 'local') {
             // Runlight here is on this site, signed in with this login, so the whole dashboard shows, not a share view.
             $address = Local::active() ? Local::address() : '';
-            $ticket = $address !== '' ? ['url' => $address . '/'] : Local::missing();
+            $frame = $address !== '' ? $address . '/' : Local::missing();
             $hasKey = true;
             $full = $address !== '' ? $address . '/' : '';
+            if ($address !== '' && !Local::canView()) {
+                $frame = Craft::t('runlight', 'Your account cannot see Runlight’s numbers. An admin can allow it under Users, Permissions, Runlight.');
+                $full = '';
+            } elseif ($address !== '' && Local::originOf(UrlHelper::cpUrl()) !== Local::origin()) {
+                // Only the site's own pages may frame its dashboard, so a Control Panel on another address opens it instead.
+                $note = Craft::t('runlight', 'The Control Panel is served from another address than the site, and only the site’s own pages may show its dashboard, so it opens in a new tab.');
+                $frame = null;
+            }
         } else {
             $address = $mode === 'remote' ? $settings->getAddress() : '';
             $key = $settings->getDashboardKey();
@@ -36,15 +44,18 @@ final class DashboardController extends Controller
             $ticket = $address !== '' && $hasKey ? self::ticket($address, $key) : null;
             $site = is_array($ticket) && $ticket['site'] !== '' ? $ticket['site'] : $settings->getSite();
             $full = $address !== '' ? $address . '/' . ($site !== '' ? '?site=' . rawurlencode($site) : '') : '';
+            $frame = is_array($ticket) ? $ticket['url'] : $ticket;
         }
+        $framed = is_string($frame) && str_starts_with($frame, 'http');
         return $this->renderTemplate('runlight/_dashboard.twig', [
             'setUp' => $settings->isSetUp(),
             'local' => $mode === 'local',
             'address' => $address,
             'hasKey' => $hasKey,
-            'frame' => is_array($ticket) ? $ticket['url'] : null,
-            'error' => is_string($ticket) ? $ticket : null,
-            'origin' => self::originOf($address),
+            'frame' => $framed ? $frame : null,
+            'error' => !$framed && is_string($frame) ? $frame : null,
+            'note' => $note,
+            'origin' => Local::originOf($address),
             'full' => $full,
             'settingsUrl' => 'settings/plugins/runlight',
         ]);
@@ -63,19 +74,6 @@ final class DashboardController extends Controller
         return $this->asJson($address !== '' ? Plugin::check($address) : null);
     }
 
-    /** The scheme, host, and port of an address, as a browser writes its origin. */
-    private static function originOf(string $address): string
-    {
-        $parts = parse_url($address);
-        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
-            return '';
-        }
-        $scheme = strtolower($parts['scheme']);
-        $port = (int) ($parts['port'] ?? 0);
-        $default = ($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80);
-        return $scheme . '://' . strtolower($parts['host']) . ($port && !$default ? ':' . $port : '');
-    }
-
     /**
      * Asks the Runlight for a ticket that opens the dashboard once, framed by
      * this Control Panel. Each ticket works for a few minutes and only once, so
@@ -90,7 +88,7 @@ final class DashboardController extends Controller
         try {
             $response = Craft::createGuzzleClient(['timeout' => 5, 'http_errors' => false, 'allow_redirects' => false])->post($address . '/api/embed', [
                 'headers' => ['Authorization' => 'Bearer ' . $key],
-                'json' => ['origin' => self::originOf(UrlHelper::cpUrl())],
+                'json' => ['origin' => Local::originOf(UrlHelper::cpUrl())],
             ]);
         } catch (\Throwable $e) {
             return Craft::t('runlight', 'Could not reach your Runlight: {error}', ['error' => $e->getMessage()]);

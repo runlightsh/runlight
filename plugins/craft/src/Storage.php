@@ -7,31 +7,39 @@ namespace Runlight\Craft;
 use Craft;
 use craft\helpers\FileHelper;
 use Runlight\Db\PdoDb;
+use Runlight\Store\Sql;
 use Runlight\Store\SqlStore;
 use Runlight\Store\Stores;
 
 /**
- * Where Runlight keeps its numbers when it runs in this Craft site: in Craft's
- * own database, in tables prefixed rl_, when that is Postgres, MySQL 8.4, or
- * MariaDB 11.4 or later, or else in a SQLite file under Craft's storage
- * folder, which the web never serves. Runlight's tables always start rl_,
- * whatever table prefix Craft's own have.
+ * Where Runlight keeps its numbers when it runs in this Craft site: in Craft's own database, in tables
+ * named after Craft's table prefix and rl_, such as craft_rl_events, when that is Postgres, MySQL 8.4,
+ * or MariaDB 11.4 or later, or else in a SQLite file under Craft's storage folder, which the web never
+ * serves.
  *
- * The choice is made the first time Runlight runs and kept in a file in that
- * folder, beside the secret Runlight signs with, so the numbers never split
- * across two places. None of it belongs in project config, which is shared
- * between environments and committed.
+ * Nothing records the choice beside them, so it holds on every server and through every deploy: Runlight's
+ * tables in Craft's database, once there and marked as this install's, mean Craft's database, and a SQLite
+ * file in the storage folder means SQLite. Until either is made, the choice is worked out afresh. Runlight's
+ * tables are made only where no table already starts as theirs would, unless those are all Runlight's own
+ * and marked as this install's, so a standalone Runlight or another app sharing the database is never
+ * touched, and uninstalling drops Runlight's tables by name, and only this install's.
  */
 final class Storage
 {
-    /** The file in the folder that keeps the choice and the secret. */
-    private const FILE = 'runlight.json';
-
     /** The SQLite file's name, when Runlight's tables are not in Craft's database. */
     private const SQLITE = 'runlight.db';
 
-    /** @var array<string,string>|null what the file holds, read once a request */
-    private static ?array $kept = null;
+    /** The row in Runlight's meta table that names the install whose tables they are. */
+    private const OWNER = 'craft';
+
+    /** The cache key holding the choice once it is settled, so it is not worked out on every request. */
+    public const CACHE = 'runlight-storage';
+
+    /** Runlight's statement timeout on Craft's database, in milliseconds, as its own stores set one. */
+    private const TIMEOUT = 120000;
+
+    /** @var array{kind: string, clash: bool, settled: bool}|null the choice, worked out once a request */
+    private static ?array $found = null;
 
     /** Runlight's folder under Craft's storage folder, made the first time. */
     public static function folder(): string
@@ -49,107 +57,133 @@ final class Storage
         return Craft::$app->getPath()->getStoragePath() . DIRECTORY_SEPARATOR . 'runlight';
     }
 
-    /** @return array<string,string> */
-    private static function read(): array
+    /** What Runlight's table names start with in Craft's database: Craft's own table prefix, then rl_. */
+    public static function prefix(): string
     {
-        if (self::$kept !== null) {
-            return self::$kept;
-        }
-        $file = self::path() . DIRECTORY_SEPARATOR . self::FILE;
-        $saved = is_file($file) ? json_decode((string) file_get_contents($file), true) : null;
-        return self::$kept = is_array($saved) ? array_filter($saved, 'is_string') : [];
-    }
-
-    /** A value kept in the file, or an empty string. */
-    public static function get(string $name): string
-    {
-        return self::read()[$name] ?? '';
+        return Craft::$app->getDb()->tablePrefix . Sql::PREFIX;
     }
 
     /**
-     * A value kept in the file, made the first time by $make. The file is locked while it is read
-     * and written, so two first requests at once agree on one value.
+     * Runlight's tables in Craft's database, by name in lower case: the only ones it ever makes or drops.
      *
-     * @param callable(): string $make
+     * @return list<string>
      */
-    public static function remember(string $name, callable $make): string
+    public static function tables(): array
     {
-        $known = self::get($name);
-        if ($known !== '') {
-            return $known;
-        }
-        return self::change(static function (array $kept) use ($name, $make): array {
-            if (($kept[$name] ?? '') === '') {
-                $kept[$name] = $make();
-            }
-            return $kept;
-        })[$name];
+        $prefix = strtolower(self::prefix());
+        return array_map(static fn (string $table): string => $prefix . $table, Sql::TABLES);
     }
 
     /**
-     * @param callable(array<string,string>): array<string,string> $edit
-     * @return array<string,string>
+     * The tables in Craft's database whose names start as Runlight's would, by their names in lower case.
+     *
+     * @return array<string, string> each table's name as the database has it
      */
-    private static function change(callable $edit): array
+    private static function found(): array
     {
-        $handle = fopen(self::folder() . DIRECTORY_SEPARATOR . self::FILE, 'c+');
-        if ($handle === false) {
-            throw new \RuntimeException('Runlight could not open its file in Craft’s storage folder.');
+        $prefix = strtolower(self::prefix());
+        $found = [];
+        foreach (Craft::$app->getDb()->getSchema()->getTableNames('', true) as $table) {
+            if (str_starts_with(strtolower((string) $table), $prefix)) {
+                $found[strtolower((string) $table)] = (string) $table;
+            }
+        }
+        return $found;
+    }
+
+    /** The id that marks Runlight's tables as this install's. */
+    private static function owner(): string
+    {
+        return (string) Craft::$app->getSystemUid();
+    }
+
+    /**
+     * Whether Runlight's tables in Craft's database are this install's own: all of them Runlight's, its
+     * record of the schema there, and marked as this install's.
+     *
+     * @param array<string, string> $found the tables that start as Runlight's would
+     */
+    private static function ours(array $found): bool
+    {
+        $meta = strtolower(self::prefix()) . 'meta';
+        if (!isset($found[$meta]) || array_diff(array_keys($found), self::tables()) !== []) {
+            return false;
         }
         try {
-            flock($handle, LOCK_EX);
-            $saved = json_decode((string) stream_get_contents($handle), true);
-            $kept = $edit(is_array($saved) ? array_filter($saved, 'is_string') : []);
-            ftruncate($handle, 0);
-            rewind($handle);
-            fwrite($handle, (string) json_encode($kept, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($handle);
-            flock($handle, LOCK_UN);
-        } finally {
-            fclose($handle);
+            $owner = (new \craft\db\Query())->select(['value'])->from($found[$meta])->where(['key' => self::OWNER])->scalar();
+        } catch (\Throwable) {
+            return false;
         }
-        // It holds the secret, so only the user PHP runs as reads it.
-        @chmod(self::folder() . DIRECTORY_SEPARATOR . self::FILE, 0600);
-        return self::$kept = $kept;
+        return is_string($owner) && $owner !== '' && hash_equals($owner, self::owner());
     }
 
     /**
-     * Where Runlight keeps its numbers: "craft" for Craft's database, "sqlite", or an empty string
-     * when this server can do neither. Worked out once, and kept once Runlight first opens its store.
+     * Where Runlight keeps its numbers: "craft" for Craft's database, "sqlite", or an empty string when
+     * this server can do neither.
      */
     public static function kind(): string
     {
-        static $found = null;
-        $kind = self::get('storage');
-        if (in_array($kind, ['craft', 'sqlite'], true)) {
-            return $kind;
-        }
-        return $found ??= self::craftFits() ? 'craft' : (extension_loaded('pdo_sqlite') ? 'sqlite' : '');
+        return self::choice()['kind'];
     }
 
-    /** Keeps the choice, unless another request made one first, whose choice then stands. */
-    private static function choose(): string
+    /** Whether Craft's database would do, but tables starting as Runlight's would are another's. */
+    public static function clash(): bool
     {
-        $kind = self::kind();
-        if ($kind === '' || self::get('storage') === $kind) {
-            return $kind;
+        return self::choice()['clash'];
+    }
+
+    /** @return array{kind: string, clash: bool, settled: bool} */
+    private static function choice(): array
+    {
+        if (self::$found !== null) {
+            return self::$found;
         }
-        return self::change(static function (array $kept) use ($kind): array {
-            $kept['storage'] = in_array($kept['storage'] ?? '', ['craft', 'sqlite'], true) ? $kept['storage'] : $kind;
-            return $kept;
-        })['storage'];
+        $cache = Craft::$app->getCache();
+        $cached = $cache->get(self::CACHE);
+        if (in_array($cached, ['craft', 'sqlite'], true)) {
+            return self::$found = ['kind' => $cached, 'clash' => false, 'settled' => true];
+        }
+        $found = self::detect();
+        // Once the tables or the file are there, the choice holds, so it is kept a while.
+        if ($found['settled']) {
+            $cache->set(self::CACHE, $found['kind'], 3600);
+        }
+        return self::$found = $found;
+    }
+
+    /** @return array{kind: string, clash: bool, settled: bool} */
+    private static function detect(): array
+    {
+        $fits = self::craftFits();
+        $found = [];
+        try {
+            $found = $fits ? self::found() : [];
+        } catch (\Throwable $e) {
+            Craft::warning('Runlight could not list Craft’s tables: ' . $e->getMessage(), 'runlight');
+            $fits = false;
+        }
+        $ours = $found !== [] && self::ours($found);
+        if ($ours) {
+            return ['kind' => 'craft', 'clash' => false, 'settled' => true];
+        }
+        if (is_file(self::path() . DIRECTORY_SEPARATOR . self::SQLITE)) {
+            return ['kind' => 'sqlite', 'clash' => false, 'settled' => true];
+        }
+        if ($fits && $found === []) {
+            return ['kind' => 'craft', 'clash' => false, 'settled' => false];
+        }
+        return ['kind' => extension_loaded('pdo_sqlite') ? 'sqlite' : '', 'clash' => $fits, 'settled' => false];
     }
 
     /**
-     * Whether Craft's own database can hold Runlight's tables: Postgres, or MySQL 8.4 or MariaDB 11.4
-     * or later, whose tables compare text by code point with a collation older servers lack. A Craft
-     * whose own table prefix is rl_ would share names with Runlight's, so it gets a SQLite file.
+     * Whether Craft's own database can hold Runlight's tables: Postgres, or MySQL 8.4 or MariaDB 11.4 or
+     * later, whose tables compare text by code point with a collation older servers lack.
      */
     private static function craftFits(): bool
     {
         try {
             $db = Craft::$app->getDb();
-            if (rtrim((string) $db->tablePrefix, '_') === 'rl') {
+            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,31}\z/', self::prefix())) {
                 return false;
             }
             if ($db->getIsPgsql()) {
@@ -169,20 +203,34 @@ final class Storage
         }
     }
 
-    /** The store Runlight runs on. */
+    /**
+     * The store Runlight runs on. The first time in Craft's database, its tables are made and marked as
+     * this install's, which settles the choice; a SQLite file settles it by being made.
+     */
     public static function store(): SqlStore
     {
-        if (self::choose() === 'craft') {
-            $dialect = Craft::$app->getDb()->getIsPgsql() ? 'postgres' : 'mysql';
-            return new SqlStore(new PdoDb(\Closure::fromCallable([self::class, 'connect']), $dialect, true, $dialect === 'mysql' ? 120000 : 0));
+        $choice = self::choice();
+        if ($choice['kind'] === '') {
+            throw new \RuntimeException('Runlight has nowhere to keep its numbers on this server.');
         }
-        return Stores::sqlite(self::folder() . DIRECTORY_SEPARATOR . self::SQLITE);
+        if ($choice['kind'] === 'sqlite') {
+            return Stores::sqlite(self::folder() . DIRECTORY_SEPARATOR . self::SQLITE);
+        }
+        $dialect = Craft::$app->getDb()->getIsPgsql() ? 'postgres' : 'mysql';
+        $store = new SqlStore(new PdoDb(\Closure::fromCallable([self::class, 'connect']), $dialect, true, $dialect === 'mysql' ? self::TIMEOUT : 0), self::prefix());
+        if (!$choice['settled']) {
+            $store->migrate(true);
+            $store->db->run(Sql::upsert($dialect, 'rl_meta', ['"key"', 'value'], ['"key"'], ['value']), [self::OWNER, self::owner()]);
+            self::$found = ['kind' => 'craft', 'clash' => false, 'settled' => true];
+            Craft::$app->getCache()->set(self::CACHE, 'craft', 3600);
+        }
+        return $store;
     }
 
     /**
      * A connection of Runlight's own to Craft's database, from the settings Craft connects with, set
      * up as Runlight's own stores set theirs up: Craft's connection is never shared, so neither
-     * changes the other's session.
+     * changes the other's session or transactions.
      */
     public static function connect(): \PDO
     {
@@ -192,7 +240,7 @@ final class Storage
             $dsn = $db->dsn;
             // Set when the connection starts, so a RESET inside Runlight comes back to them.
             if (!str_contains($dsn, 'options=')) {
-                $options = ['-c statement_timeout=120000'];
+                $options = ['-c statement_timeout=' . self::TIMEOUT];
                 $schema = (string) Craft::$app->getConfig()->getDb()->schema;
                 if (preg_match('/^[a-z_][a-z0-9_$]*$/i', $schema)) {
                     $options[] = '-c search_path=' . $schema;
@@ -202,29 +250,39 @@ final class Storage
             return new \PDO($dsn, $db->username, $db->password, $attributes);
         }
         $dsn = preg_replace('/;?charset=[^;]*/i', '', $db->dsn) . ';charset=utf8mb4';
-        $ignoreSpace = defined('Pdo\Mysql::ATTR_IGNORE_SPACE') ? \Pdo\Mysql::ATTR_IGNORE_SPACE : \PDO::MYSQL_ATTR_IGNORE_SPACE;
+        $ignoreSpace = defined('Pdo\Mysql::ATTR_IGNORE_SPACE') ? constant('Pdo\Mysql::ATTR_IGNORE_SPACE') : \PDO::MYSQL_ATTR_IGNORE_SPACE;
         $pdo = new \PDO($dsn, $db->username, $db->password, $attributes + [$ignoreSpace => true]);
         $mariadb = (bool) preg_match('/mariadb/i', (string) $pdo->query('SELECT VERSION() AS v')->fetchColumn());
-        $pdo->exec($mariadb ? 'SET SESSION max_statement_time = 120' : 'SET SESSION max_execution_time = 120000');
+        $pdo->exec($mariadb ? 'SET SESSION max_statement_time = ' . (self::TIMEOUT / 1000) : 'SET SESSION max_execution_time = ' . self::TIMEOUT);
         return $pdo;
     }
 
-    /** Removes Runlight's numbers, for uninstalling: its tables in Craft's database, and its folder. */
+    /**
+     * Removes Runlight's numbers, for uninstalling: its tables in Craft's database, each by name and only
+     * when they are all Runlight's and marked as this install's, whether or not its folder is still here,
+     * and its folder, with a SQLite file and location data.
+     */
     public static function remove(): void
     {
-        $folder = self::path();
-        if (!is_dir($folder)) {
-            return;
-        }
-        if (self::get('storage') === 'craft') {
-            $db = Craft::$app->getDb();
-            foreach ($db->getSchema()->getTableNames('', true) as $table) {
-                if (str_starts_with($table, 'rl_')) {
-                    $db->createCommand()->dropTable($table)->execute();
+        try {
+            $found = self::found();
+            if ($found !== [] && self::ours($found)) {
+                $db = Craft::$app->getDb();
+                foreach (self::tables() as $table) {
+                    if (isset($found[$table])) {
+                        $db->createCommand()->dropTable($found[$table])->execute();
+                    }
                 }
+            } elseif ($found !== []) {
+                Craft::warning('Runlight left the tables starting ' . self::prefix() . ' in place, since they are not all its own for this install.', 'runlight');
             }
+        } catch (\Throwable $e) {
+            Craft::warning('Runlight could not drop its tables: ' . $e->getMessage(), 'runlight');
         }
-        FileHelper::removeDirectory($folder);
-        self::$kept = null;
+        if (is_dir(self::path())) {
+            FileHelper::removeDirectory(self::path());
+        }
+        Craft::$app->getCache()->delete(self::CACHE);
+        self::$found = null;
     }
 }
