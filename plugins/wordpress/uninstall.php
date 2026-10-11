@@ -1,8 +1,8 @@
 <?php
 /**
- * Removes everything the plugin stored: its settings, and when Runlight ran
- * in this WordPress, its numbers, in its own tables or in its own folder
- * under uploads, with the location data.
+ * Removes everything the plugin stored, on every site of a network: its
+ * settings, and when Runlight ran in a site, its numbers, in its own tables
+ * or in its own folder under uploads, with the location data.
  *
  * @package Runlight
  */
@@ -12,21 +12,45 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 }
 
 require_once __DIR__ . '/includes/Storage.php';
+require_once __DIR__ . '/includes/Library.php';
+require_once __DIR__ . '/includes/Local.php';
 
-$runlight_folder = \Runlight\WordPress\Storage::folder();
-\Runlight\WordPress\Storage::remove();
-// The folder is the plugin's alone: what Runlight kept there goes with it.
-if ( is_dir( $runlight_folder ) ) {
-	$runlight_walk = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $runlight_folder, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::CHILD_FIRST );
-	foreach ( $runlight_walk as $runlight_entry ) {
-		if ( $runlight_entry->isDir() ) {
-			rmdir( $runlight_entry->getPathname() ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- the plugin's own folder, emptied first.
-		} else {
-			wp_delete_file( $runlight_entry->getPathname() );
+/** Removes what the plugin stored for the current site. */
+function runlight_uninstall_site(): void {
+	$folder = \Runlight\WordPress\Storage::folder();
+	\Runlight\WordPress\Storage::remove();
+	// The folder is the plugin's alone: what Runlight kept there goes with it.
+	if ( is_dir( $folder ) ) {
+		$walk = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $folder, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::CHILD_FIRST );
+		foreach ( $walk as $entry ) {
+			if ( $entry->isDir() ) {
+				rmdir( $entry->getPathname() ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- the plugin's own folder, emptied first.
+			} else {
+				wp_delete_file( $entry->getPathname() );
+			}
 		}
+		rmdir( $folder ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- the plugin's own folder, emptied above.
 	}
-	rmdir( $runlight_folder ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- the plugin's own folder, emptied above.
+	wp_clear_scheduled_hook( \Runlight\WordPress\Local::CRON );
+	delete_option( 'runlight_settings' );
+	delete_option( \Runlight\WordPress\Local::SECRET );
+	delete_option( \Runlight\WordPress\Local::CHECKED );
+	// The plugin's transients (rate counts, the site's icon, notes), whose names all start runlight_.
+	global $wpdb;
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( '_transient_runlight_' ) . '%', $wpdb->esc_like( '_transient_timeout_runlight_' ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- the plugin's own transients, removed on uninstall.
 }
-wp_clear_scheduled_hook( 'runlight_check' );
-delete_option( 'runlight_settings' );
-delete_option( 'runlight_secret' );
+
+if ( is_multisite() ) {
+	foreach ( get_sites(
+		array(
+			'fields' => 'ids',
+			'number' => 0,
+		)
+	) as $runlight_site ) {
+		switch_to_blog( (int) $runlight_site );
+		runlight_uninstall_site();
+		restore_current_blog();
+	}
+} else {
+	runlight_uninstall_site();
+}

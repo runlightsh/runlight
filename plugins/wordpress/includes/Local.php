@@ -23,7 +23,10 @@ final class Local {
 	public const CRON = 'runlight_check';
 
 	/** The option holding the secret Runlight signs with, made once. */
-	private const SECRET = 'runlight_secret';
+	public const SECRET = 'runlight_secret';
+
+	/** The option holding when the upkeep last finished, or was first due. */
+	public const CHECKED = 'runlight_checked';
 
 	private static ?Runlight $runlight = null;
 	private static ?Routes $routes     = null;
@@ -39,14 +42,28 @@ final class Local {
 		return 'local' === Settings::get()['mode'] && Library::available();
 	}
 
+	/**
+	 * Whether the site's addresses go through index.php, as with plain
+	 * permalinks: then no rewrite sends /runlight to WordPress on Apache or
+	 * LiteSpeed, but /index.php/runlight reaches it on every server.
+	 */
+	public static function plain_permalinks(): bool {
+		return '' === (string) get_option( 'permalink_structure' );
+	}
+
+	/** The site's own path and, with plain permalinks, index.php after it, which Runlight's paths start with. */
+	private static function home_path(): string {
+		return rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . ( self::plain_permalinks() ? '/index.php' : '' );
+	}
+
 	/** The path Runlight answers under, after the folder WordPress lives in, if any. */
 	public static function base(): string {
-		return rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '/runlight';
+		return self::home_path() . '/runlight';
 	}
 
 	/** Runlight's full address on this site. */
 	public static function address(): string {
-		return home_url( '/runlight' );
+		return home_url( ( self::plain_permalinks() ? '/index.php' : '' ) . '/runlight' );
 	}
 
 	/** This site's id in Runlight, which counts this one site; a site in a network has a file of its own. */
@@ -90,6 +107,7 @@ final class Local {
 		require_once __DIR__ . '/Cache.php';
 		require_once __DIR__ . '/Locations.php';
 		require_once __DIR__ . '/Mailer.php';
+		require_once __DIR__ . '/Visitor.php';
 	}
 
 	/**
@@ -98,6 +116,7 @@ final class Local {
 	 */
 	private static function locations(): \Runlight\Server\DbIp {
 		self::load();
+		Storage::protect();
 		return new \Runlight\Server\DbIp(
 			Storage::folder() . '/geo',
 			'country',
@@ -123,14 +142,14 @@ final class Local {
 				'timezone'  => self::timezone(),
 			),
 			'secret'       => self::secret(),
-			// Hosts and CDNs in front of WordPress name the visitor in a header, and Runlight needs them told apart.
-			'trustProxy'   => true,
+			// The plugin works out the visitor's address itself (Visitor) and hands it over with each request, so no header is believed here.
+			'trustProxy'   => false,
 			'fetcher'      => new Fetcher(),
 			// Rate counts and the site's icon go in WordPress's cache, never in files of Runlight's own.
 			'cache'        => new Cache(),
 			// No SMTP, whose client opens connections of its own: WordPress's mailer and the mail services cover it.
 			'mailServices' => array_values( array_diff( array_column( \Runlight\Mail\Transports::SERVICES, 'id' ), array( 'smtp' ) ) ),
-			'linkPath'     => rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '/go',
+			'linkPath'     => self::runlight_link_path(),
 		);
 		if ( Settings::get()['locations'] ) {
 			$lookup = self::locations()->lookup();
@@ -215,7 +234,8 @@ final class Local {
 			Request::tooLarge()->emit( true );
 			exit;
 		}
-		$context = array( 'ip' => $request->remoteAddress );
+		self::load();
+		$context = array( 'ip' => Visitor::address( wp_unslash( $_SERVER ) ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Visitor reads only REMOTE_ADDR and two headers, each checked to be an IP address.
 		try {
 			if ( $link ) {
 				$response = ( self::runlight()->linkHandler() )( $request, $context );
@@ -243,7 +263,7 @@ final class Local {
 
 	/** Where short links live, before Runlight is made. */
 	private static function runlight_link_path(): string {
-		return rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '/go';
+		return self::home_path() . '/go';
 	}
 
 	/**
@@ -264,20 +284,42 @@ final class Local {
 		$scheduled = wp_next_scheduled( self::CRON );
 		if ( self::active() && ! $scheduled ) {
 			wp_schedule_event( time(), 'hourly', self::CRON );
+			// Due from now, so the settings page can tell when it has not run for a day.
+			if ( false === get_option( self::CHECKED ) ) {
+				update_option( self::CHECKED, time(), false );
+			}
 		} elseif ( ! self::active() && $scheduled ) {
 			wp_clear_scheduled_hook( self::CRON );
 		}
 	}
 
-	/** Runs the upkeep. */
+	/**
+	 * Runs the upkeep. A failure is logged rather than thrown, so the other
+	 * events WordPress's cron runs in the same request still run.
+	 */
 	public static function check(): void {
 		if ( ! self::active() ) {
 			return;
 		}
-		if ( Settings::get()['locations'] ) {
-			self::locations()->refresh( (int) floor( microtime( true ) * 1000 ) );
+		try {
+			if ( Settings::get()['locations'] ) {
+				self::locations()->refresh( (int) floor( microtime( true ) * 1000 ) );
+			}
+			self::runlight()->check();
+			Cache::sweep();
+			update_option( self::CHECKED, time(), false );
+		} catch ( \Throwable $error ) {
+			\Runlight\Log::write( 'Runlight: the hourly check failed: ' . $error->getMessage() );
 		}
-		self::runlight()->check();
+	}
+
+	/**
+	 * Whether the upkeep has not finished for over a day: WordPress's cron is
+	 * off, or nothing has visited the site to run it, or it keeps failing.
+	 */
+	public static function overdue(): bool {
+		$checked = get_option( self::CHECKED );
+		return self::active() && is_numeric( $checked ) && time() - (int) $checked > DAY_IN_SECONDS + HOUR_IN_SECONDS;
 	}
 
 	/**

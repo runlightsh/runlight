@@ -42,8 +42,22 @@ register_activation_hook(
 );
 register_deactivation_hook(
 	__FILE__,
-	static function (): void {
-		wp_clear_scheduled_hook( \Runlight\WordPress\Local::CRON );
+	static function ( $network_wide ): void {
+		if ( ! $network_wide || ! is_multisite() ) {
+			wp_clear_scheduled_hook( \Runlight\WordPress\Local::CRON );
+			return;
+		}
+		// Deactivated for the whole network: each site's hourly check stops.
+		foreach ( get_sites(
+			array(
+				'fields' => 'ids',
+				'number' => 0,
+			)
+		) as $site ) {
+			switch_to_blog( (int) $site );
+			wp_clear_scheduled_hook( \Runlight\WordPress\Local::CRON );
+			restore_current_blog();
+		}
 	}
 );
 if ( is_admin() ) {
