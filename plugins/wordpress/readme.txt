@@ -22,7 +22,7 @@ Activate the plugin and choose to run Runlight inside WordPress, with nothing el
 * The Runlight item in the admin menu shows this site's numbers in wp-admin, and the full dashboard opens at /runlight on your site, for anyone who can manage options.
 * Goals, funnels, short links, email reports, and imports from Umami, Bitly, and other services are all in the dashboard.
 
-The numbers stay in this site's database: in Runlight's own tables when the database is MySQL 8.4 or MariaDB 11.4 or later, or else in a SQLite file in the uploads folder.
+The numbers stay in this site's database: in Runlight's own tables, named after WordPress's table prefix (such as wp_rl_events), when the database is MySQL 8.4 or MariaDB 11.4 or later, or else in a SQLite file in the uploads folder. Each site in a network keeps a SQLite file of its own.
 
 If you already run Runlight elsewhere, as the standalone server or inside an app, the plugin can send to that one instead. Press Connect in its settings and that Runlight fills them in, so one dashboard covers all your sites.
 
@@ -32,7 +32,13 @@ The script sets no cookies and stores nothing in the visitor's browser. Runlight
 
 = Source code =
 
-The plugin carries Runlight's PHP package in its lib folder, with the dashboard's built script. Their source, and the tools that build them, are at [github.com/runlightsh/runlight](https://github.com/runlightsh/runlight), under packages/php and packages/dashboard.
+The plugin carries Runlight's PHP package in its lib folder, with built scripts in lib/assets. Their source, and the tools that build them, are at [github.com/runlightsh/runlight](https://github.com/runlightsh/runlight):
+
+* lib/src is the PHP package itself, from packages/php.
+* lib/assets/dashboard.js and dashboard.css are the dashboard, built from packages/dashboard.
+* lib/assets/tracker.js, picker.js, and pick-return.js are the tracking script, the goal picker, and the picker's relay page, built from packages/tracker.
+
+Running npm install and then npm run build at the top of the repository builds every one of them and copies them into packages/php/assets.
 
 == Installation ==
 
@@ -40,15 +46,17 @@ The plugin carries Runlight's PHP package in its lib folder, with the dashboard'
 2. Press "Run Runlight in this WordPress". Runlight starts counting this site.
 3. Open Runlight in the admin menu to see the numbers, or open /runlight on your site for the full dashboard.
 
-To send to a Runlight you run elsewhere instead, choose "Connect to a Runlight you run elsewhere" on the setup screen, enter its address, and press Connect. That Runlight asks you to allow the connection for the site that counts this domain, or offers to add one, and then sends you back with every setting filled in. Connecting needs wp-admin on https. You can also copy the settings by hand from that Runlight's Settings, Install, where they have the same names: Runlight address, Site id, Agents key, and Dashboard key.
+To send to a Runlight you run elsewhere instead, choose "Connect to a Runlight you run elsewhere" on the setup screen, enter its address, and press Connect. That Runlight asks you to allow the connection for the site that counts this domain, or offers to add one when its sites are managed in its dashboard, as on the standalone server, and then sends you back with every setting filled in. Connecting needs wp-admin on https. You can also copy the settings by hand from that Runlight's Settings, Install, where they have the same names: Runlight address, Site id, Agents key, and Dashboard key.
 
-Running Runlight inside WordPress needs PHP 8.2 or later with the pdo, mbstring, and openssl extensions, and either pdo_sqlite or a MySQL 8.4 or MariaDB 11.4 database with pdo_mysql. The settings page says when something is missing.
+Running Runlight inside WordPress needs PHP 8.2 or later with the mbstring and openssl extensions, and either WordPress's database on MySQL 8.4 or MariaDB 11.4 or later, which Runlight reaches through WordPress's own connection, or else PHP's sqlite3 extension. Each site in a network always uses a SQLite file, so a network needs sqlite3. The settings page says when something is missing.
+
+With plain permalinks, Runlight answers at /index.php/runlight rather than /runlight, so it works on every server, and the settings page says so.
 
 == Frequently Asked Questions ==
 
 = Does this send my visitors' data to a third party? =
 
-No. Runlight runs in your own WordPress, or in the Runlight you chose, and nowhere else.
+No. Visits are counted in your own WordPress, or in the Runlight you chose, and nowhere else. Only if you add an AI provider's key and ask the assistant a question do the site's totals go to that provider, as External services describes.
 
 = Do I need a cookie banner? =
 
@@ -60,7 +68,7 @@ In this site's database, unless you chose a Runlight you run elsewhere. The Runl
 
 = What happens when I delete the plugin? =
 
-Deleting it removes its settings and, when Runlight ran inside WordPress, all of Runlight's numbers: its tables, or its folder in uploads. Deactivating it keeps everything.
+Deleting it removes its settings and, when Runlight ran inside WordPress, all of Runlight's numbers: its own tables, each by name, or its folder in uploads. On a network it does this for every site. Deactivating it keeps everything.
 
 = Does it work with page caches? =
 
@@ -68,13 +76,40 @@ Yes. Cached pages still carry the script, so visits are counted. AI agents that 
 
 == External services ==
 
-Running inside WordPress, Runlight sends nothing anywhere until you set something up that needs another service. Each of these is off until you turn it on, and each is described where you turn it on:
+Running inside WordPress, Runlight sends nothing anywhere until you set something up that needs another service. Each of these is off until you turn it on, and each is described where you turn it on.
 
-* Locations: with "Show which countries visitors come from" on, the plugin downloads DB-IP's free country database from download.db-ip.com once a month and keeps it in its folder in uploads. Visitors' addresses are looked up on your server and never sent. DB-IP's data is under CC BY 4.0 (https://db-ip.com/db/lite.php), and its terms and privacy policy are at https://db-ip.com/terms-of-use and https://db-ip.com/privacy.
-* Email reports: when an SMTP or mail plugin such as WP Mail SMTP is set up in WordPress, Runlight sends the reports you ask for with wp_mail, so they go wherever that plugin sends your site's other email. Otherwise, or when you choose one in the dashboard instead, it sends them through the mail service you set up there: the API of Amazon SES, Brevo, Mailersend, Mailgun, Mailjet, Postmark, Resend, SendGrid, or SparkPost with the key you enter, or a webhook you name. To send through an SMTP server, set it up in an SMTP plugin, which Runlight then uses. A report holds the site's numbers and goes to the addresses you list.
-* The assistant: when you add an AI provider's key in the dashboard, questions you ask the assistant go to that provider (Anthropic, OpenAI, Google Gemini, or OpenRouter) with the numbers needed to answer them, and only when you ask.
-* Imports: when you import from Umami, Bitly, Dub, Rebrandly, or Short.io in the dashboard, Runlight reads your data there with the key you enter, once.
-* Your site's icon: the dashboard shows the icon your site's home page links to, which Runlight fetches from your own site.
+* Locations: with "Show which countries visitors come from" on, the plugin downloads DB-IP's free country database from download.db-ip.com once a month and keeps it in its folder in uploads. Nothing is sent with the download, and visitors' addresses are looked up on your server and never sent. DB-IP's data is under CC BY 4.0 (https://db-ip.com/db/lite.php). Terms: https://db-ip.com/tos.php. Privacy: https://db-ip.com/privacy.php.
+* Your site's icon: the dashboard shows the icon your site's home page links to, which Runlight fetches from your site, or from wherever that link points.
+
+Email reports: when an SMTP or mail plugin such as WP Mail SMTP is active in WordPress, Runlight sends the reports you ask for, and test emails, with wp_mail, so they go wherever that plugin sends your site's other email. Otherwise, or when you choose one in the dashboard instead, it sends them through the mail service you set up there, with the key you enter. A report holds the site's totals for the week or month, and it is sent to the addresses you list, from the address you set, only when a report is due or you send a test. To send through an SMTP server, set it up in an SMTP plugin, which Runlight then uses. The services:
+
+* Amazon SES (email.<region>.amazonaws.com). Terms: https://aws.amazon.com/service-terms/. Privacy: https://aws.amazon.com/privacy/.
+* Brevo (api.brevo.com). Terms: https://www.brevo.com/legal/termsofuse/. Privacy: https://www.brevo.com/legal/privacypolicy/.
+* MailerSend (api.mailersend.com). Terms: https://www.mailersend.com/legal/terms-of-service. Privacy: https://www.mailersend.com/legal/privacy-policy.
+* Mailgun (api.mailgun.net or api.eu.mailgun.net). Terms: https://www.mailgun.com/legal/terms/. Privacy: https://www.mailgun.com/legal/privacy-policy/.
+* Mailjet (api.mailjet.com). Terms: https://www.mailjet.com/legal/terms/. Privacy: https://www.mailjet.com/legal/privacy-policy/.
+* Postmark (api.postmarkapp.com). Terms: https://postmarkapp.com/terms-of-service. Privacy: https://postmarkapp.com/privacy-policy.
+* Resend (api.resend.com). Terms: https://resend.com/legal/terms-of-service. Privacy: https://resend.com/legal/privacy-policy.
+* SendGrid (api.sendgrid.com), part of Twilio. Terms: https://www.twilio.com/en-us/legal/tos. Privacy: https://www.twilio.com/en-us/legal/privacy.
+* SparkPost (api.sparkpost.com or api.eu.sparkpost.com). Terms: https://www.sparkpost.com/policies/tou/. Privacy: https://www.sparkpost.com/policies/privacy/.
+* A webhook: the email goes to the address you enter, which is yours, so its terms are your own.
+
+The assistant: when you set up an AI provider in the dashboard, each question you ask the assistant goes to that provider, with the site's totals and lists it needs to answer it, such as pages, sources, or countries with their counts, and only when you ask. Runlight keeps no IP address or user agent, so none is ever sent. The providers:
+
+* Anthropic (api.anthropic.com). Terms: https://www.anthropic.com/legal/commercial-terms. Privacy: https://www.anthropic.com/legal/privacy.
+* OpenAI (api.openai.com). Terms: https://openai.com/policies/services-agreement/. Privacy: https://openai.com/policies/privacy-policy/.
+* Google Gemini (generativelanguage.googleapis.com). Terms: https://ai.google.dev/gemini-api/terms. Privacy: https://policies.google.com/privacy.
+* OpenRouter (openrouter.ai), which passes the question to the model you pick. Terms: https://openrouter.ai/terms. Privacy: https://openrouter.ai/privacy.
+* Ollama and LM Studio run a model on a computer you choose, this server by default (localhost), so the question goes only to the address you enter. Ollama's terms: https://ollama.com/terms, and privacy: https://ollama.com/privacy. LM Studio's terms: https://lmstudio.ai/app-terms, and privacy: https://lmstudio.ai/app-privacy.
+* Another OpenAI-compatible service: the question goes to the address you enter, under that service's own terms and privacy policy.
+
+Imports: when you import from one of these in the dashboard, Runlight reads your links, or your visits for Umami, from that service with the key or sign-in you enter, once, and sends nothing else:
+
+* Umami: the address you enter, your own Umami or Umami Cloud. Umami Cloud's terms: https://umami.is/terms, and privacy: https://umami.is/privacy.
+* Bitly (api-ssl.bitly.com). Terms: https://bitly.com/pages/terms-of-service. Privacy: https://bitly.com/pages/privacy.
+* Dub (api.dub.co). Terms: https://dub.co/legal/terms. Privacy: https://dub.co/legal/privacy.
+* Rebrandly (api.rebrandly.com). Terms: https://www.rebrandly.com/terms-conditions. Privacy: https://www.rebrandly.com/privacy-policy.
+* Short.io (api.short.io and statistics.short.io). Terms: https://short.io/terms. Privacy: https://short.io/privacy.
 
 Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone, at the address you enter. You run it yourself, so its terms are your own; Runlight is open source software under the MIT licence, and runlight.sh's terms and privacy policy are at https://runlight.sh/terms/ and https://runlight.sh/privacy/.
 
@@ -85,6 +120,16 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 * When an administrator opens the Runlight page in wp-admin and you have entered a dashboard key, the plugin sends that key and the address wp-admin is served from (its scheme, host, and port) to the same Runlight, from your server, and gets back a ticket that opens the dashboard once. The page then loads the dashboard from that Runlight in a frame, in the administrator's browser.
 
 == Changelog ==
+
+= Unreleased =
+* Runlight can run inside WordPress. Choose it on the setup screen and the site is counted, with the dashboard in wp-admin and at /runlight on the site, and the numbers in WordPress's database, in tables named after its prefix such as wp_rl_events, or in a SQLite file in uploads. It needs PHP 8.2.
+* Running inside WordPress, Runlight counts each visitor by the address the connection came from, and believes X-Forwarded-For only from a proxy on this server or a private network, and Cloudflare's header only from Cloudflare. The runlight_client_ip filter can change it.
+* Countries can come from DB-IP's free data, downloaded once a month when you turn it on.
+* Email reports go through wp_mail when an SMTP or mail plugin is active.
+* A Connect button fills in the site id, agents key, and dashboard key from a Runlight you run elsewhere, once you enter its address.
+* The observe key is now called the agents key.
+* The dashboard in wp-admin grows to its full height, and the Runlight menu item sits below the core items.
+* Deleting the plugin on a network removes what it kept for every site, and drops only Runlight's own tables, each by name.
 
 = 0.1.1 =
 * AI agents are reported after the page has been sent, so they never wait on Runlight, and sites in a subfolder report the right address.
