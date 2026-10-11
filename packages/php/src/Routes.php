@@ -721,7 +721,7 @@ final class Routes
             }
             if (!$this->warned) {
                 $this->warned = true;
-                error_log('Runlight: no RUNLIGHT_TOKEN set, so the dashboard is open because NODE_ENV is development. Anywhere else it answers 503 until a token is set.');
+                Log::write('Runlight: no RUNLIGHT_TOKEN set, so the dashboard is open because NODE_ENV is development. Anywhere else it answers 503 until a token is set.');
             }
             return true;
         }
@@ -2802,7 +2802,7 @@ final class Routes
             try {
                 return OAuth::oauthResponse($this->oauth, $request, $url->pathname, $url, $context) ?? self::coded('Not found', 'not_found', 404);
             } catch (\Throwable $error) {
-                error_log("Runlight: $error");
+                Log::write("Runlight: $error");
                 return self::coded('Internal error', 'internal', 500);
             }
         }
@@ -2815,7 +2815,7 @@ final class Routes
         try {
             return $this->route($request, $path, $url, $context);
         } catch (\Throwable $error) {
-            error_log("Runlight: $error");
+            Log::write("Runlight: $error");
             return self::coded('Internal error', 'internal', 500);
         }
     }
@@ -2912,7 +2912,7 @@ final class Routes
             try {
                 $rl->collect($request, $context);
             } catch (\Throwable $error) {
-                error_log("Runlight: could not record an event $error");
+                Log::write("Runlight: could not record an event $error");
             }
             // The same answer whatever happened, so the endpoint reveals nothing.
             return new Response('', 202, ['access-control-allow-origin' => '*']);

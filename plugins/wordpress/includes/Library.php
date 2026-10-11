@@ -76,5 +76,13 @@ final class Library {
 				}
 			}
 		);
+		// Runlight's notes go to the debug log, and only while it is on.
+		\Runlight\Log::to(
+			static function ( string $line ): void {
+				if ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) {
+					error_log( $line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Runlight's own notes, only with debug logging on.
+				}
+			}
+		);
 	}
 }

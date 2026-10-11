@@ -99,6 +99,30 @@ test("a CMS plugin keeps its saved keys only while its Runlight address stays th
   assert.deepEqual(JSON.parse(execFileSync("php", ["-r", submit], { encoding: "utf8" })), [["rlo_saved", "rl_saved"], ["", ""], ["rlo_new", "rl_new"]]);
 });
 
+test("the WordPress plugin hands Runlight the request without the slashes WordPress adds", (t) => {
+  // WordPress slashes $_SERVER as it boots (wp_magic_quotes); the stand-ins below do the same and undo it as it does.
+  const includes = new URL("../../../plugins/wordpress/includes/", import.meta.url).pathname;
+  const script = `
+    namespace Runlight\\WordPress;
+    define("ABSPATH", "/");
+    function slash($v) { return is_array($v) ? array_map(__NAMESPACE__ . "\\\\slash", $v) : (is_string($v) ? addslashes($v) : $v); }
+    function wp_unslash($v) { return is_array($v) ? array_map(__NAMESPACE__ . "\\\\wp_unslash", $v) : (is_string($v) ? stripslashes($v) : $v); }
+    require ${JSON.stringify(includes + "Library.php")};
+    require ${JSON.stringify(includes + "Local.php")};
+    $_SERVER = slash(["REQUEST_METHOD" => "GET", "HTTP_HOST" => "example.com", "REQUEST_URI" => "/runlight/it's?q=\\"a\\"", "HTTP_USER_AGENT" => "Bot \\"quoted\\" O'Brien", "HTTP_COOKIE" => "a=\\"b\\"", "REMOTE_ADDR" => "203.0.113.9"]);
+    $request = Local::request();
+    echo json_encode([$request->url, $request->headers->get("user-agent"), $request->headers->get("cookie"), $request->remoteAddress]);
+  `;
+  let answer: string;
+  try {
+    answer = execFileSync("php", ["-r", script], { encoding: "utf8" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) return t.skip("PHP is not installed");
+    throw error;
+  }
+  assert.deepEqual(JSON.parse(answer), ['http://example.com/runlight/it\'s?q="a"', 'Bot "quoted" O\'Brien', 'a="b"', "203.0.113.9"]);
+});
+
 test("every CMS plugin's PHP parses", (t) => {
   const root = new URL("../../../plugins/", import.meta.url).pathname;
   const files = execFileSync("find", [root, "-name", "*.php", "-not", "-path", "*/vendor/*"], { encoding: "utf8" }).trim().split("\n");

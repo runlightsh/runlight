@@ -8,6 +8,7 @@ use Runlight\Accounts\Accounts;
 use Runlight\Accounts\Crypto;
 use Runlight\Accounts\Web;
 use Runlight\Hash;
+use Runlight\Log;
 use Runlight\Http\BodyTooLarge;
 use Runlight\Http\Request;
 use Runlight\Http\Response;
@@ -243,7 +244,7 @@ final class Standalone
             // Everything else, the sign-in pages and People included, is the routes'.
             return $this->routes->handle($request, $context);
         } catch (\Throwable $error) {
-            error_log('Runlight: ' . $error->getMessage());
+            Log::write('Runlight: ' . $error->getMessage());
             return Routes::coded('Internal error', 'internal', 500);
         }
     }

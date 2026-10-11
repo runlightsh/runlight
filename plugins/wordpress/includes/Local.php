@@ -102,11 +102,7 @@ final class Local {
 			Storage::folder() . '/geo',
 			'country',
 			array( Fetcher::class, 'download' ),
-			static function ( string $line ): void {
-				if ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) {
-					error_log( $line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Runlight's own notes, only with debug logging on.
-				}
-			},
+			null,
 			new Locations()
 		);
 	}
@@ -158,16 +154,32 @@ final class Local {
 		}
 		self::$routes = self::runlight()->routes(
 			array(
-				'basePath'  => self::base(),
-				'token'     => null,
-				'authorize' => static fn (): bool => current_user_can( 'manage_options' ),
-				'signIn'    => self::base() . '/login',
-				'origin'    => home_url(),
-				'geoCredit' => Settings::get()['locations'],
-				'cms'       => 'WordPress',
+				'basePath'   => self::base(),
+				'token'      => null,
+				// Given here, so Runlight never reads them from the environment: WordPress's cron runs the upkeep, and no
+				// other site reports AI agents to this one.
+				'cronSecret' => '',
+				'observeKey' => '',
+				'authorize'  => static fn (): bool => current_user_can( 'manage_options' ),
+				'signIn'     => self::base() . '/login',
+				'origin'     => home_url(),
+				'geoCredit'  => Settings::get()['locations'],
+				'cms'        => 'WordPress',
 			)
 		);
 		return self::$routes;
+	}
+
+	/**
+	 * The request being served, as the visitor sent it. WordPress adds
+	 * slashes to $_SERVER, so Runlight reads a copy without them, with the
+	 * body read up to its limit as Request::fromGlobals() reads it.
+	 *
+	 * @throws \Runlight\Http\BodyTooLarge When the body is past its limit.
+	 */
+	public static function request(): Request {
+		Library::load();
+		return Request::fromServer( wp_unslash( $_SERVER ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- the path and headers reach Runlight as sent, and it checks each one itself.
 	}
 
 	/** The path of the request being served, without its query. */
@@ -197,9 +209,8 @@ final class Local {
 		if ( $base . '/login' === $path ) {
 			self::sign_in();
 		}
-		Library::load();
 		try {
-			$request = Request::fromGlobals();
+			$request = self::request();
 		} catch ( \Runlight\Http\BodyTooLarge $too_large ) {
 			Request::tooLarge()->emit( true );
 			exit;
@@ -216,9 +227,7 @@ final class Local {
 				$response = self::routes()->handle( $request, $context );
 			}
 		} catch ( \Throwable $error ) {
-			if ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) {
-				error_log( 'Runlight: ' . $error->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Runlight's own notes, only with debug logging on.
-			}
+			\Runlight\Log::write( 'Runlight: ' . $error->getMessage() );
 			$response = new \Runlight\Http\Response( '{"error":"Internal error","code":"internal"}', 500, array( 'content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store' ) );
 		}
 		$response->emit( 'HEAD' !== $request->method );

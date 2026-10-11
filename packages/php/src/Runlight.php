@@ -402,7 +402,7 @@ final class Runlight
                 $result['sent']++;
             } catch (\Throwable $error) {
                 $this->store->releaseReport($r['id'], $period['key'], $r['lastPeriod']);
-                error_log("Runlight: could not send the {$r['frequency']} report for {$site['name']} to {$r['email']}: " . $error->getMessage());
+                Log::write("Runlight: could not send the {$r['frequency']} report for {$site['name']} to {$r['email']}: " . $error->getMessage());
                 $result['failed']++;
             }
         }
@@ -897,7 +897,7 @@ final class Runlight
             try {
                 $work();
             } catch (\Throwable $error) {
-                error_log('Runlight: ' . $error->getMessage());
+                Log::write('Runlight: ' . $error->getMessage());
             }
         }
         while ($this->pruning !== []) {
@@ -905,7 +905,7 @@ final class Runlight
             try {
                 $this->applyRetention($only);
             } catch (\Throwable $error) {
-                error_log('Runlight: could not apply retention ' . $error->getMessage());
+                Log::write('Runlight: could not apply retention ' . $error->getMessage());
             }
         }
     }
@@ -998,7 +998,7 @@ final class Runlight
                 } catch (\Throwable $error) {
                     // Another process building the same day at once loses nothing: the day is there either way.
                     if (!in_array($day, $this->store->rollupDays($site['id']), true)) {
-                        error_log("Runlight: could not add up $day for {$site['id']} " . $error->getMessage());
+                        Log::write("Runlight: could not add up $day for {$site['id']} " . $error->getMessage());
                     }
                 }
             }
@@ -1208,7 +1208,7 @@ final class Runlight
             if ($this->warnDirect && $ip !== '' && Safefetch::publicAddress($ip)) {
                 $this->warnDirect = false;
                 if ($this->firstWarningToday()) {
-                    error_log("Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set 'trustProxy' => false when nothing sits in front of this server, or put a proxy in front that sets the header.");
+                    Log::write("Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set 'trustProxy' => false when nothing sits in front of this server, or put a proxy in front that sets the header.");
                 }
             }
         }
@@ -1562,7 +1562,7 @@ final class Runlight
                 ]);
             } catch (\Throwable $error) {
                 // A failed count must never break the redirect.
-                error_log('Runlight: could not record a link click ' . $error->getMessage());
+                Log::write('Runlight: could not record a link click ' . $error->getMessage());
             }
         }
         return new Response('', 302, ['location' => $link['url'], 'cache-control' => 'no-store', 'referrer-policy' => 'no-referrer-when-downgrade']);
@@ -1654,7 +1654,7 @@ final class Runlight
             return true;
         } catch (\Throwable $error) {
             // Analytics must never break the page it watches, but a failure should still be seen.
-            error_log('Runlight: could not record an AI agent fetch ' . $error->getMessage());
+            Log::write('Runlight: could not record an AI agent fetch ' . $error->getMessage());
             return false;
         }
     }
@@ -1706,7 +1706,7 @@ final class Runlight
         try {
             $this->applyRetention();
         } catch (\Throwable $error) {
-            error_log('Runlight: could not apply retention ' . $error->getMessage());
+            Log::write('Runlight: could not apply retention ' . $error->getMessage());
         }
         if ($this->now() - $this->optimizedAt >= 86_400_000) {
             $this->optimizedAt = $this->now();

@@ -11,6 +11,7 @@ use Runlight\Http\SearchParams;
 use Runlight\Http\Url;
 use Runlight\Js;
 use Runlight\Json;
+use Runlight\Log;
 use Runlight\Store\SqlStore;
 use Runlight\Undefined;
 
@@ -572,7 +573,7 @@ final class Web
                     try {
                         $this->sendLink($user, $next);
                     } catch (\Throwable $error) {
-                        error_log('Runlight: could not send a sign-in link ' . $error->getMessage());
+                        Log::write('Runlight: could not send a sign-in link ' . $error->getMessage());
                     }
                 });
             }

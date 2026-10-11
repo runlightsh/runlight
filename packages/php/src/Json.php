@@ -52,7 +52,7 @@ final class Json
         if (is_nan($n) || is_infinite($n)) {
             return 'null';
         }
-        $text = var_export($n, true);
+        $text = self::digits($n);
         if ($n == floor($n) && abs($n) < 1e21) {
             if ($n == 0) {
                 return '0';
@@ -77,6 +77,24 @@ final class Json
             return ($n < 0 ? '-' : '') . '0.' . str_repeat('0', -$exp - 1) . $digits;
         }
         return $mantissa . 'e' . ($exp > 0 ? '+' : '-') . abs($exp);
+    }
+
+    /**
+     * A float in the fewest digits that read back as the same float, as var_export() writes it under the
+     * serialize_precision setting: 0.1, 1.0, -0.0, 1.0E-7, 1.2E+25, INF, NAN.
+     *
+     * @internal
+     */
+    public static function digits(float $n): string
+    {
+        if (is_nan($n)) {
+            return 'NAN';
+        }
+        if (is_infinite($n)) {
+            return $n > 0 ? 'INF' : '-INF';
+        }
+        // JSON writes a finite float from the same setting, and only its exponent's e is lower case.
+        return strtoupper((string) json_encode($n, JSON_PRESERVE_ZERO_FRACTION));
     }
 
     private static function write(mixed $value): string
