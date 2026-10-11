@@ -178,6 +178,7 @@ public sealed class StandaloneTests : ServerTestCase
         // Broken percent escapes are a link nobody has, here and at /go/, never an error.
         Assert.Equal(404, (await server.HandleAsync(Req("/%E0"))).Status);
         Assert.Equal(404, (await server.HandleAsync(Req("/go/%zz"))).Status);
+        Assert.Equal(200, (await server.HandleAsync(Req("/pick-return"))).Status); // the picker's relay page, never a link
         Assert.Equal(200, (await server.HandleAsync(Req("/", "GET", new() { ["cookie"] = cookie }))).Status); // the dashboard opens for someone signed in
         Assert.Equal(404, (await server.HandleAsync(Req("/"))).Status);
         Assert.Equal(200, (await server.HandleAsync(Req("/api/link-domains/stats.example.com?site=blog.example.com", "DELETE", new() { ["cookie"] = cookie }))).Status); // so it can be removed

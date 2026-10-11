@@ -54,6 +54,12 @@ public sealed class Routes
     /// <summary>Where the hostnames of the site its ticket names go, as JSON inside a string.</summary>
     private const string PickHostsPlaceholder = "\"__RUNLIGHT_PICK_HOSTS__\"";
 
+    /// <summary>Where the relay page the picker sends its choice to goes, the return address its ticket names.</summary>
+    private const string PickReturnPlaceholder = "\"__RUNLIGHT_PICK_RETURN__\"";
+
+    /// <summary>Where the nonce the dashboard made for this pick goes, which the relay page hands back to it.</summary>
+    private const string PickNoncePlaceholder = "\"__RUNLIGHT_PICK_NONCE__\"";
+
     /// <summary>How long a picker ticket works: long enough to find the element, not to be kept.</summary>
     public const long PickTicketMs = 30 * 60_000;
 
@@ -95,6 +101,12 @@ public sealed class Routes
     private static readonly Regex PrivateSuffix = R("\\.(internal|intranet|private|local|localhost|localdomain|lan|home|corp|home\\.arpa|arpa|test|invalid|example)\\z");
     private static readonly Regex Email = R("^[^" + Space + "@<>\"]+@[^" + Space + "@<>\"]+\\.[^" + Space + "@<>\"]+\\z");
     private static readonly Regex OriginPattern = R("^https?://[^/?#" + Space + "]+\\z");
+
+    /// <summary>The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end.</summary>
+    private static readonly Regex PickReturn = R("^https?://[^/?#" + Space + "]+(/[^?#" + Space + "]*)?/pick-return\\z");
+
+    /// <summary>What the dashboard names one pick by, so its relay page answers only the tab that started it.</summary>
+    private static readonly Regex PickNonce = R("^[a-f0-9]{32}\\z");
     private static readonly Regex Filename = R("filename=\"([A-Za-z0-9._-]+)\"");
     private static readonly Regex ErrorCode = R("^[a-z_]{1,40}\\z");
     private static readonly Regex NotFileChar = R("[^A-Za-z0-9._-]");
@@ -111,7 +123,7 @@ public sealed class Routes
     private static readonly Regex LinkPath = R("^/api/links/([a-f0-9]+)\\z");
     private static readonly Regex EmbedTicketPattern = R("^([0-9]{1,15})\\.([a-f0-9]{32})\\.([a-f0-9]{2,512})\\.([a-f0-9]{64})\\z");
     private static readonly Regex EmbedSessionPattern = R("^([0-9]{1,15})\\.([a-f0-9]{24})\\.([a-f0-9]{64})\\z");
-    private static readonly Regex Ticket = R("^([0-9]+)\\.([a-f0-9]{2,512})\\.([a-f0-9]{2,512})\\.([a-f0-9]{64})\\z");
+    private static readonly Regex Ticket = R("^([0-9]+)\\.([a-f0-9]{2,512})\\.([a-f0-9]{2,512})(?:\\.([a-f0-9]{2,2048})\\.([a-f0-9]{32}))?\\.([a-f0-9]{64})\\z");
     private static readonly Regex ReportPath = R("^/api/reports/([a-f0-9]{24})(/send)?\\z");
     private static readonly Regex Token32 = R("^[a-f0-9]{32}\\z");
     private static readonly Regex TokenPath = R("^/api/tokens/([a-f0-9]{24})\\z");
@@ -472,17 +484,22 @@ public sealed class Routes
         return new Response(await answer.BytesAsync(cancellationToken).ConfigureAwait(false), answer.Status, back);
     }
 
-    /// <summary>A plain page in a visitor's language, for unsubscribing and for a share link that is gone.</summary>
-    private static Response SmallPage(string lang, string body, int status = 200) => new(
+    /// <summary>
+    /// A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's relay
+    /// page, which alone runs a script: one file from this server, never inline.
+    /// </summary>
+    private static Response SmallPage(string lang, string body, int status = 200, string script = "") => new(
         "<!doctype html><html lang=\"" + lang + "\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>Runlight</title>\n"
         + "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>"
-        + body + "</main></body></html>",
+        + body + "</main>" + (script.Length > 0 ? "<script src=\"" + EscapeHtml(script) + "\"></script>" : "") + "</body></html>",
         status,
         new Headers
         {
             ["content-type"] = "text/html; charset=utf-8",
             ["cache-control"] = "no-store",
-            ["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+            ["content-security-policy"] = script.Length > 0
+                ? "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                : "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
             ["referrer-policy"] = "no-referrer",
         });
 
@@ -1292,27 +1309,41 @@ public sealed class Routes
 
     private static string Unhex(string text) => Js.Decode(Convert.FromHexString(text[..(text.Length - (text.Length % 2))]));
 
-    /// <summary>A ticket that lets the picker, on <paramref name="site"/>'s pages, send its choice to <paramref name="origin"/>, the dashboard that asked, for half an hour.</summary>
-    private async Task<string> PickTicketAsync(string origin, string site, CancellationToken cancellationToken)
+    /// <summary>
+    /// A ticket that lets the picker, on <paramref name="site"/>'s pages, send its choice to <paramref name="origin"/>, the
+    /// dashboard that asked, for half an hour. With a return address and a nonce it sends it there, to the relay page,
+    /// which hands it to the dashboard tab that made the nonce; without them, as an older dashboard asks, to the tab
+    /// that opened the site.
+    /// </summary>
+    private async Task<string> PickTicketAsync(string origin, string site, (string Url, string Nonce)? back, CancellationToken cancellationToken)
     {
-        string payload = Js.Str(_rl.Now() + PickTicketMs) + "." + Hex(site) + "." + Hex(origin);
+        string payload = Js.Str(_rl.Now() + PickTicketMs) + "." + Hex(site) + "." + Hex(origin) + (back != null ? "." + Hex(back.Value.Url) + "." + back.Value.Nonce : "");
         return payload + "." + Hash.Hmac(await PickKeyAsync(cancellationToken).ConfigureAwait(false), payload);
     }
 
-    /// <summary>The dashboard origin and site a picker ticket names, or null when it is not one this install signed or has run out.</summary>
-    private async Task<(string Origin, string Site)?> PickTargetAsync(string ticket, CancellationToken cancellationToken)
+    /// <summary>What a picker ticket names, or null when it is not one this install signed or has run out.</summary>
+    private async Task<(string Origin, string Site, (string Url, string Nonce)? Back)?> PickTargetAsync(string ticket, CancellationToken cancellationToken)
     {
         var parts = Ticket.Match(ticket);
         if (!parts.Success || Js.Number(parts.Groups[1].Value) < _rl.Now())
         {
             return null;
         }
-        if (!ConstantTimeEqual(parts.Groups[4].Value, Hash.Hmac(await PickKeyAsync(cancellationToken).ConfigureAwait(false), parts.Groups[1].Value + "." + parts.Groups[2].Value + "." + parts.Groups[3].Value)))
+        if (!ConstantTimeEqual(parts.Groups[6].Value, Hash.Hmac(await PickKeyAsync(cancellationToken).ConfigureAwait(false), ticket[..ticket.LastIndexOf('.')])))
         {
             return null;
         }
         string origin = Unhex(parts.Groups[3].Value);
-        return IsOrigin(origin) ? (origin, Unhex(parts.Groups[2].Value)) : null;
+        if (!IsOrigin(origin))
+        {
+            return null;
+        }
+        if (!parts.Groups[4].Success)
+        {
+            return (origin, Unhex(parts.Groups[2].Value), null);
+        }
+        string address = Unhex(parts.Groups[4].Value);
+        return PickReturn.IsMatch(address) && address.StartsWith(origin + "/", StringComparison.Ordinal) ? (origin, Unhex(parts.Groups[2].Value), (address, parts.Groups[5].Value)) : null;
     }
 
     /// <summary>The key embed tickets and sessions are signed with, made on first use and kept in the database for every process.</summary>
@@ -2559,12 +2590,25 @@ public sealed class Routes
             {
                 return Coded("Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400);
             }
+            // Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+            // listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+            (string Url, string Nonce)? back = null;
+            if (Defined(body, "return") || Defined(body, "nonce"))
+            {
+                string address = Text(body, "return");
+                string nonce = Text(body, "nonce");
+                if (Hex(address).Length > 2048 || !PickReturn.IsMatch(address) || !address.StartsWith(origin + "/", StringComparison.Ordinal) || !PickNonce.IsMatch(nonce))
+                {
+                    return Coded("Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits", "pick_return", 400);
+                }
+                back = (address, nonce);
+            }
             // A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
             if (_managed.TryGetValue(request, out var hub) && await Store.SettingAsync("token-origin:" + hub.Str("id"), cancellationToken).ConfigureAwait(false) != origin)
             {
                 return Coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403);
             }
-            return JsonResponse(new JsObject { ["ticket"] = await PickTicketAsync(origin, site.Str("id")!, cancellationToken).ConfigureAwait(false) });
+            return JsonResponse(new JsObject { ["ticket"] = await PickTicketAsync(origin, site.Str("id")!, back, cancellationToken).ConfigureAwait(false) });
         }
 
         if ((path == "/api/goals" && method == "POST") || (AnyGoalPath.IsMatch(path) && (method == "PATCH" || method == "DELETE")))
@@ -3417,9 +3461,28 @@ public sealed class Routes
                 await rl.InitAsync(cancellationToken).ConfigureAwait(false);
             }
             object? hosts = target != null ? rl.Site(target.Value.Site)?.Get("hostnames") : new List<object?>();
-            string script = ReplaceOnce(Assets.Text("picker.js"), PickTargetPlaceholder, global::Runlight.Json.Stringify(hosts != null ? (target?.Origin ?? "") : ""));
+            var named = hosts != null ? target : null;
+            string script = ReplaceOnce(Assets.Text("picker.js"), PickTargetPlaceholder, global::Runlight.Json.Stringify(named?.Origin ?? ""));
             script = ReplaceOnce(script, PickHostsPlaceholder, global::Runlight.Json.Stringify(global::Runlight.Json.Stringify(hosts ?? new List<object?>())));
+            script = ReplaceOnce(script, PickReturnPlaceholder, global::Runlight.Json.Stringify(named?.Back?.Url ?? ""));
+            script = ReplaceOnce(script, PickNoncePlaceholder, global::Runlight.Json.Stringify(named?.Back?.Nonce ?? ""));
             return new Response(script, 200, new Headers { ["content-type"] = "application/javascript; charset=utf-8", ["cache-control"] = "no-store" });
+        }
+
+        // The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+        // script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+        if (path == "/pick-return" && method == "GET")
+        {
+            var t = Messages.Translator(AcceptedLanguage(request));
+            return SmallPage(
+                t.Lang,
+                "<div id=\"done\" hidden><h1>" + EscapeHtml(t.T("pick.doneTitle")) + "</h1><p>" + EscapeHtml(t.T("pick.done")) + "</p></div><div id=\"gone\" hidden><h1>" + EscapeHtml(t.T("pick.goneTitle")) + "</h1><p>" + EscapeHtml(t.T("pick.gone")) + "</p></div>",
+                200,
+                _base + "/pick-return.js");
+        }
+        if (path == "/pick-return.js" && method == "GET")
+        {
+            return new Response(Assets.Text("pick-return.js"), 200, new Headers { ["content-type"] = "application/javascript; charset=utf-8", ["cache-control"] = "no-store" });
         }
 
         if (path == "/assets/world." + BuildHash("worldHash") + ".json" && method == "GET")
