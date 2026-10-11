@@ -127,6 +127,13 @@ test("a hub connects an app through its consent page and changes that site's set
     // Picker tickets name the hub it connected from, and no other.
     assert.equal((await call("POST", `/api/pick?site=${id}`, { origin: "http://localhost:4900" })).status, 200);
     assert.equal((await call("POST", `/api/pick?site=${id}`, { origin: "https://evil.example" })).status, 403);
+    // The install signs the hub's relay page into the ticket, so the picker on the site sends its choice back to the hub.
+    const nonce = "0123456789abcdef0123456789abcdef";
+    const relayed = await call("POST", `/api/pick?site=${id}`, { origin: "http://localhost:4900", return: "http://localhost:4900/runlight/pick-return", nonce });
+    assert.equal(relayed.status, 200);
+    const picker = await (await fetch(`${appUrl}/pick.js?runlight_ticket=${encodeURIComponent(relayed.body.ticket)}`)).text();
+    assert.ok(picker.includes('"http://localhost:4900/runlight/pick-return"') && picker.includes(`"${nonce}"`));
+    assert.equal((await call("POST", `/api/pick?site=${id}`, { origin: "http://localhost:4900", return: "https://evil.example/pick-return", nonce })).status, 400);
     assert.equal((await call("PATCH", `/api/sites/${id}`, { retentionMonths: 24 })).status, 200);
     const moved = await call("PATCH", `/api/sites/${id}`, { timezone: "Asia/Tokyo" });
     assert.equal(moved.body.site.timezone, "Asia/Tokyo", "the hub's row follows");

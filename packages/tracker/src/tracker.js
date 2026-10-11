@@ -40,8 +40,9 @@
   var all = "__RUNLIGHT_RULES__";
   var rules = (typeof all === "object" && (all[site] || all[location.hostname.replace(/^www\./, "")] || all["*"])) || [];
 
-  // ?runlight=pick, opened from the dashboard, loads the element picker and counts nothing.
-  if (/[?&]runlight=pick\b/.test(location.search) && w.opener) {
+  // ?runlight=pick with a ticket, opened from the dashboard, loads the element picker and counts nothing. The
+  // dashboard leaves this tab no handle on itself, so the ticket, which the install checks, is what tells.
+  if (/[?&]runlight=pick\b/.test(location.search) && /[?&]runlight_ticket=/.test(location.search)) {
     var picker = d.createElement("script");
     picker.src = script.src.replace(/s\.js(\?.*)?$/, "pick.js") + location.search;
     d.head.appendChild(picker);

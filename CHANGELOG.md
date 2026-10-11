@@ -4,6 +4,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Security
+
+- The goal picker no longer gives the tracked site's tab a handle on the dashboard, which let any script on the site send the dashboard tab somewhere else. The dashboard opens the site cut off from itself, and the picker sends its choice to a relay page at `pick-return` under the dashboard's own address, in the fragment so it never reaches a server. The picker's ticket names that page and a nonce, signed, and the page hands the choice to the dashboard tab that made the nonce over a channel only that origin's pages share. A hub picking on a site whose own install is older asks for that install to be updated first.
+
 ### Fixed
 
 - A broken percent escape in a path, such as `%E0`, answers as an unknown goal, share, site, link domain, or short link (a 404) instead of an internal error.

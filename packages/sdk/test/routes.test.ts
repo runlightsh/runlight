@@ -70,7 +70,7 @@ test("the element picker sends its choice only to the dashboard its ticket names
   const rl = runlight({ store: sqlite({ path: ":memory:" }), sites: [{ id: "blog", hostnames: ["blog.example.com"] }], now: () => now });
   const { GET, POST } = rl.routes({ token: "secret" });
   const ask = (body: unknown, auth = "secret") => POST(req("/runlight/api/pick?site=blog", { method: "POST", headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" }, body: JSON.stringify(body) }));
-  const target = async (ticket: string) => /var \w+="([^"]*)";if\(/.exec(await (await GET(req(`/runlight/pick.js?runlight=pick&runlight_ticket=${encodeURIComponent(ticket)}`))).text())?.[1];
+  const target = async (ticket: string) => /\w+="([^"]*)";if\(\/\^https/.exec(await (await GET(req(`/runlight/pick.js?runlight=pick&runlight_ticket=${encodeURIComponent(ticket)}`))).text())?.[1];
 
   assert.equal((await ask({ origin: "https://stats.example.com" }, "wrong")).status, 401, "only the owner gets a ticket");
   assert.equal((await ask({ origin: "javascript:alert(1)" })).status, 400);
@@ -100,6 +100,81 @@ test("the element picker sends its choice only to the dashboard its ticket names
   assert.equal((await ask({ origin: "https://evil.example" }, manage)).status, 403, "never another origin");
   const hub = (await (await ask({ origin: "https://hub.example.net" }, manage)).json()) as { ticket: string };
   assert.equal(await target(hub.ticket), "https://hub.example.net");
+});
+
+test("the picker sends its choice to the relay page its ticket names, never through the tab that opened it", async () => {
+  let now = Date.UTC(2026, 9, 7, 12);
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), sites: [{ id: "blog", hostnames: ["blog.example.com"] }], now: () => now });
+  const { GET, POST } = rl.routes({ token: "secret" });
+  const ask = (body: unknown, auth = "secret") => POST(req("/runlight/api/pick?site=blog", { method: "POST", headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" }, body: JSON.stringify(body) }));
+  const script = async (ticket: string) => (await (await GET(req(`/runlight/pick.js?runlight=pick&runlight_ticket=${encodeURIComponent(ticket)}`))).text());
+  const nonce = "0123456789abcdef0123456789abcdef";
+  const back = "https://stats.example.com/runlight/pick-return";
+
+  const asked = await ask({ origin: "https://stats.example.com", return: back, nonce });
+  assert.equal(asked.status, 200);
+  const { ticket } = (await asked.json()) as { ticket: string };
+  assert.equal(ticket.split(".").length, 6, "the return address and nonce are signed into the ticket");
+  const picker = await script(ticket);
+  assert.ok(picker.includes(JSON.stringify(back)) && picker.includes(JSON.stringify(nonce)));
+  assert.ok(!picker.includes("__RUNLIGHT_PICK_RETURN__") && !picker.includes("__RUNLIGHT_PICK_NONCE__"));
+
+  // Neither can be changed: a ticket with another return address or nonce is no ticket, and the picker sends nowhere.
+  const parts = ticket.split(".");
+  const other = Buffer.from("https://stats.example.com/elsewhere/pick-return").toString("hex");
+  for (const changed of [[...parts.slice(0, 3), other, ...parts.slice(4)], [...parts.slice(0, 4), "f".repeat(32), parts[5]]]) {
+    const sent = await script(changed.join("."));
+    assert.ok(!sent.includes("stats.example.com") && !sent.includes(nonce));
+  }
+
+  // The return address is the relay page on the dashboard's own origin, and the nonce is 32 hex digits.
+  for (const body of [
+    { origin: "https://stats.example.com", return: "https://evil.example/pick-return", nonce },
+    { origin: "https://stats.example.com", return: "https://stats.example.com.evil.example/pick-return", nonce },
+    { origin: "https://stats.example.com", return: "https://stats.example.com/runlight/", nonce },
+    { origin: "https://stats.example.com", return: "https://stats.example.com/pick-return?x=1", nonce },
+    { origin: "https://stats.example.com", return: "https://stats.example.com/pick-return#x", nonce },
+    { origin: "https://stats.example.com", return: back },
+    { origin: "https://stats.example.com", return: back, nonce: "short" },
+    { origin: "https://stats.example.com", nonce },
+  ]) {
+    const refused = await ask(body);
+    assert.equal(refused.status, 400, JSON.stringify(body));
+    assert.equal(((await refused.json()) as any).code, "pick_return");
+  }
+  assert.equal((await ask({ origin: "https://stats.example.com", return: "https://stats.example.com/pick-return", nonce })).status, 200, "a dashboard at the root");
+
+  // A hub's ticket names a relay page on the hub it connected from, and no other origin.
+  const made = (await (await POST(req("/runlight/api/tokens", { method: "POST", headers: { authorization: "Bearer secret", "content-type": "application/json" }, body: JSON.stringify({ name: "Hub", scope: "manage", site: "blog" }) }))).json()) as any;
+  await rl.store.setSetting(`token-origin:${made.token.id}`, "https://hub.example.net");
+  assert.equal((await ask({ origin: "https://hub.example.net", return: "https://hub.example.net/pick-return", nonce }, made.secret)).status, 200);
+  assert.equal((await ask({ origin: "https://hub.example.net", return: "https://evil.example/pick-return", nonce }, made.secret)).status, 400);
+
+  now += 31 * 60_000;
+  assert.ok(!(await script(ticket)).includes(nonce), "a ticket runs out after half an hour");
+});
+
+test("the relay page is static, runs only its own script, and keeps its address to itself", async () => {
+  const { GET } = make().routes({ token: "secret" });
+  const page = await GET(req("/runlight/pick-return", { headers: { "accept-language": "de-DE,de;q=0.9" } }));
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") ?? "", /text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+  const csp = page.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.ok(!/script-src[^;]*unsafe/.test(csp), "no inline script");
+  const html = await page.text();
+  assert.match(html, /lang="de"/);
+  assert.match(html, /<script src="\/runlight\/pick-return\.js"><\/script>/);
+  assert.ok(!/<script>/.test(html), "no inline script");
+  const script = await GET(req("/runlight/pick-return.js"));
+  assert.match(script.headers.get("content-type") ?? "", /javascript/);
+  assert.match(await script.text(), /BroadcastChannel/);
+  // Signed out, it answers the same: it holds nothing.
+  const { GET: open } = runlight({ store: sqlite({ path: ":memory:" }), secret: "a".repeat(32) }).routes({ token: "secret", accounts: true });
+  assert.equal((await open(req("/runlight/pick-return"))).status, 200);
 });
 
 test("broken percent escapes in a path answer as a name nobody has, never an error", async () => {

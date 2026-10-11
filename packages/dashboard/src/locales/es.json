@@ -423,6 +423,7 @@
   "goals.match.selector": "Selector CSS",
   "goals.pick": "Elegir en mi sitio",
   "goals.picking": "Esperando tu elección",
+  "goals.pickUpdate": "El Runlight que cuenta este sitio es demasiado antiguo para devolver una elección aquí. Actualízalo, o escribe un selector.",
   "goals.hint.event": "El nombre que envías con runlight(\"Nombre\") o un atributo data-runlight.",
   "goals.hint.page": "Una ruta como /gracias. Usa * para cualquier cosa: /blog/* o /gracias*. Una URL completa también sirve.",
   "goals.hint.link": "Clics en enlaces cuya dirección coincide. Usa * para cualquier cosa, como https://buy.stripe.com/*, o empieza con / para tus propias páginas.",
@@ -807,6 +808,7 @@
   "error.twofactor_restart": "Demasiados códigos incorrectos. Vuelve a empezar a activar el inicio de sesión en dos pasos.",
   "error.pick_origin": "Envía el origen del panel, como https://stats.example.com",
   "error.pick_hub": "La dirección de este hub no es desde la que se conectó. Vuelve a conectar el sitio desde aquí.",
+  "error.pick_return": "Envía la dirección del panel seguida de /pick-return, en su origen, y un nonce de 32 dígitos hexadecimales",
   "assistant.viewerDaily": "Preguntas por lector al día",
   "assistant.viewerDailyHint": "Cada pregunta se paga con tu clave de IA. Los lectores son las personas que invitas en Personas, que pueden leer las estadísticas sin cambiar nada, y cada uno puede hacer este número de preguntas al día. Pon 0 para dejar el asistente solo a los propietarios. Los enlaces compartidos nunca tienen el asistente.",
   "error.assistant_soon": "Has preguntado mucho en poco tiempo. Espera un poco y vuelve a preguntar.",
@@ -996,5 +998,9 @@
   "embedKey.name": "Panel en un CMS",
   "tokens.embeds": "Abre el panel en un CMS",
   "error.embed_expired": "Este panel ha caducado. Recarga la página para abrirlo de nuevo.",
-  "error.embed_site": "Una clave para el panel en un CMS es para un solo sitio. Elige el sitio."
+  "error.embed_site": "Una clave para el panel en un CMS es para un solo sitio. Elige el sitio.",
+  "pick.doneTitle": "Elegido",
+  "pick.done": "Ya está en el objetivo de tu panel. Puedes cerrar esta pestaña.",
+  "pick.goneTitle": "Esta elección no llegó al panel",
+  "pick.gone": "No se inició desde el panel de este navegador, o ya se envió. Vuelve al panel y elige otra vez."
 }

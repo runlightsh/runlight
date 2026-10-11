@@ -51021,6 +51021,474 @@
       ]
     },
     {
+      "name": "the element picker: tickets that name a relay page, and the page itself",
+      "site": {
+        "hostnames": [
+          "blog.example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "sites": [
+        {
+          "id": "blog",
+          "hostnames": [
+            "blog.example.com"
+          ],
+          "timezone": "UTC"
+        },
+        {
+          "id": "shop",
+          "hostnames": [
+            "shop.example.com"
+          ],
+          "timezone": "UTC"
+        }
+      ],
+      "start": 1791374400000,
+      "token": "conformance",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com/runlight/pick-return",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "capture": {
+            "ticket": "ticket"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/pick.js?runlight=pick&runlight_ticket={{ticket}}",
+          "look": [
+            "\"https://stats.example.com\"",
+            "\"https://stats.example.com/runlight/pick-return\"",
+            "\"0123456789abcdef0123456789abcdef\"",
+            "\\\"blog.example.com\\\""
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/javascript",
+              "cache-control": "no-store"
+            },
+            "found": [
+              true,
+              true,
+              true,
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com/pick-return",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://evil.example/pick-return",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com.evil.example/pick-return",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com/runlight/",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com/runlight/pick-return?x=1",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com/runlight/pick-return"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "return": "https://stats.example.com/runlight/pick-return",
+            "nonce": "ABCDEF0123456789ABCDEF0123456789"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+              "code": "pick_return"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://stats.example.com"
+          },
+          "capture": {
+            "older": "ticket"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/pick.js?runlight=pick&runlight_ticket={{older}}",
+          "look": [
+            "\"https://stats.example.com\"",
+            "\"https://stats.example.com/runlight/pick-return\"",
+            "\"0123456789abcdef0123456789abcdef\""
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/javascript",
+              "cache-control": "no-store"
+            },
+            "found": [
+              true,
+              false,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/tokens",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "Hub",
+            "scope": "manage",
+            "site": "blog"
+          },
+          "capture": {
+            "hub": "secret"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "token": {
+                "id": "<id>",
+                "name": "Hub",
+                "site": "blog",
+                "scope": "manage",
+                "hint": "<hint>",
+                "createdAt": 1791374400000,
+                "lastUsedAt": null
+              },
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=blog",
+          "headers": {
+            "authorization": "Bearer {{hub}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://hub.example.net",
+            "return": "https://hub.example.net/pick-return",
+            "nonce": "0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "This hub's address is not the one it connected from. Connect the site again from here.",
+              "code": "pick_hub"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/pick.js?runlight=pick&runlight_ticket={{ticket}}",
+          "advance": 1860000,
+          "look": [
+            "\"https://stats.example.com\"",
+            "\"https://stats.example.com/runlight/pick-return\"",
+            "\"0123456789abcdef0123456789abcdef\""
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/javascript",
+              "cache-control": "no-store"
+            },
+            "found": [
+              false,
+              false,
+              false
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/pick-return",
+          "headers": {
+            "accept-language": "fr-FR,fr;q=0.9"
+          },
+          "look": [
+            "lang=\"fr\"",
+            "<script src=\"/runlight/pick-return.js\"></script>",
+            "id=\"done\" hidden",
+            "id=\"gone\" hidden"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+              "referrer-policy": "no-referrer"
+            },
+            "found": [
+              true,
+              true,
+              true,
+              true
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/pick-return.js",
+          "look": [
+            "BroadcastChannel",
+            "\"runlight-pick\""
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/javascript",
+              "cache-control": "no-store"
+            },
+            "found": [
+              true,
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/pick-return",
+          "expect": {
+            "status": 404,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Not found",
+              "code": "not_found"
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "broken percent escapes in a path answer as a name nobody has",
       "site": {
         "hostnames": [

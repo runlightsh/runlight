@@ -1,16 +1,22 @@
 // The element picker. The dashboard opens the site with ?runlight=pick and a
 // ticket from its install; the tracker loads this instead of counting
-// anything. Hover to highlight, click to choose, and the choice goes back to
-// the dashboard that opened the page.
+// anything. Hover to highlight, click to choose, and this tab goes to the
+// relay page on the dashboard's origin with the choice, which hands it to the
+// dashboard tab. The site's tab never gets a handle on the dashboard's.
 (function () {
   var w = window;
   var d = document;
-  var opener = w.opener;
-  if (!opener) return;
   // The choice goes only to the dashboard origin named in the ticket the install checked when it served
   // this script, which a page that opens the site some other way cannot get. The bar shows that host too.
   var target = "__RUNLIGHT_PICK_TARGET__";
   if (!/^https?:\/\//.test(target)) return;
+  // The relay page there and the nonce the dashboard tab listens for, both from the ticket. A ticket an older
+  // dashboard asked for names neither, and the choice goes back to the tab that opened this one, as it did.
+  var back = "__RUNLIGHT_PICK_RETURN__";
+  var nonce = "__RUNLIGHT_PICK_NONCE__";
+  var relay = back.indexOf(target + "/") === 0 && /^[a-f0-9]{32}$/.test(nonce);
+  var opener = w.opener;
+  if (!relay && !opener) return;
   // The ticket also names the site it was made for, so a ticket for one site does nothing on another's pages.
   var hosts = JSON.parse("__RUNLIGHT_PICK_HOSTS__");
   if (hosts.length && hosts.indexOf(location.hostname.toLowerCase().replace(/^www\./, "")) < 0) return;
@@ -122,9 +128,19 @@
     acts.textContent = "";
     button(t[2], "", idle);
     button(t[1], "go", function () {
-      opener.postMessage({ runlight: "pick", selector: chosen.selector, href: chosen.href, text: chosen.text }, target);
       msg.textContent = t[5];
       acts.textContent = "";
+      if (relay) {
+        // In the fragment, so the choice never reaches a server's logs, and with no referrer, so the
+        // relay page's server never sees this page's address and its ticket either.
+        var go = d.createElement("a");
+        go.rel = "noreferrer";
+        go.href = back + "#n=" + nonce + "&s=" + encodeURIComponent(chosen.selector) + "&h=" + encodeURIComponent(chosen.href) + "&t=" + encodeURIComponent(chosen.text);
+        root.appendChild(go);
+        go.click();
+        return;
+      }
+      opener.postMessage({ runlight: "pick", selector: chosen.selector, href: chosen.href, text: chosen.text }, target);
       setTimeout(function () {
         w.close();
       }, 900);
