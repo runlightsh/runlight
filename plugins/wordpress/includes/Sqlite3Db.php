@@ -34,19 +34,17 @@ final class Sqlite3Db implements Db {
 		if ( null === $this->sqlite ) {
 			$new          = ! file_exists( $this->path );
 			$this->sqlite = new \SQLite3( $this->path );
+			// The file holds sealed keys, so it is for its owner and group alone (0660), whatever the umask: a
+			// scheduled job such as WP-CLI running as another user of the same group can still write to it. Set
+			// before WAL is turned on, so the -wal and -shm files SQLite makes beside it take the same mode.
+			if ( $new && '/' === DIRECTORY_SEPARATOR && file_exists( $this->path ) ) {
+				chmod( $this->path, 0660 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Runlight's own database file, just made.
+			}
 			$this->sqlite->enableExceptions( true );
 			$this->sqlite->busyTimeout( 5000 );
 			$this->sqlite->exec( 'PRAGMA journal_mode = WAL' );
 			$this->sqlite->exec( 'PRAGMA synchronous = NORMAL' );
 			$this->sqlite->exec( 'PRAGMA secure_delete = FAST' );
-			// The file holds sealed keys, so it is readable by this user alone, and so are SQLite's files beside it.
-			if ( $new && '/' === DIRECTORY_SEPARATOR ) {
-				foreach ( array( '', '-wal', '-shm' ) as $suffix ) {
-					if ( file_exists( $this->path . $suffix ) ) {
-						chmod( $this->path . $suffix, 0600 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Runlight's own database file, just made.
-					}
-				}
-			}
 		}
 		return $this->sqlite;
 	}

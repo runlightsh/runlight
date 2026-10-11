@@ -7,12 +7,15 @@ namespace Drupal\runlight;
 use Drupal\Core\Site\Settings;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\TransferException;
+use GuzzleHttp\TransferStats;
 use Psr\Log\LoggerInterface;
 use Runlight\Http\BodyTooLong;
 use Runlight\Http\Fetcher as RunlightFetcher;
 use Runlight\Http\FetchError;
 use Runlight\Http\Headers;
 use Runlight\Http\Response;
+use Runlight\Http\Url;
+use Runlight\Safefetch;
 
 /**
  * Runlight's outgoing requests, made through Drupal's HTTP client.
@@ -23,6 +26,11 @@ use Runlight\Http\Response;
  * icon.
  */
 final class Fetcher implements RunlightFetcher {
+
+  /**
+   * Redirects followed for one pinned request, as Guzzle's own limit is.
+   */
+  private const MAX_REDIRECTS = 20;
 
   public function __construct(
     private readonly ClientInterface $httpClient,
@@ -44,6 +52,36 @@ final class Fetcher implements RunlightFetcher {
    *   When no answer came.
    */
   public function fetch(string $url, array $init = []): Response {
+    if (empty($init['resolve']) || ($init['redirect'] ?? 'follow') === 'manual') {
+      return $this->send($url, $init);
+    }
+    // A pinned request's redirects are followed here, so each one is checked
+    // against the pins as the first address was.
+    for ($hop = 0;; $hop++) {
+      $answer = $this->send($url, ['redirect' => 'manual'] + $init);
+      $location = $answer->headers->get('location');
+      if ($answer->status < 300 || $answer->status >= 400 || $location === NULL || $location === '') {
+        return $answer;
+      }
+      if ($hop >= self::MAX_REDIRECTS) {
+        throw new FetchError('Will not follow more than ' . self::MAX_REDIRECTS . ' redirects');
+      }
+      $url = (new Url($location, $url))->href();
+    }
+  }
+
+  /**
+   * One request, with no redirect followed when it is pinned.
+   *
+   * @param string $url
+   *   The address.
+   * @param array<string, mixed> $init
+   *   The request, with the keys fetch() takes.
+   *
+   * @return \Runlight\Http\Response
+   *   The answer.
+   */
+  private function send(string $url, array $init): Response {
     $headers = $init['headers'] ?? [];
     $headers = $headers instanceof Headers ? $headers : new Headers($headers);
     $method = strtoupper((string) ($init['method'] ?? 'GET'));
@@ -64,20 +102,34 @@ final class Fetcher implements RunlightFetcher {
     }
     // A pin connects to the address Runlight checked, with the name kept for
     // the certificate. Only cURL can, and only without a proxy, which would
-    // look the name up again, so without either the request is refused.
+    // look the name up again, so without either the request is refused, as is
+    // an address no pin names.
+    $addresses = [];
+    $connected = NULL;
     if (!empty($init['resolve'])) {
+      $addresses = Safefetch::pinned($url, array_values($init['resolve']));
       if (!defined('CURLOPT_RESOLVE') || !function_exists('curl_exec')) {
         throw new FetchError('Runlight needs PHP’s curl extension to make this request safely.');
       }
-      if (!empty(Settings::get('http_client_config', [])['proxy'] ?? NULL)) {
+      $proxy = method_exists($this->httpClient, 'getConfig') ? $this->httpClient->getConfig('proxy') : NULL;
+      if (!empty(Settings::get('http_client_config', [])['proxy'] ?? NULL) || !empty($proxy)) {
         throw new FetchError('Runlight cannot make this request safely through a proxy.');
       }
-      $options['curl'] = [CURLOPT_RESOLVE => array_values($init['resolve'])];
+      // No proxy from the environment either, which cURL would read itself.
+      $options['curl'] = [CURLOPT_RESOLVE => array_values($init['resolve']), CURLOPT_PROXY => ''];
       // Guzzle sends a streamed request with PHP's streams, which take no pin.
       $options['stream'] = FALSE;
+      $options['allow_redirects'] = FALSE;
+      // Whatever handler sent it, the answer counts only from a pinned address.
+      $options['on_stats'] = static function (TransferStats $stats) use (&$connected): void {
+        $connected = $stats->getHandlerStat('primary_ip');
+      };
     }
     try {
       $answer = $this->httpClient->request($method, $url, $options);
+      if ($addresses !== [] && !self::among($connected, $addresses)) {
+        throw new FetchError('Runlight did not reach the address it checked, so the answer is not used.');
+      }
       $stream = $answer->getBody();
       $body = '';
       // One byte past the limit is enough to know the answer is too long.
@@ -101,6 +153,27 @@ final class Fetcher implements RunlightFetcher {
       $received[strtolower((string) $name)] = array_map('strval', $values);
     }
     return new Response($body, $answer->getStatusCode(), $received);
+  }
+
+  /**
+   * Whether the address connected to is one of the pinned ones.
+   *
+   * @param mixed $connected
+   *   The address cURL reports, if any.
+   * @param list<string> $addresses
+   *   The pinned addresses.
+   *
+   * @return bool
+   *   TRUE when it is.
+   */
+  private static function among(mixed $connected, array $addresses): bool {
+    $packed = is_string($connected) && $connected !== '' ? @inet_pton(trim($connected, '[]')) : FALSE;
+    foreach ($addresses as $address) {
+      if ($packed !== FALSE && $packed === @inet_pton($address)) {
+        return TRUE;
+      }
+    }
+    return FALSE;
   }
 
   /**
