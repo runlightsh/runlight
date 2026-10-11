@@ -224,11 +224,11 @@ impl Routes {
         if let Some(raw) = crate::re::group(js_re!(r"^/api/link-domains/([^/]+)/check$"), path, 1)
             && method == "GET"
         {
-            let domain = crate::sources::decode_uri_component(&raw)
-                .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
-            if !store.link_domains().await?.iter().any(|(d, s)| *d == domain && *s == site.id) {
-                return Ok(coded("Unknown domain", "unknown_domain", 404, None));
-            }
+            // A domain with broken escapes is one nobody added.
+            let domain = match crate::sources::decode_uri_component(&raw) {
+                Some(d) if store.link_domains().await?.iter().any(|(k, s)| *k == d && *s == site.id) => d,
+                _ => return Ok(coded("Unknown domain", "unknown_domain", 404, None)),
+            };
             let own = match &self.0.origin {
                 Some(o) => Url::parse(o).map(|u| u.hostname()).unwrap_or_default(),
                 None => url.hostname(),
@@ -284,11 +284,11 @@ impl Routes {
         if let Some(raw) = crate::re::group(js_re!(r"^/api/link-domains/([^/]+)$"), path, 1)
             && method == "DELETE"
         {
-            let domain = crate::sources::decode_uri_component(&raw)
-                .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
-            if !store.link_domains().await?.iter().any(|(d, s)| *d == domain && *s == site.id) {
-                return Ok(coded("Unknown domain", "unknown_domain", 404, None));
-            }
+            // A domain with broken escapes is one nobody added.
+            let domain = match crate::sources::decode_uri_component(&raw) {
+                Some(d) if store.link_domains().await?.iter().any(|(k, s)| *k == d && *s == site.id) => d,
+                _ => return Ok(coded("Unknown domain", "unknown_domain", 404, None)),
+            };
             store.remove_link_domain(&domain).await?;
             rl.forget_link_domains();
             return Ok(json(&obj! { "ok" => true }, 200, &[]));
@@ -445,16 +445,12 @@ impl Routes {
         let id = if path == "/api/goals" {
             None
         } else {
-            Some(
-                crate::sources::decode_uri_component(&path["/api/goals/".len()..])
-                    .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?,
-            )
+            // An id with broken escapes is one no goal has.
+            match crate::sources::decode_uri_component(&path["/api/goals/".len()..]) {
+                Some(id) if existing.iter().any(|g| g.id == id) => Some(id),
+                _ => return Ok(coded("Unknown goal", "unknown_goal", 404, None)),
+            }
         };
-        if let Some(id) = &id
-            && !existing.iter().any(|g| &g.id == id)
-        {
-            return Ok(coded("Unknown goal", "unknown_goal", 404, None));
-        }
         self.forget_trackers();
         if request.method == "DELETE" {
             rl.store().delete_goal(id.as_deref().unwrap_or("")).await?;
@@ -708,9 +704,11 @@ impl Routes {
             }
             return Ok(coded("Method not allowed", "method_not_allowed", 405, None));
         }
-        let id = crate::sources::decode_uri_component(&path["/api/shares/".len()..])
-            .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
-        let share = if test(js_re!(r"^[a-f0-9]{32}$"), &id) { rl.store().share_by_id(&id).await? } else { None };
+        let id = crate::sources::decode_uri_component(&path["/api/shares/".len()..]);
+        let share = match id {
+            Some(id) if test(js_re!(r"^[a-f0-9]{32}$"), &id) => rl.store().share_by_id(&id).await?,
+            _ => None,
+        };
         let Some(share) = share.filter(|s| s.site == site.id) else {
             return Ok(coded("Unknown share", "unknown_share", 404, None));
         };
