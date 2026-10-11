@@ -60,6 +60,12 @@ final class Routes
     private const PICK_TARGET_PLACEHOLDER = '"__RUNLIGHT_PICK_TARGET__"';
     /** Where the hostnames of the site its ticket names go, as JSON inside a string. */
     private const PICK_HOSTS_PLACEHOLDER = '"__RUNLIGHT_PICK_HOSTS__"';
+    /** Where the relay page the picker sends its choice to goes, the return address its ticket names. */
+    private const PICK_RETURN_PLACEHOLDER = '"__RUNLIGHT_PICK_RETURN__"';
+    /** Where the nonce the dashboard made for this pick goes, which the relay page hands back to it. */
+    private const PICK_NONCE_PLACEHOLDER = '"__RUNLIGHT_PICK_NONCE__"';
+    /** What the dashboard names one pick by, so its relay page answers only the tab that started it. */
+    private const PICK_NONCE = '/^[a-f0-9]{32}\z/';
     /** How long a picker ticket works: long enough to find the element, not to be kept. */
     public const PICK_TICKET_MS = 30 * 60_000;
     /** Questions one person may put to the assistant in an hour, and at once. */
@@ -391,17 +397,19 @@ final class Routes
     }
 
     /** A plain page in a visitor's language, for unsubscribing and for a share link that is gone. */
-    private static function smallPage(string $lang, string $body, int $status = 200): Response
+    private static function smallPage(string $lang, string $body, int $status = 200, string $script = ''): Response
     {
         return new Response(
             "<!doctype html><html lang=\"$lang\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>Runlight</title>\n"
             . '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>'
-            . "$body</main></body></html>",
+            . "$body</main>" . ($script !== '' ? '<script src="' . self::escapeHtml($script) . '"></script>' : '') . '</body></html>',
             $status,
             [
                 'content-type' => 'text/html; charset=utf-8',
                 'cache-control' => 'no-store',
-                'content-security-policy' => "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+                'content-security-policy' => $script !== ''
+                    ? "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                    : "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
                 'referrer-policy' => 'no-referrer',
             ],
         );
@@ -609,6 +617,12 @@ final class Routes
     private static function isOrigin(string $value): bool
     {
         return (bool) preg_match('#^https?://[^/?\#' . Js::SPACE . ']+\z#u', Js::scrub($value));
+    }
+
+    /** The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end. */
+    private static function isPickReturn(string $value): bool
+    {
+        return (bool) preg_match('#^https?://[^/?\#' . Js::SPACE . ']+(/[^?\#' . Js::SPACE . ']*)?/pick-return\z#u', Js::scrub($value));
     }
 
     /**
@@ -1120,29 +1134,42 @@ final class Routes
         return $made;
     }
 
-    /** A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half an hour. */
-    private function pickTicket(string $origin, string $site): string
+    /**
+     * A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
+     * an hour. With a return address and a nonce it sends it there, to the relay page, which hands it to the dashboard
+     * tab that made the nonce; without them, as an older dashboard asks, to the tab that opened the site.
+     *
+     * @param array{url: string, nonce: string}|null $back
+     */
+    private function pickTicket(string $origin, string $site, ?array $back = null): string
     {
-        $payload = ($this->rl->now() + self::PICK_TICKET_MS) . '.' . bin2hex($site) . '.' . bin2hex($origin);
+        $payload = ($this->rl->now() + self::PICK_TICKET_MS) . '.' . bin2hex($site) . '.' . bin2hex($origin) . ($back !== null ? '.' . bin2hex($back['url']) . '.' . $back['nonce'] : '');
         return "$payload." . Hash::hmac($this->pickKey(), $payload);
     }
 
     /**
-     * The dashboard origin and site a picker ticket names, or null when it is not one this install signed or has run out.
+     * What a picker ticket names, or null when it is not one this install signed or has run out.
      *
-     * @return array{origin: string, site: string}|null
+     * @return array{origin: string, site: string, back?: array{url: string, nonce: string}}|null
      */
     private function pickTarget(string $ticket): ?array
     {
-        if (!preg_match('/^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})\z/', $ticket, $parts) || Js::number($parts[1]) < $this->rl->now()) {
+        if (!preg_match('/^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]{2,2048})\.([a-f0-9]{32}))?\.([a-f0-9]{64})\z/', $ticket, $parts) || Js::number($parts[1]) < $this->rl->now()) {
             return null;
         }
-        if (!self::constantTimeEqual($parts[4], Hash::hmac($this->pickKey(), "{$parts[1]}.{$parts[2]}.{$parts[3]}"))) {
+        if (!self::constantTimeEqual($parts[6], Hash::hmac($this->pickKey(), substr($ticket, 0, (int) strrpos($ticket, '.'))))) {
             return null;
         }
         $unhex = fn (string $text): string => Js::scrub((string) hex2bin(substr($text, 0, strlen($text) - strlen($text) % 2)));
         $origin = $unhex($parts[3]);
-        return self::isOrigin($origin) ? ['origin' => $origin, 'site' => $unhex($parts[2])] : null;
+        if (!self::isOrigin($origin)) {
+            return null;
+        }
+        if ($parts[4] === '') {
+            return ['origin' => $origin, 'site' => $unhex($parts[2])];
+        }
+        $back = $unhex($parts[4]);
+        return self::isPickReturn($back) && str_starts_with($back, "$origin/") ? ['origin' => $origin, 'site' => $unhex($parts[2]), 'back' => ['url' => $back, 'nonce' => $parts[5]]] : null;
     }
 
     /** The key embed tickets and sessions are signed with, made on first use and kept in the database for every process. */
@@ -2138,12 +2165,23 @@ final class Routes
             if (!self::isOrigin($origin)) {
                 return self::coded("Send the dashboard's origin, such as https://stats.example.com", 'pick_origin', 400);
             }
+            // Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+            // listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+            $back = null;
+            if (self::defined($body, 'return') || self::defined($body, 'nonce')) {
+                $address = Js::scrub(self::text($body, 'return'));
+                $nonce = self::text($body, 'nonce');
+                if (strlen($address) > 1024 || !self::isPickReturn($address) || !str_starts_with($address, "$origin/") || !preg_match(self::PICK_NONCE, $nonce)) {
+                    return self::coded("Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits", 'pick_return', 400);
+                }
+                $back = ['url' => $address, 'nonce' => $nonce];
+            }
             // A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
             $hub = $this->managed[$request] ?? null;
             if ($hub !== null && $this->store()->setting("token-origin:{$hub['id']}") !== $origin) {
                 return self::coded("This hub's address is not the one it connected from. Connect the site again from here.", 'pick_hub', 403);
             }
-            return self::json(['ticket' => $this->pickTicket($origin, $site['id'])]);
+            return self::json(['ticket' => $this->pickTicket($origin, $site['id'], $back)]);
         }
 
         if (($path === '/api/goals' && $method === 'POST') || (preg_match('#^/api/goals/[^/]+\z#', $path) && ($method === 'PATCH' || $method === 'DELETE'))) {
@@ -2819,9 +2857,27 @@ final class Routes
                 $rl->init();
             }
             $hosts = $target !== null ? ($rl->site($target['site'])['hostnames'] ?? null) : [];
-            $script = self::replaceOnce(self::asset('picker.js'), self::PICK_TARGET_PLACEHOLDER, Json::encode($hosts !== null ? ($target['origin'] ?? '') : ''));
+            $named = $hosts !== null ? $target : null;
+            $script = self::replaceOnce(self::asset('picker.js'), self::PICK_TARGET_PLACEHOLDER, Json::encode($named['origin'] ?? ''));
             $script = self::replaceOnce($script, self::PICK_HOSTS_PLACEHOLDER, Json::encode(Json::encode($hosts ?? [])));
+            $script = self::replaceOnce($script, self::PICK_RETURN_PLACEHOLDER, Json::encode($named['back']['url'] ?? ''));
+            $script = self::replaceOnce($script, self::PICK_NONCE_PLACEHOLDER, Json::encode($named['back']['nonce'] ?? ''));
             return new Response($script, 200, ['content-type' => 'application/javascript; charset=utf-8', 'cache-control' => 'no-store']);
+        }
+
+        // The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+        // script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+        if ($path === '/pick-return' && $method === 'GET') {
+            ['t' => $t, 'lang' => $lang] = Messages::translator(self::acceptedLanguage($request));
+            return self::smallPage(
+                $lang,
+                '<div id="done" hidden><h1>' . self::escapeHtml($t('pick.doneTitle')) . '</h1><p>' . self::escapeHtml($t('pick.done')) . '</p></div><div id="gone" hidden><h1>' . self::escapeHtml($t('pick.goneTitle')) . '</h1><p>' . self::escapeHtml($t('pick.gone')) . '</p></div>',
+                200,
+                "{$this->base}/pick-return.js",
+            );
+        }
+        if ($path === '/pick-return.js' && $method === 'GET') {
+            return new Response(self::asset('pick-return.js'), 200, ['content-type' => 'application/javascript; charset=utf-8', 'cache-control' => 'no-store']);
         }
 
         if ($path === '/assets/world.' . self::hash('worldHash') . '.json' && $method === 'GET') {
