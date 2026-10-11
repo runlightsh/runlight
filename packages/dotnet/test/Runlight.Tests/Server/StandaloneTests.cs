@@ -175,6 +175,9 @@ public sealed class StandaloneTests : ServerTestCase
         await server.HandleAsync(Req("/api/links?site=blog.example.com", "POST", Auth, J(new JsObject { ["url"] = "https://blog.example.com/b", ["slug"] = "sale", ["domain"] = "stats.example.com" })));
         Assert.Equal(302, (await server.HandleAsync(Req("/sale"))).Status);
         Assert.Equal(200, (await server.HandleAsync(Req("/login"))).Status); // sign-in is still the sign-in page
+        // Broken percent escapes are a link nobody has, here and at /go/, never an error.
+        Assert.Equal(404, (await server.HandleAsync(Req("/%E0"))).Status);
+        Assert.Equal(404, (await server.HandleAsync(Req("/go/%zz"))).Status);
         Assert.Equal(200, (await server.HandleAsync(Req("/", "GET", new() { ["cookie"] = cookie }))).Status); // the dashboard opens for someone signed in
         Assert.Equal(404, (await server.HandleAsync(Req("/"))).Status);
         Assert.Equal(200, (await server.HandleAsync(Req("/api/link-domains/stats.example.com?site=blog.example.com", "DELETE", new() { ["cookie"] = cookie }))).Status); // so it can be removed

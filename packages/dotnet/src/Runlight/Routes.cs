@@ -675,8 +675,11 @@ public sealed class Routes
     /// <summary>A dashboard's origin, which a picker ticket names.</summary>
     private static bool IsOrigin(string value) => OriginPattern.IsMatch(value);
 
-    /// <summary>decodeURIComponent, which throws on a broken escape, as the TypeScript does (an internal error there).</summary>
-    private static string Decode(string text) => Js.DecodeURIComponent(text) ?? throw new UriFormatException("URI malformed");
+    /// <summary>
+    /// One part of a URL path with its percent escapes decoded, or null when they are broken (such as %E0 or
+    /// %zz). A route answers null as it does a name it does not know, never with an error.
+    /// </summary>
+    private static string? DecodePart(string part) => Js.DecodeURIComponent(part);
 
     /// <summary><c>String(body[key] ?? fallback)</c>.</summary>
     private static string Text(JsObject body, string key, string fallback = "")
@@ -1035,8 +1038,8 @@ public sealed class Routes
             var checkMatch = CheckPath.Match(path);
             if (checkMatch.Success && request.Method == "GET")
             {
-                string domain = Decode(checkMatch.Groups[1].Value);
-                if (!(await OwnDomainsAsync(siteId, cancellationToken).ConfigureAwait(false)).Contains(domain))
+                string? domain = DecodePart(checkMatch.Groups[1].Value);
+                if (domain == null || !(await OwnDomainsAsync(siteId, cancellationToken).ConfigureAwait(false)).Contains(domain))
                 {
                     return Coded("Unknown domain", "unknown_domain", 404);
                 }
@@ -1096,8 +1099,8 @@ public sealed class Routes
             var domainMatch = DomainPath.Match(path);
             if (domainMatch.Success && request.Method == "DELETE")
             {
-                string domain = Decode(domainMatch.Groups[1].Value);
-                if (!(await OwnDomainsAsync(siteId, cancellationToken).ConfigureAwait(false)).Contains(domain))
+                string? domain = DecodePart(domainMatch.Groups[1].Value);
+                if (domain == null || !(await OwnDomainsAsync(siteId, cancellationToken).ConfigureAwait(false)).Contains(domain))
                 {
                     return Coded("Unknown domain", "unknown_domain", 404);
                 }
@@ -1448,7 +1451,8 @@ public sealed class Routes
             return (Response)siteOrRefusal;
         }
         var existing = await Store.GoalsAsync(site.Str("id"), cancellationToken).ConfigureAwait(false);
-        string? id = path == "/api/goals" ? null : Decode(path["/api/goals/".Length..]);
+        bool named = path != "/api/goals";
+        string? id = named ? DecodePart(path["/api/goals/".Length..]) : null;
         JsObject? before = null;
         foreach (var g in existing)
         {
@@ -1457,7 +1461,7 @@ public sealed class Routes
                 before = g;
             }
         }
-        if (id != null && before == null)
+        if (named && (id == null || before == null))
         {
             return Coded("Unknown goal", "unknown_goal", 404);
         }
@@ -1766,8 +1770,8 @@ public sealed class Routes
             return Coded("Method not allowed", "method_not_allowed", 405);
         }
 
-        string id = Decode(path["/api/shares/".Length..]);
-        var share = ShareId.IsMatch(id) ? await Store.ShareByIdAsync(id, cancellationToken).ConfigureAwait(false) : null;
+        string? id = DecodePart(path["/api/shares/".Length..]);
+        var share = id != null && ShareId.IsMatch(id) ? await Store.ShareByIdAsync(id, cancellationToken).ConfigureAwait(false) : null;
         if (share == null || share.Str("site") != siteId)
         {
             return Coded("Unknown share", "unknown_share", 404);
@@ -2136,7 +2140,7 @@ public sealed class Routes
         {
             string? askedSite = url.SearchParams.Get("site");
             var siteMatch = SitePath.Match(path);
-            if ((!string.IsNullOrEmpty(askedSite) && askedSite != token.Str("site")) || (siteMatch.Success && Decode(siteMatch.Groups[1].Value) != token.Str("site")))
+            if ((!string.IsNullOrEmpty(askedSite) && askedSite != token.Str("site")) || (siteMatch.Success && DecodePart(siteMatch.Groups[1].Value) != token.Str("site")))
             {
                 return Coded("Unknown site", "unknown_site", 404);
             }
@@ -2614,9 +2618,14 @@ public sealed class Routes
             {
                 return Denied(access);
             }
+            string? id = DecodePart(deleteMatch.Groups[1].Value);
+            if (id == null)
+            {
+                return Coded("Unknown site", "unknown_site", 404);
+            }
             try
             {
-                await rl.DeleteSiteAsync(Decode(deleteMatch.Groups[1].Value), cancellationToken).ConfigureAwait(false);
+                await rl.DeleteSiteAsync(id, cancellationToken).ConfigureAwait(false);
                 return JsonResponse(new JsObject { ["ok"] = true });
             }
             catch (Exception error) when (IsRange(error))
@@ -2847,9 +2856,13 @@ public sealed class Routes
             string months = string.Join(", ", RetentionMonths.Select(Js.Str));
             return Coded("Keep visits for " + months + " months, or forever", "retention_bad", 400, new JsObject { ["months"] = months });
         }
+        string? id = DecodePart(rawId);
+        if (id == null)
+        {
+            return Coded("Unknown site", "unknown_site", 404);
+        }
         try
         {
-            string id = Decode(rawId);
             var remote = rl.Remote(id);
             // How long a connected site keeps visits, and the timezone its days follow, are the install's
             // settings: this server passes them on, and changes its own row only once the install took them.
@@ -2897,7 +2910,7 @@ public sealed class Routes
             {
                 patch["hostnames"] = body.Get("hostnames");
             }
-            var site = await rl.UpdateSiteAsync(Decode(rawId), patch, cancellationToken).ConfigureAwait(false);
+            var site = await rl.UpdateSiteAsync(id, patch, cancellationToken).ConfigureAwait(false);
             // A connected site answers as the list shows it, so the dashboard keeps its install and domains.
             if (remote != null)
             {

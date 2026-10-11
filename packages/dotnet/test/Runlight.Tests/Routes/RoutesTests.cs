@@ -116,6 +116,42 @@ public sealed class RoutesTests : RoutesTestCase
     }
 
     [Fact]
+    public async Task Broken_percent_escapes_in_a_path_answer_as_a_name_nobody_has_never_an_error()
+    {
+        var rl = await RunlightAsync(sites: [Site("blog", hostnames: ["blog.example.com"])]);
+        var routes = rl.Routes(new RoutesOptions { Token = "secret" });
+        (string Method, string Path, string Code, object? Body)[] cases =
+        [
+            ("PATCH", "/runlight/api/goals/%E0?site=blog", "unknown_goal", new JsObject { ["name"] = "X", ["kind"] = "event", ["match"] = "X" }),
+            ("DELETE", "/runlight/api/goals/%zz?site=blog", "unknown_goal", null),
+            ("PATCH", "/runlight/api/shares/%E0%A4?site=blog", "unknown_share", new JsObject { ["name"] = "X" }),
+            ("DELETE", "/runlight/api/shares/%?site=blog", "unknown_share", null),
+            ("PATCH", "/runlight/api/sites/%E0", "unknown_site", new JsObject { ["name"] = "X" }),
+            ("DELETE", "/runlight/api/sites/%zz", "unknown_site", null),
+            ("GET", "/runlight/api/link-domains/%E0/check?site=blog", "unknown_domain", null),
+            ("DELETE", "/runlight/api/link-domains/%zz?site=blog", "unknown_domain", null),
+        ];
+        foreach (var (method, path, code, body) in cases)
+        {
+            var answer = await routes.HandleAsync(Owner(path, method, body));
+            Assert.True(answer.Status == 404, method + " " + path);
+            Assert.Equal(code, Obj(answer).Str("code"));
+        }
+        // A hub's manage token, checked against its one site before anything else.
+        var made = Obj(await routes.HandleAsync(Owner("/runlight/api/tokens", "POST", new JsObject { ["name"] = "Hub", ["scope"] = "manage", ["site"] = "blog" })));
+        Assert.Equal(404, (await routes.HandleAsync(Owner("/runlight/api/sites/%E0", "PATCH", new JsObject { ["name"] = "X" }, made.Str("secret")!))).Status);
+        // Public pages and short links: the share page, unsubscribing, the app's link path, and a link domain.
+        Assert.Equal(404, (await routes.HandleAsync(Req("/runlight/share/%E0"))).Status);
+        Assert.Equal(404, (await routes.HandleAsync(Req("/runlight/unsubscribe/%E0"))).Status);
+        Assert.Equal(404, (await routes.HandleAsync(Req("/runlight/assets/app.%E0.js"))).Status);
+        Assert.Equal(404, (await rl.LinkHandler()(Req("/go/%E0"))).Status);
+        await rl.Store.AddLinkDomainAsync("go.example.net", "blog", rl.Now());
+        rl.ForgetLinkDomains();
+        var linked = await rl.LinkDomainResponseAsync(new Request("https://go.example.net/%E0", "GET", H(("host", "go.example.net"))));
+        Assert.Equal(404, linked?.Status);
+    }
+
+    [Fact]
     public async Task The_check_endpoint_takes_the_cron_secret()
     {
         var routes = (await RunlightAsync()).Routes(new RoutesOptions { Token = "secret", CronSecret = "cron" });
@@ -459,9 +495,8 @@ public sealed class RoutesTests : RoutesTestCase
     [Fact]
     public async Task An_error_inside_a_route_is_an_internal_error_that_says_nothing_more()
     {
-        var routes = (await RunlightAsync(sites: [Site("blog", hostnames: ["blog.example.com"])])).Routes(new RoutesOptions { Token = null });
-        // A broken escape in a path makes decodeURIComponent throw, as it does in TypeScript.
-        var answer = await routes.HandleAsync(Req("/runlight/api/goals/%E0%A4%A?site=blog", "DELETE"));
+        var routes = (await RunlightAsync(sites: [Site("blog", hostnames: ["blog.example.com"])])).Routes(new RoutesOptions { Authorize = (_, _) => throw new InvalidOperationException("the database is on fire") });
+        var answer = await routes.HandleAsync(Req("/runlight/api/goals?site=blog"));
         Assert.Equal(500, answer.Status);
         Assert.Equal("{\"error\":\"Internal error\",\"code\":\"internal\"}", answer.Text());
     }
