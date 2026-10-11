@@ -598,7 +598,7 @@ class PostgresDb(_NetworkDb):
 
 
 class MysqlDb(_NetworkDb):
-    """MySQL 8.4 or MariaDB 11.4 and later through PyMySQL. Each statement goes through mysql_text() first, with
+    """MySQL 8.0.20 or MariaDB 11.4 and later through PyMySQL. Each statement goes through mysql_text() first, with
     its values written in on the client, as mysql2 fills them in."""
 
     _dialect = "mysql"
@@ -960,7 +960,7 @@ def postgres(url: str, statement_timeout: int = 120_000, schema: str | None = No
 
 
 def mysql(url: str, statement_timeout: int = 120_000, max: int = 10) -> MysqlDb:  # noqa: A002
-    """MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://), with
+    """MySQL 8.0.20 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://), with
     the TLS settings mysql_tls() lists, such as ?ssl-mode=VERIFY_IDENTITY. The
     session is utf8mb4, with IGNORE_SPACE added to the server's SQL mode as mysql2 asks for it. Runlight's tables
     carry their own binary collation, so text compares and sorts by code point. `max` is the most connections

@@ -13,7 +13,7 @@ use Runlight\Store\Stores;
 
 /**
  * Where Runlight keeps its numbers when it runs in this Craft site: in Craft's own database, in tables
- * named after Craft's table prefix and rl_, such as craft_rl_events, when that is Postgres, MySQL 8.4,
+ * named after Craft's table prefix and rl_, such as craft_rl_events, when that is Postgres, MySQL 8.0.20,
  * or MariaDB 11.4 or later, or else in a SQLite file under Craft's storage folder, which the web never
  * serves.
  *
@@ -176,7 +176,7 @@ final class Storage
     }
 
     /**
-     * Whether Craft's own database can hold Runlight's tables: Postgres, or MySQL 8.4 or MariaDB 11.4 or
+     * Whether Craft's own database can hold Runlight's tables: Postgres, or MySQL 8.0.20 or MariaDB 11.4 or
      * later, whose tables compare text by code point with a collation older servers lack.
      */
     private static function craftFits(): bool
@@ -193,10 +193,10 @@ final class Storage
                 return false;
             }
             $version = (string) $db->getSchema()->getServerVersion();
-            if (!preg_match('/^(\d+\.\d+)/', $version, $number)) {
+            if (!preg_match('/^(\d+\.\d+(?:\.\d+)?)/', $version, $number)) {
                 return false;
             }
-            return version_compare($number[1], $db->getIsMaria() ? '11.4' : '8.4', '>=');
+            return version_compare($number[1], $db->getIsMaria() ? '11.4' : '8.0.20', '>=');
         } catch (\Throwable $e) {
             Craft::warning('Runlight could not read Craft’s database version: ' . $e->getMessage(), 'runlight');
             return false;

@@ -11,7 +11,7 @@ import sh.runlight.db.Db;
 
 /**
  * The databases the store tests run on: SQLite always; Postgres when RUNLIGHT_TEST_PG holds a
- * connection string (each test gets a schema of its own); MySQL 8.4 and MariaDB 11.4 when
+ * connection string (each test gets a schema of its own); MySQL 8.0.20 and MariaDB 11.4 when
  * RUNLIGHT_TEST_MYSQL is set. RUNLIGHT_TEST_MYSQL may hold the URLs, separated by spaces or commas;
  * any other value means the two local test servers. Each MySQL test gets a database of its own.
  * SQLite, Postgres, and the first MySQL server each run once more with the tables under another

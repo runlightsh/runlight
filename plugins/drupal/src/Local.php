@@ -120,7 +120,7 @@ final class Local implements DestructableInterface {
       ]);
     }
     if ($this->storage->kind() === '') {
-      return (string) $this->t('Running Runlight in this Drupal needs Drupal’s database on Postgres, MySQL 8.4, or MariaDB 11.4 or later, or else a private files folder, set with <code>@setting</code> in settings.php, and PHP’s pdo_sqlite extension for a SQLite file there.', ['@setting' => "\$settings['file_private_path']"]);
+      return (string) $this->t('Running Runlight in this Drupal needs Drupal’s database on Postgres, MySQL 8.0.20, or MariaDB 11.4 or later, or else a private files folder, set with <code>@setting</code> in settings.php, and PHP’s pdo_sqlite extension for a SQLite file there.', ['@setting' => "\$settings['file_private_path']"]);
     }
     return '';
   }

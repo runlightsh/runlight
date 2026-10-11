@@ -2,7 +2,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
   defmodule Runlight.Db.Ecto do
     @moduledoc """
     Runlight's statements through an app's own Ecto repo, on SQLite
-    (`ecto_sqlite3`), Postgres (`postgrex`), or MySQL 8.4 and MariaDB 11.4
+    (`ecto_sqlite3`), Postgres (`postgrex`), or MySQL 8.0.20 and MariaDB 11.4
     and later (`myxql`). The repo's adapter picks the dialect.
 
         Runlight.Db.Ecto.new(repo: MyApp.Repo)

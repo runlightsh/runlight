@@ -15,7 +15,7 @@ friendly analytics with no cookies, kept in your own database.
 
 Drupal 10.3 or 11, and PHP 8.2 or later. Running Runlight inside the site also
 needs the `pdo`, `mbstring`, and `openssl` extensions, and either Drupal's
-database on Postgres, MySQL 8.4, or MariaDB 11.4 or later, or else a private
+database on Postgres, MySQL 8.0.20, or MariaDB 11.4 or later, or else a private
 files folder and `pdo_sqlite`.
 
 ## Installation
@@ -41,7 +41,7 @@ own it, and people with View Runlight see the same dashboard without changing
 anything. Short links answer at `/go/{name}`.
 
 Runlight keeps its numbers in Drupal's own database, when that is Postgres, or
-MySQL 8.4 or MariaDB 11.4 or later, in tables named after Drupal's table prefix
+MySQL 8.0.20 or MariaDB 11.4 or later, in tables named after Drupal's table prefix
 and `rl_`, such as `rl_events`, marked as this site's. Tables of those names
 that are not this site's Runlight's, such as a standalone Runlight's, are left
 alone. It opens a connection of its own through Drupal's database driver, from

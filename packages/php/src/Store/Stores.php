@@ -45,7 +45,7 @@ final class Stores
     }
 
     /**
-     * Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL, or a PDO
+     * Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL, or a PDO
      * the app already has. Text is utf8mb4 with a binary collation, so it compares and sorts by code point,
      * case and trailing spaces included, as SQLite and Postgres do. Option: `statementTimeout`, in
      * milliseconds (default 120000, 0 for no limit), which MySQL applies to reads only and MariaDB to every

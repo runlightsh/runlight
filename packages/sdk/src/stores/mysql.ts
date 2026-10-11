@@ -91,7 +91,7 @@ function driver(on: On): Pick<Db, "all" | "run" | "affected"> {
 }
 
 /**
- * Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, through mysql2. Tables are prefixed `rl_` (or `prefix`),
+ * Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, through mysql2. Tables are prefixed `rl_` (or `prefix`),
  * so the database can be the app's own. Text is utf8mb4 with a binary collation, so it compares and
  * sorts by code point, case and trailing spaces included, as SQLite and Postgres do.
  */

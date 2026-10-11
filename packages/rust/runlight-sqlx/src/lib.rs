@@ -14,7 +14,7 @@
 //!
 //! The tables are the TypeScript SDK's, statement for statement, so a Rust
 //! process can share a database with a Node or PHP one. Each database is a
-//! feature of the crate: `sqlite`, `postgres`, and `mysql` (MySQL 8.4 or
+//! feature of the crate: `sqlite`, `postgres`, and `mysql` (MySQL 8.0.20 or
 //! MariaDB 11.4 and later).
 //!
 //! Values reach the database as the TypeScript drivers send them. SQLite
@@ -76,7 +76,7 @@ pub fn postgres_with_prefix(pool: sqlx::PgPool, prefix: &str) -> Result<SqlStore
     SqlStore::with_prefix(Arc::new(PostgresDb::new(pool)), prefix)
 }
 
-/// Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, on the app's pool, which needs at least
+/// Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, on the app's pool, which needs at least
 /// two connections. Text is utf8mb4 with a binary collation, so it compares and sorts by code point,
 /// as SQLite and Postgres do. Values are written into each statement escaped with backslashes, so each
 /// statement first takes NO_BACKSLASH_ESCAPES out of its connection's sql_mode.

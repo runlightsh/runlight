@@ -12,7 +12,7 @@ pub enum Dialect {
     Sqlite,
     /// Postgres.
     Postgres,
-    /// MySQL 8.4 or MariaDB 11.4 and later.
+    /// MySQL 8.0.20 or MariaDB 11.4 and later.
     Mysql,
 }
 

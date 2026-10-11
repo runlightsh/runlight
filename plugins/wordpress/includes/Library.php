@@ -50,7 +50,7 @@ final class Library {
 			// Each site in a network keeps a file of its own, never tables in the network's database.
 			return is_multisite()
 				? __( 'Running Runlight in a site of a network needs PHP’s sqlite3 extension, which this server does not have.', 'runlight' )
-				: __( 'Running Runlight in this WordPress needs WordPress’s database on MySQL 8.4 or MariaDB 11.4 or later, or else PHP’s sqlite3 extension, and this server has neither.', 'runlight' );
+				: __( 'Running Runlight in this WordPress needs WordPress’s database on MySQL 8.0.20 or MariaDB 11.4 or later, or else PHP’s sqlite3 extension, and this server has neither.', 'runlight' );
 		}
 		return '';
 	}

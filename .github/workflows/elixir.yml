@@ -34,6 +34,11 @@ jobs:
             newest: true
             mysql: mirror.gcr.io/library/mariadb:11.4
             mysql-health: healthcheck.sh --connect --innodb_initialized
+          - elixir: "1.18.5"
+            otp: "27.3"
+            newest: false
+            mysql: public.ecr.aws/docker/library/mysql:8.0
+            mysql-health: mysqladmin ping -h 127.0.0.1 -ppw
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16

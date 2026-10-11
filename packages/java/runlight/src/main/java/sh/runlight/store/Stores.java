@@ -64,7 +64,7 @@ public final class Stores {
   }
 
   /**
-   * Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL.
+   * Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL.
    * Text is utf8mb4 with a binary collation, so it compares and sorts by code point. Needs MySQL
    * Connector/J or MariaDB Connector/J.
    */

@@ -118,7 +118,7 @@ func SQLite(db *sql.DB) *SQLDB { return &SQLDB{db: db, dialect: "sqlite"} }
 // stdlib, say). Its pool needs two connections at least.
 func Postgres(db *sql.DB) *SQLDB { return &SQLDB{db: db, dialect: "postgres"} }
 
-// MySQL is a Db for MySQL 8.4 or MariaDB 11.4 and later, opened with
+// MySQL is a Db for MySQL 8.0.20 or MariaDB 11.4 and later, opened with
 // database/sql (go-sql-driver/mysql). Text is utf8mb4 with a binary
 // collation, so it compares and sorts by code point, as SQLite and Postgres
 // do. Its pool needs two connections at least.

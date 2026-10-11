@@ -42,7 +42,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each Node major also runs against one of MySQL and MariaDB.
+        # Each Node major also runs against one of MySQL and MariaDB, and Node 24 once more against
+        # MySQL 8.0, the oldest line Runlight supports (8.0.20 and later).
         include:
           - node: 22
             mysql: mirror.gcr.io/library/mysql:8.4
@@ -50,6 +51,9 @@ jobs:
           - node: 24
             mysql: mirror.gcr.io/library/mariadb:11.4
             mysql-health: healthcheck.sh --connect --innodb_initialized
+          - node: 24
+            mysql: public.ecr.aws/docker/library/mysql:8.0
+            mysql-health: mysqladmin ping -h 127.0.0.1 -ppw
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16
@@ -90,7 +94,8 @@ jobs:
       - run: npm run build
 
   # The PHP package (packages/php), on the oldest PHP it supports and a current one, against the same three
-  # kinds of database. Each PHP version also runs against one of MySQL and MariaDB.
+  # kinds of database. Each PHP version also runs against one of MySQL and MariaDB, and PHP 8.2 once more against
+  # MySQL 8.0, the oldest line Runlight supports (8.0.20 and later).
   php:
     runs-on: ubuntu-latest
     strategy:
@@ -103,6 +108,9 @@ jobs:
           - php: "8.4"
             mysql: mirror.gcr.io/library/mariadb:11.4
             mysql-health: healthcheck.sh --connect --innodb_initialized
+          - php: "8.2"
+            mysql: public.ecr.aws/docker/library/mysql:8.0
+            mysql-health: mysqladmin ping -h 127.0.0.1 -ppw
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16

@@ -23,7 +23,7 @@ module Runlight
       Store::SqlStore.new(Db::Connect.postgres(url, statement_timeout: statement_timeout, schema: schema), prefix)
     end
 
-    # Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL. Text is
+    # Runlight's tables in MySQL 8.0.20 or MariaDB 11.4 and later, from a mysql:// or mariadb:// URL. Text is
     # utf8mb4 with a binary collation, so it compares and sorts by code point, case and trailing spaces
     # included, as SQLite and Postgres do. statement_timeout is in milliseconds (default 120000, 0 for no
     # limit), which MySQL applies to reads only and MariaDB to every statement.

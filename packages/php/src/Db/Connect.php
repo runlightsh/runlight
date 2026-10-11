@@ -74,7 +74,7 @@ final class Connect
     }
 
     /**
-     * MySQL 8.4 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://).
+     * MySQL 8.0.20 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or mariadb://).
      * The session is the one mysql2 opens: utf8mb4 with the server's default collation for it, and the
      * server's own SQL mode with IGNORE_SPACE added, which mysql2 asks for when it connects. Runlight's
      * tables carry their own binary collation, so text compares and sorts by code point. `$statementTimeout`

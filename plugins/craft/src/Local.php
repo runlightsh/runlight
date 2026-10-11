@@ -68,7 +68,7 @@ final class Local
             return $missing = Craft::t('runlight', 'Craft’s database already has tables starting {prefix} that are not this install’s Runlight’s, so Runlight leaves them alone. Running it in this Craft site then needs PHP’s pdo_sqlite extension, for a SQLite file in the storage folder.', ['prefix' => Storage::prefix()]);
         }
         if (Storage::kind() === '') {
-            return $missing = Craft::t('runlight', 'Running Runlight in this Craft site needs Craft’s database on Postgres, MySQL 8.4, or MariaDB 11.4 or later, or PHP’s pdo_sqlite extension, and this server has neither.');
+            return $missing = Craft::t('runlight', 'Running Runlight in this Craft site needs Craft’s database on Postgres, MySQL 8.0.20, or MariaDB 11.4 or later, or PHP’s pdo_sqlite extension, and this server has neither.');
         }
         return $missing = '';
     }

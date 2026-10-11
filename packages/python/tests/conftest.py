@@ -3,7 +3,7 @@ and conformance tests run on.
 
 SQLite in memory always. Postgres when RUNLIGHT_TEST_PG is set: a connection URL, or anything else (such as 1)
 for postgres://joncphillips@127.0.0.1:5432/runlight_test_python; each test gets a schema of its own, dropped
-after. MySQL 8.4 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set: URLs separated by spaces or commas, or
+after. MySQL 8.0.20 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set: URLs separated by spaces or commas, or
 anything else for the two local test servers. MySQL has no schemas inside a database, so each test empties the
 database of Runlight's tables first; those tests never run in parallel."""
 

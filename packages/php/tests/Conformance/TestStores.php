@@ -13,7 +13,7 @@ use Runlight\Store\Stores;
  * a Postgres schema of its own when RUNLIGHT_TEST_PG is set, and a MySQL or
  * MariaDB database of its own when RUNLIGHT_TEST_MYSQL is set. Each variable
  * holds a connection URL; set to anything else (such as 1), the URLs the port
- * conventions name are used, both MySQL 8.4 and MariaDB 11.4 for MySQL.
+ * conventions name are used, both MySQL 8.0.20 and MariaDB 11.4 for MySQL.
  */
 final class TestStores
 {

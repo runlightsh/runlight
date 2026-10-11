@@ -14,7 +14,7 @@ namespace Runlight.Tests;
 
 /// <summary>
 /// The databases the store tests run on: SQLite always; Postgres when RUNLIGHT_TEST_PG holds a
-/// connection string or URL (each test gets a schema of its own inside it), and MySQL 8.4 and
+/// connection string or URL (each test gets a schema of its own inside it), and MySQL 8.0.20 and
 /// MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set. MySQL has one database for the port's tests, so
 /// each test there drops Runlight's tables first, and the tests run one at a time. Any value
 /// without "://" means the local servers: Postgres at 127.0.0.1:5432, database
