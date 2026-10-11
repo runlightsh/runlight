@@ -178,7 +178,7 @@ function MailService({ site, admin }: { site: Site; admin: boolean }) {
           <div class="domain-main">
             <span class="share-name">{serviceName}</span>
             <span class="share-meta">
-              {state.source === "app" ? t("mail.viaApp", { via: serviceName, from: state.from }) : t(state.source === "code" ? "mail.fromCode" : "mail.fromLine", { from: fromLine })}
+              {state.source === "app" ? t("mail.viaApp", { via: serviceName, from: fromLine }) : t(state.source === "code" ? "mail.fromCode" : "mail.fromLine", { from: fromLine })}
             </span>
           </div>
           {state.source === "app" && admin ? (
@@ -201,7 +201,7 @@ function MailService({ site, admin }: { site: Site; admin: boolean }) {
                   {t("mail.backToApp", { via: state.app.via })}
                 </button>
               ) : (
-                <DeleteButton name={service?.name ?? ""} onDelete={() => void api.removeMail().then(load)} />
+                <DeleteButton name={service?.name ?? ""} onDelete={() => void api.removeMail().then(load).catch((err: Error) => setError(err.message))} />
               )}
             </div>
           ) : null}
