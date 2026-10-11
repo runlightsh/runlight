@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Runlight\Cms;
 
 use Runlight\Http\Fetcher;
+use Runlight\Http\Url;
 
 /**
  * A CMS plugin connecting to a Runlight without copying keys, the half every plugin shares: it reads the
@@ -60,28 +61,18 @@ final class Connect
     /** Whether a Runlight sends people back to an address: on https, or this computer while trying things out. */
     public static function returnable(string $back): bool
     {
-        $parts = parse_url($back);
-        if (!is_array($parts)) {
-            return false;
-        }
-        $host = strtolower((string) ($parts['host'] ?? ''));
-        return strtolower((string) ($parts['scheme'] ?? '')) === 'https' || in_array($host, ['localhost', '127.0.0.1', '[::1]'], true);
+        $url = Url::parse($back);
+        return $url !== null && ($url->protocol === 'https:' || in_array($url->hostname, ['localhost', '127.0.0.1', '[::1]'], true));
     }
 
     /**
-     * The scheme, host, and port of an address, as a browser writes its origin, so https://x:443 and https://x
-     * are the same. An empty string for an address without one.
+     * The scheme, host, and port of a web address, as a browser writes its origin, so https://x:443 and
+     * https://x are the same. An empty string for anything else.
      */
     public static function origin(string $address): string
     {
-        $parts = parse_url($address);
-        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
-            return '';
-        }
-        $scheme = strtolower($parts['scheme']);
-        $port = (int) ($parts['port'] ?? 0);
-        $default = ($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80);
-        return $scheme . '://' . strtolower($parts['host']) . ($port !== 0 && !$default ? ':' . $port : '');
+        $url = Url::parse($address);
+        return $url !== null && in_array($url->protocol, ['http:', 'https:'], true) ? $url->origin() : '';
     }
 
     /**
@@ -98,7 +89,7 @@ final class Connect
         if ($address === '') {
             return [null, null, $this->words('address')];
         }
-        if (!in_array(strtolower((string) parse_url($address, PHP_URL_SCHEME)), ['http', 'https'], true)) {
+        if (self::origin($address) === '') {
             return [null, null, $this->words('scheme')];
         }
         if (!self::returnable($this->back)) {
@@ -129,7 +120,7 @@ final class Connect
             'method' => 'POST',
             'headers' => ['content-type' => 'application/json'],
             'body' => (string) json_encode([
-                'client_name' => $this->words('client', ['host' => (string) parse_url($this->back, PHP_URL_HOST)]),
+                'client_name' => $this->words('client', ['host' => Url::parse($this->back)?->hostname ?? '']),
                 'redirect_uris' => [$this->back],
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         ]);
