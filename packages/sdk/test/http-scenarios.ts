@@ -933,7 +933,7 @@ const WP_BACK = "https://www.blog.example.com/wp-admin/options-general.php?page=
 const NEW_BACK = "https://new.example.org/admin/settings/runlight";
 const IP_BACK = "http://127.0.0.1:9400/wp-admin/options-general.php?page=runlight";
 const cmsAsk = (client: string, back: string, extra = "") => `/oauth/authorize?response_type=code&client_id={{${client}}}&redirect_uri=${encodeURIComponent(back)}&code_challenge=${CHALLENGE}&code_challenge_method=S256&scope=cms&state=c1${extra}`;
-const cmsAllow = (client: string, back: string, site: string): Step => ({ method: "POST", path: "/oauth/authorize", headers: auth, form: { response_type: "code", client_id: `{{${client}}}`, redirect_uri: back, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: "cms", state: "c1", decision: "allow", site } });
+const cmsAllow = (client: string, back: string, site: string, scope = "cms"): Step => ({ method: "POST", path: "/oauth/authorize", headers: auth, form: { response_type: "code", client_id: `{{${client}}}`, redirect_uri: back, code_challenge: CHALLENGE, code_challenge_method: "S256", scope, state: "c1", decision: "allow", site } });
 const cmsSwap = (code: string, client: string, back: string): Step => ({ method: "POST", path: "/oauth/token", form: { grant_type: "authorization_code", code: `{{${code}}}`, client_id: `{{${client}}}`, redirect_uri: back, code_verifier: VERIFIER } });
 const register = (name: string, back: string, capture: string): Step => ({ method: "POST", path: "/oauth/register", headers: { "content-type": "application/json" }, body: { client_name: name, redirect_uris: [back] }, capture: { [capture]: "client_id" } });
 
@@ -959,6 +959,13 @@ OAUTH.push({
     post("/api/embed", { origin: "https://www.blog.example.com" }, asJson("{{dashboardKey}}")),
     getAs("/api/stats?site=blog.example.com&period=today", as("{{dashboardKey}}")),
     get("/api/tokens"),
+    // The agents key in the answer is the site's own: it reports the site's pages, and a key made up is refused.
+    post("/api/observe", { url: "https://blog.example.com/post", userAgent: GPTBOT }, asJson("{{agentsKey}}")),
+    post("/api/observe", { url: "https://blog.example.com/post", userAgent: GPTBOT }, asJson("rlo_0123456789abcdefghij0123")),
+    // Asked for with manage too, cms wins, and a new site for a domain a site already counts is that site.
+    { method: "GET", path: cmsAsk("wp", WP_BACK).replace("scope=cms", "scope=cms%20manage"), headers: auth, look: ["wants to count <strong>blog.example.com</strong>", "agents key", "change its settings"] },
+    { ...cmsAllow("wp", WP_BACK, "new", "cms manage"), capture: { againCode: "header:location~code=([a-f0-9]+)" } },
+    cmsSwap("againCode", "wp", WP_BACK),
     // A domain no site counts yet gets a new site for it.
     register("Drupal at new.example.org", NEW_BACK, "drupal"),
     { method: "GET", path: cmsAsk("drupal", NEW_BACK), headers: auth, look: ['<option value="new">A new site for new.example.org</option>'] },
@@ -970,6 +977,66 @@ OAUTH.push({
     { ...cmsAllow("ip", IP_BACK, "new"), capture: { ipFirst: "header:location~error=([a-z_]+)" } },
   ],
 });
+
+const OTHER_BACK = "https://other.example.org/admin/settings/runlight";
+
+OAUTH.push(
+  {
+    name: "OAuth: a CMS plugin connects to sites in code, which must count its domain",
+    site: { hostnames: ["blog.example.com"], timezone: "UTC" },
+    sites: [
+      { id: "blog", hostnames: ["blog.example.com"], timezone: "UTC", name: "Blog" },
+      { id: "shop", hostnames: ["shop.example.com"], timezone: "UTC", name: "Shop" },
+    ],
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { secret: "conformance-secret" },
+    steps: [
+      // No site in code counts the domain, and sites are not added here, so there is nothing to connect to.
+      register("Drupal at other.example.org", OTHER_BACK, "other"),
+      { method: "GET", path: cmsAsk("other", OTHER_BACK), headers: auth, look: ["Add this site first", "<strong>other.example.org</strong>"] },
+      { ...cmsAllow("other", OTHER_BACK, "new"), capture: { otherError: "header:location~error=([a-z_]+)" } },
+      // The site that counts it is offered alone, with no new one, and a new one asked for is that site.
+      register("WordPress at www.blog.example.com", WP_BACK, "wp"),
+      { method: "GET", path: cmsAsk("wp", WP_BACK), headers: auth, look: ['<option value="blog">Blog</option>', '<option value="shop">', '<option value="new">'] },
+      { ...cmsAllow("wp", WP_BACK, "new"), capture: { wpCode: "header:location~code=([a-f0-9]+)" } },
+      cmsSwap("wpCode", "wp", WP_BACK),
+    ],
+  },
+  {
+    name: "OAuth: a CMS plugin connects to the one site, which lists no domains and so counts any",
+    site: { hostnames: [], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { secret: "conformance-secret" },
+    steps: [
+      register("WordPress at www.blog.example.com", WP_BACK, "wp"),
+      { method: "GET", path: cmsAsk("wp", WP_BACK), headers: auth, look: ["wants to count <strong>blog.example.com</strong>", '<option value="default">', "Add this site first"] },
+      { ...cmsAllow("wp", WP_BACK, "default"), capture: { wpCode: "header:location~code=([a-f0-9]+)" } },
+      { ...cmsSwap("wpCode", "wp", WP_BACK), capture: { agentsKey: "agents_key" } },
+      post("/api/observe", { url: "https://www.blog.example.com/post", userAgent: GPTBOT }, asJson("{{agentsKey}}")),
+      { ...cmsAllow("wp", WP_BACK, "new"), capture: { newCode: "header:location~code=([a-f0-9]+)" } },
+      cmsSwap("newCode", "wp", WP_BACK),
+      cmsAllow("wp", WP_BACK, "elsewhere"),
+    ],
+  },
+);
+
+/** The dashboard shown inside a CMS's admin pages: framed by its own origin only, and nothing else framed at all. */
+const CMS: Scenario[] = [
+  {
+    name: "the dashboard inside a CMS's admin pages",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { cms: "WordPress" },
+    steps: [
+      { method: "GET", path: "/", headers: auth, look: ['data-cms="WordPress"', "data-embed"] },
+      { ...post("/api/shares", { name: "Board" }), capture: { share: "share.id" } },
+      { method: "GET", path: "/share/{{share}}", look: ["data-cms"] },
+    ],
+  },
+];
 
 const OWNER = { email: "owner@example.com", password: "correct horse battery" };
 const signIn = (email: string, password: string, extra: Record<string, string> = {}, jar = "main"): Step => ({ method: "POST", path: "/login", form: { email, password, ...extra }, jar });
@@ -1236,6 +1303,42 @@ const MAIL: Scenario[] = [
     ],
   },
 ];
+
+MAIL.push(
+  {
+    name: "the app's own mailer, and the mail services Settings offers",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 7, 12, 0),
+    token: "conformance",
+    options: { secret: "conformance-secret", appMailer: { via: "WordPress (WP Mail SMTP)", from: "wordpress@example.com", fromName: "Example blog" }, mailServices: ["webhook", "resend"] },
+    upstream: [{ url: "https://hooks.example.net/", status: 200, body: "" }],
+    steps: [
+      // The app's mailer sends until a service is saved, and only the services offered are listed, in their usual order.
+      get("/api/mail"),
+      post("/api/mail/test", { to: "me@example.com" }),
+      post("/api/mail/test", { to: "me@example.com", lang: "de" }),
+      // A service not offered here cannot be saved; one that is takes the app's mailer's place.
+      put("/api/mail", { service: "smtp", host: "smtp.example.com", port: "587", security: "starttls", from: "r@example.com" }),
+      put("/api/mail", { service: "pigeon", from: "r@example.com" }),
+      put("/api/mail", { service: "webhook", url: "https://hooks.example.net/runlight", secret: "whsec", from: "reports@example.com" }),
+      get("/api/mail"),
+      post("/api/mail/test", { to: "me@example.com" }),
+      // Removing it goes back to the app's mailer, and a service saved after that keeps no secret from before.
+      del("/api/mail"),
+      get("/api/mail"),
+      put("/api/mail", { service: "webhook", url: "https://hooks.example.net/runlight", from: "reports@example.com" }),
+      get("/api/mail"),
+    ],
+  },
+  {
+    name: "an app's own mailer that fails",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 7, 12, 0),
+    token: "conformance",
+    options: { appMailer: { via: "Drupal", from: "site@example.com", fail: "SMTP connect() failed" } },
+    steps: [get("/api/mail"), post("/api/mail/test", { to: "me@example.com" })],
+  },
+);
 
 const INSTALL = "https://install.example.net/runlight";
 const HUB = "https://hub.example.net/runlight";
@@ -1686,4 +1789,4 @@ const ESCAPES: Scenario[] = [
   },
 ];
 
-export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...PICKING, ...ESCAPES];
+export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...PICKING, ...ESCAPES, ...CMS];

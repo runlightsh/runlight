@@ -1,5 +1,5 @@
 {
-  "description": "HTTP requests to a fresh Runlight on a fixed clock, and the answers every implementation must give. Each scenario runs on an empty database with the scenario's site (or sites, each with its id, in place of site), its token as the routes' token (an empty string for none, null to leave them open), and its options, then plays its steps in order. Nothing from the environment counts: no RUNLIGHT_TOKEN, RUNLIGHT_SECRET, CRON_SECRET, RUNLIGHT_OBSERVE_KEY, or NODE_ENV.\n\nScenario options: accounts (sign-in accounts on, as routes({ accounts: true }), with the token as the key the first account is made with), managedSites (sites are kept in the database and managed through the API; site and sites are ignored), origin (the install's own address), secret (encrypts saved keys and signs sessions; none without it), observeKey (the install-wide key for POST /api/observe; none without it), cronSecret (the bearer secret POST and GET /api/check also take; none without it), and rateLimit (tracker requests per address per minute, default 120, false for none).\n\nBefore each step the clock moves by advance milliseconds, and work a request starts after answering (such as deleting visits past a shorter retention) is finished before the next step. A step is method, path, headers, and a body: body is a JSON value sent as JSON text (with no content type unless headers name one), or a string sent as it is; form is fields sent as application/x-www-form-urlencoded. The request goes to https://{host}/runlight{path}, where host is the step's host or example.com. A step's to picks the entry point: routes (the default), links (the app's own short-link path, linkHandler(), with path from the host's root such as /go/sale), or linkDomain (the middleware for link domains, linkDomainResponse(), with path from the host's root). absolute: true sends a routes path from the host's root instead of under /runlight, as for /.well-known/ at the site's root.\n\nCookies: each scenario has cookie jars, named by a step's jar (default main; false sends and keeps none). Every Set-Cookie in an answer goes into the step's jar (an empty value or Max-Age=0 removes it), and a request sends its jar's cookies as one Cookie header (name=value pairs joined by '; ') unless its headers give a cookie.\n\nTemplates: {{name}} in a path, a header, a body string, or a form field is a value captured earlier (empty when nothing was), and {{totp:name}} is the six-digit TOTP code (RFC 6238: SHA-1, 30 second steps, base32 secret) for the captured secret at the step's clock. capture keeps values from an answer: a dotted path into its JSON body (a.b.0.c), header:<name> for a response header (all of its Set-Cookie lines joined by newlines for set-cookie), text for the raw body, or fetched for the bodies of the requests the step made to other servers, joined by newlines; any of them followed by ~<regex> keeps the regex's first group instead. Captures read the answer as sent, before it is normalized.\n\nAnswers: status, headers, body, text, files, found, fetched, or pass. headers holds those of content-type (its media type only), cache-control, location, set-cookie (a list, one per cookie, with each value written <value> unless it is empty), www-authenticate, allow, content-disposition, content-security-policy, x-frame-options, referrer-policy, x-content-type-options, x-robots-tag, and the access-control-allow-origin, -methods, -headers, and -max-age headers that the answer sends, and none it does not. body is a JSON answer's body. text is a text/plain or text/csv answer's body. files lists a ZIP answer's files in order, each with its name and text. A step's look lists text to find in an answer that is not JSON, such as a page or a script, and found says which of them it holds. pass: true means the link-domain middleware let the request through to the app.\n\nOther servers: upstream lists servers the scenario stands in for. A request the implementation makes to another server goes to the first upstream whose url its URL starts with (and whose method matches, when one is given), which answers with that status (default 200), headers, and body (a JSON value sent as JSON with application/json, or a string sent as it is). A request no upstream matches fails as a network error does. fetched lists every such request a step made, in order, each with its method, url, the headers the implementation set (lowercased, sorted), and its body (parsed as JSON, or as form fields when it is application/x-www-form-urlencoded, else text).\n\nNormalizing, applied to bodies, text, files, header values, and fetched requests alike: a string whose key is token, secret, hint, version, library, language, ticket, or recovery, or that is a whole rl_ or rlo_ token or 24 hex digits, becomes <k>, where k is its key's name (value for a string with no key). In other strings, the value of a code, ticket, secret, or code_challenge query parameter becomes <value>, every run of 24 or more lowercase hex digits not next to another letter or digit becomes <hex>, and every rl_ or rlo_ token of 20 or more characters becomes <key>.",
+  "description": "HTTP requests to a fresh Runlight on a fixed clock, and the answers every implementation must give. Each scenario runs on an empty database with the scenario's site (or sites, each with its id, in place of site), its token as the routes' token (an empty string for none, null to leave them open), and its options, then plays its steps in order. Nothing from the environment counts: no RUNLIGHT_TOKEN, RUNLIGHT_SECRET, CRON_SECRET, RUNLIGHT_OBSERVE_KEY, or NODE_ENV.\n\nScenario options: accounts (sign-in accounts on, as routes({ accounts: true }), with the token as the key the first account is made with), managedSites (sites are kept in the database and managed through the API; site and sites are ignored), origin (the install's own address), secret (encrypts saved keys and signs sessions; none without it), observeKey (the install-wide key for POST /api/observe; none without it), cronSecret (the bearer secret POST and GET /api/check also take; none without it), rateLimit (tracker requests per address per minute, default 120, false for none), cms (the CMS the dashboard is shown inside, as routes({ cms })), mailServices (the ids of the mail services Settings offers, as runlight({ mailServices })), and appMailer (a mailer of the app's own as the mail option, with its via, from, and fromName when given, whose send records each message it is handed, or, when fail is given, throws an error with fail as its message).\n\nBefore each step the clock moves by advance milliseconds, and work a request starts after answering (such as deleting visits past a shorter retention) is finished before the next step. A step is method, path, headers, and a body: body is a JSON value sent as JSON text (with no content type unless headers name one), or a string sent as it is; form is fields sent as application/x-www-form-urlencoded. The request goes to https://{host}/runlight{path}, where host is the step's host or example.com. A step's to picks the entry point: routes (the default), links (the app's own short-link path, linkHandler(), with path from the host's root such as /go/sale), or linkDomain (the middleware for link domains, linkDomainResponse(), with path from the host's root). absolute: true sends a routes path from the host's root instead of under /runlight, as for /.well-known/ at the site's root.\n\nCookies: each scenario has cookie jars, named by a step's jar (default main; false sends and keeps none). Every Set-Cookie in an answer goes into the step's jar (an empty value or Max-Age=0 removes it), and a request sends its jar's cookies as one Cookie header (name=value pairs joined by '; ') unless its headers give a cookie.\n\nTemplates: {{name}} in a path, a header, a body string, or a form field is a value captured earlier (empty when nothing was), and {{totp:name}} is the six-digit TOTP code (RFC 6238: SHA-1, 30 second steps, base32 secret) for the captured secret at the step's clock. capture keeps values from an answer: a dotted path into its JSON body (a.b.0.c), header:<name> for a response header (all of its Set-Cookie lines joined by newlines for set-cookie), text for the raw body, or fetched for the bodies of the requests the step made to other servers, joined by newlines; any of them followed by ~<regex> keeps the regex's first group instead. Captures read the answer as sent, before it is normalized.\n\nAnswers: status, headers, body, text, files, found, fetched, mailed, or pass. headers holds those of content-type (its media type only), cache-control, location, set-cookie (a list, one per cookie, with each value written <value> unless it is empty), www-authenticate, allow, content-disposition, content-security-policy, x-frame-options, referrer-policy, x-content-type-options, x-robots-tag, and the access-control-allow-origin, -methods, -headers, and -max-age headers that the answer sends, and none it does not. body is a JSON answer's body. text is a text/plain or text/csv answer's body. files lists a ZIP answer's files in order, each with its name and text. A step's look lists text to find in an answer that is not JSON, such as a page or a script, and found says which of them it holds. pass: true means the link-domain middleware let the request through to the app. mailed lists the messages a step handed the app's own mailer, in order, each with its to, from, fromName (only when it is not empty), subject, and text.\n\nOther servers: upstream lists servers the scenario stands in for. A request the implementation makes to another server goes to the first upstream whose url its URL starts with (and whose method matches, when one is given), which answers with that status (default 200), headers, and body (a JSON value sent as JSON with application/json, or a string sent as it is). A request no upstream matches fails as a network error does. fetched lists every such request a step made, in order, each with its method, url, the headers the implementation set (lowercased, sorted), and its body (parsed as JSON, or as form fields when it is application/x-www-form-urlencoded, else text).\n\nNormalizing, applied to bodies, text, files, header values, fetched requests, and mailed messages alike: a string whose key is token, secret, hint, version, library, language, ticket, or recovery, or that is a whole rl_ or rlo_ token or 24 hex digits, becomes <k>, where k is its key's name (value for a string with no key). In other strings, the value of a code, ticket, secret, or code_challenge query parameter becomes <value>, every run of 24 or more lowercase hex digits not next to another letter or digit becomes <hex>, and every rl_ or rlo_ token of 20 or more characters becomes <key>.",
   "scenarios": [
     {
       "name": "a day of visits and the reports they make",
@@ -26888,6 +26888,128 @@
         },
         {
           "method": "POST",
+          "path": "/api/observe",
+          "headers": {
+            "authorization": "Bearer {{agentsKey}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "url": "https://blog.example.com/post",
+            "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+          },
+          "expect": {
+            "status": 204
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/observe",
+          "headers": {
+            "authorization": "Bearer rlo_0123456789abcdefghij0123",
+            "content-type": "application/json"
+          },
+          "body": {
+            "url": "https://blog.example.com/post",
+            "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+          },
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Unauthorized",
+              "code": "unauthorized"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{wp}}&redirect_uri=https%3A%2F%2Fwww.blog.example.com%2Fwp-admin%2Foptions-general.php%3Fpage%3Drunlight&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=cms%20manage&state=c1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "wants to count <strong>blog.example.com</strong>",
+            "agents key",
+            "change its settings"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              true,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms manage",
+            "state": "c1",
+            "decision": "allow",
+            "site": "new"
+          },
+          "capture": {
+            "againCode": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&code=<value>&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{againCode}}",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "cms",
+              "site": "blog.example.com",
+              "agents_key": "<agents_key>"
+            }
+          }
+        },
+        {
+          "method": "POST",
           "path": "/oauth/register",
           "headers": {
             "content-type": "application/json"
@@ -27120,6 +27242,492 @@
             "headers": {
               "cache-control": "no-store",
               "location": "http://127.0.0.1:9400/wp-admin/options-general.php?page=runlight&error=invalid_request&error_description=%22127.0.0.1%22+is+not+a+domain+name&state=c1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "OAuth: a CMS plugin connects to sites in code, which must count its domain",
+      "site": {
+        "hostnames": [
+          "blog.example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "sites": [
+        {
+          "id": "blog",
+          "hostnames": [
+            "blog.example.com"
+          ],
+          "timezone": "UTC",
+          "name": "Blog"
+        },
+        {
+          "id": "shop",
+          "hostnames": [
+            "shop.example.com"
+          ],
+          "timezone": "UTC",
+          "name": "Shop"
+        }
+      ],
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "Drupal at other.example.org",
+            "redirect_uris": [
+              "https://other.example.org/admin/settings/runlight"
+            ]
+          },
+          "capture": {
+            "other": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiRHJ1cGFsIGF0IG90aGVyLmV4YW1wbGUub3JnIiwiciI6WyJodHRwczovL290aGVyLmV4YW1wbGUub3JnL2FkbWluL3NldHRpbmdzL3J1bmxpZ2h0Il0sInQiOjE3OTEyODgwMDAwMDB9.<hex>",
+              "client_name": "Drupal at other.example.org",
+              "redirect_uris": [
+                "https://other.example.org/admin/settings/runlight"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{other}}&redirect_uri=https%3A%2F%2Fother.example.org%2Fadmin%2Fsettings%2Frunlight&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=cms&state=c1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "Add this site first",
+            "<strong>other.example.org</strong>"
+          ],
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{other}}",
+            "redirect_uri": "https://other.example.org/admin/settings/runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "new"
+          },
+          "capture": {
+            "otherError": "header:location~error=([a-z_]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://other.example.org/admin/settings/runlight?error=invalid_request&error_description=Pick+a+site+that+counts+other.example.org&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "WordPress at www.blog.example.com",
+            "redirect_uris": [
+              "https://www.blog.example.com/wp-admin/options-general.php?page=runlight"
+            ]
+          },
+          "capture": {
+            "wp": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiV29yZFByZXNzIGF0IHd3dy5ibG9nLmV4YW1wbGUuY29tIiwiciI6WyJodHRwczovL3d3dy5ibG9nLmV4YW1wbGUuY29tL3dwLWFkbWluL29wdGlvbnMtZ2VuZXJhbC5waHA_cGFnZT1ydW5saWdodCJdLCJ0IjoxNzkxMjg4MDAwMDAwfQ.<hex>",
+              "client_name": "WordPress at www.blog.example.com",
+              "redirect_uris": [
+                "https://www.blog.example.com/wp-admin/options-general.php?page=runlight"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{wp}}&redirect_uri=https%3A%2F%2Fwww.blog.example.com%2Fwp-admin%2Foptions-general.php%3Fpage%3Drunlight&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=cms&state=c1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "<option value=\"blog\">Blog</option>",
+            "<option value=\"shop\">",
+            "<option value=\"new\">"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              false,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "new"
+          },
+          "capture": {
+            "wpCode": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&code=<value>&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{wpCode}}",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "cms",
+              "site": "blog",
+              "agents_key": "<agents_key>"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "OAuth: a CMS plugin connects to the one site, which lists no domains and so counts any",
+      "site": {
+        "hostnames": [],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "WordPress at www.blog.example.com",
+            "redirect_uris": [
+              "https://www.blog.example.com/wp-admin/options-general.php?page=runlight"
+            ]
+          },
+          "capture": {
+            "wp": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiV29yZFByZXNzIGF0IHd3dy5ibG9nLmV4YW1wbGUuY29tIiwiciI6WyJodHRwczovL3d3dy5ibG9nLmV4YW1wbGUuY29tL3dwLWFkbWluL29wdGlvbnMtZ2VuZXJhbC5waHA_cGFnZT1ydW5saWdodCJdLCJ0IjoxNzkxMjg4MDAwMDAwfQ.<hex>",
+              "client_name": "WordPress at www.blog.example.com",
+              "redirect_uris": [
+                "https://www.blog.example.com/wp-admin/options-general.php?page=runlight"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{wp}}&redirect_uri=https%3A%2F%2Fwww.blog.example.com%2Fwp-admin%2Foptions-general.php%3Fpage%3Drunlight&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=cms&state=c1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "wants to count <strong>blog.example.com</strong>",
+            "<option value=\"default\">",
+            "Add this site first"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              true,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "default"
+          },
+          "capture": {
+            "wpCode": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&code=<value>&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{wpCode}}",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "capture": {
+            "agentsKey": "agents_key"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "cms",
+              "site": "default",
+              "agents_key": "<agents_key>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/observe",
+          "headers": {
+            "authorization": "Bearer {{agentsKey}}",
+            "content-type": "application/json"
+          },
+          "body": {
+            "url": "https://www.blog.example.com/post",
+            "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+          },
+          "expect": {
+            "status": 204
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "new"
+          },
+          "capture": {
+            "newCode": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&code=<value>&state=c1"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{newCode}}",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "cms",
+              "site": "default",
+              "agents_key": "<agents_key>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{wp}}",
+            "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "cms",
+            "state": "c1",
+            "decision": "allow",
+            "site": "elsewhere"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight&error=invalid_request&error_description=Pick+a+site+that+counts+blog.example.com&state=c1"
             }
           }
         }
@@ -35384,6 +35992,789 @@
             "body": {
               "error": "Method not allowed",
               "code": "method_not_allowed"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "the app's own mailer, and the mail services Settings offers",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791374400000,
+      "token": "conformance",
+      "options": {
+        "secret": "conformance-secret",
+        "appMailer": {
+          "via": "WordPress (WP Mail SMTP)",
+          "from": "wordpress@example.com",
+          "fromName": "Example blog"
+        },
+        "mailServices": [
+          "webhook",
+          "resend"
+        ]
+      },
+      "upstream": [
+        {
+          "url": "https://hooks.example.net/",
+          "status": 200,
+          "body": ""
+        }
+      ],
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "source": "app",
+              "service": "",
+              "from": "wordpress@example.com",
+              "fromName": "Example blog",
+              "fields": {},
+              "saved": [],
+              "encrypted": true,
+              "services": [
+                {
+                  "id": "resend",
+                  "name": "Resend",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "re_..."
+                    }
+                  ]
+                },
+                {
+                  "id": "webhook",
+                  "name": "Webhook",
+                  "fields": [
+                    {
+                      "name": "url",
+                      "label": "URL",
+                      "placeholder": "https://example.com/hooks/mail"
+                    },
+                    {
+                      "name": "secret",
+                      "label": "Signing secret",
+                      "secret": true,
+                      "optional": true
+                    }
+                  ]
+                }
+              ],
+              "app": {
+                "via": "WordPress (WP Mail SMTP)",
+                "from": "wordpress@example.com",
+                "fromName": "Example blog",
+                "replaced": false
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/mail/test",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "to": "me@example.com"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            },
+            "mailed": [
+              {
+                "to": "me@example.com",
+                "from": "wordpress@example.com",
+                "fromName": "Example blog",
+                "subject": "Runlight can send email",
+                "text": "This test came through WordPress (WP Mail SMTP). Reports for your sites will arrive the same way."
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/mail/test",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "to": "me@example.com",
+            "lang": "de"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            },
+            "mailed": [
+              {
+                "to": "me@example.com",
+                "from": "wordpress@example.com",
+                "fromName": "Example blog",
+                "subject": "Runlight kann E-Mails senden",
+                "text": "Dieser Test kam über WordPress (WP Mail SMTP). Berichte für deine Websites kommen auf demselben Weg."
+              }
+            ]
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "service": "smtp",
+            "host": "smtp.example.com",
+            "port": "587",
+            "security": "starttls",
+            "from": "r@example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "SMTP is not offered here. Pick another mail service",
+              "code": "mail_service",
+              "params": {
+                "service": "smtp"
+              }
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "service": "pigeon",
+            "from": "r@example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Pick a mail service",
+              "code": "mail_service",
+              "params": {}
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "service": "webhook",
+            "url": "https://hooks.example.net/runlight",
+            "secret": "whsec",
+            "from": "reports@example.com"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "source": "dashboard",
+              "service": "webhook",
+              "from": "reports@example.com",
+              "fromName": "",
+              "fields": {
+                "url": "https://hooks.example.net/runlight"
+              },
+              "saved": [
+                "secret"
+              ],
+              "encrypted": true,
+              "services": [
+                {
+                  "id": "resend",
+                  "name": "Resend",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "re_..."
+                    }
+                  ]
+                },
+                {
+                  "id": "webhook",
+                  "name": "Webhook",
+                  "fields": [
+                    {
+                      "name": "url",
+                      "label": "URL",
+                      "placeholder": "https://example.com/hooks/mail"
+                    },
+                    {
+                      "name": "secret",
+                      "label": "Signing secret",
+                      "secret": true,
+                      "optional": true
+                    }
+                  ]
+                }
+              ],
+              "app": {
+                "via": "WordPress (WP Mail SMTP)",
+                "from": "wordpress@example.com",
+                "fromName": "Example blog",
+                "replaced": true
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/mail/test",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "to": "me@example.com"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            },
+            "fetched": [
+              {
+                "method": "POST",
+                "url": "https://hooks.example.net/runlight",
+                "headers": {
+                  "content-type": "application/json",
+                  "x-runlight-signature": "sha256=<hex>"
+                },
+                "body": {
+                  "to": "me@example.com",
+                  "from": "reports@example.com",
+                  "fromName": "",
+                  "subject": "Runlight can send email",
+                  "html": "<p style=\"font-family:sans-serif;font-size:15px\">This test came through Webhook. Reports for your sites will arrive the same way.</p>",
+                  "text": "This test came through Webhook. Reports for your sites will arrive the same way.",
+                  "headers": {}
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "source": "app",
+              "service": "",
+              "from": "wordpress@example.com",
+              "fromName": "Example blog",
+              "fields": {},
+              "saved": [],
+              "encrypted": true,
+              "services": [
+                {
+                  "id": "resend",
+                  "name": "Resend",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "re_..."
+                    }
+                  ]
+                },
+                {
+                  "id": "webhook",
+                  "name": "Webhook",
+                  "fields": [
+                    {
+                      "name": "url",
+                      "label": "URL",
+                      "placeholder": "https://example.com/hooks/mail"
+                    },
+                    {
+                      "name": "secret",
+                      "label": "Signing secret",
+                      "secret": true,
+                      "optional": true
+                    }
+                  ]
+                }
+              ],
+              "app": {
+                "via": "WordPress (WP Mail SMTP)",
+                "from": "wordpress@example.com",
+                "fromName": "Example blog",
+                "replaced": false
+              }
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "service": "webhook",
+            "url": "https://hooks.example.net/runlight",
+            "from": "reports@example.com"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "source": "dashboard",
+              "service": "webhook",
+              "from": "reports@example.com",
+              "fromName": "",
+              "fields": {
+                "url": "https://hooks.example.net/runlight"
+              },
+              "saved": [],
+              "encrypted": true,
+              "services": [
+                {
+                  "id": "resend",
+                  "name": "Resend",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "re_..."
+                    }
+                  ]
+                },
+                {
+                  "id": "webhook",
+                  "name": "Webhook",
+                  "fields": [
+                    {
+                      "name": "url",
+                      "label": "URL",
+                      "placeholder": "https://example.com/hooks/mail"
+                    },
+                    {
+                      "name": "secret",
+                      "label": "Signing secret",
+                      "secret": true,
+                      "optional": true
+                    }
+                  ]
+                }
+              ],
+              "app": {
+                "via": "WordPress (WP Mail SMTP)",
+                "from": "wordpress@example.com",
+                "fromName": "Example blog",
+                "replaced": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "an app's own mailer that fails",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791374400000,
+      "token": "conformance",
+      "options": {
+        "appMailer": {
+          "via": "Drupal",
+          "from": "site@example.com",
+          "fail": "SMTP connect() failed"
+        }
+      },
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "source": "app",
+              "service": "",
+              "from": "site@example.com",
+              "fromName": "",
+              "fields": {},
+              "saved": [],
+              "encrypted": false,
+              "services": [
+                {
+                  "id": "ses",
+                  "name": "Amazon SES",
+                  "fields": [
+                    {
+                      "name": "region",
+                      "label": "Region",
+                      "placeholder": "us-east-1"
+                    },
+                    {
+                      "name": "accessKeyId",
+                      "label": "Access key ID"
+                    },
+                    {
+                      "name": "secretAccessKey",
+                      "label": "Secret access key",
+                      "secret": true
+                    }
+                  ]
+                },
+                {
+                  "id": "resend",
+                  "name": "Resend",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "re_..."
+                    }
+                  ]
+                },
+                {
+                  "id": "postmark",
+                  "name": "Postmark",
+                  "fields": [
+                    {
+                      "name": "serverToken",
+                      "label": "Server API token",
+                      "secret": true
+                    },
+                    {
+                      "name": "stream",
+                      "label": "Message stream",
+                      "optional": true,
+                      "placeholder": "outbound"
+                    }
+                  ]
+                },
+                {
+                  "id": "sendgrid",
+                  "name": "SendGrid",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "SG...."
+                    }
+                  ]
+                },
+                {
+                  "id": "mailgun",
+                  "name": "Mailgun",
+                  "fields": [
+                    {
+                      "name": "domain",
+                      "label": "Sending domain",
+                      "placeholder": "mg.example.com"
+                    },
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true
+                    },
+                    {
+                      "name": "region",
+                      "label": "Region",
+                      "options": [
+                        "us",
+                        "eu"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "id": "brevo",
+                  "name": "Brevo",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true,
+                      "placeholder": "xkeysib-..."
+                    }
+                  ]
+                },
+                {
+                  "id": "mailjet",
+                  "name": "Mailjet",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key"
+                    },
+                    {
+                      "name": "secretKey",
+                      "label": "Secret key",
+                      "secret": true
+                    }
+                  ]
+                },
+                {
+                  "id": "mailersend",
+                  "name": "MailerSend",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API token",
+                      "secret": true,
+                      "placeholder": "mlsn...."
+                    }
+                  ]
+                },
+                {
+                  "id": "sparkpost",
+                  "name": "SparkPost",
+                  "fields": [
+                    {
+                      "name": "apiKey",
+                      "label": "API key",
+                      "secret": true
+                    },
+                    {
+                      "name": "region",
+                      "label": "Region",
+                      "options": [
+                        "us",
+                        "eu"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "id": "smtp",
+                  "name": "SMTP",
+                  "fields": [
+                    {
+                      "name": "host",
+                      "label": "Host",
+                      "placeholder": "smtp.example.com"
+                    },
+                    {
+                      "name": "port",
+                      "label": "Port",
+                      "placeholder": "587"
+                    },
+                    {
+                      "name": "security",
+                      "label": "Security",
+                      "options": [
+                        "starttls",
+                        "tls",
+                        "none"
+                      ]
+                    },
+                    {
+                      "name": "username",
+                      "label": "Username",
+                      "optional": true
+                    },
+                    {
+                      "name": "password",
+                      "label": "Password",
+                      "secret": true,
+                      "optional": true
+                    }
+                  ]
+                },
+                {
+                  "id": "webhook",
+                  "name": "Webhook",
+                  "fields": [
+                    {
+                      "name": "url",
+                      "label": "URL",
+                      "placeholder": "https://example.com/hooks/mail"
+                    },
+                    {
+                      "name": "secret",
+                      "label": "Signing secret",
+                      "secret": true,
+                      "optional": true
+                    }
+                  ]
+                }
+              ],
+              "app": {
+                "via": "Drupal",
+                "from": "site@example.com",
+                "fromName": "",
+                "replaced": false
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/mail/test",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "to": "me@example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Drupal could not send it: SMTP connect() failed",
+              "code": "mail_app_failed",
+              "params": {
+                "via": "Drupal",
+                "detail": "SMTP connect() failed"
+              }
             }
           }
         }
@@ -52467,6 +53858,99 @@
               "content-type": "text/plain"
             },
             "text": "Not found"
+          }
+        }
+      ]
+    },
+    {
+      "name": "the dashboard inside a CMS's admin pages",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "cms": "WordPress"
+      },
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "data-cms=\"WordPress\"",
+            "data-embed"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+              "x-frame-options": "SAMEORIGIN",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/shares",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "Board"
+          },
+          "capture": {
+            "share": "share.id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "share": {
+                "id": "<hex>",
+                "site": "default",
+                "name": "Board",
+                "createdAt": 1791288000000,
+                "path": "/runlight/share/<hex>"
+              }
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/share/{{share}}",
+          "look": [
+            "data-cms"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "no-referrer",
+              "x-robots-tag": "noindex"
+            },
+            "found": [
+              false
+            ]
           }
         }
       ]
