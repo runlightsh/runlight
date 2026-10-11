@@ -9,7 +9,7 @@ mod wired;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::assets::{self, BUILD_INFO, DASHBOARD_CSS, DASHBOARD_JS, PICKER, TRACKER, WORLD_JSON};
+use crate::assets::{self, BUILD_INFO, DASHBOARD_CSS, DASHBOARD_JS, PICK_RELAY, PICKER, TRACKER, WORLD_JSON};
 use crate::goals::{CodedError, click_rules};
 use crate::hash::{hmac, random_id, sha256};
 use crate::http::{Headers, Request, Response, Url};
@@ -93,6 +93,10 @@ const RULES_PLACEHOLDER: &str = "\"__RUNLIGHT_RULES__\"";
 const PICK_TARGET_PLACEHOLDER: &str = "\"__RUNLIGHT_PICK_TARGET__\"";
 /// Where the hostnames of the site its ticket names go, as JSON inside a string.
 const PICK_HOSTS_PLACEHOLDER: &str = "\"__RUNLIGHT_PICK_HOSTS__\"";
+/// Where the relay page the picker sends its choice to goes, the return address its ticket names.
+const PICK_RETURN_PLACEHOLDER: &str = "\"__RUNLIGHT_PICK_RETURN__\"";
+/// Where the nonce the dashboard made for this pick goes, which the relay page hands back to it.
+const PICK_NONCE_PLACEHOLDER: &str = "\"__RUNLIGHT_PICK_NONCE__\"";
 /// How long a picker ticket works.
 const PICK_TICKET_MS: i64 = 30 * 60_000;
 pub(crate) const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -224,18 +228,28 @@ pub(crate) fn private_name(domain: &str) -> bool {
     )
 }
 
-/// A plain page in a visitor's language, for unsubscribing and for a share link that is gone.
-pub(crate) fn small_page(lang: &str, body: &str, status: u16) -> Response {
+/// A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's relay
+/// page, which alone runs a script: one file from this server, never inline.
+pub(crate) fn small_page(lang: &str, body: &str, status: u16, script: &str) -> Response {
+    let tag =
+        if script.is_empty() { String::new() } else { format!("<script src=\"{}\"></script>", escape_html(script)) };
     Response::new(
         format!(
             "<!doctype html><html lang=\"{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>Runlight</title>
-<style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;color:#111827}}main{{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}}h1{{font-size:20px;margin:0 0 12px}}p{{margin:0 0 20px;color:#4b5563}}button{{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}}</style></head><body><main>{body}</main></body></html>"
+<style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;color:#111827}}main{{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}}h1{{font-size:20px;margin:0 0 12px}}p{{margin:0 0 20px;color:#4b5563}}button{{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}}</style></head><body><main>{body}</main>{tag}</body></html>"
         ),
         status,
         Headers::new()
             .with("content-type", "text/html; charset=utf-8")
             .with("cache-control", "no-store")
-            .with("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            .with(
+                "content-security-policy",
+                if script.is_empty() {
+                    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+                } else {
+                    "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                },
+            )
             .with("referrer-policy", "no-referrer"),
     )
 }
@@ -705,32 +719,52 @@ impl Routes {
         Ok(made)
     }
 
-    /// A ticket that lets the picker, on `site`'s pages, send its choice to `origin` for half an hour.
-    pub(crate) async fn pick_ticket(&self, origin: &str, site: &str) -> Result<String, crate::Error> {
-        let payload = format!(
+    /// A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
+    /// an hour. With a return address and a nonce it sends it there, to the relay page, which hands it to the dashboard
+    /// tab that made the nonce; without them, as an older dashboard asks, to the tab that opened the site.
+    pub(crate) async fn pick_ticket(
+        &self,
+        origin: &str,
+        site: &str,
+        back: Option<(&str, &str)>,
+    ) -> Result<String, crate::Error> {
+        let mut payload = format!(
             "{}.{}.{}",
             self.rl().now() + PICK_TICKET_MS,
             crate::hash::hex(site.as_bytes()),
             crate::hash::hex(origin.as_bytes())
         );
+        if let Some((url, nonce)) = back {
+            payload.push_str(&format!(".{}.{nonce}", crate::hash::hex(url.as_bytes())));
+        }
         let sig = hmac(&self.pick_key().await?, &payload);
         Ok(format!("{payload}.{sig}"))
     }
 
-    /// The dashboard origin and site a picker ticket names, or `None`.
-    async fn pick_target(&self, ticket: &str) -> Result<Option<(String, String)>, crate::Error> {
-        let re = js_re!(r"^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})$");
+    /// What a picker ticket names, or `None` when it is not one this install signed or has run out.
+    async fn pick_target(&self, ticket: &str) -> Result<Option<PickTarget>, crate::Error> {
+        let re = js_re!(
+            r"^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]{2,2048})\.([a-f0-9]{32}))?\.([a-f0-9]{64})$"
+        );
         let Some(caps) = re.captures(ticket.as_bytes()) else { return Ok(None) };
-        let part = |i: usize| String::from_utf8_lossy(caps.get(i).map_or(&[][..], |m| m.as_bytes())).into_owned();
-        if js::text_number(&part(1)) < self.rl().now() as f64 {
+        let part = |i: usize| caps.get(i).map(|m| String::from_utf8_lossy(m.as_bytes()).into_owned());
+        if js::text_number(&part(1).unwrap_or_default()) < self.rl().now() as f64 {
             return Ok(None);
         }
-        let expected = hmac(&self.pick_key().await?, &format!("{}.{}.{}", part(1), part(2), part(3)));
-        if !constant_time_equal(&part(4), &expected) {
+        let signed = &ticket[..ticket.rfind('.').unwrap_or(0)];
+        if !constant_time_equal(&part(6).unwrap_or_default(), &hmac(&self.pick_key().await?, signed)) {
             return Ok(None);
         }
-        let origin = unhex(&part(3));
-        Ok(test(js_re!(r"^https?://[^/?#\s]+$"), &origin).then(|| (origin, unhex(&part(2)))))
+        let origin = unhex(&part(3).unwrap_or_default());
+        if !test(js_re!(r"^https?://[^/?#\s]+$"), &origin) {
+            return Ok(None);
+        }
+        let site = unhex(&part(2).unwrap_or_default());
+        let Some(url) = part(4).map(|u| unhex(&u)) else { return Ok(Some(PickTarget { origin, site, back: None })) };
+        if !is_pick_return(&url, &origin) {
+            return Ok(None);
+        }
+        Ok(Some(PickTarget { origin, site, back: Some((url, part(5).unwrap_or_default())) }))
     }
 
     /// The key embed tickets and sessions are signed with, made on first use and kept in the database for every process.
@@ -912,20 +946,46 @@ impl Routes {
                 self.rl().init().await?;
             }
             let hosts: Option<Vec<String>> = match &target {
-                Some((_, site)) => self.rl().site(Some(site)).map(|s| s.hostnames),
+                Some(t) => self.rl().site(Some(&t.site)).map(|s| s.hostnames),
                 None => Some(vec![]),
             };
-            let target_json =
-                js::quote(if hosts.is_some() { target.as_ref().map_or("", |t| t.0.as_str()) } else { "" });
+            let named = if hosts.is_some() { target.as_ref() } else { None };
+            let back = named.and_then(|t| t.back.as_ref());
             let hosts_json =
                 js::quote(&Value::Array(hosts.unwrap_or_default().into_iter().map(Value::from).collect()).to_json());
-            let script = PICKER.replacen(PICK_TARGET_PLACEHOLDER, &target_json, 1).replacen(
-                PICK_HOSTS_PLACEHOLDER,
-                &hosts_json,
-                1,
-            );
+            let script = PICKER
+                .replacen(PICK_TARGET_PLACEHOLDER, &js::quote(named.map_or("", |t| t.origin.as_str())), 1)
+                .replacen(PICK_HOSTS_PLACEHOLDER, &hosts_json, 1)
+                .replacen(PICK_RETURN_PLACEHOLDER, &js::quote(back.map_or("", |b| b.0.as_str())), 1)
+                .replacen(PICK_NONCE_PLACEHOLDER, &js::quote(back.map_or("", |b| b.1.as_str())), 1);
             return Ok(Response::new(
                 script,
+                200,
+                Headers::new()
+                    .with("content-type", "application/javascript; charset=utf-8")
+                    .with("cache-control", "no-store"),
+            ));
+        }
+        // The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+        // script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+        if path == "/pick-return" && method == "GET" {
+            let (t, lang) = glue::translator(&accepted_language(request));
+            return Ok(small_page(
+                &lang,
+                &format!(
+                    "<div id=\"done\" hidden><h1>{}</h1><p>{}</p></div><div id=\"gone\" hidden><h1>{}</h1><p>{}</p></div>",
+                    escape_html(&t("pick.doneTitle", &[])),
+                    escape_html(&t("pick.done", &[])),
+                    escape_html(&t("pick.goneTitle", &[])),
+                    escape_html(&t("pick.gone", &[]))
+                ),
+                200,
+                &format!("{}/pick-return.js", self.0.base),
+            ));
+        }
+        if path == "/pick-return.js" && method == "GET" {
+            return Ok(Response::new(
+                PICK_RELAY,
                 200,
                 Headers::new()
                     .with("content-type", "application/javascript; charset=utf-8")
@@ -1051,6 +1111,7 @@ impl Routes {
                         escape_html(&t("embed.gone", &[]))
                     ),
                     404,
+                    "",
                 ));
             };
             let session = match &token {
@@ -1097,6 +1158,7 @@ impl Routes {
                         escape_html(&t("share.gone", &[]))
                     ),
                     404,
+                    "",
                 ));
             };
             return Ok(Response::new(
@@ -1171,6 +1233,21 @@ fn admin_only(path: &str, method: &str) -> bool {
 fn internal(error: crate::Error) -> Response {
     eprintln!("Runlight: {error}");
     coded("Internal error", "internal", 500, None)
+}
+
+/// What a picker ticket names: the dashboard's origin, the site, and, for a newer dashboard, the relay page on that
+/// origin and the nonce its tab listens for.
+struct PickTarget {
+    origin: String,
+    site: String,
+    back: Option<(String, String)>,
+}
+
+/// Whether `url` is the relay page on the dashboard's `origin`: its address with /pick-return on the end.
+pub(crate) fn is_pick_return(url: &str, origin: &str) -> bool {
+    test(js_re!(r"^https?://[^/?#\s]+(/[^?#\s]*)?/pick-return$"), url)
+        && !url.chars().any(js::is_space)
+        && url.starts_with(&format!("{origin}/"))
 }
 
 fn unhex(text: &str) -> String {

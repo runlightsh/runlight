@@ -422,6 +422,26 @@ impl Routes {
                     None,
                 ));
             }
+            // Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+            // listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+            let back = if body.get("return").is_some() || body.get("nonce").is_some() {
+                let address = js::str_or_empty(body.get("return"));
+                let nonce = js::str_or_empty(body.get("nonce"));
+                if address.len() > 1024
+                    || !crate::routes::is_pick_return(&address, &origin)
+                    || !test(js_re!(r"^[a-f0-9]{32}$"), &nonce)
+                {
+                    return Ok(coded(
+                        "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
+                        "pick_return",
+                        400,
+                        None,
+                    ));
+                }
+                Some((address, nonce))
+            } else {
+                None
+            };
             // A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
             if let Some(hub) = call.managed()
                 && rl.store().setting(&format!("token-origin:{}", hub.id)).await?.as_deref() != Some(origin.as_str())
@@ -433,7 +453,8 @@ impl Routes {
                     None,
                 ));
             }
-            return Ok(json(&obj! { "ticket" => self.pick_ticket(&origin, &site.id).await? }, 200, &[]));
+            let back = back.as_ref().map(|(address, nonce)| (address.as_str(), nonce.as_str()));
+            return Ok(json(&obj! { "ticket" => self.pick_ticket(&origin, &site.id, back).await? }, 200, &[]));
         }
 
         if (path == "/api/goals" && method == "POST")

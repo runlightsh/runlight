@@ -14,8 +14,10 @@ pub const DASHBOARD_CSS: &str = include_str!("../assets/dashboard.css");
 pub const WORLD_JSON: &str = include_str!("../assets/world.json");
 /// The tracker, with its click rules still a placeholder.
 pub const TRACKER: &str = include_str!("../assets/tracker.js");
-/// The element picker, with its target and hosts still placeholders.
+/// The element picker, with its target, hosts, return address, and nonce still placeholders.
 pub const PICKER: &str = include_str!("../assets/picker.js");
+/// The picker's relay page script, which hands a pick to the dashboard tab that asked for it.
+pub const PICK_RELAY: &str = include_str!("../assets/pick-return.js");
 
 const BUILD: &str = include_str!("../assets/build.json");
 const LOCALES_JSON: &str = include_str!("../assets/locales.json");
