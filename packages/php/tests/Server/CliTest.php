@@ -214,4 +214,62 @@ final class CliTest extends TestCase
         $this->assertStringContainsString('dbip-country-lite-2026-12.mmdb.gz', end($logged));
         $this->assertNull($broken->newest());
     }
+
+    public function testDbIpWorksItsFilesThroughTheFilesItIsGiven(): void
+    {
+        $db = base64_decode(Fixture::load('geo')['databases'][0]['base64']);
+        $dir = "{$this->root}/geo";
+        // An app's own filesystem layer, here keeping the database in memory once it is opened, as a CMS's may.
+        $files = new class implements \Runlight\Server\DbIpFiles {
+            /** @var list<string> */
+            public array $done = [];
+            private \Runlight\Server\DbIpDisk $disk;
+
+            public function __construct()
+            {
+                $this->disk = new \Runlight\Server\DbIpDisk();
+            }
+
+            public function folder(string $dir): bool
+            {
+                $this->done[] = 'folder';
+                return $this->disk->folder($dir);
+            }
+
+            public function gunzip(string $from, string $to): void
+            {
+                $this->done[] = 'gunzip';
+                file_put_contents($to, gzdecode((string) file_get_contents($from)));
+            }
+
+            public function open(string $file): \Runlight\Mmdb
+            {
+                $this->done[] = 'open ' . basename($file);
+                return new \Runlight\Mmdb((string) file_get_contents($file));
+            }
+
+            public function move(string $from, string $to): void
+            {
+                $this->done[] = 'move';
+                $this->disk->move($from, $to);
+            }
+
+            public function delete(string $file): void
+            {
+                $this->done[] = 'delete ' . basename($file);
+                $this->disk->delete($file);
+            }
+        };
+        $download = static fn (string $url, string $file): bool => (bool) file_put_contents($file, gzencode($db));
+        $geo = new DbIp($dir, 'country', $download, static function (string $line): void {
+        }, $files);
+        $geo->refresh(1_791_374_400_000); // 2026-10-07
+        // Older files go, the download among them, and what is left of the download goes either way.
+        $this->assertSame(['folder', 'gunzip', 'open dbip-country-lite-2026-10.mmdb.partial', 'move', 'delete dbip-country-lite-2026-10.mmdb.gz.partial', 'delete dbip-country-lite-2026-10.mmdb.gz.partial', 'delete dbip-country-lite-2026-10.mmdb.partial'], $files->done);
+        $files->done = [];
+        $lookup = $geo->lookup();
+        $this->assertNotNull($lookup);
+        $lookup('192.0.2.1');
+        $this->assertSame(['open dbip-country-lite-2026-10.mmdb'], $files->done, 'lookups open the database through it too');
+    }
 }

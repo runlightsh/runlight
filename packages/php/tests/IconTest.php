@@ -83,6 +83,21 @@ final class IconTest extends TestCase
         $this->assertCount(4, $fetcher->requests);
     }
 
+    public function testAnAppsCacheKeepsTheIconInPlaceOfApcuAndFiles(): void
+    {
+        $origin = 'https://93.184.215.15';
+        $fetcher = new FakeFetcher(static fn (string $url) => $url === "$origin/favicon.ico" ? new Response("\x89PNG\x00", 200, ['content-type' => 'image/png']) : new Response('', 404));
+        $cache = new \Runlight\Tests\Support\MemoryCache();
+        $now = 1_791_471_600_000;
+        $icon = Icon::fetchIcon($origin, $now, $fetcher, $this->dir, $cache);
+        $this->assertSame(['body' => "\x89PNG\x00", 'type' => 'image/png'], $icon);
+        $this->assertSame(['runlight:icon:' . hash('sha256', $origin)], array_keys($cache->values));
+        (new \ReflectionProperty(Icon::class, 'cache'))->setValue(null, []);
+        $this->assertSame($icon, Icon::fetchIcon($origin, $now + 60_000, $fetcher, $this->dir, $cache), 'read back from the cache');
+        $this->assertCount(2, $fetcher->requests);
+        $this->assertFalse(is_dir("{$this->dir}/runlight-icons"), 'no file is made');
+    }
+
     public function testAPrivateOriginIsNeverFetched(): void
     {
         $fetcher = new FakeFetcher(static fn () => new Response('x', 200, ['content-type' => 'image/png']));

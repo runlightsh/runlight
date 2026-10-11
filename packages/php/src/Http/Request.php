@@ -72,7 +72,8 @@ final class Request
      */
     public static function readBody($stream, string $target, ?string $declared = null): string
     {
-        $limit = preg_match('#/e$#D', (string) parse_url($target, PHP_URL_PATH)) ? 16 * 1024 : 10 * 1024 * 1024;
+        // The path is what comes before the query, as the Node adapter reads it.
+        $limit = preg_match('#/e$#D', explode('?', $target, 2)[0]) ? 16 * 1024 : 10 * 1024 * 1024;
         if ($declared !== null && is_numeric(trim($declared)) && (float) trim($declared) > $limit) {
             throw new BodyTooLarge("Request body over $limit bytes");
         }

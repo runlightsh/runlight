@@ -264,6 +264,26 @@ final class IngestTest extends CoreTestCase
         @rmdir($dir);
     }
 
+    public function testAnAppsCacheKeepsTheRateLimitCountsAndItsKeyInPlaceOfApcuAndFiles(): void
+    {
+        $dir = sys_get_temp_dir() . '/runlight-rate-test-' . bin2hex(random_bytes(4));
+        $cache = new \Runlight\Tests\Support\MemoryCache();
+        $now = static fn (): int => 1_000 * 60_000;
+        $first = new \Runlight\RateLimit(2, $now, $dir, true, $cache);
+        $second = new \Runlight\RateLimit(2, $now, $dir, true, $cache);
+        self::assertTrue($first->allow('192.0.2.1'));
+        self::assertTrue($second->allow('192.0.2.1'));
+        self::assertFalse($first->allow('192.0.2.1'), 'the third hit in the minute is over the limit, wherever it lands');
+        self::assertTrue($second->allow('192.0.2.2'), 'another address counts apart');
+        $first->sweep();
+        $keys = array_keys($cache->values);
+        sort($keys);
+        self::assertSame('runlight:rl:key:0', $keys[2]);
+        self::assertSame(16, strlen($cache->values['runlight:rl:key:0']));
+        self::assertMatchesRegularExpression('/^runlight:rl:1000:[0-9a-f]{16}$/', $keys[0]);
+        self::assertFalse(is_dir($dir), 'no file is made');
+    }
+
     public function testTheRateLimitHoldsAcrossSeparateProcessesWithoutApcu(): void
     {
         // Each PHP request is its own process, so the key has to outlast them all for the day, or every request

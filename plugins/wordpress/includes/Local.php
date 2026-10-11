@@ -81,8 +81,23 @@ final class Local {
 		return $secret;
 	}
 
-	/** DB-IP's free country data, kept beside a SQLite file, or in the same uploads folder. */
+	/** The package, and the plugin's classes that build on it, loaded once. */
+	private static function load(): void {
+		Library::load();
+		require_once __DIR__ . '/Fetcher.php';
+		require_once __DIR__ . '/WpdbDb.php';
+		require_once __DIR__ . '/Sqlite3Db.php';
+		require_once __DIR__ . '/Cache.php';
+		require_once __DIR__ . '/Locations.php';
+		require_once __DIR__ . '/Mailer.php';
+	}
+
+	/**
+	 * DB-IP's free country data, kept beside a SQLite file, or in the same
+	 * uploads folder, downloaded and kept through WordPress.
+	 */
 	private static function locations(): \Runlight\Server\DbIp {
+		self::load();
 		return new \Runlight\Server\DbIp(
 			Storage::folder() . '/geo',
 			'country',
@@ -91,7 +106,8 @@ final class Local {
 				if ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) {
 					error_log( $line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Runlight's own notes, only with debug logging on.
 				}
-			}
+			},
+			new Locations()
 		);
 	}
 
@@ -100,23 +116,25 @@ final class Local {
 		if ( null !== self::$runlight ) {
 			return self::$runlight;
 		}
-		Library::load();
-		require_once __DIR__ . '/Fetcher.php';
+		self::load();
 		$name    = wp_strip_all_tags( get_bloginfo( 'name' ) );
 		$options = array(
-			'store'      => Storage::store(),
-			'site'       => array(
+			'store'        => Storage::store(),
+			'site'         => array(
 				'id'        => self::site(),
 				'name'      => '' !== $name ? $name : (string) wp_parse_url( home_url(), PHP_URL_HOST ),
 				'hostnames' => self::hostnames(),
 				'timezone'  => self::timezone(),
 			),
-			'secret'     => self::secret(),
+			'secret'       => self::secret(),
 			// Hosts and CDNs in front of WordPress name the visitor in a header, and Runlight needs them told apart.
-			'trustProxy' => true,
-			'fetcher'    => new Fetcher(),
-			'dataDir'    => Storage::folder(),
-			'linkPath'   => rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '/go',
+			'trustProxy'   => true,
+			'fetcher'      => new Fetcher(),
+			// Rate counts and the site's icon go in WordPress's cache, never in files of Runlight's own.
+			'cache'        => new Cache(),
+			// No SMTP, whose client opens connections of its own: WordPress's mailer and the mail services cover it.
+			'mailServices' => array_values( array_diff( array_column( \Runlight\Mail\Transports::SERVICES, 'id' ), array( 'smtp' ) ) ),
+			'linkPath'     => rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '/go',
 		);
 		if ( Settings::get()['locations'] ) {
 			$lookup = self::locations()->lookup();
@@ -125,7 +143,6 @@ final class Local {
 			}
 		}
 		// With an SMTP or mail plugin set up, reports go through WordPress, until the dashboard names another service.
-		require_once __DIR__ . '/Mailer.php';
 		$mailer = property_exists( Runlight::class, 'appMailer' ) ? Mailer::option() : null;
 		if ( null !== $mailer ) {
 			$options['mail'] = $mailer;
