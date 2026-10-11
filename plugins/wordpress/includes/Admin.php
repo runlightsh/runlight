@@ -258,6 +258,35 @@ JS;
 		<?php
 	}
 
+	/** What a site running Runlight here should know: where it answers with plain permalinks, and upkeep that has not run. */
+	private static function local_notices(): void {
+		$cron_off = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
+		?>
+		<?php if ( Local::plain_permalinks() ) : ?>
+			<div class="notice notice-info inline"><p>
+				<?php
+				printf(
+					/* translators: 1: Runlight's address on this site, 2: link to the permalink settings */
+					esc_html__( 'With plain permalinks, Runlight answers at %1$s, through index.php, so it works on every server. Choose another structure under %2$s to have it at /runlight.', 'runlight' ),
+					'<code>' . esc_html( Local::address() . '/' ) . '</code>',
+					'<a href="' . esc_url( admin_url( 'options-permalink.php' ) ) . '">' . esc_html__( 'Settings, Permalinks', 'runlight' ) . '</a>'
+				);
+				?>
+			</p></div>
+		<?php endif; ?>
+		<?php if ( Local::overdue() ) : ?>
+			<div class="notice notice-warning inline"><p>
+				<?php esc_html_e( 'Runlight’s hourly upkeep has not run for over a day, so email reports, location data, daily totals, and removing visits past their retention are waiting.', 'runlight' ); ?>
+				<?php if ( $cron_off ) : ?>
+					<?php esc_html_e( 'WordPress’s cron is turned off with DISABLE_WP_CRON, so have your server run wp-cron.php every hour, or run “wp cron event run --due-now” with WP-CLI.', 'runlight' ); ?>
+				<?php else : ?>
+					<?php esc_html_e( 'WordPress runs it when the site has visitors, so on a quiet site, or where the host blocks it, have your server run wp-cron.php every hour.', 'runlight' ); ?>
+				<?php endif; ?>
+			</p></div>
+		<?php endif; ?>
+		<?php
+	}
+
 	public static function page(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
@@ -272,7 +301,8 @@ JS;
 			self::setup( $missing );
 			return;
 		}
-		if ( $manual ) {
+		// By hand, the fields start at "elsewhere", but only until a choice is saved.
+		if ( $unset && $manual ) {
 			$local = false;
 		}
 		?>
@@ -290,6 +320,7 @@ JS;
 					<?php esc_html_e( 'Runlight is counting this site.', 'runlight' ); ?>
 					<a href="<?php echo esc_url( admin_url( 'admin.php?page=' . Dashboard::PAGE ) ); ?>"><?php esc_html_e( 'See the numbers', 'runlight' ); ?></a>
 				</p></div>
+				<?php self::local_notices(); ?>
 			<?php elseif ( ! $local && '' !== $settings['address'] ) : ?>
 				<div id="runlight-status" class="notice notice-info inline"><p><?php esc_html_e( 'Checking that your Runlight answers…', 'runlight' ); ?></p></div>
 			<?php endif; ?>

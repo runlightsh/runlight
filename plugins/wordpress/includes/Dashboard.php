@@ -1,7 +1,9 @@
 <?php
 /**
- * The Runlight page in wp-admin: this site's dashboard, framed from your
- * Runlight with a ticket the plugin asks for on every visit to the page.
+ * The Runlight page in wp-admin: this site's dashboard, framed. Runlight
+ * running in this WordPress is framed from /runlight on the site, signed in
+ * as the admin is; a Runlight elsewhere is framed with a ticket the plugin
+ * asks for on every visit to the page.
  *
  * @package Runlight
  */
@@ -85,6 +87,8 @@ final class Dashboard {
 		$setup    = admin_url( 'options-general.php?page=runlight' );
 		$local    = 'local' === $settings['mode'];
 		$address  = Settings::address();
+		// The dashboard lets only its own origin frame it, so wp-admin served from another one, such as www. or http, opens it in a tab.
+		$elsewhere = $local && '' !== $address && self::origin_of( $address ) !== self::admin_origin();
 		if ( $local ) {
 			// Runlight here is on this site, signed in with this login, so the whole dashboard shows, not a share view.
 			$ticket = '' !== $address ? array( 'url' => $address . '/' ) : Library::missing();
@@ -130,6 +134,18 @@ final class Dashboard {
 					);
 					?>
 				</p></div>
+			<?php elseif ( $elsewhere ) : ?>
+				<div class="notice notice-info inline"><p>
+					<?php
+					printf(
+						/* translators: 1: the address wp-admin is served from, 2: the site's address */
+						esc_html__( 'wp-admin is served from %1$s and the site from %2$s, and the dashboard shows inside a page only from its own site’s address, so it opens in a new tab.', 'runlight' ),
+						'<code>' . esc_html( self::admin_origin() ) . '</code>',
+						'<code>' . esc_html( self::origin_of( $address ) ) . '</code>'
+					);
+					?>
+				</p></div>
+				<p><a class="button button-primary" href="<?php echo esc_url( $full ); ?>" target="_blank" rel="noopener"><?php esc_html_e( 'Open the dashboard', 'runlight' ); ?></a></p>
 			<?php elseif ( is_string( $ticket ) ) : ?>
 				<div class="notice notice-error inline"><p>
 					<?php echo esc_html( $ticket ); ?>

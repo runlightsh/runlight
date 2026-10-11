@@ -42,11 +42,14 @@ final class Library {
 				return sprintf( __( 'Running Runlight in this WordPress needs PHP’s %s extension, which this server does not have.', 'runlight' ), $extension );
 			}
 		}
-		if ( '' === Storage::kind() ) {
-			return __( 'Running Runlight in this WordPress needs WordPress’s database on MySQL 8.4 or MariaDB 11.4 or later, or else PHP’s sqlite3 extension, and this server has neither.', 'runlight' );
-		}
 		if ( '' === self::folder() ) {
 			return __( 'This copy of the plugin is missing its lib folder. Install it again from WordPress.org.', 'runlight' );
+		}
+		if ( '' === Storage::kind() ) {
+			// Each site in a network keeps a file of its own, never tables in the network's database.
+			return is_multisite()
+				? __( 'Running Runlight in a site of a network needs PHP’s sqlite3 extension, which this server does not have.', 'runlight' )
+				: __( 'Running Runlight in this WordPress needs WordPress’s database on MySQL 8.4 or MariaDB 11.4 or later, or else PHP’s sqlite3 extension, and this server has neither.', 'runlight' );
 		}
 		return '';
 	}

@@ -1,10 +1,11 @@
 <?php
 /**
  * Where Runlight keeps its numbers when it runs in this WordPress: in
- * WordPress's own database, in tables prefixed rl_, when that is MySQL 8.4 or
- * MariaDB 11.4 or later, or else in a SQLite file under the uploads folder.
- * The choice is made the first time Runlight runs and kept, so the numbers
- * never split across two places.
+ * WordPress's own database, in tables named after WordPress's own prefix and
+ * rl_, such as wp_rl_events, when that is MySQL 8.4 or MariaDB 11.4 or later,
+ * or else in a SQLite file under the uploads folder. The choice is made the
+ * first time Runlight runs and kept, so the numbers never split across two
+ * places.
  *
  * @package Runlight
  */
@@ -43,7 +44,7 @@ final class Storage {
 			return $kept;
 		}
 		// Sites in a network each get a file of their own, so no site sees another's settings or keys.
-		$kind = ! is_multisite() && self::mysql_fits() ? 'mysql' : ( class_exists( 'SQLite3' ) ? 'sqlite' : '' );
+		$kind = ! is_multisite() && self::mysql_fits() && self::mysql_free() ? 'mysql' : ( class_exists( 'SQLite3' ) ? 'sqlite' : '' );
 		$kept = array(
 			'kind' => $kind,
 			'file' => 'runlight-' . bin2hex( random_bytes( 16 ) ) . '.db',
@@ -71,10 +72,72 @@ final class Storage {
 		return version_compare( $number[1], stripos( $version, 'mariadb' ) !== false ? '11.4' : '8.4', '>=' );
 	}
 
+	/** What Runlight's table names start with in WordPress's database: WordPress's own prefix, then rl_. */
+	public static function prefix(): string {
+		global $wpdb;
+		return $wpdb->prefix . \Runlight\Store\Sql::PREFIX;
+	}
+
+	/**
+	 * Runlight's tables in WordPress's database, by name: the only ones it ever
+	 * creates or drops.
+	 *
+	 * @return list<string>
+	 */
+	private static function tables(): array {
+		$prefix = self::prefix();
+		return array_map( static fn ( string $table ): string => $prefix . $table, \Runlight\Store\Sql::TABLES );
+	}
+
+	/**
+	 * The tables already in WordPress's database whose names start as
+	 * Runlight's would.
+	 *
+	 * @return list<string>
+	 */
+	private static function found(): array {
+		global $wpdb;
+		return array_map( 'strval', (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::prefix() ) . '%' ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- looking for tables named as Runlight's would be, before making them.
+	}
+
+	/**
+	 * Whether Runlight's tables can go in WordPress's database without meeting
+	 * another's: no table there starts as theirs would, unless it is one of
+	 * Runlight's own, left by an earlier copy of the plugin along with its
+	 * record of the schema. Otherwise the numbers go in a SQLite file.
+	 */
+	private static function mysql_free(): bool {
+		Library::load();
+		$found = self::found();
+		if ( array() === $found ) {
+			return true;
+		}
+		return in_array( self::prefix() . 'meta', $found, true ) && array() === array_diff( $found, self::tables() );
+	}
+
 	/** The folder a SQLite file goes in, made with files that keep it from being listed. */
 	public static function folder(): string {
 		$uploads = wp_upload_dir( null, false );
 		return trailingslashit( $uploads['basedir'] ) . 'runlight';
+	}
+
+	/**
+	 * Makes the folder, if need be, with the files that keep it from being
+	 * listed on any server, writing either one that is missing, whatever made
+	 * the folder.
+	 */
+	public static function protect(): void {
+		$folder = self::folder();
+		if ( ! is_dir( $folder ) ) {
+			wp_mkdir_p( $folder );
+		}
+		// The file's name is the protection; these keep the folder from being listed on any server.
+		if ( ! file_exists( $folder . '/index.php' ) ) {
+			file_put_contents( $folder . '/index.php', "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a new file in the plugin's own folder.
+		}
+		if ( ! file_exists( $folder . '/.htaccess' ) ) {
+			file_put_contents( $folder . '/.htaccess', "Require all denied\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a new file in the plugin's own folder.
+		}
 	}
 
 	/** The store Runlight runs on. */
@@ -82,19 +145,16 @@ final class Storage {
 		$kept = self::kept();
 		if ( 'mysql' === $kept['kind'] ) {
 			global $wpdb;
-			return new \Runlight\Store\SqlStore( new WpdbDb( $wpdb ) );
+			return new \Runlight\Store\SqlStore( new WpdbDb( $wpdb ), self::prefix() );
 		}
-		$folder = self::folder();
-		if ( ! is_dir( $folder ) ) {
-			wp_mkdir_p( $folder );
-			// The file's name is the protection; these keep the folder from being listed on any server.
-			file_put_contents( $folder . '/index.php', "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a new file in a folder the plugin made.
-			file_put_contents( $folder . '/.htaccess', "Require all denied\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a new file in a folder the plugin made.
-		}
-		return new \Runlight\Store\SqlStore( new Sqlite3Db( $folder . '/' . $kept['file'] ) );
+		self::protect();
+		return new \Runlight\Store\SqlStore( new Sqlite3Db( self::folder() . '/' . $kept['file'] ) );
 	}
 
-	/** Removes Runlight's numbers, for uninstalling: its tables, or its SQLite file. */
+	/**
+	 * Removes Runlight's numbers, for uninstalling: its tables, each by name and
+	 * only when its record of the schema is there, or its SQLite file.
+	 */
 	public static function remove(): void {
 		$kept = get_option( self::OPTION, array() );
 		if ( ! is_array( $kept ) ) {
@@ -102,9 +162,12 @@ final class Storage {
 		}
 		if ( 'mysql' === ( $kept['kind'] ?? '' ) ) {
 			global $wpdb;
-			$tables = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( 'rl_' ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Runlight's own tables, found to be dropped on uninstall.
-			foreach ( $tables as $table ) {
-				$wpdb->query( 'DROP TABLE IF EXISTS `' . esc_sql( $table ) . '`' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuerySchemaChange -- Runlight's own tables, dropped on uninstall.
+			Library::load();
+			$found = self::found();
+			if ( in_array( self::prefix() . 'meta', $found, true ) ) {
+				foreach ( array_intersect( self::tables(), $found ) as $table ) {
+					$wpdb->query( 'DROP TABLE IF EXISTS `' . esc_sql( $table ) . '`' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuerySchemaChange -- Runlight's own tables, each by name, dropped on uninstall.
+				}
 			}
 		} elseif ( 'sqlite' === ( $kept['kind'] ?? '' ) && is_string( $kept['file'] ?? null ) ) {
 			foreach ( array( '', '-wal', '-shm' ) as $suffix ) {
