@@ -21,9 +21,10 @@ use Runlight\Tests\Conformance\Zip;
  * A stand-in for the PHP core that answers each step, deliberately, with the
  * answer http.json expects of it: placeholders filled with fresh values, ZIP
  * files zipped, the requests to other servers made through the runner's
- * fetcher, and Set-Cookie lines with values for the jars. Replaying every
- * scenario through it proves the runner itself (normalizing, captures, jars,
- * templates, ZIP reading, and the fetched record) before the core exists.
+ * fetcher, the messages handed to the app's own mailer, and Set-Cookie lines
+ * with values for the jars. Replaying every scenario through it proves the
+ * runner itself (normalizing, captures, jars, templates, ZIP reading, and the
+ * fetched and mailed records) before the core exists.
  *
  * It also checks what it is sent: the entry point, method, and URL each step
  * names, no template left unfilled, and nothing read from the environment.
@@ -84,6 +85,10 @@ final class ReplayTarget implements Target
 
         foreach ($expect->fetched ?? [] as $fetched) {
             $this->fetch($fetched);
+        }
+        foreach ($expect->mailed ?? [] as $mailed) {
+            $message = (array) $this->values->value($mailed);
+            ($this->runlightOptions['mail']['send'])([...$message, 'html' => '', 'headers' => []]);
         }
         if (!empty($expect->pass)) {
             return null;

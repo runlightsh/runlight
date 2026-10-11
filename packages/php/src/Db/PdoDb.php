@@ -146,7 +146,13 @@ final class PdoDb implements Db
         if ($this->dialect === 'postgres') {
             // Asked for again and again rather than waited on: a waiting statement would hold up an index being
             // built CONCURRENTLY by whoever has the lock, and the two would wait on each other for good.
+            // Up to TablesBusy::wait(), so a request does not wait on a long index build for good.
+            $wait = TablesBusy::wait();
+            $until = microtime(true) + $wait;
             while (!($this->all('SELECT pg_try_advisory_lock(?) AS ok', [self::MIGRATION_LOCK])[0]['ok'] ?? false)) {
+                if (microtime(true) >= $until) {
+                    throw new TablesBusy($wait);
+                }
                 usleep(100_000);
             }
             try {
@@ -160,15 +166,22 @@ final class PdoDb implements Db
             }
         }
         $pdo = $this->pdo();
+        // Up to TablesBusy::wait(), so a request does not wait on a long index build for good.
+        $wait = TablesBusy::wait();
+        $until = microtime(true) + $wait;
         for (;;) {
-            $ok = $pdo->query('SELECT GET_LOCK(' . self::MYSQL_LOCK . ', 5) AS ok')->fetchColumn();
+            $left = max(1, min(5, (int) ceil($until - microtime(true))));
+            $ok = $pdo->query('SELECT GET_LOCK(' . self::MYSQL_LOCK . ", $left) AS ok")->fetchColumn();
             if ($ok === null || $ok === false) {
                 throw new \RuntimeException('Runlight: MySQL refused the lock for creating tables');
             }
             if ((int) $ok === 1) {
                 break;
             }
-            // Not got within 5 seconds: another process is creating the tables. Ask again.
+            // Not got in time: another process is creating the tables. Ask again, until the wait is up.
+            if (microtime(true) >= $until) {
+                throw new TablesBusy($wait);
+            }
         }
         try {
             // An index on a big table takes a while to build, so the build may run past the statement timeout.

@@ -71,6 +71,12 @@ final class SqlStore
         return array_map(fn (string $table): string => $this->prefix . $table, Sql::TABLES);
     }
 
+    /** A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_. */
+    private function unnamed(string $name): string
+    {
+        return str_starts_with($name, $this->prefix) ? Sql::PREFIX . substr($name, strlen($this->prefix)) : $name;
+    }
+
     /** A table or index name as the database has it, under the store's prefix. */
     private function named(string $name): string
     {
@@ -136,8 +142,10 @@ final class SqlStore
                 "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
            WHERE NOT i.indisvalid AND c.relname LIKE '" . str_replace('_', '\\_', $this->prefix) . "%' AND c.relnamespace = current_schema()::regnamespace",
             );
+            // The name comes back as the database has it, so it goes back under rl_ before the prefix is put on again,
+            // which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
             foreach ($broken as $row) {
-                $db->run('DROP INDEX IF EXISTS "' . str_replace('"', '', (string) $row['name']) . '"');
+                $db->run('DROP INDEX IF EXISTS "' . str_replace('"', '', $this->unnamed((string) $row['name'])) . '"');
             }
         }
         foreach ($statements as $statement) {

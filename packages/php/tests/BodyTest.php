@@ -8,7 +8,9 @@ use PHPUnit\Framework\TestCase;
 use Runlight\Body;
 use Runlight\Http\BodyTooLong;
 use Runlight\Http\CurlFetcher;
+use Runlight\Http\FetchError;
 use Runlight\Http\Response;
+use Runlight\Tests\Support\LocalServer;
 
 /**
  * Capped reads: Body's checks, and the Fetcher's maxBytes, truncate, and resolve against a real server. The same
@@ -16,32 +18,18 @@ use Runlight\Http\Response;
  */
 final class BodyTest extends TestCase
 {
-    /** @var resource|null */
-    private static $server = null;
+    private static ?LocalServer $server = null;
     private static int $port = 0;
 
     public static function setUpBeforeClass(): void
     {
-        $probe = stream_socket_server('tcp://127.0.0.1:0');
-        self::$port = (int) explode(':', stream_socket_get_name($probe, false))[1];
-        fclose($probe);
-        self::$server = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . self::$port, __DIR__ . '/Support/http-router.php'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-        for ($i = 0; $i < 100; $i++) {
-            $socket = @stream_socket_client('tcp://127.0.0.1:' . self::$port, $errno, $errstr, 0.1);
-            if ($socket !== false) {
-                fclose($socket);
-                return;
-            }
-            usleep(50_000);
-        }
+        self::$server = new LocalServer();
+        self::$port = self::$server->port;
     }
 
     public static function tearDownAfterClass(): void
     {
-        if (is_resource(self::$server)) {
-            proc_terminate(self::$server);
-            proc_close(self::$server);
-        }
+        self::$server?->stop();
     }
 
     public function testTextIsReadUpToTheCap(): void
@@ -84,6 +72,70 @@ final class BodyTest extends TestCase
         $port = self::$port;
         $answer = (new CurlFetcher())->fetch("http://pinned.invalid:$port/", ['resolve' => ["pinned.invalid:$port:127.0.0.1"]]);
         $this->assertSame("host pinned.invalid:$port", $answer->text());
+    }
+
+    public function testAPinThatCannotBeAppliedRefusesTheFetchRatherThanLookingTheNameUpAgain(): void
+    {
+        $port = self::$port;
+        $streams = new \ReflectionMethod(CurlFetcher::class, 'viaStreams');
+        foreach ([
+            'another host' => ["http://pinned.invalid:$port/", ["other.invalid:$port:127.0.0.1"]],
+            'another port' => ["http://pinned.invalid:$port/", ['pinned.invalid:' . ($port + 1) . ':127.0.0.1']],
+            'no port given means 80' => ['http://pinned.invalid/', ["pinned.invalid:$port:127.0.0.1"]],
+        ] as $what => [$url, $pins]) {
+            foreach (['curl' => fn () => (new CurlFetcher())->fetch($url, ['resolve' => $pins]), 'streams' => fn () => $streams->invoke(new CurlFetcher(), $url, ['resolve' => $pins])] as $how => $fetch) {
+                try {
+                    $fetch();
+                    $this->fail("$what ($how) should be refused");
+                } catch (FetchError $error) {
+                    $this->assertStringContainsString('so it is not fetched', $error->getMessage(), "$what ($how)");
+                }
+            }
+        }
+    }
+
+    public function testAPinnedRequestGoesThroughNoProxyEvenOneTheEnvironmentNames(): void
+    {
+        $port = self::$port;
+        // A proxy that would look the name up itself. Nothing may connect to it.
+        $proxy = stream_socket_server('tcp://127.0.0.1:0');
+        $address = 'http://' . stream_socket_get_name($proxy, false);
+        $saved = [];
+        foreach (['http_proxy', 'HTTPS_PROXY', 'ALL_PROXY'] as $name) {
+            $saved[$name] = getenv($name);
+            putenv("$name=$address");
+        }
+        try {
+            $answer = (new CurlFetcher())->fetch("http://pinned.invalid:$port/", ['resolve' => ["pinned.invalid:$port:127.0.0.1"], 'timeoutMs' => 5000]);
+            $this->assertSame("host pinned.invalid:$port", $answer->text());
+            $read = [$proxy];
+            $write = $except = null;
+            $this->assertSame(0, stream_select($read, $write, $except, 0), 'nothing went through the proxy');
+        } finally {
+            foreach ($saved as $name => $value) {
+                putenv($value === false ? $name : "$name=$value");
+            }
+            fclose($proxy);
+        }
+    }
+
+    public function testAPinnedRequestFollowsARedirectOnlyToAPinnedAddress(): void
+    {
+        $port = self::$port;
+        $pins = ['resolve' => ["pinned.invalid:$port:127.0.0.1"]];
+        $streams = new \ReflectionMethod(CurlFetcher::class, 'viaStreams');
+        $same = "http://pinned.invalid:$port/redirect?to=" . rawurlencode("http://pinned.invalid:$port/");
+        $this->assertSame("host pinned.invalid:$port", (new CurlFetcher())->fetch($same, $pins)->text(), 'the same host and port keep their pin');
+        $manual = (new CurlFetcher())->fetch($same, [...$pins, 'redirect' => 'manual']);
+        $this->assertSame(302, $manual->status);
+        $elsewhere = "http://pinned.invalid:$port/redirect?to=" . rawurlencode("http://elsewhere.invalid:$port/");
+        try {
+            (new CurlFetcher())->fetch($elsewhere, $pins);
+            $this->fail('a redirect to a name with no pin is refused');
+        } catch (FetchError $error) {
+            $this->assertSame("Runlight: no checked address is pinned for elsewhere.invalid:$port, so it is not fetched", $error->getMessage());
+        }
+        $this->assertSame(302, $streams->invoke(new CurlFetcher(), $elsewhere, [...$pins, 'redirect' => 'manual'])->status, 'the stream fallback follows nothing by itself');
     }
 
     public function testTheStreamFallbackConnectsToThePinnedAddressAndCapsToo(): void

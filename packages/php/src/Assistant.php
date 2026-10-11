@@ -108,31 +108,30 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
     }
 
     /**
-     * Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
-     * private network is allowed, as the person setting it up means it to be.
+     * A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+     * (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
      */
-    public static function refuseMetadata(string $url): void
+    private static function refused(MetadataAddressError $error): AssistantError
     {
-        $host = (new Url($url))->hostname;
-        if (Safefetch::metadataHost($host)) {
-            throw new AssistantError("$host is a link-local or cloud metadata address, which Runlight never connects to", 'address_refused', ['host' => $host]);
-        }
+        return new AssistantError($error->getMessage(), 'address_refused', ['host' => $error->host]);
     }
 
     /** @param array<string, string> $headers */
     private static function post(Fetcher $fetcher, string $url, array $headers, mixed $body, int $deadline, \Closure $now, ?\Closure $cancelled): mixed
     {
         self::inTime($deadline, $now, $cancelled);
-        self::refuseMetadata($url);
         $left = $deadline - $now();
         try {
-            $answer = $fetcher->fetch($url, [
+            $answer = Safefetch::serviceFetch($url, [
                 'method' => 'POST',
                 'headers' => array_merge(['content-type' => 'application/json'], $headers),
                 'body' => Json::encode($body),
                 'timeoutMs' => min(90_000, $left),
-            ]);
+            ], $fetcher);
         } catch (\Throwable $error) {
+            if ($error instanceof MetadataAddressError) {
+                throw self::refused($error);
+            }
             $host = (new Url($url))->host();
             throw $error instanceof FetchError && $error->timedOut
                 ? new AssistantError("Could not reach $host: it took too long to answer", 'assistant_timeout', ['host' => $host])
@@ -387,10 +386,12 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
         $headers = $provider['protocol'] === 'anthropic'
             ? ['x-api-key' => $key, 'anthropic-version' => '2023-06-01']
             : ($key !== '' ? ['authorization' => "Bearer $key"] : []);
-        self::refuseMetadata($base);
         try {
-            $answer = $fetcher->fetch("$base/models" . ($provider['protocol'] === 'anthropic' ? '?limit=100' : ''), ['headers' => $headers, 'timeoutMs' => 20_000]);
-        } catch (\Throwable) {
+            $answer = Safefetch::serviceFetch("$base/models" . ($provider['protocol'] === 'anthropic' ? '?limit=100' : ''), ['headers' => $headers, 'timeoutMs' => 20_000], $fetcher);
+        } catch (\Throwable $error) {
+            if ($error instanceof MetadataAddressError) {
+                throw self::refused($error);
+            }
             $host = (new Url($base))->host();
             throw new AssistantError("Could not reach $host", 'unreachable', ['host' => $host]);
         }

@@ -355,6 +355,84 @@ final class Safefetch
         }
     }
 
+    /**
+     * The addresses a Fetcher's `resolve` pins for a URL's host and port, without brackets, so a Fetcher connects
+     * to one of them and nowhere else. Throws a FetchError when no pin names that host and port, as for a redirect
+     * to another host: a request whose pin cannot be applied is never made.
+     *
+     * @param list<string> $pins "host:port:address[,address]" entries, as publicFetch makes them
+     * @return list<string>
+     */
+    public static function pinned(string $url, array $pins): array
+    {
+        $parsed = Url::parse($url);
+        if ($parsed === null || ($parsed->protocol !== 'http:' && $parsed->protocol !== 'https:')) {
+            throw new FetchError("Runlight: $url cannot be pinned to a checked address");
+        }
+        $port = $parsed->port !== '' ? $parsed->port : ($parsed->protocol === 'https:' ? '443' : '80');
+        foreach ($pins as $pin) {
+            if (preg_match('/^([^:\[\]]+):(\d+):(.+)\z/', (string) $pin, $m) && strcasecmp($m[1], $parsed->hostname) === 0 && $m[2] === $port) {
+                return array_map(static fn (string $a): string => trim($a, '[]'), explode(',', $m[3]));
+            }
+        }
+        throw new FetchError("Runlight: no checked address is pinned for {$parsed->hostname}:$port, so it is not fetched");
+    }
+
+    /** Headers that describe a body, dropped with it when a redirect turns a request into a GET. */
+    private const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location'];
+    /** Credentials, dropped when a redirect leads to another origin. */
+    private const CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie'];
+
+    /**
+     * Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
+     * this computer or a private network, but is never at a link-local or cloud metadata address. The address
+     * is checked, and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch
+     * follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body, and a redirect to
+     * another origin goes without the credentials. A redirect past the last one comes back as it is, and
+     * `timeoutMs` (default 30000) covers them all. Throws a MetadataAddressError for an address it refuses.
+     *
+     * @param array{method?: string, headers?: array<string, string>, body?: string, timeoutMs?: int, redirects?: int} $init
+     */
+    public static function serviceFetch(string $target, array $init, ?Fetcher $fetcher = null): Response
+    {
+        $fetcher ??= new CurlFetcher();
+        $redirects = $init['redirects'] ?? 5;
+        $until = hrtime(true) + ($init['timeoutMs'] ?? 30_000) * 1_000_000;
+        $url = new Url($target);
+        $method = strtoupper($init['method'] ?? 'GET');
+        $headers = $init['headers'] ?? [];
+        $body = $init['body'] ?? null;
+        for ($hop = 0; ; $hop++) {
+            $host = (string) preg_replace('/^\[|\]\z/', '', $url->hostname);
+            if (self::metadataHost($host)) {
+                throw new MetadataAddressError($host);
+            }
+            $left = (int) ceil(($until - hrtime(true)) / 1_000_000);
+            if ($left <= 0) {
+                throw self::timedOut();
+            }
+            $options = ['method' => $method, 'headers' => $headers, 'redirect' => 'manual', 'timeoutMs' => $left];
+            if ($body !== null) {
+                $options['body'] = $body;
+            }
+            $answer = $fetcher->fetch($url->href(), $options);
+            $location = $answer->headers->get('location');
+            if ($answer->status < 300 || $answer->status >= 400 || $location === null || $location === '' || $hop >= $redirects) {
+                return $answer;
+            }
+            $next = new Url($location, $url->href());
+            if ($answer->status === 303 || (($answer->status === 301 || $answer->status === 302) && $method === 'POST')) {
+                $method = $method === 'HEAD' ? 'HEAD' : 'GET';
+                $body = null;
+                $headers = array_filter($headers, static fn (string $name): bool => !in_array(strtolower($name), self::BODY_HEADERS, true), ARRAY_FILTER_USE_KEY);
+            }
+            if ($next->origin() !== $url->origin()) {
+                $headers = array_filter($headers, static fn (string $name): bool => !in_array(strtolower($name), self::CREDENTIAL_HEADERS, true), ARRAY_FILTER_USE_KEY);
+            }
+            $url = $next;
+        }
+    }
+
     /** An install on this machine: http://localhost or http://127.0.0.1, with any port. */
     private const LOCAL_INSTALL = '#^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)#';
 

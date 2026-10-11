@@ -32,7 +32,8 @@ interface Db
     /**
      * Runs `$fn` while holding a database-wide lock, so two processes starting
      * at once do not race to create the same tables, and a read-then-write in
-     * `$fn` cannot interleave with another process's.
+     * `$fn` cannot interleave with another process's. Waits for the lock at
+     * most TablesBusy::wait() seconds, then throws a TablesBusy.
      *
      * @template T
      * @param callable(Db): T $fn
