@@ -151,9 +151,10 @@ impl Routes {
         {
             let asked = url.search_params().get("site").map(str::to_string);
             let site_match = crate::re::group(js_re!(r"^/api/sites/([^/]+)$"), path, 1);
-            let named = site_match.as_deref().map(|s| crate::sources::decode_uri_component(s).unwrap_or_default());
+            // An id with broken escapes never names the token's site.
+            let named = site_match.as_deref().map(crate::sources::decode_uri_component);
             if asked.as_deref().is_some_and(|a| !a.is_empty() && a != t.site)
-                || named.as_deref().is_some_and(|n| n != t.site)
+                || named.is_some_and(|n| n.as_deref() != Some(t.site.as_str()))
             {
                 return Ok(coded("Unknown site", "unknown_site", 404, None));
             }
@@ -479,8 +480,9 @@ impl Routes {
             if access != CanRead::Yes {
                 return Ok(self.denied(access));
             }
-            let id = crate::sources::decode_uri_component(raw)
-                .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
+            let Some(id) = crate::sources::decode_uri_component(raw) else {
+                return Ok(coded("Unknown site", "unknown_site", 404, None));
+            };
             return Ok(match rl.delete_site(&id).await {
                 Ok(()) => json(&obj! { "ok" => true }, 200, &[]),
                 Err(Error::Settings(e)) if e.message == "Unknown site" => coded(&e.message, "unknown_site", 404, None),
@@ -1057,9 +1059,10 @@ impl Routes {
                 Some(&[("months", "6, 12, 24, 36, 60")]),
             ));
         }
+        let Some(id) = crate::sources::decode_uri_component(raw) else {
+            return Ok(coded("Unknown site", "unknown_site", 404, None));
+        };
         let result = async {
-            let id = crate::sources::decode_uri_component(raw)
-                .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
             let remote = rl.remote(&id);
             // How long a connected site keeps visits, and the timezone its days follow, are the install's settings.
             let mut forward = js::Object::new();

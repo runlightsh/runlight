@@ -1322,7 +1322,8 @@ impl Runlight {
         let path = request.parsed_url().pathname();
         let prefix = format!("{}/", self.0.link_path);
         let slug = match path.strip_prefix(&prefix) {
-            Some(rest) => decode_uri_component(rest).ok_or_else(|| Error::Other("URIError: URI malformed".into()))?,
+            // A slug with broken escapes is one no link has.
+            Some(rest) => decode_uri_component(rest).unwrap_or_default(),
             None => String::new(),
         };
         let found =
@@ -1360,8 +1361,7 @@ impl Runlight {
                 return Ok(None);
             }
         }
-        let slug = decode_uri_component(&pathname[1.min(pathname.len())..])
-            .ok_or_else(|| Error::Other("URIError: URI malformed".into()))?;
+        let slug = decode_uri_component(&pathname[1.min(pathname.len())..]).unwrap_or_default();
         let found =
             if !slug.is_empty() && !slug.contains('/') { self.redirect(request, &slug, &host).await? } else { None };
         Ok(Some(found.unwrap_or_else(not_found)))
