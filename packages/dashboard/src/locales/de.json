@@ -423,6 +423,7 @@
   "goals.match.selector": "CSS-Selektor",
   "goals.pick": "Auf meiner Website wählen",
   "goals.picking": "Warte auf deine Auswahl",
+  "goals.pickUpdate": "Das Runlight, das diese Website zählt, ist zu alt, um eine Auswahl hierher zurückzuschicken. Aktualisiere es, oder gib einen Selektor ein.",
   "goals.hint.event": "Der Name, den du mit runlight(\"Name\") oder einem data-runlight-Attribut sendest.",
   "goals.hint.page": "Ein Pfad wie /danke. Nutze * für Beliebiges: /blog/* oder /danke*. Eine volle URL geht auch.",
   "goals.hint.link": "Klicks auf Links mit passender Adresse. Nutze * für Beliebiges, etwa https://buy.stripe.com/*, oder beginne mit / für eigene Seiten.",
@@ -807,6 +808,7 @@
   "error.twofactor_restart": "Zu viele falsche Codes. Beginne erneut mit dem Einschalten der Zwei-Faktor-Anmeldung.",
   "error.pick_origin": "Sende den Ursprung des Dashboards, etwa https://stats.example.com",
   "error.pick_hub": "Die Adresse dieses Hubs ist nicht die, von der aus er sich verbunden hat. Verbinde die Website von hier aus erneut.",
+  "error.pick_return": "Sende die Adresse des Dashboards mit /pick-return am Ende, auf seinem Origin, und eine Nonce aus 32 Hexziffern",
   "assistant.viewerDaily": "Fragen pro Betrachter und Tag",
   "assistant.viewerDailyHint": "Jede Frage wird mit deinem KI-Schlüssel bezahlt. Betrachter sind die Personen, die du unter Personen einlädst und die Statistiken lesen, aber nichts ändern können. Jeder von ihnen kann so viele Fragen am Tag stellen. Setze 0, um den Assistenten den Eigentümern vorzubehalten. Freigabelinks bekommen den Assistenten nie.",
   "error.assistant_soon": "Du hast in kurzer Zeit viel gefragt. Warte kurz und frag dann noch einmal.",
@@ -996,5 +998,9 @@
   "embedKey.name": "Dashboard in einem CMS",
   "tokens.embeds": "Öffnet das Dashboard in einem CMS",
   "error.embed_expired": "Dieses Dashboard ist abgelaufen. Lade die Seite neu, um es wieder zu öffnen.",
-  "error.embed_site": "Ein Schlüssel für das Dashboard in einem CMS gilt für eine Website. Wähle die Website aus."
+  "error.embed_site": "Ein Schlüssel für das Dashboard in einem CMS gilt für eine Website. Wähle die Website aus.",
+  "pick.doneTitle": "Ausgewählt",
+  "pick.done": "Die Auswahl steht im Ziel auf deinem Dashboard. Du kannst diesen Tab schließen.",
+  "pick.goneTitle": "Diese Auswahl hat das Dashboard nicht erreicht",
+  "pick.gone": "Sie wurde nicht im Dashboard dieses Browsers gestartet, oder sie wurde schon gesendet. Geh zurück zum Dashboard und wähle erneut."
 }

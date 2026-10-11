@@ -423,6 +423,7 @@
   "goals.match.selector": "Sélecteur CSS",
   "goals.pick": "Choisir sur mon site",
   "goals.picking": "En attente de votre choix",
+  "goals.pickUpdate": "Le Runlight qui compte ce site est trop ancien pour renvoyer un choix ici. Mettez-le à jour, ou saisissez un sélecteur.",
   "goals.hint.event": "Le nom envoyé avec runlight(\"Nom\") ou un attribut data-runlight.",
   "goals.hint.page": "Un chemin comme /merci. Utilisez * pour n’importe quoi : /blog/* ou /merci*. Une URL complète marche aussi.",
   "goals.hint.link": "Clics sur les liens dont l’adresse correspond. Utilisez * pour n’importe quoi, comme https://buy.stripe.com/*, ou commencez par / pour vos propres pages.",
@@ -807,6 +808,7 @@
   "error.twofactor_restart": "Trop de codes erronés. Recommencez l’activation de la connexion à deux facteurs.",
   "error.pick_origin": "Envoyez l’origine du tableau de bord, par exemple https://stats.example.com",
   "error.pick_hub": "L’adresse de ce hub n’est pas celle depuis laquelle il s’est connecté. Connectez à nouveau le site depuis ici.",
+  "error.pick_return": "Envoyez l’adresse du tableau de bord suivie de /pick-return, sur son origine, et un nonce de 32 chiffres hexadécimaux",
   "assistant.viewerDaily": "Questions par lecteur et par jour",
   "assistant.viewerDailyHint": "Chaque question est payée avec votre clé d’IA. Les lecteurs sont les personnes que vous invitez dans Personnes, qui peuvent lire les statistiques sans rien modifier, et chacun peut poser ce nombre de questions par jour. Mettez 0 pour réserver l’assistant aux propriétaires. Les liens de partage n’ont jamais accès à l’assistant.",
   "error.assistant_soon": "Vous avez posé beaucoup de questions en peu de temps. Patientez un peu, puis réessayez.",
@@ -996,5 +998,9 @@
   "embedKey.name": "Tableau de bord dans un CMS",
   "tokens.embeds": "Ouvre le tableau de bord dans un CMS",
   "error.embed_expired": "Ce tableau de bord a expiré. Rechargez la page pour l'ouvrir à nouveau.",
-  "error.embed_site": "Une clé pour le tableau de bord dans un CMS vaut pour un seul site. Choisissez le site."
+  "error.embed_site": "Une clé pour le tableau de bord dans un CMS vaut pour un seul site. Choisissez le site.",
+  "pick.doneTitle": "Choisi",
+  "pick.done": "Il est dans l’objectif sur votre tableau de bord. Vous pouvez fermer cet onglet.",
+  "pick.goneTitle": "Ce choix n’a pas atteint le tableau de bord",
+  "pick.gone": "Il n’a pas été lancé depuis le tableau de bord de ce navigateur, ou il a déjà été envoyé. Revenez au tableau de bord et choisissez à nouveau."
 }

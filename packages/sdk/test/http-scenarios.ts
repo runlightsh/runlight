@@ -1569,6 +1569,49 @@ const FIRST: Scenario[] = [
   },
 ];
 
+const NONCE = "0123456789abcdef0123456789abcdef";
+const RELAY = "https://stats.example.com/runlight/pick-return";
+
+const PICKING: Scenario[] = [
+  {
+    name: "the element picker: tickets that name a relay page, and the page itself",
+    site: { hostnames: ["blog.example.com"], timezone: "UTC" },
+    sites: [
+      { id: "blog", hostnames: ["blog.example.com"], timezone: "UTC" },
+      { id: "shop", hostnames: ["shop.example.com"], timezone: "UTC" },
+    ],
+    start: Date.UTC(2026, 9, 7, 12, 0),
+    token: "conformance",
+    steps: [
+      // The dashboard names its relay page and a nonce, and the script the site loads with the ticket carries both.
+      { ...post("/api/pick?site=blog", { origin: "https://stats.example.com", return: RELAY, nonce: NONCE }), capture: { ticket: "ticket" } },
+      { method: "GET", path: "/pick.js?runlight=pick&runlight_ticket={{ticket}}", look: ['"https://stats.example.com"', `"${RELAY}"`, `"${NONCE}"`, '\\"blog.example.com\\"'] },
+      // A dashboard at the root of its origin.
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: "https://stats.example.com/pick-return", nonce: NONCE }),
+      // The relay page is on the dashboard's own origin, is nothing else, and comes with a nonce of 32 hex digits.
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: "https://evil.example/pick-return", nonce: NONCE }),
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: "https://stats.example.com.evil.example/pick-return", nonce: NONCE }),
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: "https://stats.example.com/runlight/", nonce: NONCE }),
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: `${RELAY}?x=1`, nonce: NONCE }),
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: RELAY }),
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", return: RELAY, nonce: "ABCDEF0123456789ABCDEF0123456789" }),
+      post("/api/pick?site=blog", { origin: "https://stats.example.com", nonce: NONCE }),
+      // An older dashboard names neither, and its ticket's script carries none.
+      { ...post("/api/pick?site=blog", { origin: "https://stats.example.com" }), capture: { older: "ticket" } },
+      { method: "GET", path: "/pick.js?runlight=pick&runlight_ticket={{older}}", look: ['"https://stats.example.com"', `"${RELAY}"`, `"${NONCE}"`] },
+      // A hub's manage token still gets none for an origin it names now, relay page or not.
+      { ...post("/api/tokens", { name: "Hub", scope: "manage", site: "blog" }), capture: { hub: "secret" } },
+      post("/api/pick?site=blog", { origin: "https://hub.example.net", return: "https://hub.example.net/pick-return", nonce: NONCE }, asJson("{{hub}}")),
+      // After half an hour the ticket names nothing.
+      { method: "GET", path: "/pick.js?runlight=pick&runlight_ticket={{ticket}}", advance: 31 * MINUTE, look: ['"https://stats.example.com"', `"${RELAY}"`, `"${NONCE}"`] },
+      // The relay page: static, in the visitor's language, running only its own script from this server.
+      { method: "GET", path: "/pick-return", headers: { "accept-language": "fr-FR,fr;q=0.9" }, look: ['lang="fr"', '<script src="/runlight/pick-return.js"></script>', 'id="done" hidden', 'id="gone" hidden'] },
+      { method: "GET", path: "/pick-return.js", look: ["BroadcastChannel", '"runlight-pick"'] },
+      { method: "POST", path: "/pick-return" },
+    ],
+  },
+];
+
 /** Escapes that decode to no text at all (%E0 alone is half a character), which every HTTP stack still passes on. */
 const ESCAPES: Scenario[] = [
   {
@@ -1601,4 +1644,4 @@ const ESCAPES: Scenario[] = [
   },
 ];
 
-export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...ESCAPES];
+export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...PICKING, ...ESCAPES];

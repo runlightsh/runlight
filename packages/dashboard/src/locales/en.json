@@ -423,6 +423,7 @@
   "goals.match.selector": "CSS selector",
   "goals.pick": "Pick on my site",
   "goals.picking": "Waiting for your pick",
+  "goals.pickUpdate": "The Runlight that counts this site is too old to send a pick back here. Update it, or type a selector.",
   "goals.hint.event": "The name you send with runlight(\"Name\") or a data-runlight attribute.",
   "goals.hint.page": "A path like /thanks. Use * for anything: /blog/* or /thanks*. A full URL works too.",
   "goals.hint.link": "Clicks on links whose address matches. Use * for anything, like https://buy.stripe.com/*, or start with / for your own pages.",
@@ -807,6 +808,7 @@
   "error.twofactor_restart": "Too many wrong codes. Start turning on two-factor sign-in again.",
   "error.pick_origin": "Send the dashboard's origin, such as https://stats.example.com",
   "error.pick_hub": "This hub's address is not the one it connected from. Connect the site again from here.",
+  "error.pick_return": "Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits",
   "assistant.viewerDaily": "Questions each viewer can ask a day",
   "assistant.viewerDailyHint": "Every question is paid for with your AI key. Viewers are the people you invite under People who can read stats but change nothing, and each of them can ask this many a day. Set 0 to keep the assistant for owners. Share links never get the assistant.",
   "error.assistant_soon": "You have asked a lot in a short time. Wait a little and ask again.",
@@ -996,5 +998,9 @@
   "embedKey.name": "Dashboard in a CMS",
   "tokens.embeds": "Opens the dashboard in a CMS",
   "error.embed_expired": "This dashboard has expired. Reload the page to open it again.",
-  "error.embed_site": "A key for the dashboard in a CMS is for one site. Pick the site."
+  "error.embed_site": "A key for the dashboard in a CMS is for one site. Pick the site.",
+  "pick.doneTitle": "Picked",
+  "pick.done": "It is in the goal on your dashboard. You can close this tab.",
+  "pick.goneTitle": "This pick did not reach the dashboard",
+  "pick.gone": "It was not started from this browser's dashboard, or it was sent already. Go back to the dashboard and pick again."
 }

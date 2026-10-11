@@ -3,7 +3,7 @@ import { ConnectError, finishConnect, startConnect } from "./connect.js";
 import { PAGES_PER_VISIT, journeys } from "./journeys.js";
 import { JOURNEY_VISITS, type ReportRow, type ShareRow, type SiteRow, type TokenRow } from "./store.js";
 import { DASHBOARD_CSS, DASHBOARD_HASH, DASHBOARD_JS, LOCALES, LOCALES_HASH, WORLD_HASH, WORLD_JSON } from "./generated/dashboard.js";
-import { PICKER, TRACKER, TRACKER_HASH } from "./generated/tracker.js";
+import { PICKER, PICK_RELAY, TRACKER, TRACKER_HASH } from "./generated/tracker.js";
 import { hmac, randomId, sha256 } from "./hash.js";
 import { DIMENSIONS, isDimension, isSessionDimension, MAX_FILTERS, parseFilter, type Filter, type Query } from "./query.js";
 import { EMAIL, LINK_DOMAIN_CHECK, RETENTION_MONTHS, envValue as env, type RequestContext, type Runlight } from "./runlight.js";
@@ -249,17 +249,22 @@ async function passThrough(remote: { url: string; token: string; site: string },
   return new Response(answer.body, { status: answer.status, headers: back });
 }
 
-/** A plain page in a visitor's language, for unsubscribing and for a share link that is gone. */
-function smallPage(lang: string, body: string, status = 200): Response {
+/**
+ * A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's relay
+ * page, which alone runs a script: one file from this server, never inline.
+ */
+function smallPage(lang: string, body: string, status = 200, script = ""): Response {
   return new Response(
     `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Runlight</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>${body}</main></body></html>`,
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827}main{max-width:420px;margin:24px;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 20px;color:#4b5563}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:#111827;color:#fff;font:inherit;font-weight:600;cursor:pointer}</style></head><body><main>${body}</main>${script ? `<script src="${escapeHtml(script)}"></script>` : ""}</body></html>`,
     {
       status,
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
-        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+        "content-security-policy": script
+          ? "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          : "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
         "referrer-policy": "no-referrer",
       },
     },
@@ -404,8 +409,16 @@ const RULES_PLACEHOLDER = '"__RUNLIGHT_RULES__"';
 const PICK_TARGET_PLACEHOLDER = '"__RUNLIGHT_PICK_TARGET__"';
 /** Where the hostnames of the site its ticket names go, as JSON inside a string. */
 const PICK_HOSTS_PLACEHOLDER = '"__RUNLIGHT_PICK_HOSTS__"';
+/** Where the relay page the picker sends its choice to goes, the return address its ticket names. */
+const PICK_RETURN_PLACEHOLDER = '"__RUNLIGHT_PICK_RETURN__"';
+/** Where the nonce the dashboard made for this pick goes, which the relay page hands back to it. */
+const PICK_NONCE_PLACEHOLDER = '"__RUNLIGHT_PICK_NONCE__"';
 /** A dashboard's origin, which a picker ticket names. */
 const ORIGIN = /^https?:\/\/[^/?#\s]+$/;
+/** The relay page on a dashboard's origin: the dashboard's address with /pick-return on the end. */
+const PICK_RETURN = /^https?:\/\/[^/?#\s]+(\/[^?#\s]*)?\/pick-return$/;
+/** What the dashboard names one pick by, so its relay page answers only the tab that started it. */
+const PICK_NONCE = /^[a-f0-9]{32}$/;
 /** How long a picker ticket works: long enough to find the element, not to be kept. */
 const PICK_TICKET_MS = 30 * 60_000;
 /** Questions one person may put to the assistant in an hour, and at once. */
@@ -788,19 +801,26 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   const hex = (text: string) => Array.from(new TextEncoder().encode(text), (b) => b.toString(16).padStart(2, "0")).join("");
   const unhex = (text: string) => new TextDecoder().decode(new Uint8Array(text.match(/../g)!.map((h) => parseInt(h, 16))));
 
-  /** A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half an hour. */
-  async function pickTicket(origin: string, site: string): Promise<string> {
-    const payload = `${runlight.now() + PICK_TICKET_MS}.${hex(site)}.${hex(origin)}`;
+  /**
+   * A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
+   * an hour. With a return address and a nonce it sends it there, to the relay page, which hands it to the dashboard
+   * tab that made the nonce; without them, as an older dashboard asks, to the tab that opened the site.
+   */
+  async function pickTicket(origin: string, site: string, back?: { url: string; nonce: string }): Promise<string> {
+    const payload = `${runlight.now() + PICK_TICKET_MS}.${hex(site)}.${hex(origin)}${back ? `.${hex(back.url)}.${back.nonce}` : ""}`;
     return `${payload}.${await hmac(await pickKey(), payload)}`;
   }
 
-  /** The dashboard origin and site a picker ticket names, or null when it is not one this install signed or has run out. */
-  async function pickTarget(ticket: string): Promise<{ origin: string; site: string } | null> {
-    const parts = /^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})\.([a-f0-9]{64})$/.exec(ticket);
+  /** What a picker ticket names, or null when it is not one this install signed or has run out. */
+  async function pickTarget(ticket: string): Promise<{ origin: string; site: string; back?: { url: string; nonce: string } } | null> {
+    const parts = /^(\d+)\.([a-f0-9]{2,512})\.([a-f0-9]{2,512})(?:\.([a-f0-9]{2,2048})\.([a-f0-9]{32}))?\.([a-f0-9]{64})$/.exec(ticket);
     if (!parts || Number(parts[1]) < runlight.now()) return null;
-    if (!constantTimeEqual(parts[4]!, await hmac(await pickKey(), `${parts[1]}.${parts[2]}.${parts[3]}`))) return null;
+    if (!constantTimeEqual(parts[6]!, await hmac(await pickKey(), ticket.slice(0, ticket.lastIndexOf("."))))) return null;
     const origin = unhex(parts[3]!);
-    return ORIGIN.test(origin) ? { origin, site: unhex(parts[2]!) } : null;
+    if (!ORIGIN.test(origin)) return null;
+    if (parts[4] === undefined) return { origin, site: unhex(parts[2]!) };
+    const url = unhex(parts[4]);
+    return PICK_RETURN.test(url) && url.startsWith(`${origin}/`) ? { origin, site: unhex(parts[2]!), back: { url, nonce: parts[5]! } } : null;
   }
 
   /** The key embed tickets and sessions are signed with, made on first use and kept in the database for every process. */
@@ -1591,12 +1611,23 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (body instanceof Response) return body;
       const origin = String(body.origin ?? "");
       if (!ORIGIN.test(origin)) return coded("Send the dashboard's origin, such as https://stats.example.com", "pick_origin", 400);
+      // Where the picker sends its choice: the relay page on the same origin, and the nonce the dashboard tab
+      // listens for. An older dashboard sends neither and gets a ticket for the tab that opened the site.
+      let back: { url: string; nonce: string } | undefined;
+      if (body.return !== undefined || body.nonce !== undefined) {
+        const address = String(body.return ?? "");
+        const nonce = String(body.nonce ?? "");
+        if (hex(address).length > 2048 || !PICK_RETURN.test(address) || !address.startsWith(`${origin}/`) || !PICK_NONCE.test(nonce)) {
+          return coded("Send the dashboard's address with /pick-return on the end, on its origin, and a nonce of 32 hex digits", "pick_return", 400);
+        }
+        back = { url: address, nonce };
+      }
       // A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
       const hub = managed.get(request);
       if (hub && (await runlight.store.setting(`token-origin:${hub.id}`)) !== origin) {
         return coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403);
       }
-      return json({ ticket: await pickTicket(origin, site.id) });
+      return json({ ticket: await pickTicket(origin, site.id, back) });
     }
 
     if ((path === "/api/goals" && request.method === "POST") || (/^\/api\/goals\/[^/]+$/.test(path) && (request.method === "PATCH" || request.method === "DELETE"))) {
@@ -1981,8 +2012,27 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         const target = await pickTarget(url.searchParams.get("runlight_ticket") ?? "");
         if (target) await runlight.init();
         const hosts = target ? (runlight.site(target.site)?.hostnames ?? null) : [];
-        const script = PICKER.replace(PICK_TARGET_PLACEHOLDER, () => JSON.stringify(hosts ? (target?.origin ?? "") : "")).replace(PICK_HOSTS_PLACEHOLDER, () => JSON.stringify(JSON.stringify(hosts ?? [])));
+        const named = hosts ? target : null;
+        const script = PICKER.replace(PICK_TARGET_PLACEHOLDER, () => JSON.stringify(named?.origin ?? ""))
+          .replace(PICK_HOSTS_PLACEHOLDER, () => JSON.stringify(JSON.stringify(hosts ?? [])))
+          .replace(PICK_RETURN_PLACEHOLDER, () => JSON.stringify(named?.back?.url ?? ""))
+          .replace(PICK_NONCE_PLACEHOLDER, () => JSON.stringify(named?.back?.nonce ?? ""));
         return new Response(script, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" } });
+      }
+
+      // The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
+      // script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
+      if (path === "/pick-return" && request.method === "GET") {
+        const { t, lang } = translator(acceptedLanguage(request));
+        return smallPage(
+          lang,
+          `<div id="done" hidden><h1>${escapeHtml(t("pick.doneTitle"))}</h1><p>${escapeHtml(t("pick.done"))}</p></div><div id="gone" hidden><h1>${escapeHtml(t("pick.goneTitle"))}</h1><p>${escapeHtml(t("pick.gone"))}</p></div>`,
+          200,
+          `${base}/pick-return.js`,
+        );
+      }
+      if (path === "/pick-return.js" && request.method === "GET") {
+        return new Response(PICK_RELAY, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" } });
       }
 
       if (path === `/assets/world.${WORLD_HASH}.json` && request.method === "GET") {

@@ -14,6 +14,7 @@ const files: Record<string, string> = {
   "world.json": dashboard.WORLD_JSON,
   "tracker.js": tracker.TRACKER,
   "picker.js": tracker.PICKER,
+  "pick-return.js": tracker.PICK_RELAY,
   "locales.json": `${JSON.stringify({ en: dashboard.ENGLISH, ...dashboard.LOCALES }, null, 1)}\n`,
   "build.json": `${JSON.stringify(
     {

@@ -423,6 +423,7 @@
   "goals.match.selector": "Seletor CSS",
   "goals.pick": "Escolher no meu site",
   "goals.picking": "Aguardando sua escolha",
+  "goals.pickUpdate": "O Runlight que conta este site é antigo demais para devolver uma escolha aqui. Atualize-o, ou digite um seletor.",
   "goals.hint.event": "O nome enviado com runlight(\"Nome\") ou um atributo data-runlight.",
   "goals.hint.page": "Um caminho como /obrigado. Use * para qualquer coisa: /blog/* ou /obrigado*. Uma URL completa também serve.",
   "goals.hint.link": "Cliques em links cujo endereço corresponde. Use * para qualquer coisa, como https://buy.stripe.com/*, ou comece com / para suas próprias páginas.",
@@ -807,6 +808,7 @@
   "error.twofactor_restart": "Códigos errados demais. Comece de novo a ativar o login em duas etapas.",
   "error.pick_origin": "Envie a origem do painel, como https://stats.example.com",
   "error.pick_hub": "O endereço deste hub não é aquele de onde ele se conectou. Conecte o site de novo a partir daqui.",
+  "error.pick_return": "Envie o endereço do painel seguido de /pick-return, na sua origem, e um nonce de 32 dígitos hexadecimais",
   "assistant.viewerDaily": "Perguntas por leitor por dia",
   "assistant.viewerDailyHint": "Cada pergunta é paga com a sua chave de IA. Leitores são as pessoas que você convida em Pessoas, que podem ler as estatísticas sem mudar nada, e cada um pode fazer este número de perguntas por dia. Use 0 para deixar o assistente só para os proprietários. Links de compartilhamento nunca têm o assistente.",
   "error.assistant_soon": "Você perguntou muito em pouco tempo. Espere um pouco e pergunte de novo.",
@@ -996,5 +998,9 @@
   "embedKey.name": "Painel em um CMS",
   "tokens.embeds": "Abre o painel em um CMS",
   "error.embed_expired": "Este painel expirou. Recarregue a página para abri-lo de novo.",
-  "error.embed_site": "Uma chave para o painel em um CMS é para um só site. Escolha o site."
+  "error.embed_site": "Uma chave para o painel em um CMS é para um só site. Escolha o site.",
+  "pick.doneTitle": "Escolhido",
+  "pick.done": "Já está na meta do seu painel. Pode fechar esta aba.",
+  "pick.goneTitle": "Esta escolha não chegou ao painel",
+  "pick.gone": "Não foi iniciada a partir do painel deste navegador, ou já foi enviada. Volte ao painel e escolha de novo."
 }

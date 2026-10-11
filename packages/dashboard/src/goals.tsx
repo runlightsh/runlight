@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { api, type Funnel, type Goal, type GoalInput, type GoalReport, type GoalTotals, type Site, type View } from "./api.js";
+import { api, base, type Funnel, type Goal, type GoalInput, type GoalReport, type GoalTotals, type Site, type View } from "./api.js";
 import { Chart } from "./chart.js";
 import { count, money, percent } from "./format.js";
 import { currentLocale, t, type Key } from "./i18n.js";
@@ -255,7 +255,7 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
   const [saving, setSaving] = useState(false);
   const [suggest, setSuggest] = useState<string[]>([]);
   const [picking, setPicking] = useState(false);
-  const pickWindow = useRef<Window | null>(null);
+  const pickNonce = useRef("");
   const set = (patch: Partial<GoalInput>) => setInput((i) => ({ ...i, ...patch }));
 
   // Names already seen, so an event goal is a pick rather than a guess.
@@ -267,33 +267,47 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
       .catch(() => setSuggest([]));
   }, [input.kind]);
 
+  // The choice comes back from the relay page on this origin, which the picker's tab goes to; only the pick
+  // this tab started, by its nonce, counts.
   useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      if (!pickWindow.current || e.source !== pickWindow.current) return;
-      const data = e.data as { runlight?: string; selector?: string; href?: string; text?: string };
-      if (data?.runlight !== "pick" || typeof data.selector !== "string") return;
+    if (typeof BroadcastChannel === "undefined") return;
+    const channel = new BroadcastChannel("runlight-pick");
+    channel.onmessage = (e: MessageEvent) => {
+      const data = e.data as { runlight?: string; nonce?: string; selector?: string; text?: string };
+      if (data?.runlight !== "pick" || !pickNonce.current || data.nonce !== pickNonce.current || typeof data.selector !== "string") return;
+      pickNonce.current = "";
       setPicking(false);
-      set({ match: data.selector.slice(0, 500), clickBy: "selector", ...(input.name ? {} : { name: (data.text || "").slice(0, 60) }) });
+      set({ match: data.selector.slice(0, 500), clickBy: "selector", ...(input.name ? {} : { name: String(data.text || "").slice(0, 60) }) });
     };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    return () => channel.close();
   }, [input.name]);
 
   const host = site.hostnames[0];
   const pick = () => {
     if (!host) return;
+    setError("");
     setPicking(true);
-    // The tab opens at once, while the click still allows it, and goes to the site when the ticket is back.
-    // The ticket names this dashboard, so the picker sends its choice here and nowhere else.
-    const opened = window.open("about:blank", "runlight-pick");
-    pickWindow.current = opened;
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+    pickNonce.current = nonce;
+    try {
+      localStorage.setItem("runlight-pick", nonce);
+    } catch {}
+    // The tab opens at once, while the click still allows it, and goes to the site when the ticket is back. It
+    // is cut off from this one first, so nothing on the site can reach or move the dashboard.
+    const opened = window.open("about:blank", "_blank");
+    if (opened) opened.opener = null;
+    // The ticket names this dashboard's relay page and the nonce, so the picker sends its choice here and nowhere else.
     api
-      .pickTicket(site.id, location.origin)
+      .pickTicket(site.id, location.origin, `${location.origin}${base}/pick-return`, nonce)
       .then(({ ticket }) => {
+        // A ticket with no return address is from an older install, whose picker can only answer the tab that
+        // opened it, and this one leaves it none.
+        if (ticket.split(".").length < 6) throw new Error(t("goals.pickUpdate"));
         if (opened) opened.location.href = `https://${host}/?runlight=pick&runlight_lang=${currentLocale().slice(0, 2)}&runlight_ticket=${encodeURIComponent(ticket)}`;
       })
       .catch((err: Error) => {
         opened?.close();
+        pickNonce.current = "";
         setPicking(false);
         setError(err.message);
       });
