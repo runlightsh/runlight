@@ -150,6 +150,9 @@ final class StandaloneTest extends TestCase
         $server->handle(self::req('/api/links?site=blog.example.com', 'POST', $auth, self::json(['url' => 'https://blog.example.com/b', 'slug' => 'sale', 'domain' => 'stats.example.com'])));
         $this->assertSame(302, $server->handle(self::req('/sale'))->status);
         $this->assertSame(200, $server->handle(self::req('/login'))->status, 'sign-in is still the sign-in page');
+        // Broken percent escapes are a link nobody has, here and at /go/, never an error.
+        $this->assertSame(404, $server->handle(self::req('/%E0'))->status);
+        $this->assertSame(404, $server->handle(self::req('/go/%zz'))->status);
         $this->assertSame(200, $server->handle(self::req('/', 'GET', ['cookie' => $cookie]))->status, 'the dashboard opens for someone signed in');
         $this->assertSame(404, $server->handle(self::req('/'))->status);
         $this->assertSame(200, $server->handle(self::req('/api/link-domains/stats.example.com?site=blog.example.com', 'DELETE', ['cookie' => $cookie]))->status, 'so it can be removed');

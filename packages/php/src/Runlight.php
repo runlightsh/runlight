@@ -1411,7 +1411,8 @@ final class Runlight
     {
         return function (Request $request, array $context = []): Response {
             $path = (new Url($request->url))->pathname;
-            $slug = str_starts_with($path, "{$this->linkPath}/") ? self::decode(substr($path, strlen($this->linkPath) + 1)) : '';
+            // A slug with broken escapes is one no link has.
+            $slug = str_starts_with($path, "{$this->linkPath}/") ? (Js::decodeURIComponent(substr($path, strlen($this->linkPath) + 1)) ?? '') : '';
             $found = $slug !== '' && !str_contains($slug, '/') ? $this->redirect($request, $slug, '', $context) : null;
             return $found ?? self::notFound();
         };
@@ -1444,7 +1445,7 @@ final class Runlight
                 return null;
             }
         }
-        $slug = self::decode(substr($url->pathname, 1));
+        $slug = Js::decodeURIComponent(substr($url->pathname, 1)) ?? '';
         $found = $slug !== '' && !str_contains($slug, '/') ? $this->redirect($request, $slug, $host, $context) : null;
         return $found ?? self::notFound();
     }
@@ -1452,12 +1453,6 @@ final class Runlight
     private static function notFound(): Response
     {
         return new Response('Not found', 404, ['content-type' => 'text/plain; charset=utf-8']);
-    }
-
-    /** decodeURIComponent, throwing where it throws a URIError. */
-    private static function decode(string $text): string
-    {
-        return Js::decodeURIComponent($text) ?? throw new \UnexpectedValueException('URI malformed');
     }
 
     /**
