@@ -215,6 +215,13 @@ final class CliTest extends TestCase
         $this->assertNull($broken->newest());
     }
 
+    public function testDbIpDiskSaysWhenAFileCannotBeMoved(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/could not move/');
+        (new \Runlight\Server\DbIpDisk())->move(sys_get_temp_dir() . '/runlight-no-such-file-' . bin2hex(random_bytes(4)), sys_get_temp_dir() . '/runlight-moved');
+    }
+
     public function testDbIpWorksItsFilesThroughTheFilesItIsGiven(): void
     {
         $db = base64_decode(Fixture::load('geo')['databases'][0]['base64']);
