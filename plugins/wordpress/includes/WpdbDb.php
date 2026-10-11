@@ -5,8 +5,8 @@
  *
  * Runlight writes its SQL for SQLite and Postgres with `?` placeholders. As
  * the package's MySQL driver does, each statement is turned into MySQL's
- * form first: a "quoted" name in backticks, a backslash inside 'text'
- * doubled, and each `?` replaced by its value, escaped by $wpdb itself.
+ * form first by MysqlText: a "quoted" name in backticks, a backslash inside
+ * 'text' doubled, and each `?` replaced by its value, escaped by $wpdb itself.
  *
  * @package Runlight
  */
@@ -14,6 +14,7 @@
 namespace Runlight\WordPress;
 
 use Runlight\Db\Db;
+use Runlight\Db\MysqlText;
 use Runlight\Db\TablesBusy;
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -146,40 +147,7 @@ final class WpdbDb implements Db {
 	 * @param array  $params Its values.
 	 */
 	private function text( string $sql, array $params ): string {
-		$params = array_values( $params );
-		$out    = '';
-		$n      = 0;
-		$quote  = null;
-		$length = strlen( $sql );
-		for ( $i = 0; $i < $length; $i++ ) {
-			$ch = $sql[ $i ];
-			if ( null !== $quote ) {
-				if ( $ch === $quote ) {
-					$quote = null;
-					$out  .= '"' === $ch ? '`' : $ch;
-				} elseif ( "'" === $quote && '\\' === $ch ) {
-					$out .= '\\\\';
-				} elseif ( '"' === $quote && '`' === $ch ) {
-					$out .= '``';
-				} else {
-					$out .= $ch;
-				}
-			} elseif ( "'" === $ch || '"' === $ch || '`' === $ch ) {
-				$quote = $ch;
-				$out  .= '"' === $ch ? '`' : $ch;
-			} elseif ( '?' === $ch ) {
-				if ( $n >= count( $params ) ) {
-					throw new \InvalidArgumentException( 'Runlight: a statement has more placeholders than values' );
-				}
-				$out .= $this->literal( $params[ $n++ ] );
-			} else {
-				$out .= $ch;
-			}
-		}
-		if ( count( $params ) !== $n ) {
-			throw new \InvalidArgumentException( 'Runlight: a statement has more values than placeholders' );
-		}
-		return $out;
+		return MysqlText::of( $sql, array_values( $params ), $this->literal( ... ) );
 	}
 
 	/**

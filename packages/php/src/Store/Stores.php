@@ -6,6 +6,7 @@ namespace Runlight\Store;
 
 use Runlight\Db\Connect;
 use Runlight\Db\Db;
+use Runlight\Db\MysqlText;
 use Runlight\Db\PdoDb;
 
 /**
@@ -87,13 +88,13 @@ final class Stores
 
     /**
      * SQL written for SQLite and Postgres as MySQL and MariaDB read it, with each `?` filled in by `$escape`
-     * (mysql2's escaping by default). See PdoDb::mysqlText().
+     * (mysql2's escaping by default). See MysqlText::of().
      *
      * @param list<mixed> $params
      * @param (callable(mixed): string)|null $escape
      */
     public static function mysqlText(string $sql, array $params = [], ?callable $escape = null): string
     {
-        return PdoDb::mysqlText($sql, $params, $escape);
+        return MysqlText::of($sql, $params, $escape);
     }
 }

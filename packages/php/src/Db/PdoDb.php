@@ -12,7 +12,7 @@ use Runlight\Log;
  * drivers do (stores/sqlite.ts, stores/postgres.ts, and stores/mysql.ts). The connection is opened on
  * first use, so a request that reads nothing never connects.
  *
- * SQL is written for SQLite and Postgres. On MySQL each statement goes through mysqlText() first, as the
+ * SQL is written for SQLite and Postgres. On MySQL each statement goes through MysqlText::of() first, as the
  * TypeScript driver sends it: a "quoted" name in backticks, and a backslash inside 'text' doubled, since
  * MySQL reads it as an escape where standard SQL takes it literally. Values are filled in by PDO on the
  * client, as mysql2 fills them in.
@@ -259,63 +259,6 @@ final class PdoDb implements Db
         $pdo->exec($this->mariadb ? 'SET SESSION max_statement_time = ' . Json::number($ms / 1000) : "SET SESSION max_execution_time = $ms");
     }
 
-    /**
-     * SQL written for SQLite and Postgres, as MySQL and MariaDB read it: a "quoted" identifier is quoted with
-     * backticks, and a backslash inside 'text' is doubled. With `$params`, each `?` outside quotes becomes its
-     * value through `$escape`, as mysql2 fills them in; without, the placeholders stay for PDO.
-     *
-     * @param list<mixed>|null $params
-     * @param (callable(mixed): string)|null $escape
-     */
-    public static function mysqlText(string $sql, ?array $params = null, ?callable $escape = null): string
-    {
-        $out = '';
-        $n = 0;
-        $quote = null;
-        $length = strlen($sql);
-        for ($i = 0; $i < $length; $i++) {
-            $ch = $sql[$i];
-            if ($quote !== null) {
-                if ($ch === $quote) {
-                    $quote = null;
-                    $out .= $ch === '"' ? '`' : $ch;
-                } elseif ($quote === "'" && $ch === '\\') {
-                    $out .= '\\\\';
-                } elseif ($quote === '"' && $ch === '`') {
-                    $out .= '``';
-                } else {
-                    $out .= $ch;
-                }
-            } elseif ($ch === "'" || $ch === '"' || $ch === '`') {
-                $quote = $ch;
-                $out .= $ch === '"' ? '`' : $ch;
-            } elseif ($ch === '?' && $params !== null) {
-                if ($n >= count($params)) {
-                    throw new \InvalidArgumentException('Runlight: a statement has more placeholders than values');
-                }
-                $out .= ($escape ?? self::escape(...))($params[$n++]);
-            } else {
-                $out .= $ch;
-            }
-        }
-        if ($params !== null && $n !== count($params)) {
-            throw new \InvalidArgumentException('Runlight: a statement has more values than placeholders');
-        }
-        return $out;
-    }
-
-    /** A value as a MySQL literal, as mysql2's escape() writes the values Runlight binds. */
-    private static function escape(mixed $value): string
-    {
-        return match (true) {
-            $value === null => 'NULL',
-            is_bool($value) => $value ? 'true' : 'false',
-            is_int($value) => (string) $value,
-            is_float($value) => Json::number($value),
-            default => "'" . strtr((string) $value, ["\0" => '\\0', "\x08" => '\\b', "\t" => '\\t', "\x1a" => '\\Z', "\n" => '\\n', "\r" => '\\r', '"' => '\\"', "'" => "\\'", '\\' => '\\\\']) . "'",
-        };
-    }
-
     /** Drops a connection left in a state it could not undo; the next statement opens a new one. */
     private function discard(): void
     {
@@ -355,7 +298,7 @@ final class PdoDb implements Db
     {
         $pdo = $this->pdo();
         if ($this->dialect === 'mysql') {
-            $text = $this->texts[$sql] ??= self::mysqlText($sql);
+            $text = $this->texts[$sql] ??= MysqlText::of($sql);
             if (count($this->texts) > 500) {
                 $this->texts = [$sql => $text];
             }
