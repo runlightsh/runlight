@@ -3,17 +3,21 @@
 ## Unreleased
 
 ### Added
-- Runlight can now run inside your Craft site, with its numbers in Craft's database (Postgres, MySQL 8.4, or MariaDB 11.4 or later) or else in a SQLite file under `storage/runlight`, its dashboard under Runlight in the Control Panel and at `/runlight/` on the site, and short links at `/go/<name>`. Admins and anyone allowed to use the plugin can open it.
+- Runlight can now run inside your Craft site, with its numbers in Craft's database (Postgres, MySQL 8.4, or MariaDB 11.4 or later) or else in a SQLite file under `storage/runlight`, its dashboard under Runlight in the Control Panel and at `/runlight/` on the site, and short links at `/go/<name>`. Its tables are named after Craft's table prefix, such as `craft_rl_events`, and marked as this install's, and tables of those names that are someone else's, such as a standalone Runlight's, are left alone. The choice is read from the database and the storage folder, so it holds on every server and through every deploy, and the secret Runlight signs with comes from Craft's security key.
+- Two permissions, under Users, Permissions, Runlight: See Runlight's numbers, and Manage Runlight, which with admins owns Runlight in your site. Changes are taken only from the site's own pages.
+- Running in your site, Runlight counts each visitor by the address Craft works out from its `trustedHosts` and `ipHeaders` settings, never by a header it reads itself, and keeps its rate counts in Craft's cache. It reads no environment variables of its own, and its notes go to Craft's log.
 - A setup screen, shown once the plugin is installed, to choose where Runlight runs: in this Craft site with one press, or on a Runlight you run elsewhere. Nothing is counted until you choose.
 - A Locations setting, with Runlight in your site, shows visitors' countries from DB-IP's free data, downloaded once a month.
-- `php craft runlight/check` runs Runlight's hourly upkeep for a cron job; without one, a visit queues it in Craft's queue once an hour.
-- Uninstalling removes Runlight's tables and its folder under `storage`.
-- A Connect button under the Runlight address in the settings. It asks your Runlight to pick this site, then fills in the site id and both keys, so nothing needs copying.
+- `php craft runlight/check` runs Runlight's hourly upkeep for a cron job; without one, a visit to the site queues it in Craft's queue once an hour, unless one is still waiting. The settings say when it has not run for a day.
+- Uninstalling drops Runlight's tables, each by name and only this install's, even when its folder under `storage` is gone, and removes the folder.
+- A Connect button under the Runlight address in the settings. It asks your Runlight to pick this site, then fills in the site id and both keys, so nothing needs copying. It writes the keys into `.env` as `RUNLIGHT_AGENTS_KEY` and `RUNLIGHT_DASHBOARD_KEY` and saves the settings as those variables, so project config holds no key.
 - With Runlight in your site, email reports go through Craft's own mailer when its email settings use a transport other than Sendmail, such as SMTP. Runlight's dashboard can still pick another mail service, and go back to Craft's.
 
 ### Changed
 - The plugin needs the runlight/runlight package, which Composer installs with it.
 - The observe key is now called the agents key, as Runlight calls it, and each setting says where in Runlight it is shown.
+- The dashboard in the Control Panel grows to its full height, so the page scrolls like any other, and its sheets open over the part on screen.
+- While a Runlight elsewhere does not answer, reports of AI agent fetches pause for a minute, so a server that is down never ties up PHP once for every fetch.
 
 ## 0.1.1 - 2026-10-10
 
