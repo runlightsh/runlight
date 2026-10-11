@@ -49,6 +49,25 @@ public static class Databases
 
     public static Xunit.TheoryData<string> KindData() => [.. Kinds()];
 
+    /// <summary>The table prefix the "+prefix" kinds use in place of rl_, as WordPress would give one.</summary>
+    public const string TestPrefix = "wp_rl_";
+
+    /// <summary>
+    /// The kinds at hand for the store suites and the conformance scenarios: each also once more with its
+    /// tables under <see cref="TestPrefix"/>, as "sqlite+prefix", "postgres+prefix", and so on.
+    /// </summary>
+    public static IEnumerable<string> StoreKinds()
+    {
+        var kinds = Kinds().ToList();
+        return kinds.Concat(kinds.Select(k => k + "+prefix"));
+    }
+
+    public static Xunit.TheoryData<string> StoreKindData() => [.. StoreKinds()];
+
+    /// <summary>A kind without "+prefix", and the prefix it asks for (null for rl_).</summary>
+    public static (string Kind, string? Prefix) Unprefixed(string kind) =>
+        kind.EndsWith("+prefix", StringComparison.Ordinal) ? (kind[..^"+prefix".Length], TestPrefix) : (kind, null);
+
     public static Xunit.TheoryData<string> ServerData()
     {
         var kinds = Kinds().Where(k => k != "sqlite").ToList();
@@ -133,7 +152,8 @@ public static class Databases
         return b.ConnectionString;
     }
 
-    private static readonly string[] Tables = ["rl_meta", "rl_sites", "rl_salts", "rl_sessions", "rl_events", "rl_links", "rl_link_domains", "rl_shares", "rl_goals", "rl_settings", "rl_reports", "rl_tokens", "rl_funnels", "rl_rollup_days", "rl_rollups", "rl_users", "rl_invites"];
+    /// <summary>Runlight's tables, under rl_ and under the test prefix.</summary>
+    private static readonly string[] Tables = [.. Sql.Tables.Select(t => Sql.Prefix + t), .. Sql.Tables.Select(t => TestPrefix + t)];
 
     /// <summary>
     /// A fresh, empty store of a kind, dropped by <see cref="CleanupAsync"/>. <paramref name="statementTimeout"/>
@@ -142,19 +162,20 @@ public static class Databases
     /// </summary>
     public static async Task<SqlStore> FreshAsync(string kind, int statementTimeout = 0)
     {
-        if (kind == "sqlite")
+        var (plain, prefix) = Unprefixed(kind);
+        if (plain == "sqlite")
         {
             var source = SqliteFactory.Instance.CreateDataSource("Data Source=:memory:");
-            var store = new SqlStore(new AdoDb(source, "sqlite", owned: true));
+            var store = new SqlStore(new AdoDb(source, "sqlite", owned: true), prefix ?? Sql.Prefix);
             Cleanups.Add(() => store.CloseAsync().AsTask());
             return store;
         }
-        if (kind == "postgres")
+        if (plain == "postgres")
         {
-            return PgStore(await PgSchemaAsync(), statementTimeout);
+            return PgStore(await PgSchemaAsync(), statementTimeout, prefix ?? Sql.Prefix);
         }
-        await DropMysqlTablesAsync(kind);
-        return MysqlStore(kind, statementTimeout);
+        await DropMysqlTablesAsync(plain);
+        return MysqlStore(plain, statementTimeout, prefix ?? Sql.Prefix);
     }
 
     /// <summary>A schema of its own in the Postgres test database, dropped by <see cref="CleanupAsync"/>.</summary>
@@ -178,23 +199,23 @@ public static class Databases
     }
 
     /// <summary>A store on a Postgres schema (one from <see cref="PgSchemaAsync"/>), closed by <see cref="CleanupAsync"/>.</summary>
-    public static SqlStore PgStore(string schema, int statementTimeout = 0)
+    public static SqlStore PgStore(string schema, int statementTimeout = 0, string prefix = Sql.Prefix)
     {
-        var store = new SqlStore(new AdoDb(NpgsqlDataSource.Create(PgConnectionString(PgUrl()!, schema)), "postgres", owned: true, statementTimeout: statementTimeout));
+        var store = new SqlStore(new AdoDb(NpgsqlDataSource.Create(PgConnectionString(PgUrl()!, schema)), "postgres", owned: true, statementTimeout: statementTimeout), prefix);
         Cleanups.Add(() => store.CloseAsync().AsTask());
         return store;
     }
 
     /// <summary>A store on the MySQL test database as it is, closed by <see cref="CleanupAsync"/>.</summary>
-    public static SqlStore MysqlStore(string kind, int statementTimeout = 0)
+    public static SqlStore MysqlStore(string kind, int statementTimeout = 0, string prefix = Sql.Prefix)
     {
-        var store = new SqlStore(new AdoDb(new MySqlDataSource(MysqlConnectionString(MysqlUrls()[kind])), "mysql", owned: true, statementTimeout: statementTimeout));
+        var store = new SqlStore(new AdoDb(new MySqlDataSource(MysqlConnectionString(MysqlUrls()[kind])), "mysql", owned: true, statementTimeout: statementTimeout), prefix);
         Cleanups.Add(() => store.CloseAsync().AsTask());
         return store;
     }
 
     /// <summary>
-    /// Runlight's tables dropped from the MySQL test database. MySQL has one database for the port's
+    /// Runlight's tables dropped from the MySQL test database, under either prefix. MySQL has one database for the port's
     /// tests, so a test that needs a second empty database (as the PHP tests make one) empties this
     /// one instead.
     /// </summary>

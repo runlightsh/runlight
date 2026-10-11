@@ -348,13 +348,17 @@ public static class OAuth
         var counting = new List<JsObject>();
         if (cms)
         {
+            // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.
+            var local = new List<JsObject>();
             foreach (var s in await ctx.Sites(cancellationToken).ConfigureAwait(false))
             {
-                if (!await ctx.IsRemote(Js.String(s.Get("id")), cancellationToken).ConfigureAwait(false) && s.Get("hostnames") is List<object?> hostnames && hostnames.Any(h => h is string t && t == host))
+                if (!await ctx.IsRemote(Js.String(s.Get("id")), cancellationToken).ConfigureAwait(false))
                 {
-                    counting.Add(s);
+                    local.Add(s);
                 }
             }
+            static List<object?> Hosts(JsObject s) => s.Get("hostnames") as List<object?> ?? [];
+            counting = local.Count == 1 && Hosts(local[0]).Count == 0 ? local : local.Where(s => Hosts(s).Any(h => h is string t && t == host)).ToList();
         }
 
         if (!await ctx.IsOwner(request, cancellationToken).ConfigureAwait(false))

@@ -1579,7 +1579,7 @@ public sealed class Routes
                         ["fields"] = viaManage ? new JsObject() : fields,
                         ["saved"] = viaManage ? new List<object?>() : saved,
                         ["encrypted"] = _rl.Secret != null,
-                        ["services"] = ToList(Transports.Services),
+                        ["services"] = ToList(_rl.MailServices),
                     };
                     // The app's own mailer, named only when there is one, so the answer without it stays as it was.
                     if (_rl.AppMailer is { } app)
@@ -3392,6 +3392,10 @@ public sealed class Routes
             {
                 return await OAuth.OAuthResponseAsync(_oauth, request, url.Pathname, url, ip, cancellationToken).ConfigureAwait(false) ?? Coded("Not found", "not_found", 404);
             }
+            catch (TablesBusyError)
+            {
+                return TablesBusy();
+            }
             catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 await Console.Error.WriteLineAsync("Runlight: " + error).ConfigureAwait(false);
@@ -3409,12 +3413,21 @@ public sealed class Routes
         {
             return await RouteAsync(request, path, url, ip, cancellationToken).ConfigureAwait(false);
         }
+        catch (TablesBusyError)
+        {
+            // Another process is building the tables, such as an index after an upgrade: worth asking again soon.
+            return TablesBusy();
+        }
         catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             await Console.Error.WriteLineAsync("Runlight: " + error).ConfigureAwait(false);
             return Coded("Internal error", "internal", 500);
         }
     }
+
+    /// <summary>The answer while another process creates or upgrades the tables.</summary>
+    private static Response TablesBusy() =>
+        Coded("Runlight is creating or upgrading its tables. Try again in a minute.", "tables_busy", 503, null, new Headers { ["retry-after"] = "30" });
 
     /// <summary>The handler, as an adapter takes it.</summary>
     public RequestHandler Handler() => HandleAsync;

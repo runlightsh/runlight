@@ -10,9 +10,10 @@ using System.Threading.Tasks;
 namespace Runlight.Http;
 
 /// <summary>
-/// Fetches with <see cref="HttpClient"/>, following redirects itself so a pinned address holds for the first hop.
-/// A pinned request never goes through a proxy, which would connect wherever it liked; others take the
-/// system's proxy, if it has one.
+/// Fetches with <see cref="HttpClient"/>, following redirects itself. A pinned request never goes through a
+/// proxy, which would look the name up again itself and connect wherever it liked, and connects only to the
+/// addresses its pins name: a hop to a host and port they do not name is refused, never looked up. Others
+/// take the system's proxy, if it has one.
 /// </summary>
 public sealed class HttpClientFetcher : IFetcher, IDisposable
 {
@@ -27,13 +28,20 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
     private readonly HttpClient _direct;
 
     public HttpClientFetcher()
+        : this(null)
     {
-        _client = Client(useProxy: true);
-        _direct = Client(useProxy: false);
     }
 
-    private static HttpClient Client(bool useProxy) =>
-        new(new SocketsHttpHandler
+    /// <param name="proxy">The proxy for requests that are not pinned, in place of the system's. For tests.</param>
+    internal HttpClientFetcher(IWebProxy? proxy)
+    {
+        _client = Client(useProxy: true, proxy);
+        _direct = Client(useProxy: false, null);
+    }
+
+    private static HttpClient Client(bool useProxy, IWebProxy? proxy)
+    {
+        var handler = new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             AutomaticDecompression = DecompressionMethods.All,
@@ -41,8 +49,13 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
             UseCookies = false,
             UseProxy = useProxy,
             ConnectCallback = ConnectAsync,
-        })
-        { Timeout = Timeout.InfiniteTimeSpan };
+        };
+        if (proxy != null)
+        {
+            handler.Proxy = proxy;
+        }
+        return new(handler) { Timeout = Timeout.InfiniteTimeSpan };
+    }
 
     public void Dispose()
     {
@@ -58,9 +71,10 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
         // brackets, as curl's resolve takes them. Only those addresses are tried, in order.
         var targets = new List<EndPoint>();
         bool pinned = false;
-        if (context.InitialRequestMessage.Options.TryGetValue(PinsKey, out var pins))
+        bool hasPins = context.InitialRequestMessage.Options.TryGetValue(PinsKey, out var pins) && pins.Count > 0;
+        if (hasPins)
         {
-            foreach (string pin in pins)
+            foreach (string pin in pins!)
             {
                 int first = pin.IndexOf(':', StringComparison.Ordinal);
                 if (first < 0)
@@ -89,13 +103,14 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                 break;
             }
         }
-        if (!pinned)
+        if (!hasPins)
         {
             targets.Add(context.DnsEndPoint);
         }
-        else if (targets.Count == 0)
+        else if (!pinned || targets.Count == 0)
         {
-            // A pin that names no address never falls back to a lookup of its own.
+            // A pinned request reaching a host its pins do not name, or a pin that names no address, never
+            // falls back to a lookup of its own: the address used is always one that was checked.
             throw new SocketException((int)SocketError.HostNotFound);
         }
         Exception? last = null;
@@ -142,7 +157,8 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                     throw new FetchException("fetch failed: unsupported protocol");
                 }
                 using var message = new HttpRequestMessage(new HttpMethod(method), current);
-                bool pinned = hop == 0 && init.Resolve.Count > 0;
+                // Every hop of a pinned request keeps its pins, so a redirect followed here goes only where they say.
+                bool pinned = init.Resolve.Count > 0;
                 if (pinned)
                 {
                     message.Options.Set(PinsKey, init.Resolve);

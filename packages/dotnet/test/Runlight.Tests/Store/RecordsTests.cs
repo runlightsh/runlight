@@ -15,7 +15,7 @@ public sealed class RecordsTests : StoreTestCase
         new() { ["id"] = id, ["name"] = name, ["hostnames"] = hostnames.Cast<object?>().ToList(), ["timezone"] = timezone };
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Sites_are_kept_with_their_overrides_and_a_deleted_sites_records_go_with_it(string kind)
     {
         var store = await StoreAsync(kind);
@@ -53,7 +53,7 @@ public sealed class RecordsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Short_links_and_their_clicks(string kind)
     {
         var store = await StoreAsync(kind);
@@ -116,7 +116,7 @@ public sealed class RecordsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Shares_tokens_reports_and_settings(string kind)
     {
         var store = await StoreAsync(kind);
@@ -167,7 +167,7 @@ public sealed class RecordsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task Salts_sessions_and_the_live_view(string kind)
     {
         var store = await StoreAsync(kind);
@@ -202,7 +202,7 @@ public sealed class RecordsTests : StoreTestCase
     }
 
     [Theory]
-    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
     public async Task AI_agent_fetches_are_their_own_rows_outside_visits(string kind)
     {
         var store = await StoreAsync(kind);

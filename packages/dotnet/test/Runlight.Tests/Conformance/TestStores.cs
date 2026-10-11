@@ -12,13 +12,16 @@ namespace Runlight.Tests.ConformanceRunner;
 /// always, a Postgres schema of its own inside runlight_test_dotnet when RUNLIGHT_TEST_PG is set, and MySQL
 /// 8.4 and MariaDB 11.4 when RUNLIGHT_TEST_MYSQL is set. MySQL has one database for the port's tests
 /// (runlight_test_dotnet), so each scenario there empties it of Runlight's tables first. Everything is
-/// closed and dropped by <see cref="Databases.CleanupAsync"/>.
+/// closed and dropped by <see cref="Databases.CleanupAsync"/>. Each kind also comes "+prefix", with its tables
+/// under <see cref="Databases.TestPrefix"/>.
 /// </summary>
 public static class TestStores
 {
     /// <summary>The database for a fresh store of this kind.</summary>
     public static async Task<IDb> DbAsync(string kind)
     {
+        var (plain, prefix) = Databases.Unprefixed(kind);
+        kind = plain;
         AdoDb db;
         if (kind == "sqlite")
         {
@@ -35,7 +38,8 @@ public static class TestStores
             db = new AdoDb(new MySqlDataSource(Databases.MysqlConnectionString(Databases.MysqlUrls()[kind])), "mysql", owned: true);
         }
         Databases.OnCleanup(() => db.DisposeAsync().AsTask());
-        return db;
+        // A "+prefix" kind keeps its tables under the test prefix, which the store over it keeps.
+        return prefix == null ? db : new PrefixedDb(db, prefix);
     }
 
     /// <summary>A fresh store of this kind, through Stores.FromDb, which wraps an open IDb as Stores.Sqlite, Stores.Postgres, and Stores.MySql wrap theirs.</summary>

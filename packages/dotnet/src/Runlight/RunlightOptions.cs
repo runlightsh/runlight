@@ -130,6 +130,13 @@ public sealed class RunlightOptions
     public MailOption? Mail { get; init; }
 
     /// <summary>
+    /// The ids of the mail services Settings offers and saves, such as every service but "smtp" in an app
+    /// that cannot keep connections of its own open. Default every service. A service saved earlier that is
+    /// not in the list counts as none, so the app's mailer, if there is one, sends instead.
+    /// </summary>
+    public IReadOnlyList<string>? MailServices { get; init; }
+
+    /// <summary>
     /// Encrypts the keys kept in the database: the mail service's, the AI Assistant's, and the tokens for
     /// connected installs. Default the RUNLIGHT_SECRET environment variable, then RUNLIGHT_TOKEN.
     /// </summary>

@@ -59,6 +59,22 @@ public static class Sql
     /// <summary>Engaged time, or for imported visits with none, first to last request.</summary>
     public const string Duration = "COALESCE(s.engaged_ms, s.last_at - s.started_at)";
 
+    /// <summary>What every table and index name starts with, unless a store is given another prefix in its place.</summary>
+    public const string Prefix = "rl_";
+
+    /// <summary>
+    /// Runlight's tables, after the prefix: the store's, and the sign-in accounts' two. An app dropping
+    /// Runlight's tables drops these by name, never every table that starts with the prefix.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Tables =
+    [
+        "meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings",
+        "reports", "tokens", "funnels", "rollup_days", "rollups", "users", "invites",
+    ];
+
+    /// <summary>The longest a process waits for another one creating or upgrading the tables before it gives up.</summary>
+    public const int LockWaitMs = 30_000;
+
     public const int SchemaVersion = 11;
 
     /// <summary>

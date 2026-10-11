@@ -11,7 +11,7 @@ namespace Runlight.Tests.ConformanceRunner.Fake;
 /// of it: placeholders filled with fresh values, ZIP files zipped, the requests to other servers made
 /// through the runner's fetcher, and Set-Cookie lines with values for the jars. Replaying every scenario
 /// through it proves the runner itself (normalizing, captures, jars, templates, ZIP reading, and the
-/// fetched record) apart from the core.
+/// fetched and mailed records) apart from the core.
 ///
 /// It also checks what it is sent: the entry point, method, and URL each step names, no template left
 /// unfilled, and nothing read from the environment.
@@ -61,6 +61,11 @@ public sealed class ReplayTarget : ITarget
         foreach (var fetched in (expect.Arr("fetched") ?? []).Cast<JsObject>())
         {
             await FetchAsync(fetched);
+        }
+        // Hands the app's mailer what the step expects, as the core would.
+        foreach (var mailed in (expect.Arr("mailed") ?? []).Cast<JsObject>())
+        {
+            Options.Mailed.Add((JsObject)_values.Value(mailed)!);
         }
         if (Js.Truthy(expect.Get("pass")))
         {

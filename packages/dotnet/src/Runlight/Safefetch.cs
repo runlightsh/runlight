@@ -425,6 +425,83 @@ public static partial class Safefetch
         }
     }
 
+    /// <summary>Headers that describe a body, dropped with it when a redirect turns a request into a GET.</summary>
+    private static readonly string[] BodyHeaders = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
+
+    /// <summary>Credentials, dropped when a redirect leads to another origin.</summary>
+    private static readonly string[] CredentialHeaders = ["authorization", "proxy-authorization", "cookie"];
+
+    /// <summary>
+    /// Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
+    /// this computer or a private network, but is never at a link-local or cloud metadata address. The address
+    /// is checked, and so is every redirect's, up to <paramref name="redirects"/> of them, each followed as
+    /// fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body, and a redirect
+    /// to another origin goes without the credentials. A redirect past the last one comes back as it is.
+    /// TimeoutMs is the limit for every hop together.
+    /// </summary>
+    /// <param name="target">The address.</param>
+    /// <param name="init">The request; its Redirect is ignored, since redirects are followed here.</param>
+    /// <param name="fetcher">What sends each request, and looks up each name.</param>
+    /// <param name="redirects">How many redirects are followed.</param>
+    /// <param name="cancellationToken">Stops the request.</param>
+    /// <exception cref="MetadataAddressError">For an address it refuses.</exception>
+    public static async Task<Response> ServiceFetchAsync(string target, FetchInit init, IFetcher fetcher, int redirects = 5, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(init);
+        ArgumentNullException.ThrowIfNull(fetcher);
+        var clock = Stopwatch.StartNew();
+        var url = new Url(target);
+        string method = init.Method.ToUpperInvariant();
+        var headers = new Headers(init.Headers);
+        byte[]? body = init.Body;
+        for (int hop = 0; ; hop++)
+        {
+            string host = Brackets.Replace(url.Hostname, "");
+            if (await MetadataHostAsync(host, fetcher.LookupAsync).ConfigureAwait(false))
+            {
+                throw new MetadataAddressError(host);
+            }
+            long left = init.TimeoutMs - clock.ElapsedMilliseconds;
+            if (left <= 0)
+            {
+                throw TimedOut();
+            }
+            var answer = await fetcher.FetchAsync(url.Href, new FetchInit
+            {
+                Method = method,
+                Headers = new Headers(headers),
+                Body = body,
+                Redirect = "manual",
+                TimeoutMs = (int)left,
+                MaxBytes = init.MaxBytes,
+                Truncate = init.Truncate,
+            }, cancellationToken).ConfigureAwait(false);
+            string? location = answer.Headers.Get("location");
+            if (answer.Status < 300 || answer.Status >= 400 || string.IsNullOrEmpty(location) || hop >= redirects)
+            {
+                return answer;
+            }
+            var next = new Url(location, url.Href);
+            if (answer.Status == 303 || ((answer.Status == 301 || answer.Status == 302) && method == "POST"))
+            {
+                method = method == "HEAD" ? "HEAD" : "GET";
+                body = null;
+                foreach (string name in BodyHeaders)
+                {
+                    headers.Delete(name);
+                }
+            }
+            if (next.Origin != url.Origin)
+            {
+                foreach (string name in CredentialHeaders)
+                {
+                    headers.Delete(name);
+                }
+            }
+            url = next;
+        }
+    }
+
     /// <summary>
     /// Whether an address can be another Runlight install's: https, or, with
     /// <paramref name="local"/>, an install on this machine, which only code can allow.
