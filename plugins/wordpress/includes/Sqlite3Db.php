@@ -83,6 +83,19 @@ final class Sqlite3Db implements Db {
 		$this->execute( $sql, $params )->finalize();
 	}
 
+	/**
+	 * Runs an UPDATE or DELETE and says how many rows it matched. The store asks this rather than adding RETURNING,
+	 * since SQLite3 runs a statement once to start it and again to read its first row, so a RETURNING statement
+	 * would change the rows twice and report none.
+	 *
+	 * @param string $sql    The statement, with `?` placeholders.
+	 * @param array  $params Its values.
+	 */
+	public function affected( string $sql, array $params = array() ): int {
+		$this->execute( $sql, $params )->finalize();
+		return $this->sqlite()->changes();
+	}
+
 	public function transaction( callable $fn ): mixed {
 		if ( $this->depth > 0 ) {
 			return $fn( $this );

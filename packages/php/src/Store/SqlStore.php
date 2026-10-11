@@ -179,10 +179,13 @@ final class SqlStore
         return method_exists($this->db, 'metered') && $this->db->metered();
     }
 
-    /** How many rows an UPDATE or DELETE of rows with an id matched. MySQL has no RETURNING, so its driver counts them. */
+    /**
+     * How many rows an UPDATE or DELETE of rows with an id matched. A driver that counts them itself says so, as
+     * MySQL's must, having no RETURNING, and as PHP's SQLite3 must, which runs a RETURNING statement twice.
+     */
     private function changed(string $sql, array $params): int
     {
-        if ($this->db->dialect() === 'mysql' && method_exists($this->db, 'affected')) {
+        if (method_exists($this->db, 'affected')) {
             return $this->db->affected($sql, $params);
         }
         return count($this->db->all("$sql RETURNING id", $params));
@@ -1064,7 +1067,7 @@ final class SqlStore
             return null;
         }
         $sql = 'DELETE FROM rl_settings WHERE "key" = ?';
-        $gone = $this->db->dialect() === 'mysql' && method_exists($this->db, 'affected')
+        $gone = method_exists($this->db, 'affected')
             ? $this->db->affected($sql, [$key])
             : count($this->db->all("$sql RETURNING \"key\"", [$key]));
         return $gone === 1 ? $value : null;
