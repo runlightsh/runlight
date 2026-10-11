@@ -1738,11 +1738,10 @@ func (r *Runlight) LinkHandler() func(ctx context.Context, request *Request) *Re
 		path := request.Parsed().Pathname
 		slug := ""
 		if strings.HasPrefix(path, r.LinkPath+"/") {
-			decoded, ok := decodeURIComponent(path[len(r.LinkPath)+1:])
-			if !ok {
-				return internalError(r, errors.New("URIError: URI malformed"))
+			// A slug with broken escapes is one no link has.
+			if decoded, ok := decodeURIComponent(path[len(r.LinkPath)+1:]); ok {
+				slug = decoded
 			}
-			slug = decoded
 		}
 		if slug != "" && !strings.Contains(slug, "/") {
 			found, err := r.Redirect(ctx, request, slug, "")
@@ -1805,10 +1804,7 @@ func (r *Runlight) LinkDomainResponse(ctx context.Context, request *Request) (*R
 			return nil, nil
 		}
 	}
-	slug, ok := decodeURIComponent(u.Pathname[1:])
-	if !ok {
-		return nil, errors.New("URIError: URI malformed")
-	}
+	slug, _ := decodeURIComponent(u.Pathname[1:])
 	if slug != "" && !strings.Contains(slug, "/") {
 		found, err := r.Redirect(ctx, request, slug, host)
 		if err != nil {

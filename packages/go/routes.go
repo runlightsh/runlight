@@ -599,7 +599,7 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 	if m := checkPath.FindStringSubmatch(path); m != nil && request.Method == "GET" {
 		domain, ok := decodeURIComponent(m[1])
 		if !ok {
-			return nil, errors.New("URIError: URI malformed")
+			return Coded("Unknown domain", "unknown_domain", 404, nil), nil
 		}
 		domains, err := rt.siteDomains(ctx, site.ID)
 		if err != nil {
@@ -650,7 +650,7 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 	if m := domainOne.FindStringSubmatch(path); m != nil && request.Method == "DELETE" {
 		domain, ok := decodeURIComponent(m[1])
 		if !ok {
-			return nil, errors.New("URIError: URI malformed")
+			return Coded("Unknown domain", "unknown_domain", 404, nil), nil
 		}
 		domains, err := rt.siteDomains(ctx, site.ID)
 		if err != nil {
@@ -1082,9 +1082,10 @@ func (rt *Routes) goalWrites(c *call, path string, u *whatwg.URL) (*Response, er
 	id := ""
 	var before *GoalRow
 	if path != "/api/goals" {
+		// An id with broken escapes is one no goal has.
 		decoded, ok := decodeURIComponent(path[len("/api/goals/"):])
 		if !ok {
-			return nil, errors.New("URIError: URI malformed")
+			return Coded("Unknown goal", "unknown_goal", 404, nil), nil
 		}
 		id = decoded
 		for i := range existing {
@@ -1386,7 +1387,7 @@ func (rt *Routes) sharesAPI(c *call, path string, u *whatwg.URL) (*Response, err
 	}
 	id, ok := decodeURIComponent(path[len("/api/shares/"):])
 	if !ok {
-		return nil, errors.New("URIError: URI malformed")
+		return Coded("Unknown share", "unknown_share", 404, nil), nil
 	}
 	var share *ShareRow
 	if shareID.MatchString(id) {
