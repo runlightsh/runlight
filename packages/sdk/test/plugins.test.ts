@@ -355,7 +355,7 @@ test("the WordPress plugin keeps its tables under WordPress's prefix, and drops 
   assert.deepEqual(JSON.parse(run(["wpx_options", "wpx_rl_options", "wpx_rl_links"], "mysql")!).dropped, []);
 });
 
-test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs its check from its own lib folder", async (t) => {
+test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs its check from the package it bundles", async (t) => {
   const php = spawnSync("php", ["--version"]);
   if (php.error && !process.env.CI) return t.skip("PHP is not installed");
   const dir = mkdtempSync(path.join(tmpdir(), "runlight-wp-zip-"));
@@ -365,7 +365,7 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
   assert.ok(zip, built);
   execFileSync("php", ["-r", `$z = new ZipArchive(); $z->open($argv[1]); $z->extractTo($argv[2]); $z->close();`, zip, dir]);
   const plugin = path.join(dir, "runlight");
-  assert.ok(existsSync(path.join(plugin, "lib/src/Runlight.php")));
+  assert.ok(existsSync(path.join(plugin, "vendor/runlight/runlight/src/Runlight.php")));
   const env = {
     ...process.env,
     RUNLIGHT_WP_PLUGIN: plugin,
