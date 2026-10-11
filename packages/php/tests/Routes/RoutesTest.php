@@ -108,7 +108,7 @@ final class RoutesTest extends TestCase
         $ask = fn (mixed $body, string $auth = 'secret'): Response => $routes->handle(Make::owner('/runlight/api/pick?site=blog', 'POST', $body, $auth));
         $target = function (string $ticket) use ($routes): ?string {
             $script = $routes->handle(self::req('/runlight/pick.js?runlight=pick&runlight_ticket=' . rawurlencode($ticket)))->text();
-            return preg_match('/var \w+="([^"]*)";if\(/', $script, $m) ? $m[1] : null;
+            return preg_match('/\w+="([^"]*)";if\(\/\^https/', $script, $m) ? $m[1] : null;
         };
 
         $this->assertSame(401, $ask(['origin' => 'https://stats.example.com'], 'wrong')->status, 'only the owner gets a ticket');
@@ -138,6 +138,86 @@ final class RoutesTest extends TestCase
         $this->assertSame(403, $ask(['origin' => 'https://evil.example'], $manage)->status, 'never another origin');
         $hub = Make::body($ask(['origin' => 'https://hub.example.net'], $manage))['ticket'];
         $this->assertSame('https://hub.example.net', $target($hub));
+    }
+
+    public function testThePickerSendsItsChoiceToTheRelayPageItsTicketNamesNeverThroughTheTabThatOpenedIt(): void
+    {
+        $now = gmmktime(12, 0, 0, 10, 7, 2026) * 1000;
+        $rl = Make::runlight(['sites' => [['id' => 'blog', 'hostnames' => ['blog.example.com']]], 'now' => function () use (&$now): int {
+            return $now;
+        }]);
+        $routes = $rl->routes(['token' => 'secret']);
+        $ask = fn (mixed $body, string $auth = 'secret'): Response => $routes->handle(Make::owner('/runlight/api/pick?site=blog', 'POST', $body, $auth));
+        $script = fn (string $ticket): string => $routes->handle(self::req('/runlight/pick.js?runlight=pick&runlight_ticket=' . rawurlencode($ticket)))->text();
+        $nonce = '0123456789abcdef0123456789abcdef';
+        $back = 'https://stats.example.com/runlight/pick-return';
+
+        $asked = $ask(['origin' => 'https://stats.example.com', 'return' => $back, 'nonce' => $nonce]);
+        $this->assertSame(200, $asked->status);
+        $ticket = Make::body($asked)['ticket'];
+        $this->assertCount(6, explode('.', $ticket), 'the return address and nonce are signed into the ticket');
+        $picker = $script($ticket);
+        $this->assertStringContainsString(Json::encode($back), $picker);
+        $this->assertStringContainsString(Json::encode($nonce), $picker);
+        $this->assertStringNotContainsString('__RUNLIGHT_PICK_RETURN__', $picker);
+        $this->assertStringNotContainsString('__RUNLIGHT_PICK_NONCE__', $picker);
+
+        // Neither can be changed: a ticket with another return address or nonce is no ticket, and the picker sends nowhere.
+        $parts = explode('.', $ticket);
+        $other = bin2hex('https://stats.example.com/elsewhere/pick-return');
+        foreach ([[...array_slice($parts, 0, 3), $other, ...array_slice($parts, 4)], [...array_slice($parts, 0, 4), str_repeat('f', 32), $parts[5]]] as $changed) {
+            $sent = $script(implode('.', $changed));
+            $this->assertStringNotContainsString('stats.example.com', $sent);
+            $this->assertStringNotContainsString($nonce, $sent);
+        }
+
+        // The return address is the relay page on the dashboard's own origin, and the nonce is 32 hex digits.
+        foreach ([
+            ['origin' => 'https://stats.example.com', 'return' => 'https://evil.example/pick-return', 'nonce' => $nonce],
+            ['origin' => 'https://stats.example.com', 'return' => 'https://stats.example.com.evil.example/pick-return', 'nonce' => $nonce],
+            ['origin' => 'https://stats.example.com', 'return' => 'https://stats.example.com/runlight/', 'nonce' => $nonce],
+            ['origin' => 'https://stats.example.com', 'return' => 'https://stats.example.com/pick-return?x=1', 'nonce' => $nonce],
+            ['origin' => 'https://stats.example.com', 'return' => 'https://stats.example.com/pick-return#x', 'nonce' => $nonce],
+            ['origin' => 'https://stats.example.com', 'return' => $back],
+            ['origin' => 'https://stats.example.com', 'return' => $back, 'nonce' => 'short'],
+            ['origin' => 'https://stats.example.com', 'nonce' => $nonce],
+        ] as $body) {
+            $refused = $ask($body);
+            $this->assertSame(400, $refused->status, Json::encode($body));
+            $this->assertSame('pick_return', Make::body($refused)['code']);
+        }
+        $this->assertSame(200, $ask(['origin' => 'https://stats.example.com', 'return' => 'https://stats.example.com/pick-return', 'nonce' => $nonce])->status, 'a dashboard at the root');
+
+        // A hub's ticket names a relay page on the hub it connected from, and no other origin.
+        $made = Make::body($routes->handle(Make::owner('/runlight/api/tokens', 'POST', ['name' => 'Hub', 'scope' => 'manage', 'site' => 'blog'])));
+        $rl->store->setSetting("token-origin:{$made['token']['id']}", 'https://hub.example.net');
+        $this->assertSame(200, $ask(['origin' => 'https://hub.example.net', 'return' => 'https://hub.example.net/pick-return', 'nonce' => $nonce], $made['secret'])->status);
+        $this->assertSame(400, $ask(['origin' => 'https://hub.example.net', 'return' => 'https://evil.example/pick-return', 'nonce' => $nonce], $made['secret'])->status);
+
+        $now += 31 * 60_000;
+        $this->assertStringNotContainsString($nonce, $script($ticket), 'a ticket runs out after half an hour');
+    }
+
+    public function testTheRelayPageIsStaticRunsOnlyItsOwnScriptAndKeepsItsAddressToItself(): void
+    {
+        $routes = Make::runlight()->routes(['token' => 'secret']);
+        $page = $routes->handle(self::req('/runlight/pick-return', 'GET', ['accept-language' => 'de-DE,de;q=0.9']));
+        $this->assertSame(200, $page->status);
+        $this->assertMatchesRegularExpression('/text\/html/', $page->headers->get('content-type') ?? '');
+        $this->assertSame('no-store', $page->headers->get('cache-control'));
+        $this->assertSame('no-referrer', $page->headers->get('referrer-policy'));
+        $csp = $page->headers->get('content-security-policy') ?? '';
+        $this->assertStringContainsString("script-src 'self'", $csp);
+        $this->assertStringContainsString("frame-ancestors 'none'", $csp);
+        $this->assertDoesNotMatchRegularExpression('/script-src[^;]*unsafe/', $csp, 'no inline script');
+        $html = $page->text();
+        $this->assertStringContainsString('lang="de"', $html);
+        $this->assertStringContainsString('<script src="/runlight/pick-return.js"></script>', $html);
+        $this->assertStringNotContainsString('<script>', $html, 'no inline script');
+        $script = $routes->handle(self::req('/runlight/pick-return.js'));
+        $this->assertMatchesRegularExpression('/javascript/', $script->headers->get('content-type') ?? '');
+        $this->assertStringContainsString('BroadcastChannel', $script->text());
+        $this->assertSame(404, $routes->handle(self::req('/runlight/pick-return', 'POST', ['authorization' => 'Bearer secret']))->status);
     }
 
     public function testBrokenPercentEscapesInAPathAnswerAsANameNobodyHasNeverAnError(): void
