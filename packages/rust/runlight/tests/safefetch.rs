@@ -439,3 +439,170 @@ async fn dashboards_opening_at_once_share_one_lookup() {
     assert!(a.is_some());
     assert_eq!(*fetcher.0.lock().unwrap(), 2, "the page and the favicon, once");
 }
+
+/// What the little server below was asked: method, path, body, authorization, and content type.
+type Seen = Arc<Mutex<Vec<[String; 5]>>>;
+
+/// An HTTP server on this computer that redirects as each path says, and records every request.
+async fn redirecting_server() -> (u16, Seen) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen: Seen = Arc::default();
+    let record = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let record = record.clone();
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let (head, body) = loop {
+                    let Ok(n) = socket.read(&mut chunk).await else { return };
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if let Some(at) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&bytes[..at]).into_owned();
+                        let length = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string())
+                            })
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        while bytes.len() < at + 4 + length {
+                            let Ok(n) = socket.read(&mut chunk).await else { return };
+                            if n == 0 {
+                                break;
+                            }
+                            bytes.extend_from_slice(&chunk[..n]);
+                        }
+                        break (head, String::from_utf8_lossy(&bytes[at + 4..]).into_owned());
+                    }
+                };
+                let mut lines = head.lines();
+                let mut first = lines.next().unwrap_or("").split(' ');
+                let (method, path) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
+                let header = |name: &str| {
+                    head.lines()
+                        .skip(1)
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+                        })
+                        .unwrap_or_default()
+                };
+                record.lock().unwrap().push([
+                    method,
+                    path.clone(),
+                    body,
+                    header("authorization"),
+                    header("content-type"),
+                ]);
+                let location = match path.as_str() {
+                    "/metadata" => Some((302, "http://169.254.169.254/latest/meta-data/".to_string())),
+                    "/metadata-v6" => Some((307, "http://[fd00:ec2::254]/".to_string())),
+                    "/see-other" => Some((303, "/landed".to_string())),
+                    "/keep" => Some((307, "/landed".to_string())),
+                    "/elsewhere" => Some((307, format!("http://localhost:{port}/landed"))),
+                    "/loop" => Some((302, "/loop".to_string())),
+                    _ => None,
+                };
+                let answer = match location {
+                    Some((status, to)) => {
+                        format!(
+                            "HTTP/1.1 {status} Moved\r\nlocation: {to}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                    }
+                    None => "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok".to_string(),
+                };
+                let _ = socket.write_all(answer.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+#[cfg(feature = "transport")]
+#[tokio::test]
+async fn a_services_redirects_are_followed_only_while_each_one_stays_off_link_local_and_metadata_addresses() {
+    use runlight::safefetch::{MetadataAddressError, SERVICE_REDIRECTS, ServiceFetchError, service_fetch};
+    let (port, seen) = redirecting_server().await;
+    let base = format!("http://127.0.0.1:{port}");
+    let fetcher = runlight::http::default_fetcher();
+    let ask = || {
+        FetchInit::method("POST")
+            .header("authorization", "Bearer key")
+            .header("content-type", "application/json")
+            .body("{}")
+            .timeout(10_000)
+    };
+    let refused = |host: &str| Err(ServiceFetchError::Metadata(MetadataAddressError { host: host.into() }));
+    // A service on this computer is fine; a redirect to a metadata address is refused before it is asked.
+    let fetch = |path: &str, init: FetchInit, redirects: u32| {
+        let (fetcher, url) = (fetcher.clone(), format!("{base}{path}"));
+        async move { service_fetch(&*fetcher, &url, init, redirects, None).await }
+    };
+    assert_eq!(fetch("/metadata", ask(), SERVICE_REDIRECTS).await.map(|r| r.status), refused("169.254.169.254"));
+    assert_eq!(fetch("/metadata-v6", ask(), SERVICE_REDIRECTS).await.map(|r| r.status), refused("fd00:ec2::254"));
+    assert_eq!(
+        service_fetch(&*fetcher, "http://169.254.169.254/v1/models", FetchInit::default(), 5, None)
+            .await
+            .map(|r| r.status),
+        refused("169.254.169.254")
+    );
+    let row = |m: &str, p: &str, b: &str, a: &str, t: &str| [m, p, b, a, t].map(str::to_string);
+    // Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and the key goes
+    // no further than the origin it was meant for.
+    seen.lock().unwrap().clear();
+    assert_eq!(fetch("/see-other", ask(), SERVICE_REDIRECTS).await.unwrap().text(), "ok");
+    assert_eq!(seen.lock().unwrap()[1], row("GET", "/landed", "", "Bearer key", ""));
+    seen.lock().unwrap().clear();
+    fetch("/keep", ask(), SERVICE_REDIRECTS).await.unwrap();
+    assert_eq!(seen.lock().unwrap()[1], row("POST", "/landed", "{}", "Bearer key", "application/json"));
+    seen.lock().unwrap().clear();
+    fetch("/elsewhere", ask(), SERVICE_REDIRECTS).await.unwrap();
+    assert_eq!(seen.lock().unwrap()[1], row("POST", "/landed", "{}", "", "application/json"));
+    // Past the last redirect, the redirect comes back as it is.
+    seen.lock().unwrap().clear();
+    assert_eq!(fetch("/loop", FetchInit::default(), 2).await.unwrap().status, 302);
+    assert_eq!(seen.lock().unwrap().len(), 3);
+
+    // The AI assistant and a mail webhook refuse such a redirect with the address it led to.
+    let settings = runlight::assistant::AssistantSettings {
+        provider: "custom".into(),
+        base_url: format!("{base}/metadata#"),
+        ..Default::default()
+    };
+    match runlight::assistant::list_models(&settings, &fetcher).await {
+        Err(runlight::assistant::AssistantFailure::Coded(e)) => {
+            assert_eq!(
+                (e.code.as_str(), e.params),
+                ("address_refused", vec![("host".into(), "169.254.169.254".into())])
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    let mut config = runlight::js::Object::new();
+    config.set("service", "webhook");
+    config.set("url", format!("http://localhost:{port}/metadata"));
+    let message = runlight::mail::Message {
+        to: "me@example.com".into(),
+        from: "reports@example.com".into(),
+        subject: "Hi".into(),
+        html: "<p>Hi</p>".into(),
+        text: "Hi".into(),
+        ..Default::default()
+    };
+    let error = runlight::mail::transports::send(&config, &message, &fetcher, 0).await.unwrap_err();
+    assert_eq!(
+        (error.code.as_str(), error.message.as_str()),
+        (
+            "address_refused",
+            "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to"
+        )
+    );
+}

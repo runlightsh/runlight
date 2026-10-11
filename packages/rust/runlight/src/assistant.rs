@@ -17,6 +17,7 @@ use crate::js::{self, Value};
 use crate::mcp::{ApiRead, INSTRUCTIONS, TOOLS, call_tool};
 use crate::obj;
 use crate::re::uni_re;
+use crate::safefetch::{MetadataAddressError, SERVICE_REDIRECTS, ServiceFetchError, service_fetch};
 
 /// A service the assistant can ask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,19 +315,10 @@ fn parse_url(url: &str) -> Result<Url, AssistantFailure> {
     Url::parse(url).ok_or_else(|| AssistantFailure::Thrown("Invalid URL".into()))
 }
 
-/// Refuses a service at a link-local or cloud metadata address. One on this computer (Ollama, LM Studio) or a
-/// private network is allowed, as the person setting it up means it to be.
-pub async fn refuse_metadata(url: &str) -> Result<(), AssistantFailure> {
-    let host = parse_url(url)?.hostname();
-    if crate::safefetch::metadata_host(&host, None).await {
-        return Err(AssistantError::new(
-            format!("{host} is a link-local or cloud metadata address, which Runlight never connects to"),
-            "address_refused",
-            &[("host", &host)],
-        )
-        .into());
-    }
-    Ok(())
+/// A service at a link-local or cloud metadata address, refused there or at a redirect. One on this computer
+/// (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
+fn refused(error: MetadataAddressError) -> AssistantFailure {
+    AssistantError::new(error.to_string(), "address_refused", &[("host", &error.host)]).into()
 }
 
 /// Sends the request, giving up as soon as the person has left (checked
@@ -336,17 +328,20 @@ async fn fetch(
     url: &str,
     init: FetchInit,
     cancelled: Cancelled<'_>,
-) -> Result<Response, FetchError> {
+) -> Result<Response, ServiceFetchError> {
     // fetch() refuses a URL that carries credentials before sending anything.
     if let Some(u) = Url::parse(url)
         && (!u.username().is_empty() || !u.password().is_empty())
     {
-        return Err(FetchError::Failed("Request cannot be constructed from a URL that includes credentials".into()));
+        return Err(
+            FetchError::Failed("Request cannot be constructed from a URL that includes credentials".into()).into()
+        );
     }
+    // The service's address and every redirect's are checked.
     let Some(cancelled) = cancelled else {
-        return fetcher.fetch(url, init).await;
+        return service_fetch(&**fetcher, url, init, SERVICE_REDIRECTS, None).await;
     };
-    let mut request = fetcher.fetch(url, init);
+    let mut request = Box::pin(service_fetch(&**fetcher, url, init, SERVICE_REDIRECTS, None));
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
     std::future::poll_fn(|cx| {
         if let Poll::Ready(r) = request.as_mut().poll(cx) {
@@ -354,7 +349,7 @@ async fn fetch(
         }
         while tick.poll_tick(cx).is_ready() {
             if cancelled() {
-                return Poll::Ready(Err(FetchError::Failed("This operation was aborted".into())));
+                return Poll::Ready(Err(FetchError::Failed("This operation was aborted".into()).into()));
             }
         }
         Poll::Pending
@@ -372,7 +367,6 @@ async fn post(
     cancelled: Cancelled<'_>,
 ) -> Result<Value, AssistantFailure> {
     in_time(deadline, now, cancelled)?;
-    refuse_metadata(url).await?;
     let left = deadline - now();
     let mut init = FetchInit::method("POST").header("content-type", "application/json");
     for (name, value) in headers {
@@ -381,7 +375,8 @@ async fn post(
     let init = init.body(js::stringify(body)).timeout(left.clamp(1, 90_000) as u64);
     let answer = match fetch(fetcher, url, init, cancelled).await {
         Ok(answer) => answer,
-        Err(error) => {
+        Err(ServiceFetchError::Metadata(error)) => return Err(refused(error)),
+        Err(ServiceFetchError::Fetch(error)) => {
             let host = parse_url(url)?.host();
             return Err(match error {
                 FetchError::TimedOut => AssistantError::new(
@@ -705,10 +700,10 @@ pub async fn list_models(
     } else if !settings.key.is_empty() {
         init = init.header("authorization", format!("Bearer {}", settings.key));
     }
-    refuse_metadata(&base).await?;
     let url = format!("{base}/models{}", if anthropic { "?limit=100" } else { "" });
     let answer = match fetch(fetcher, &url, init, None).await {
         Ok(answer) => answer,
+        Err(ServiceFetchError::Metadata(error)) => return Err(refused(error)),
         Err(_) => {
             let host = parse_url(&base)?.host();
             return Err(

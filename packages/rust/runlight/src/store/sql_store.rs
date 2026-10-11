@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use super::db::{Db, DbError, Dialect, Hold, Param, Row};
+use super::prefixed::{PREFIX, Prefixed, TABLES, check_prefix};
 use super::rows::*;
 use super::sql::*;
 use crate::js::{self, Object, Value};
@@ -24,6 +25,7 @@ async fn pause() {
 #[derive(Clone)]
 pub struct SqlStore {
     db: Arc<dyn Db>,
+    prefix: Arc<str>,
     ready: Arc<tokio::sync::Mutex<bool>>,
 }
 
@@ -168,14 +170,38 @@ fn concat(parts: Vec<Vec<Param>>) -> Vec<Param> {
 }
 
 impl SqlStore {
-    /// A store over a database.
+    /// A store over a database, its tables named `rl_` and something (or under the Db's own prefix, for a
+    /// [`Prefixed`] one).
     pub fn new(db: Arc<dyn Db>) -> SqlStore {
-        SqlStore { db, ready: Arc::new(tokio::sync::Mutex::new(false)) }
+        let prefix: Arc<str> = db.prefix().unwrap_or(PREFIX).into();
+        SqlStore { db, prefix, ready: Arc::new(tokio::sync::Mutex::new(false)) }
+    }
+
+    /// A store whose table and index names start with `prefix` in place of `rl_`, so two apps can each
+    /// keep Runlight's tables in one database: up to 32 letters, digits, and underscores, not starting
+    /// with a digit. A Db that is already prefixed keeps its own.
+    pub fn with_prefix(db: Arc<dyn Db>, prefix: &str) -> Result<SqlStore, DbError> {
+        check_prefix(prefix)?;
+        if db.prefix().is_some() || prefix == PREFIX {
+            return Ok(SqlStore::new(db));
+        }
+        Ok(SqlStore::new(Arc::new(Prefixed::new(db, prefix)?)))
     }
 
     /// The database.
     pub fn db(&self) -> &Arc<dyn Db> {
         &self.db
+    }
+
+    /// What the store's table and index names start with: `rl_` unless it was given another.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The store's tables as named in the database, for an app removing Runlight: each one by name, since
+    /// another app's tables may well start with the same letters.
+    pub fn tables(&self) -> Vec<String> {
+        TABLES.iter().map(|table| format!("{}{table}", self.prefix)).collect()
     }
 
     fn dialect(&self) -> Dialect {
@@ -184,7 +210,7 @@ impl SqlStore {
 
     /// A store on another connection (one held for a transaction), sharing nothing else.
     fn on(&self, db: Arc<dyn Db>) -> SqlStore {
-        SqlStore { db, ready: self.ready.clone() }
+        SqlStore { db, prefix: self.prefix.clone(), ready: self.ready.clone() }
     }
 
     async fn all(&self, sql: &str, params: Vec<Param>) -> R<Vec<Row>> {
@@ -206,7 +232,7 @@ impl SqlStore {
             return Ok(());
         }
         let held = self.db.hold(Hold::Exclusive).await?;
-        let result = create(&*held).await;
+        let result = create(&*held, &self.prefix).await;
         let finished = held.finish(result.is_ok()).await;
         result?;
         finished?;
@@ -2432,21 +2458,27 @@ impl SiteRow {
 }
 
 /// Creates the tables, or brings older ones up to date (migrate's work, under its lock).
-async fn create(db: &dyn Db) -> R<()> {
+async fn create(db: &dyn Db, prefix: &str) -> R<()> {
     // On Postgres an index on a big table takes a while to build, so the build may run past the
     // statement timeout, and goes CONCURRENTLY, so another process still serving keeps writing meanwhile.
     let postgres = db.dialect() == Dialect::Postgres;
     if postgres {
         db.run("SET statement_timeout = 0", vec![]).await?;
     }
-    let result = upgrade(db, postgres).await;
+    let result = upgrade(db, postgres, prefix).await;
     if postgres {
         let _ = db.run("RESET statement_timeout", vec![]).await;
     }
     result
 }
 
-async fn upgrade(db: &dyn Db, postgres: bool) -> R<()> {
+async fn upgrade(db: &dyn Db, postgres: bool, prefix: &str) -> R<()> {
+    // A table or index name as the database has it, under the store's prefix: the statements are
+    // rewritten on the way through, but values bound as parameters are not.
+    let named = |name: &str| match name.strip_prefix(PREFIX) {
+        Some(rest) => format!("{prefix}{rest}"),
+        None => name.to_string(),
+    };
     let dialect = db.dialect();
     let statements = schema(dialect);
     db.run(&statements[0], vec![]).await?;
@@ -2456,13 +2488,19 @@ async fn upgrade(db: &dyn Db, postgres: bool) -> R<()> {
         // A concurrent build that was stopped leaves its index unusable; it goes, and is built again below.
         let broken = db
             .all(
-                "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-           WHERE NOT i.indisvalid AND c.relname LIKE 'rl\\_%' AND c.relnamespace = current_schema()::regnamespace",
+                &format!(
+                    "SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+           WHERE NOT i.indisvalid AND c.relname LIKE '{}%' AND c.relnamespace = current_schema()::regnamespace",
+                    prefix.replace('_', "\\_")
+                ),
                 vec![],
             )
             .await?;
         for row in broken {
-            db.run(&format!("DROP INDEX IF EXISTS \"{}\"", row.text("name").replace('"', "")), vec![]).await?;
+            // Written under rl_, as every statement is, so the prefix is put back on the way through once only.
+            let name = row.text("name").replace('"', "");
+            let name = name.strip_prefix(prefix).map_or_else(|| name.clone(), |rest| format!("{PREFIX}{rest}"));
+            db.run(&format!("DROP INDEX IF EXISTS \"{name}\""), vec![]).await?;
         }
     }
     let index_re = js_re!(r"^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (\w+)");
@@ -2476,7 +2514,7 @@ async fn upgrade(db: &dyn Db, postgres: bool) -> R<()> {
             let there = db
                 .all(
                     "SELECT 1 AS there FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
-                    params![table, name],
+                    params![named(&table), named(&name)],
                 )
                 .await?;
             if there.is_empty() {

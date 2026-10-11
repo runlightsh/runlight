@@ -247,6 +247,25 @@ fn is_busy(err: &sqlx::Error) -> bool {
     busy_code || text.contains("SQLITE_BUSY") || text.contains("database is locked")
 }
 
+/// Makes the database file, when there is none yet, for its owner and group alone (0660), whatever the
+/// umask: the visits in it are nobody else's to read, and a scheduled job running as another user of the
+/// same group can still write to it. It is made before SQLite opens it and turns on WAL, so the -wal and
+/// -shm files SQLite makes beside it take the same mode. Systems without such modes make it as it is.
+pub(crate) fn own_file(path: &std::path::Path) {
+    if path.exists() {
+        return;
+    }
+    // A file another process made a moment ago is left as it is.
+    let Ok(file) = std::fs::OpenOptions::new().write(true).create_new(true).open(path) else { return };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Not a file this process may change, or a file system with no such modes: it stays as made.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o660));
+    }
+    drop(file);
+}
+
 /// Puts the connection in WAL mode, retrying while SQLite answers busy, with a short growing pause.
 async fn wal(conn: &mut PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
     let mut waited = Duration::ZERO;

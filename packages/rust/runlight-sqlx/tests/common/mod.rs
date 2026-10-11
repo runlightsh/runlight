@@ -9,7 +9,9 @@
 //! 127.0.0.1:33084 and MariaDB 11.4 at 127.0.0.1:33114, database
 //! runlight_test_rust), and MariaDB alone when RUNLIGHT_TEST_MARIADB is a
 //! URL. A MySQL database is one per server, so the tests that use it take
-//! turns, each starting from no tables.
+//! turns, each starting from no tables. SQLite, Postgres, and the first
+//! MySQL each run once more with their tables under another prefix
+//! ("sqlite+prefix" and so on).
 
 #![allow(dead_code)]
 
@@ -62,7 +64,28 @@ pub fn kinds() -> Vec<(&'static str, String)> {
     if let Some(maria) = env("RUNLIGHT_TEST_MARIADB").filter(|m| m.contains("://")) {
         out.push(("mariadb", maria));
     }
+    let prefixed: Vec<(&'static str, String)> = out
+        .iter()
+        .filter_map(|(kind, url)| {
+            let plus = match *kind {
+                "sqlite" => "sqlite+prefix",
+                "postgres" => "postgres+prefix",
+                "mysql" => "mysql+prefix",
+                _ => return None,
+            };
+            Some((plus, url.clone()))
+        })
+        .collect();
+    out.extend(prefixed);
     out
+}
+
+/// The table prefix the "+prefix" kinds use in place of rl_, as WordPress would give one.
+pub const TEST_PREFIX: &str = "wp_rl_";
+
+/// The database a kind is on: "sqlite" for "sqlite+prefix", and so on.
+pub fn base(kind: &str) -> &str {
+    kind.strip_suffix("+prefix").unwrap_or(kind)
 }
 
 /// One turn per MySQL server, as its one test database is shared.
@@ -95,10 +118,13 @@ fn random_name() -> String {
 
 /// A fresh store of a kind.
 pub async fn fresh(kind: &str, url: &str) -> Fresh {
-    match kind {
-        "sqlite" => {
-            Fresh { store: runlight_sqlx::connect(":memory:").await.expect("SQLite"), cleanup: None, _turn: None }
-        }
+    let prefix = if kind.ends_with("+prefix") { TEST_PREFIX } else { runlight::store::PREFIX };
+    match base(kind) {
+        "sqlite" => Fresh {
+            store: runlight_sqlx::connect_with_prefix(":memory:", prefix).await.expect("SQLite"),
+            cleanup: None,
+            _turn: None,
+        },
         "postgres" => {
             let name = random_name();
             let admin = sqlx::PgPool::connect(url).await.expect("Postgres");
@@ -111,7 +137,7 @@ pub async fn fresh(kind: &str, url: &str) -> Fresh {
                 .options([("search_path", name.as_str())]);
             let pool =
                 sqlx::postgres::PgPoolOptions::new().max_connections(5).connect_with(options).await.expect("Postgres");
-            let store = runlight_sqlx::postgres(pool);
+            let store = runlight_sqlx::postgres_with_prefix(pool, prefix).expect("a prefix");
             Fresh {
                 store,
                 cleanup: Some(Box::new(move || {
@@ -132,7 +158,7 @@ pub async fn fresh(kind: &str, url: &str) -> Fresh {
             drop_tables(&pool).await;
             let cleanup_pool = pool.clone();
             Fresh {
-                store: runlight_sqlx::mysql(pool),
+                store: runlight_sqlx::mysql_with_prefix(pool, prefix).expect("a prefix"),
                 cleanup: Some(Box::new(move || {
                     Box::pin(async move {
                         drop_tables(&cleanup_pool).await;
@@ -145,10 +171,11 @@ pub async fn fresh(kind: &str, url: &str) -> Fresh {
     }
 }
 
-/// Every Runlight table in the shared MySQL database goes, so the next test starts from none.
-async fn drop_tables(pool: &sqlx::MySqlPool) {
+/// Every Runlight table in the shared MySQL database goes, under either prefix, so the next test starts
+/// from none.
+pub async fn drop_tables(pool: &sqlx::MySqlPool) {
     use sqlx::Row;
-    let rows = sqlx::query("SELECT table_name AS t FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'rl\\_%'")
+    let rows = sqlx::query("SELECT table_name AS t FROM information_schema.tables WHERE table_schema = DATABASE() AND (table_name LIKE 'rl\\_%' OR table_name LIKE 'wp\\_rl\\_%')")
         .fetch_all(pool)
         .await
         .expect("the tables");

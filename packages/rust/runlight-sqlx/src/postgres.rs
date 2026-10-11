@@ -2,9 +2,12 @@
 //! join a transaction the app has open; a transaction or a lock holds one connection until it ends.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use runlight::BoxFuture;
-use runlight::store::{Db, DbError, Dialect, Hold, Param, Row, fill_placeholders, postgres_literal};
+use runlight::store::{
+    Db, DbError, Dialect, Hold, Param, Row, TablesBusyError, fill_placeholders, lock_wait, postgres_literal,
+};
 use sqlx::pool::PoolConnection;
 use sqlx::{AssertSqlSafe, PgPool, Postgres};
 use tokio::sync::Mutex;
@@ -60,21 +63,30 @@ impl Db for PostgresDb {
                 Hold::Transaction => {
                     sqlx::raw_sql(AssertSqlSafe("BEGIN".to_string())).execute(&mut **conn).await.map_err(db_error)?;
                 }
-                Hold::Exclusive => loop {
-                    // Asked for again and again rather than waited on: a waiting statement would hold up an
-                    // index being built CONCURRENTLY by whoever has the lock, and the two would wait on each
-                    // other for good.
-                    let rows =
-                        sqlx::raw_sql(AssertSqlSafe(format!("SELECT pg_try_advisory_lock({MIGRATION_LOCK}) AS ok")))
-                            .fetch_all(&mut **conn)
-                            .await
-                            .map_err(db_error)?;
-                    let ok = rows.first().map(pg_row).transpose()?.is_some_and(|r| r.num("ok") == 1.0);
-                    if ok {
-                        break;
+                Hold::Exclusive => {
+                    // Up to the lock wait, so a request does not wait on a long index build for good.
+                    let wait = lock_wait();
+                    let until = Instant::now() + wait;
+                    loop {
+                        // Asked for again and again rather than waited on: a waiting statement would hold up an
+                        // index being built CONCURRENTLY by whoever has the lock, and the two would wait on each
+                        // other for good.
+                        let rows = sqlx::raw_sql(AssertSqlSafe(format!(
+                            "SELECT pg_try_advisory_lock({MIGRATION_LOCK}) AS ok"
+                        )))
+                        .fetch_all(&mut **conn)
+                        .await
+                        .map_err(db_error)?;
+                        let ok = rows.first().map(pg_row).transpose()?.is_some_and(|r| r.num("ok") == 1.0);
+                        if ok {
+                            break;
+                        }
+                        if Instant::now() >= until {
+                            return Err(TablesBusyError { waited: wait }.into());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                },
+                }
             }
             Ok(Arc::new(Held { conn: Arc::new(Mutex::new(slot)), kind, role: Role::Owner }) as Arc<dyn Db>)
         })

@@ -41,7 +41,7 @@ pub use postgres::PostgresDb;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteDb;
 
-use runlight::store::SqlStore;
+use runlight::store::{DbError, PREFIX, SqlStore, check_prefix};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use std::sync::Arc;
 
@@ -53,11 +53,27 @@ pub fn sqlite(pool: sqlx::SqlitePool) -> SqlStore {
     SqlStore::new(Arc::new(SqliteDb::new(pool)))
 }
 
+/// [`sqlite`], with every table and index name starting with `prefix` in place of `rl_`, so two apps
+/// sharing one database each keep a set of their own: up to 32 letters, digits, and underscores, not
+/// starting with a digit.
+#[cfg(feature = "sqlite")]
+pub fn sqlite_with_prefix(pool: sqlx::SqlitePool, prefix: &str) -> Result<SqlStore, DbError> {
+    SqlStore::with_prefix(Arc::new(SqliteDb::new(pool)), prefix)
+}
+
 /// Runlight's tables in Postgres, on the app's pool. The pool needs at least two connections: some
 /// work holds one while it reads through another.
 #[cfg(feature = "postgres")]
 pub fn postgres(pool: sqlx::PgPool) -> SqlStore {
     SqlStore::new(Arc::new(PostgresDb::new(pool)))
+}
+
+/// [`postgres`], with every table and index name starting with `prefix` in place of `rl_`, so two apps
+/// sharing one database each keep a set of their own: up to 32 letters, digits, and underscores, not
+/// starting with a digit.
+#[cfg(feature = "postgres")]
+pub fn postgres_with_prefix(pool: sqlx::PgPool, prefix: &str) -> Result<SqlStore, DbError> {
+    SqlStore::with_prefix(Arc::new(PostgresDb::new(pool)), prefix)
 }
 
 /// Runlight's tables in MySQL 8.4 or MariaDB 11.4 and later, on the app's pool, which needs at least
@@ -69,10 +85,27 @@ pub fn mysql(pool: sqlx::MySqlPool) -> SqlStore {
     SqlStore::new(Arc::new(MysqlDb::new(pool)))
 }
 
+/// [`mysql`], with every table and index name starting with `prefix` in place of `rl_`, so two apps
+/// sharing one database each keep a set of their own: up to 32 letters, digits, and underscores, not
+/// starting with a digit.
+#[cfg(feature = "mysql")]
+pub fn mysql_with_prefix(pool: sqlx::MySqlPool, prefix: &str) -> Result<SqlStore, DbError> {
+    SqlStore::with_prefix(Arc::new(MysqlDb::new(pool)), prefix)
+}
+
 /// A store from a connection URL: `sqlite:` (or a path), `postgres://`, or `mysql://` and `mariadb://`,
-/// with a pool of its own, as the standalone server and the CLI open one.
-pub async fn connect(url: &str) -> Result<SqlStore, runlight::store::DbError> {
-    let fail = |e: &dyn std::fmt::Display| runlight::store::DbError(e.to_string());
+/// with a pool of its own, as the standalone server and the CLI open one. A new SQLite file is made for
+/// its owner and group alone (0660).
+pub async fn connect(url: &str) -> Result<SqlStore, DbError> {
+    connect_with_prefix(url, PREFIX).await
+}
+
+/// [`connect`], with every table and index name starting with `prefix` in place of `rl_`, so two apps
+/// sharing one database each keep a set of their own: up to 32 letters, digits, and underscores, not
+/// starting with a digit.
+pub async fn connect_with_prefix(url: &str, prefix: &str) -> Result<SqlStore, DbError> {
+    check_prefix(prefix)?;
+    let fail = |e: &dyn std::fmt::Display| DbError(e.to_string());
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
         #[cfg(feature = "postgres")]
@@ -83,7 +116,7 @@ pub async fn connect(url: &str) -> Result<SqlStore, runlight::store::DbError> {
                 .connect(url)
                 .await
                 .map_err(|e| fail(&e))?;
-            return Ok(postgres(pool));
+            return postgres_with_prefix(pool, prefix);
         }
         #[cfg(not(feature = "postgres"))]
         return Err(fail(&"Runlight: built without the postgres feature"));
@@ -98,7 +131,7 @@ pub async fn connect(url: &str) -> Result<SqlStore, runlight::store::DbError> {
                 .connect(&url)
                 .await
                 .map_err(|e| fail(&e))?;
-            return Ok(mysql(pool));
+            return mysql_with_prefix(pool, prefix);
         }
         #[cfg(not(feature = "mysql"))]
         return Err(fail(&"Runlight: built without the mysql feature"));
@@ -110,6 +143,9 @@ pub async fn connect(url: &str) -> Result<SqlStore, runlight::store::DbError> {
         let options = if path == ":memory:" {
             sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:").map_err(|e| fail(&e))?
         } else {
+            if !path.starts_with("file:") {
+                sqlite::own_file(std::path::Path::new(path));
+            }
             sqlx::sqlite::SqliteConnectOptions::new().filename(path).create_if_missing(true)
         };
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -117,7 +153,7 @@ pub async fn connect(url: &str) -> Result<SqlStore, runlight::store::DbError> {
             .connect_with(options)
             .await
             .map_err(|e| fail(&e))?;
-        Ok(sqlite(pool))
+        sqlite_with_prefix(pool, prefix)
     }
     #[cfg(not(feature = "sqlite"))]
     Err(fail(&"Runlight: built without the sqlite feature"))

@@ -16,6 +16,16 @@ fn mail_error(message: &str, code: &str) -> Error {
     Error::Mail(CodedError::new(message, code, &[]))
 }
 
+/// An app mailer's own error as a MailError coded `mail_app_failed`, its words as the detail.
+fn app_failed(via: &str, detail: String) -> Error {
+    let message = if detail.is_empty() {
+        format!("{via} could not send it")
+    } else {
+        format!("{via} could not send it: {detail}")
+    };
+    Error::Mail(CodedError::new(message, "mail_app_failed", &[("via", via), ("detail", &detail)]))
+}
+
 impl Runlight {
     /// The mail Runlight sends with: a service from code, or as saved in the dashboard, or else the app's
     /// own mailer, as service "app" with its `via`, with where it came from (`code`, `dashboard`, or `app`).
@@ -28,7 +38,14 @@ impl Runlight {
         if let Some(Value::Object(o)) =
             sealed.and_then(|s| unseal(&s, self.secret())).and_then(|opened| js::parse(&opened).ok())
         {
-            return Ok(Some((o, "dashboard")));
+            // A service no longer offered counts as none, so it is never sent through.
+            let offered =
+                self.0.mail_services.as_ref().is_none_or(|offered| {
+                    offered.iter().any(|s| o.get("service").and_then(Value::as_str) == Some(s.id))
+                });
+            if offered {
+                return Ok(Some((o, "dashboard")));
+            }
         }
         let Some(app) = &self.0.app_mailer else { return Ok(None) };
         let mut settings = Object::new().with("service", "app").with("from", app.from.as_str());
@@ -54,6 +71,13 @@ impl Runlight {
         let Some(service) = SERVICES.iter().find(|s| input.get("service").and_then(Value::as_str) == Some(s.id)) else {
             return Err(mail_error("Pick a mail service", "mail_service"));
         };
+        if !self.mail_services().iter().any(|s| s.id == service.id) {
+            return Err(Error::Mail(CodedError::new(
+                format!("{} is not offered here. Pick another mail service", service.name),
+                "mail_service",
+                &[("service", service.id)],
+            )));
+        }
         let text = |k: &str| js::trim(&js::str_or_empty(input.get(k))).to_string();
         let mut settings = Object::new();
         settings.set("service", service.id);
@@ -113,15 +137,12 @@ impl Runlight {
         };
         (app.send)(message).await.map_err(|error| match error.downcast::<MailError>() {
             Ok(mail) => Error::Mail(*mail),
-            Err(error) => {
-                let detail = error.to_string();
-                let message = if detail.is_empty() {
-                    format!("{} could not send it", app.via)
-                } else {
-                    format!("{} could not send it: {detail}", app.via)
-                };
-                Error::Mail(CodedError::new(message, "mail_app_failed", &[("via", &app.via), ("detail", &detail)]))
-            }
+            Err(error) => match error.downcast::<Error>() {
+                // The crate's own Error::Mail passes through as a bare MailError does.
+                Ok(own) if matches!(*own, Error::Mail(_)) => *own,
+                Ok(own) => app_failed(&app.via, own.to_string()),
+                Err(error) => app_failed(&app.via, error.to_string()),
+            },
         })
     }
 

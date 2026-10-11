@@ -26,7 +26,9 @@ pub struct FetchInit {
     /// With `max_bytes`, hand back the first bytes rather than fail.
     pub truncate: bool,
     /// Addresses a host name is pinned to, so an address checked is the one
-    /// connected to: the host, its port, and its addresses.
+    /// connected to: the host, its port, and its addresses. A Fetcher given
+    /// any connects to those addresses alone, never through a proxy, and
+    /// fails a request it cannot pin rather than send it another way.
     pub resolve: Vec<(String, u16, Vec<IpAddr>)>,
 }
 
@@ -144,6 +146,10 @@ fn client(manual: bool, resolve: &[(String, u16, Vec<IpAddr>)]) -> Result<reqwes
         b = b.no_proxy();
     }
     for (host, port, addresses) in resolve {
+        // A name pinned to no address would be looked up again by the client.
+        if addresses.is_empty() {
+            return Err(FetchError::Failed(format!("{host} has no address to connect to")));
+        }
         let addrs: Vec<std::net::SocketAddr> =
             addresses.iter().map(|ip| std::net::SocketAddr::new(*ip, *port)).collect();
         b = b.resolve_to_addrs(host, &addrs);

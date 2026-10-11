@@ -2,9 +2,12 @@
 //! transaction or a lock holds one connection until it ends.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use runlight::BoxFuture;
-use runlight::store::{Db, DbError, Dialect, Hold, Param, Row, fill_placeholders, mysql_literal};
+use runlight::store::{
+    Db, DbError, Dialect, Hold, Param, Row, TablesBusyError, fill_placeholders, lock_wait, mysql_literal,
+};
 use sqlx::pool::PoolConnection;
 use sqlx::{AssertSqlSafe, MySql, MySqlPool};
 use tokio::sync::Mutex;
@@ -71,17 +74,27 @@ impl Db for MysqlDb {
             let conn = slot.conn.as_mut().ok_or_else(ended)?;
             match kind {
                 Hold::Transaction => begin(conn).await?,
-                Hold::Exclusive => loop {
-                    let rows = exec(conn, &format!("SELECT GET_LOCK({LOCK}, 5) AS ok")).await?;
-                    let row = rows.into_iter().next().unwrap_or_default();
-                    if row.is_null("ok") {
-                        return Err(DbError("Runlight: MySQL refused the lock for creating tables".into()));
+                Hold::Exclusive => {
+                    // Up to the lock wait, so a request does not wait on a long index build for good.
+                    let wait = lock_wait();
+                    let until = Instant::now() + wait;
+                    loop {
+                        let left = until.saturating_duration_since(Instant::now()).as_millis().div_ceil(1000);
+                        let seconds = left.clamp(1, 5);
+                        let rows = exec(conn, &format!("SELECT GET_LOCK({LOCK}, {seconds}) AS ok")).await?;
+                        let row = rows.into_iter().next().unwrap_or_default();
+                        if row.is_null("ok") {
+                            return Err(DbError("Runlight: MySQL refused the lock for creating tables".into()));
+                        }
+                        if row.num("ok") == 1.0 {
+                            break;
+                        }
+                        // Not got in time: another process is creating the tables. Ask again, until the wait is up.
+                        if Instant::now() >= until {
+                            return Err(TablesBusyError { waited: wait }.into());
+                        }
                     }
-                    if row.num("ok") == 1.0 {
-                        break;
-                    }
-                    // Not got within 5 seconds: another process is creating the tables. Ask again.
-                },
+                }
             }
             Ok(Arc::new(Held { conn: Arc::new(Mutex::new(slot)), kind, role: Role::Owner }) as Arc<dyn Db>)
         })
