@@ -642,6 +642,7 @@ impl Routes {
                     escape_html(&t("email.unsub.gone", &[]))
                 ),
                 404,
+                "",
             ));
         };
         if request.method == "POST" {
@@ -654,6 +655,7 @@ impl Routes {
                     escape_html(&t("email.unsub.done", &[("site", &site.name), ("email", &report.email)]))
                 ),
                 200,
+                "",
             ));
         }
         Ok(small_page(
@@ -665,6 +667,7 @@ impl Routes {
                 escape_html(&t("email.unsubscribe", &[]))
             ),
             200,
+            "",
         ))
     }
 
