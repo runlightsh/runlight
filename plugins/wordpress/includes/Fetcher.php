@@ -61,12 +61,12 @@ final class Fetcher implements RunlightFetcher {
 
 		if ( is_wp_error( $response ) ) {
 			$message = $response->get_error_message();
-			throw new FetchError( '' !== $message ? $message : 'fetch failed', (bool) preg_match( '/timed out|error 28/i', $message ) );
+			throw new FetchError( '' !== $message ? $message : 'fetch failed', (bool) preg_match( '/timed out|error 28/i', $message ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- never printed as HTML: Runlight puts it in a JSON answer or a log line.
 		}
 		$body = (string) wp_remote_retrieve_body( $response );
 		if ( null !== $max && strlen( $body ) > $max ) {
 			if ( empty( $init['truncate'] ) ) {
-				throw new BodyTooLong( "Body over $max bytes" );
+				throw new BodyTooLong( sprintf( 'Body over %d bytes', (int) $max ) );
 			}
 			$body = substr( $body, 0, $max );
 		}
