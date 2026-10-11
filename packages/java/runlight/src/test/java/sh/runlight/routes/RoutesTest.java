@@ -887,13 +887,65 @@ class RoutesTest {
   @Test
   void anErrorInsideARouteIsAnInternalErrorThatSaysNothingMore() {
     Routes routes =
-        Make.runlight(new Runlight.Options().sites(List.of(Make.site("blog", "blog.example.com"))))
-            .routes(new Routes.Options().token(null));
-    // A broken escape in a path makes decodeURIComponent throw, as it does in TypeScript.
-    Response answer =
-        routes.handle(req("/runlight/api/goals/%E0%A4%A?site=blog", "DELETE", Map.of()));
+        routes(
+            new Routes.Options()
+                .authorize(
+                    r -> {
+                      throw new IllegalStateException("the app's own check broke");
+                    }));
+    Response answer = routes.handle(req("/runlight/api/sites"));
     assertEquals(500, answer.status());
     assertEquals("{\"error\":\"Internal error\",\"code\":\"internal\"}", answer.text());
+  }
+
+  @Test
+  void brokenPercentEscapesInAPathAnswerAsANameNobodyHasNeverAnError() {
+    Runlight rl =
+        Make.runlight(new Runlight.Options().sites(List.of(Make.site("blog", "blog.example.com"))));
+    Routes routes = rl.routes(new Routes.Options().token("secret"));
+    Object goal = Json.object("name", "X", "kind", "event", "match", "X");
+    Object[][] cases = {
+      {"PATCH", "/runlight/api/goals/%E0?site=blog", "unknown_goal", goal},
+      {"DELETE", "/runlight/api/goals/%zz?site=blog", "unknown_goal", null},
+      {"PATCH", "/runlight/api/shares/%E0%A4?site=blog", "unknown_share", Json.object("name", "X")},
+      {"DELETE", "/runlight/api/shares/%?site=blog", "unknown_share", null},
+      {"PATCH", "/runlight/api/sites/%E0", "unknown_site", Json.object("name", "X")},
+      {"DELETE", "/runlight/api/sites/%zz", "unknown_site", null},
+      {"GET", "/runlight/api/link-domains/%E0/check?site=blog", "unknown_domain", null},
+      {"DELETE", "/runlight/api/link-domains/%zz?site=blog", "unknown_domain", null},
+    };
+    for (Object[] c : cases) {
+      Response answer = routes.handle(owner((String) c[1], (String) c[0], c[3]));
+      assertEquals(404, answer.status(), c[0] + " " + c[1]);
+      assertEquals(c[2], body(answer).get("code"), c[0] + " " + c[1]);
+    }
+    // A hub's manage token, checked against its one site before anything else.
+    Map<String, Object> made =
+        body(
+            routes.handle(
+                owner(
+                    "/runlight/api/tokens",
+                    "POST",
+                    Json.object("name", "Hub", "scope", "manage", "site", "blog"))));
+    Response hub =
+        routes.handle(
+            owner(
+                "/runlight/api/sites/%E0",
+                "PATCH", Json.object("name", "X"), (String) made.get("secret")));
+    assertEquals(404, hub.status());
+    // Public pages and short links: the share page, unsubscribing, the app's link path, and a link
+    // domain.
+    assertEquals(404, routes.handle(req("/runlight/share/%E0")).status());
+    assertEquals(404, routes.handle(req("/runlight/unsubscribe/%E0")).status());
+    assertEquals(404, routes.handle(req("/runlight/assets/app.%E0.js")).status());
+    assertEquals(404, rl.linkHandler().apply(req("/go/%E0")).status());
+    rl.store.addLinkDomain("go.example.net", "blog", System.currentTimeMillis());
+    rl.forgetLinkDomains();
+    Response linked =
+        rl.linkDomainResponse(
+            new sh.runlight.http.Request(
+                "https://go.example.net/%E0", "GET", sh.runlight.http.Headers.of(), ""));
+    assertEquals(404, linked.status());
   }
 
   @Test

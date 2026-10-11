@@ -9,6 +9,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -977,13 +978,12 @@ public final class Routes {
     return ORIGIN.matcher(value).find();
   }
 
-  /** decodeURIComponent, which throws on a broken escape, as the TypeScript does. */
-  private static String decode(String text) {
-    String decoded = Js.decodeURIComponent(text);
-    if (decoded == null) {
-      throw new Runlight.UriError();
-    }
-    return decoded;
+  /**
+   * One part of a URL path with its percent escapes decoded, or null when they are broken (such as
+   * %E0 or %zz). A route answers null as it does a name it does not know, never with an error.
+   */
+  static String decodePart(String part) {
+    return Js.decodeURIComponent(part);
   }
 
   /** String(body[key] ?? fallback). */
@@ -1408,8 +1408,8 @@ public final class Routes {
       }
       Matcher checkMatch = DOMAIN_CHECK.matcher(path);
       if (checkMatch.find() && method.equals("GET")) {
-        String domain = decode(checkMatch.group(1));
-        if (!ownDomains(siteId).contains(domain)) {
+        String domain = decodePart(checkMatch.group(1));
+        if (domain == null || !ownDomains(siteId).contains(domain)) {
           return coded("Unknown domain", "unknown_domain", 404);
         }
         // One added before names inside private networks were refused is never fetched. What the
@@ -1468,8 +1468,8 @@ public final class Routes {
 
       Matcher domainMatch = DOMAIN_PATH.matcher(path);
       if (domainMatch.find() && method.equals("DELETE")) {
-        String domain = decode(domainMatch.group(1));
-        if (!ownDomains(siteId).contains(domain)) {
+        String domain = decodePart(domainMatch.group(1));
+        if (domain == null || !ownDomains(siteId).contains(domain)) {
           return coded("Unknown domain", "unknown_domain", 404);
         }
         store.removeLinkDomain(domain);
@@ -1930,14 +1930,15 @@ public final class Routes {
     }
     Map<String, Object> site = asMap(found);
     List<Map<String, Object>> existing = store().goals((String) site.get("id"));
-    String id = path.equals("/api/goals") ? null : decode(path.substring("/api/goals/".length()));
+    boolean named = !path.equals("/api/goals");
+    String id = named ? decodePart(path.substring("/api/goals/".length())) : null;
     Map<String, Object> before = null;
     for (Map<String, Object> g : existing) {
       if (g.get("id").equals(id)) {
         before = g;
       }
     }
-    if (id != null && before == null) {
+    if (named && before == null) {
       return coded("Unknown goal", "unknown_goal", 404);
     }
     trackers.clear();
@@ -2274,8 +2275,9 @@ public final class Routes {
       return coded("Method not allowed", "method_not_allowed", 405);
     }
 
-    String id = decode(path.substring("/api/shares/".length()));
-    Map<String, Object> share = SHARE_ID.matcher(id).find() ? store().shareById(id) : null;
+    String id = decodePart(path.substring("/api/shares/".length()));
+    Map<String, Object> share =
+        id != null && SHARE_ID.matcher(id).find() ? store().shareById(id) : null;
     if (share == null || !site.get("id").equals(share.get("site"))) {
       return coded("Unknown share", "unknown_share", 404);
     }
@@ -2626,7 +2628,7 @@ public final class Routes {
       Matcher siteMatch = SITE_PATH.matcher(path);
       boolean isSite = siteMatch.find();
       if ((asked != null && !asked.isEmpty() && !asked.equals(token.get("site")))
-          || (isSite && !decode(siteMatch.group(1)).equals(token.get("site")))) {
+          || (isSite && !Objects.equals(decodePart(siteMatch.group(1)), token.get("site")))) {
         return coded("Unknown site", "unknown_site", 404);
       }
       if (isSite && isJson(request)) {
@@ -3092,8 +3094,12 @@ public final class Routes {
       if (!Boolean.TRUE.equals(access)) {
         return denied(access);
       }
+      String id = decodePart(siteMatch.group(1));
+      if (id == null) {
+        return coded("Unknown site", "unknown_site", 404);
+      }
       try {
-        rl.deleteSite(decode(siteMatch.group(1)));
+        rl.deleteSite(id);
         return json(Json.object("ok", true));
       } catch (RuntimeException error) {
         if (!isRange(error)) {
@@ -3333,8 +3339,11 @@ public final class Routes {
           400,
           Json.object("months", months));
     }
+    String id = decodePart(rawId);
+    if (id == null) {
+      return coded("Unknown site", "unknown_site", 404);
+    }
     try {
-      String id = decode(rawId);
       Map<String, Object> remote = rl.remote(id);
       // How long a connected site keeps visits, and the timezone its days follow, are the
       // install's settings: this server passes them on, and changes its own row only once the
@@ -3380,7 +3389,7 @@ public final class Routes {
       if (defined(body, "hostnames") && rl.managedSites) {
         patch.put("hostnames", plain(Js.get(body, "hostnames")));
       }
-      Map<String, Object> site = new LinkedHashMap<>(rl.updateSite(decode(rawId), patch));
+      Map<String, Object> site = new LinkedHashMap<>(rl.updateSite(id, patch));
       // A connected site answers as the list shows it, so the dashboard keeps its install and
       // domains.
       if (remote != null) {
