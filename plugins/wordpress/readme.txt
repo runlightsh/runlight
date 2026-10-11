@@ -32,11 +32,11 @@ The script sets no cookies and stores nothing in the visitor's browser. Runlight
 
 = Source code =
 
-The plugin carries Runlight's PHP package in its lib folder, with built scripts in lib/assets. Their source, and the tools that build them, are at [github.com/runlightsh/runlight](https://github.com/runlightsh/runlight):
+The plugin bundles Runlight's own PHP package, runlight/runlight (MIT), at vendor/runlight/runlight, as Composer lays it out, with its built scripts in vendor/runlight/runlight/assets. Their source, and the tools that build them, are at [github.com/runlightsh/runlight](https://github.com/runlightsh/runlight):
 
-* lib/src is the PHP package itself, from packages/php.
-* lib/assets/dashboard.js and dashboard.css are the dashboard, built from packages/dashboard.
-* lib/assets/tracker.js, picker.js, and pick-return.js are the tracking script, the goal picker, and the picker's relay page, built from packages/tracker.
+* vendor/runlight/runlight/src is the PHP package itself, from packages/php.
+* assets/dashboard.js and dashboard.css are the dashboard, built from packages/dashboard.
+* assets/tracker.js, picker.js, and pick-return.js are the tracking script, the goal picker, and the picker's relay page, built from packages/tracker.
 
 Running npm install and then npm run build at the top of the repository builds every one of them and copies them into packages/php/assets.
 

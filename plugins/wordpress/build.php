@@ -6,8 +6,9 @@
  *     php plugins/wordpress/build.php [output directory]
  *
  * writes runlight-<version>.zip (default into plugins/wordpress/dist/) with
- * one folder, runlight/, holding the plugin's own files and, under lib/, the
- * PHP package it runs Runlight with inside WordPress.
+ * one folder, runlight/, holding the plugin's own files and, under
+ * vendor/runlight/runlight/ as Composer lays it out, the PHP package it runs
+ * Runlight with inside WordPress.
  * The header's Version, the readme's Stable tag, and the readme's changelog
  * must agree, or the build stops. Entries carry a fixed time, so the same
  * sources give the same zip.
@@ -37,7 +38,7 @@ foreach (glob("$root/includes/*.php") ?: [] as $file) {
 sort($files);
 
 // Runlight itself, from packages/php, for running it in this WordPress: its source and the built dashboard,
-// under lib/ as the package lays them out. The command line, the standalone server, and the framework bridges
+// under vendor/runlight/runlight/ with its composer.json, as Composer installs the package. The command line, the standalone server, and the framework bridges
 // are left out, since WordPress never runs them, and so are its PDO connections: inside WordPress it reaches the
 // database through $wpdb, or a SQLite file through SQLite3 (includes/WpdbDb.php and includes/Sqlite3Db.php).
 // So is whatever the plugin always replaces with WordPress's own: curl (includes/Fetcher.php), the files shared
@@ -55,13 +56,14 @@ $leftOut = [
     'src/Accounts/Web.php', 'src/Accounts/Slots.php', 'src/Accounts/Pages.php',
     'src/Http/Globals.php', 'src/Env.php', 'src/ErrorLog.php',
 ];
-$bundled = ['LICENSE' => 'lib/LICENSE'];
+$package = 'vendor/runlight/runlight';
+$bundled = ['LICENSE' => "$package/LICENSE", 'composer.json' => "$package/composer.json"];
 foreach (['src', 'assets'] as $folder) {
     $walk = new RecursiveIteratorIterator(new RecursiveDirectoryIterator("$library/$folder", FilesystemIterator::SKIP_DOTS));
     foreach ($walk as $file) {
         $path = substr($file->getPathname(), strlen("$library/"));
         if ($file->isFile() && !in_array($path, $leftOut, true) && !str_starts_with($file->getFilename(), '.')) {
-            $bundled[$path] = "lib/$path";
+            $bundled[$path] = "$package/$path";
         }
     }
 }

@@ -1,6 +1,7 @@
 <?php
 /**
- * Runlight itself, the PHP package the plugin carries under lib/, for running
+ * Runlight itself, the PHP package runlight/runlight the plugin carries under
+ * vendor/runlight/runlight, for running
  * Runlight inside this WordPress: whether this server can run it, and loading
  * its classes when it can.
  *
@@ -17,11 +18,11 @@ final class Library {
 	/** The PHP the package needs, which is newer than the plugin's own. */
 	private const PHP = '8.2';
 
-	/** Where the package is: lib/ in the plugin, or packages/php beside it in a checkout of the repository. */
+	/** Where the package is: vendor/runlight/runlight in the plugin, or packages/php beside it in a checkout of the repository. */
 	private static function folder(): string {
 		$plugin = dirname( __DIR__ );
-		if ( is_dir( $plugin . '/lib/src' ) ) {
-			return $plugin . '/lib';
+		if ( is_dir( $plugin . '/vendor/runlight/runlight/src' ) ) {
+			return $plugin . '/vendor/runlight/runlight';
 		}
 		$checkout = dirname( $plugin, 2 ) . '/packages/php';
 		return is_dir( $checkout . '/src' ) ? $checkout : '';
@@ -43,7 +44,7 @@ final class Library {
 			}
 		}
 		if ( '' === self::folder() ) {
-			return __( 'This copy of the plugin is missing its lib folder. Install it again from WordPress.org.', 'runlight' );
+			return __( 'This copy of the plugin is missing its vendor folder. Install it again from WordPress.org.', 'runlight' );
 		}
 		if ( '' === Storage::kind() ) {
 			// Each site in a network keeps a file of its own, never tables in the network's database.

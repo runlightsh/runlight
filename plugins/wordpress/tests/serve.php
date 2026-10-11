@@ -19,7 +19,7 @@ spl_autoload_register(
 		if ( ! str_starts_with( $name, 'Runlight\\' ) || str_starts_with( $name, 'Runlight\\WordPress\\' ) ) {
 			return;
 		}
-		if ( ! is_file( $runlight_plugin . '/lib/src/' . str_replace( '\\', '/', substr( $name, strlen( 'Runlight\\' ) ) ) . '.php' ) ) {
+		if ( ! is_file( $runlight_plugin . '/vendor/runlight/runlight/src/' . str_replace( '\\', '/', substr( $name, strlen( 'Runlight\\' ) ) ) . '.php' ) ) {
 			http_response_code( 500 );
 			echo "missing class $name";
 			exit;
