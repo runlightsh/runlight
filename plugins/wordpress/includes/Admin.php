@@ -383,7 +383,7 @@ JS;
 						<th scope="row"><label for="runlight-dashboard-key"><?php esc_html_e( 'Dashboard key', 'runlight' ); ?></label></th>
 						<td>
 							<input id="runlight-dashboard-key" class="regular-text code" type="password" autocomplete="off" name="<?php echo esc_attr( Settings::OPTION ); ?>[dashboard_key]" value="" placeholder="<?php echo '' !== $settings['dashboard_key'] ? esc_attr__( 'Saved. Leave blank to keep it for this address.', 'runlight' ) : ''; ?>">
-							<p class="description"><?php esc_html_e( 'Optional. Made in Runlight under Settings, Install. With it, the Runlight item in the admin menu shows this site’s numbers right here, in the same read-only view a share link shows, framed only by this admin. The key cannot read anything itself.', 'runlight' ); ?></p>
+							<p class="description"><?php esc_html_e( 'Optional. Made in Runlight under Settings, Install. With it, the Runlight item in the admin menu shows this site’s numbers right here, in the same read-only view a share link shows, framed only by this admin. Anyone holding the key can read this site’s dashboard, so keep it as you would a password.', 'runlight' ); ?></p>
 						</td>
 					</tr>
 					<tr class="runlight-local">
