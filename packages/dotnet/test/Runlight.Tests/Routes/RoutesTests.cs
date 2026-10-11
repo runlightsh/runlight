@@ -81,7 +81,7 @@ public sealed class RoutesTests : RoutesTestCase
         async Task<string?> Target(string ticket)
         {
             string script = (await routes.HandleAsync(Req("/runlight/pick.js?runlight=pick&runlight_ticket=" + Uri.EscapeDataString(ticket)))).Text();
-            var m = Regex.Match(script, "var \\w+=\"([^\"]*)\";if\\(");
+            var m = Regex.Match(script, "\\w+=\"([^\"]*)\";if\\(/\\^https");
             return m.Success ? m.Groups[1].Value : null;
         }
 
@@ -113,6 +113,89 @@ public sealed class RoutesTests : RoutesTestCase
         Assert.Equal(403, (await Ask(new JsObject { ["origin"] = "https://evil.example" }, manage)).Status); // never another origin
         string hub = Obj(await Ask(new JsObject { ["origin"] = "https://hub.example.net" }, manage)).Str("ticket")!;
         Assert.Equal("https://hub.example.net", await Target(hub));
+    }
+
+    [Fact]
+    public async Task The_picker_sends_its_choice_to_the_relay_page_its_ticket_names_never_through_the_tab_that_opened_it()
+    {
+        long now = Utc(2026, 10, 7, 12);
+        var rl = await RunlightAsync(sites: [Site("blog", hostnames: ["blog.example.com"])], now: () => now);
+        var routes = rl.Routes(new RoutesOptions { Token = "secret" });
+        Task<Response> Ask(object body, string auth = "secret") => routes.HandleAsync(Owner("/runlight/api/pick?site=blog", "POST", body, auth));
+        async Task<string> Script(string ticket) => (await routes.HandleAsync(Req("/runlight/pick.js?runlight=pick&runlight_ticket=" + Uri.EscapeDataString(ticket)))).Text();
+        const string nonce = "0123456789abcdef0123456789abcdef";
+        const string back = "https://stats.example.com/runlight/pick-return";
+
+        var asked = await Ask(new JsObject { ["origin"] = "https://stats.example.com", ["return"] = back, ["nonce"] = nonce });
+        Assert.Equal(200, asked.Status);
+        string ticket = Obj(asked).Str("ticket")!;
+        Assert.Equal(6, ticket.Split('.').Length); // the return address and nonce are signed into the ticket
+        string picker = await Script(ticket);
+        Assert.Contains(Json.Stringify(back), picker, StringComparison.Ordinal);
+        Assert.Contains(Json.Stringify(nonce), picker, StringComparison.Ordinal);
+        Assert.DoesNotContain("__RUNLIGHT_PICK_RETURN__", picker, StringComparison.Ordinal);
+        Assert.DoesNotContain("__RUNLIGHT_PICK_NONCE__", picker, StringComparison.Ordinal);
+
+        // Neither can be changed: a ticket with another return address or nonce is no ticket, and the picker sends nowhere.
+        string[] parts = ticket.Split('.');
+        string other = Convert.ToHexStringLower(System.Text.Encoding.UTF8.GetBytes("https://stats.example.com/elsewhere/pick-return"));
+        foreach (string[] changed in new[] { parts[..3].Append(other).Concat(parts[4..]).ToArray(), parts[..4].Append(new string('f', 32)).Append(parts[5]).ToArray() })
+        {
+            string sent = await Script(string.Join('.', changed));
+            Assert.DoesNotContain("stats.example.com", sent, StringComparison.Ordinal);
+            Assert.DoesNotContain(nonce, sent, StringComparison.Ordinal);
+        }
+
+        // The return address is the relay page on the dashboard's own origin, and the nonce is 32 hex digits.
+        foreach (var body in new[]
+        {
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = "https://evil.example/pick-return", ["nonce"] = nonce },
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = "https://stats.example.com.evil.example/pick-return", ["nonce"] = nonce },
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = "https://stats.example.com/runlight/", ["nonce"] = nonce },
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = "https://stats.example.com/pick-return?x=1", ["nonce"] = nonce },
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = "https://stats.example.com/pick-return#x", ["nonce"] = nonce },
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = back },
+            new JsObject { ["origin"] = "https://stats.example.com", ["return"] = back, ["nonce"] = "short" },
+            new JsObject { ["origin"] = "https://stats.example.com", ["nonce"] = nonce },
+        })
+        {
+            var refused = await Ask(body);
+            Assert.True(refused.Status == 400, Json.Stringify(body));
+            Assert.Equal("pick_return", Obj(refused).Str("code"));
+        }
+        Assert.Equal(200, (await Ask(new JsObject { ["origin"] = "https://stats.example.com", ["return"] = "https://stats.example.com/pick-return", ["nonce"] = nonce })).Status); // a dashboard at the root
+
+        // A hub's ticket names a relay page on the hub it connected from, and no other origin.
+        var made = Obj(await routes.HandleAsync(Owner("/runlight/api/tokens", "POST", new JsObject { ["name"] = "Hub", ["scope"] = "manage", ["site"] = "blog" })));
+        await rl.Store.SetSettingAsync("token-origin:" + made.Obj("token")!.Str("id"), "https://hub.example.net");
+        Assert.Equal(200, (await Ask(new JsObject { ["origin"] = "https://hub.example.net", ["return"] = "https://hub.example.net/pick-return", ["nonce"] = nonce }, made.Str("secret")!)).Status);
+        Assert.Equal(400, (await Ask(new JsObject { ["origin"] = "https://hub.example.net", ["return"] = "https://evil.example/pick-return", ["nonce"] = nonce }, made.Str("secret")!)).Status);
+
+        now += 31 * 60_000;
+        Assert.DoesNotContain(nonce, await Script(ticket), StringComparison.Ordinal); // a ticket runs out after half an hour
+    }
+
+    [Fact]
+    public async Task The_relay_page_is_static_runs_only_its_own_script_and_keeps_its_address_to_itself()
+    {
+        var routes = (await RunlightAsync()).Routes(new RoutesOptions { Token = "secret" });
+        var page = await routes.HandleAsync(Req("/runlight/pick-return", "GET", H(("accept-language", "de-DE,de;q=0.9"))));
+        Assert.Equal(200, page.Status);
+        Assert.Matches("text/html", page.Headers.Get("content-type") ?? "");
+        Assert.Equal("no-store", page.Headers.Get("cache-control"));
+        Assert.Equal("no-referrer", page.Headers.Get("referrer-policy"));
+        string csp = page.Headers.Get("content-security-policy") ?? "";
+        Assert.Contains("script-src 'self'", csp, StringComparison.Ordinal);
+        Assert.Contains("frame-ancestors 'none'", csp, StringComparison.Ordinal);
+        Assert.DoesNotMatch("script-src[^;]*unsafe", csp); // no inline script
+        string html = page.Text();
+        Assert.Contains("lang=\"de\"", html, StringComparison.Ordinal);
+        Assert.Contains("<script src=\"/runlight/pick-return.js\"></script>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<script>", html, StringComparison.Ordinal); // no inline script
+        var script = await routes.HandleAsync(Req("/runlight/pick-return.js"));
+        Assert.Matches("javascript", script.Headers.Get("content-type") ?? "");
+        Assert.Contains("BroadcastChannel", script.Text(), StringComparison.Ordinal);
+        Assert.Equal(404, (await routes.HandleAsync(Req("/runlight/pick-return", "POST"))).Status);
     }
 
     [Fact]
