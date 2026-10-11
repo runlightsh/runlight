@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Runlight
  * Plugin URI:        https://runlight.sh/
- * Description:       Counts your site's visitors with Runlight: privacy friendly analytics with no cookies, kept in your own database. Adds the script, reports AI agents that read your pages, and shows your dashboard in wp-admin.
+ * Description:       Privacy friendly analytics with no cookies, kept in your own database. Runs Runlight inside WordPress, or sends to one you run elsewhere, counts AI agents that read your pages, and shows your dashboard in wp-admin.
  * Version:           0.1.1
  * Requires at least: 6.3
  * Requires PHP:      8.1
@@ -24,11 +24,29 @@ define( 'RUNLIGHT_PLUGIN_VERSION', '0.1.1' );
 
 require_once __DIR__ . '/includes/Agents.php';
 require_once __DIR__ . '/includes/Settings.php';
+require_once __DIR__ . '/includes/Storage.php';
+require_once __DIR__ . '/includes/Library.php';
+require_once __DIR__ . '/includes/Local.php';
 require_once __DIR__ . '/includes/Tracker.php';
 require_once __DIR__ . '/includes/Admin.php';
 require_once __DIR__ . '/includes/Dashboard.php';
+require_once __DIR__ . '/includes/Connect.php';
 
 \Runlight\WordPress\Tracker::boot();
+\Runlight\WordPress\Local::boot();
+register_activation_hook(
+	__FILE__,
+	static function (): void {
+		set_transient( \Runlight\WordPress\Admin::ACTIVATED, 1, 30 );
+	}
+);
+register_deactivation_hook(
+	__FILE__,
+	static function (): void {
+		wp_clear_scheduled_hook( \Runlight\WordPress\Local::CRON );
+	}
+);
 if ( is_admin() ) {
 	\Runlight\WordPress\Admin::boot();
+	\Runlight\WordPress\Connect::boot();
 }

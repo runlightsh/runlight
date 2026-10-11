@@ -241,6 +241,8 @@ public sealed class Routes
             SignIn = string.IsNullOrEmpty(_signIn) ? null : _signIn,
             AccountOf = _accountOf,
             TokenMade = _tokenMade,
+            ManagedSites = runlight.ManagedSites,
+            AddSite = runlight.AddSiteAsync,
         };
     }
 
@@ -635,7 +637,7 @@ public sealed class Routes
     /// The dashboard's page, which holds no data: the API it calls checks access. <paramref name="embed"/> is the dashboard
     /// inside a CMS's admin pages: its session (empty once its ticket was used or ran out) and the admin origin that frames it.
     /// </summary>
-    public static string Dashboard(string @base, string share = "", string signOut = "", bool geoCredit = false, bool accounts = false, string signIn = "", (string Session, string Origin)? embed = null)
+    public static string Dashboard(string @base, string share = "", string signOut = "", bool geoCredit = false, bool accounts = false, string signIn = "", (string Session, string Origin)? embed = null, string cms = "")
     {
         ArgumentNullException.ThrowIfNull(@base);
         string b = EscapeAttr(@base);
@@ -645,6 +647,7 @@ public sealed class Routes
             + (signIn.Length > 0 ? " data-sign-in=\"" + EscapeAttr(signIn) + "\"" : "")
             + (geoCredit ? " data-geo-credit=\"\"" : "")
             + (accounts ? " data-accounts=\"\"" : "")
+            + (cms.Length > 0 ? " data-cms=\"" + EscapeAttr(cms) + "\"" : "")
             + (embed is { } e ? " data-embed=\"" + EscapeAttr(e.Session) + "\" data-embed-origin=\"" + EscapeAttr(e.Origin) + "\"" : "");
         return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>Runlight</title>\n"
             + "<link rel=\"icon\" href=\"" + Brand.RunlightIcon + "\">\n"
@@ -1952,7 +1955,7 @@ public sealed class Routes
             }
             if (scope == "embed" && site.Length == 0)
             {
-                return Coded("A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400);
+                return Coded("A dashboard key is for one site. Pick the site.", "embed_site", 400);
             }
             string secret = TokenPrefix + Hash.RandomId(20);
             var row = new JsObject
@@ -2125,7 +2128,7 @@ public sealed class Routes
             }
             if (embedToken.Str("scope") != "embed")
             {
-                return Coded("Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403);
+                return Coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403);
             }
             var embedSite = rl.Site(embedToken.Str("site"));
             if (embedSite == null)
@@ -2302,7 +2305,7 @@ public sealed class Routes
             }
         }
 
-        // Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+        // Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
         if ((path == "/api/observe-key" && method == "GET") || (path == "/api/observe-key/new" && method == "POST"))
         {
             object access = await CanReadAsync(request, cancellationToken).ConfigureAwait(false);
@@ -2316,14 +2319,7 @@ public sealed class Routes
             {
                 return (Response)siteOrRefusal;
             }
-            string name = "observe-key:" + site.Str("id");
-            string? key = path.EndsWith("/new", StringComparison.Ordinal) ? null : await Store.SettingAsync(name, cancellationToken).ConfigureAwait(false);
-            if (string.IsNullOrEmpty(key))
-            {
-                key = "rlo_" + Hash.RandomId(20);
-                await Store.SetSettingAsync(name, key, cancellationToken).ConfigureAwait(false);
-            }
-            return JsonResponse(new JsObject { ["key"] = key });
+            return JsonResponse(new JsObject { ["key"] = await OAuth.AgentsKeyAsync(Store, site.Str("id")!, path.EndsWith("/new", StringComparison.Ordinal), cancellationToken).ConfigureAwait(false) });
         }
 
         // Making, changing, and deleting funnels; reading them is with the other reports.
@@ -3635,12 +3631,15 @@ public sealed class Routes
             }
             // The page itself holds no data; the API it calls checks access and
             // the page explains how to sign in when it is refused.
-            return new Response(Dashboard(@base, "", _signOut ?? "", _options.GeoCredit, _web != null, _signIn ?? ""), 200, new Headers
+            // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+            string cms = _options.Cms ?? "";
+            bool framed = cms.Length > 0;
+            return new Response(Dashboard(@base, "", _signOut ?? "", _options.GeoCredit, _web != null, _signIn ?? "", null, cms), 200, new Headers
             {
                 ["content-type"] = "text/html; charset=utf-8",
                 ["cache-control"] = "no-store",
-                ["content-security-policy"] = DashboardCsp,
-                ["x-frame-options"] = "DENY",
+                ["content-security-policy"] = framed ? DashboardCsp.Replace("frame-ancestors 'none'", "frame-ancestors 'self'", StringComparison.Ordinal) : DashboardCsp,
+                ["x-frame-options"] = framed ? "SAMEORIGIN" : "DENY",
                 ["referrer-policy"] = "same-origin",
             });
         }

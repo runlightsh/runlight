@@ -192,7 +192,7 @@ def _send(options: dict[str, Any], fetcher: Fetcher, fetches: list[dict[str, Any
     except Exception as error:
         raise SendError(str(error)) from error
     if answer.status == 401:
-        raise SendError("Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins.")
+        raise SendError("Runlight refused the key. Use the site's agents key from Settings, Install.")
     if not answer.ok:
         raise SendError(f"Runlight answered {answer.status}: {_js.slice16(answer.text(), 0, 200)}")
     ok, body = _js.try_loads(answer.content())

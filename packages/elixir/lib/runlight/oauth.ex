@@ -4,9 +4,12 @@ defmodule Runlight.OAuth do
   # OAuth (the Claude and ChatGPT web connectors) can reach it (the SDK's
   # oauth.ts). Runlight is both the resource and the authorization server.
   # The token an app gets is an ordinary API token, so it appears in
-  # Settings, API and AI, beside the others.
+  # Settings, API and AI, beside the others. With the "cms" scope (asked for
+  # by the WordPress, Drupal, and Craft plugins) it is the site's dashboard
+  # key, and the answer also carries the site's agents key.
 
   alias Runlight.Crypto
+  alias Runlight.Errors
   alias Runlight.Hash
   alias Runlight.Http.Request
   alias Runlight.Http.Response
@@ -29,6 +32,8 @@ defmodule Runlight.OAuth do
     {"access-control-allow-headers", "authorization, content-type, mcp-protocol-version"},
     {"access-control-allow-methods", "GET, POST, OPTIONS"}
   ]
+
+  @scopes ["read", "manage", "cms"]
 
   defp base64url(text), do: Base.url_encode64(text, padding: false)
 
@@ -93,6 +98,24 @@ defmodule Runlight.OAuth do
       Regex.match?(~r/^https:\/\/[^\/]+/, value) or
         Regex.match?(~r/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//, value)
 
+  @doc "The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it."
+  def agents_key(rl, site, replace \\ false) do
+    name = "observe-key:#{site}"
+    saved = if replace, do: nil, else: Store.setting(rl.store, name)
+
+    if saved in [nil, ""] do
+      key = "rlo_" <> Hash.random_id(20)
+      Store.set_setting(rl.store, name, key)
+      key
+    else
+      saved
+    end
+  end
+
+  # A redirect address's host as a site's domains are kept: lowercase, with no port and no www.
+  defp site_host(redirect),
+    do: Url.new(redirect).hostname |> JS.lower() |> String.replace(~r/\.+$/, "") |> String.replace(~r/^www\./, "")
+
   @doc "The URL that a 401 from the MCP endpoint points clients at, to start OAuth."
   def resource_metadata_url(origin, base), do: "#{origin}#{base}/.well-known/oauth-protected-resource"
 
@@ -114,7 +137,7 @@ defmodule Runlight.OAuth do
           JS.obj(
             resource: "#{issuer}/mcp",
             authorization_servers: [issuer],
-            scopes_supported: ["read", "manage"],
+            scopes_supported: @scopes,
             bearer_methods_supported: ["header"]
           )
         )
@@ -131,7 +154,7 @@ defmodule Runlight.OAuth do
             grant_types_supported: ["authorization_code"],
             code_challenge_methods_supported: ["S256"],
             token_endpoint_auth_methods_supported: ["none"],
-            scopes_supported: ["read", "manage"]
+            scopes_supported: @scopes
           )
         )
 
@@ -220,7 +243,14 @@ defmodule Runlight.OAuth do
       end
 
       challenge = get.("code_challenge") || ""
-      manage = "manage" in String.split(get.("scope") || "", ~r/\s+/u)
+      scopes = String.split(get.("scope") || "", ~r/\s+/u)
+      cms = "cms" in scopes
+      manage = not cms and "manage" in scopes
+      # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+      host = site_host(redirect)
+
+      counting =
+        Enum.filter(Runlight.sites(rl), &(Runlight.remote(rl, &1["id"]) == nil and host in (&1["hostnames"] || [])))
 
       cond do
         get.("response_type") != "code" ->
@@ -257,12 +287,11 @@ defmodule Runlight.OAuth do
           end
 
         request.method == "GET" ->
-          consent(rl, base, client, form, redirect, manage)
+          consent(rl, base, client, form, redirect, if(cms, do: {:cms, host, counting}, else: manage))
 
         true ->
           # The consent form posts here from this page only; a form from another site is refused.
           origin = Request.header(request, "origin")
-          site = get.("site") || ""
 
           cond do
             origin not in [nil, ""] and origin != Url.origin(url) ->
@@ -271,35 +300,95 @@ defmodule Runlight.OAuth do
             get.("decision") != "allow" ->
               back.([{"error", "access_denied"}])
 
-            site != "" and Runlight.site(rl, site) == nil ->
-              back.([{"error", "invalid_request"}, {"error_description", "Unknown site"}])
-
-            manage and (site == "" or Runlight.remote(rl, site) != nil) ->
-              back.([{"error", "invalid_request"}, {"error_description", "Pick the site to manage"}])
-
             true ->
-              code = Hash.random_id(32)
-              by = if ctx.account_of, do: ctx.account_of.(request)
+              site = get.("site") || ""
 
-              grant =
-                JS.obj(
-                  client: client_id,
-                  redirect: redirect,
-                  challenge: challenge,
-                  site: site,
-                  scope: if(manage, do: "manage", else: "read"),
-                  expires: Runlight.now(rl) + @code_ms,
-                  by: if(by, do: by, else: :undefined)
-                )
+              case if(cms, do: cms_site(rl, site, host, counting), else: {:ok, site}) do
+                {:ok, site} ->
+                  scope =
+                    cond do
+                      cms -> "cms"
+                      manage -> "manage"
+                      true -> "read"
+                    end
 
-              Store.set_setting(rl.store, "oauth-code:#{Hash.sha256(code)}", JS.stringify(grant))
-              back.([{"code", code}])
+                  allow(ctx, request, back, site, %{
+                    client: client_id,
+                    redirect: redirect,
+                    challenge: challenge,
+                    scope: scope
+                  })
+
+                {:error, description} ->
+                  back.([{"error", "invalid_request"}, {"error_description", description}])
+              end
           end
       end
     end
   end
 
-  defp consent(rl, base, client, form, redirect, manage) do
+  # The site a CMS plugin gets: "new" is the first counting site, or else a new one for its host.
+  defp cms_site(rl, site, host, counting) do
+    site =
+      cond do
+        site == "new" ->
+          try do
+            case counting do
+              [first | _] -> first["id"]
+              [] -> if rl.managed_sites, do: Runlight.add_site(rl, JS.obj(hostnames: [host]))["id"], else: ""
+            end
+          rescue
+            # Such as an address, which a site cannot count by: there is no new site to make.
+            error ->
+              if Errors.range?(error), do: {:error, Exception.message(error)}, else: reraise(error, __STACKTRACE__)
+          end
+
+        Enum.any?(counting, &(&1["id"] == site)) ->
+          site
+
+        true ->
+          ""
+      end
+
+    case site do
+      {:error, _} = error -> error
+      "" -> {:error, "Pick a site that counts #{host}"}
+      site -> {:ok, site}
+    end
+  end
+
+  # The code for an allowed request, once its site is known.
+  defp allow(ctx, request, back, site, ask) do
+    rl = ctx.rl
+
+    cond do
+      site != "" and Runlight.site(rl, site) == nil ->
+        back.([{"error", "invalid_request"}, {"error_description", "Unknown site"}])
+
+      ask.scope == "manage" and (site == "" or Runlight.remote(rl, site) != nil) ->
+        back.([{"error", "invalid_request"}, {"error_description", "Pick the site to manage"}])
+
+      true ->
+        code = Hash.random_id(32)
+        by = if ctx.account_of, do: ctx.account_of.(request)
+
+        grant =
+          JS.obj(
+            client: ask.client,
+            redirect: ask.redirect,
+            challenge: ask.challenge,
+            site: site,
+            scope: ask.scope,
+            expires: Runlight.now(rl) + @code_ms,
+            by: if(by, do: by, else: :undefined)
+          )
+
+        Store.set_setting(rl.store, "oauth-code:#{Hash.sha256(code)}", JS.stringify(grant))
+        back.([{"code", code}])
+    end
+  end
+
+  defp consent(rl, base, client, form, redirect, mode) do
     hidden =
       ~w(response_type client_id redirect_uri code_challenge code_challenge_method state scope resource)
       |> Enum.map_join(fn k ->
@@ -314,44 +403,82 @@ defmodule Runlight.OAuth do
     sends_to =
       ~s(<p class="note">Allowing sends you back to <strong>#{esc(Url.host(Url.new(redirect)))}</strong>. Only allow it if you started connecting there.</p>)
 
-    if manage do
-      # Changing settings is for one site at a time, so there is no "every site" here.
-      sites = Enum.filter(Runlight.sites(rl), &(Runlight.remote(rl, &1["id"]) == nil))
-      wanted = SearchParams.get(form, "site") || ""
+    case mode do
+      {:cms, host, counting} -> cms_consent(rl, base, name, hidden, sends_to, host, counting)
+      true -> manage_consent(rl, base, name, hidden, sends_to, form)
+      false -> read_consent(rl, base, name, hidden, sends_to)
+    end
+  end
 
+  defp cms_consent(rl, base, name, hidden, sends_to, host, counting) do
+    if counting == [] and not rl.managed_sites do
+      page(
+        "Add this site first",
+        "<p>No site in this Runlight counts <strong>#{esc(host)}</strong>. Add it to a site's domains in your code, then connect again from #{name}.</p>",
+        400
+      )
+    else
       choices =
-        Enum.map_join(sites, fn s ->
-          ~s(<option value="#{esc(s["id"])}"#{if s["id"] == wanted, do: " selected", else: ""}>#{esc(s["name"])}</option>)
-        end)
+        Enum.map_join(counting, fn s -> ~s(<option value="#{esc(s["id"])}">#{esc(s["name"])}</option>) end) <>
+          if(rl.managed_sites and counting == [],
+            do: ~s(<option value="new">A new site for #{esc(host)}</option>),
+            else: ""
+          )
 
       page(
         "Connect #{name}",
         """
-        <p><strong>#{name}</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>
-        <p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>
+        <p><strong>#{name}</strong> wants to count <strong>#{esc(host)}</strong> in this Runlight.</p>
+        <p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
         #{sends_to}
         <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
         <label>Site<select name="site">#{choices}</select></label>
-        <p class="note">Its token appears in Settings, API and AI, where deleting it disconnects #{name}.</p>
-        <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
-        """
-      )
-    else
-      sites = Runlight.sites(rl)
-      options = Enum.map_join(sites, fn s -> ~s(<option value="#{esc(s["id"])}">#{esc(s["name"])} only</option>) end)
-
-      page(
-        "Connect #{name}",
-        """
-        <p><strong>#{name}</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>
-        #{sends_to}
-        <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
-        <label>Which sites it can read<select name="site"><option value="">Every site</option>#{if length(sites) > 1, do: options, else: ""}</select></label>
-        <p class="note">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>
+        <p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in #{name}.</p>
         <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
         """
       )
     end
+  end
+
+  defp manage_consent(rl, base, name, hidden, sends_to, form) do
+    # Changing settings is for one site at a time, so there is no "every site" here.
+    sites = Enum.filter(Runlight.sites(rl), &(Runlight.remote(rl, &1["id"]) == nil))
+    wanted = SearchParams.get(form, "site") || ""
+
+    choices =
+      Enum.map_join(sites, fn s ->
+        ~s(<option value="#{esc(s["id"])}"#{if s["id"] == wanted, do: " selected", else: ""}>#{esc(s["name"])}</option>)
+      end)
+
+    page(
+      "Connect #{name}",
+      """
+      <p><strong>#{name}</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>
+      <p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>
+      #{sends_to}
+      <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
+      <label>Site<select name="site">#{choices}</select></label>
+      <p class="note">Its token appears in Settings, API and AI, where deleting it disconnects #{name}.</p>
+      <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
+      """
+    )
+  end
+
+  defp read_consent(rl, base, name, hidden, sends_to) do
+    sites = Runlight.sites(rl)
+    options = Enum.map_join(sites, fn s -> ~s(<option value="#{esc(s["id"])}">#{esc(s["name"])} only</option>) end)
+
+    page(
+      "Connect #{name}",
+      """
+      <p><strong>#{name}</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>
+      #{sends_to}
+      <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
+      <label>Which sites it can read<select name="site"><option value="">Every site</option>#{if length(sites) > 1, do: options, else: ""}</select></label>
+      <p class="note">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>
+      <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
+      """
+    )
   end
 
   defp token(ctx, request) do
@@ -409,14 +536,15 @@ defmodule Runlight.OAuth do
         end
 
         secret = "rl_" <> Hash.random_id(20)
-        scope = if grant["scope"] == "manage", do: "manage", else: "read"
+        scope = if grant["scope"] in ["cms", "manage"], do: grant["scope"], else: "read"
 
         row =
           JS.obj(
             id: Hash.random_id(),
             name: JS.slice("#{client["name"] || "An app"} (OAuth)", 0, 100),
             site: grant["site"],
-            scope: scope,
+            # A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
+            scope: if(scope == "cms", do: "embed", else: scope),
             hash: Hash.sha256(secret),
             hint: JS.slice(secret, -4),
             createdAt: Runlight.now(rl),
@@ -435,7 +563,19 @@ defmodule Runlight.OAuth do
             do: Store.set_setting(rl.store, "token-origin:#{row["id"]}", Url.origin(Url.new(grant["redirect"])))
 
           out = JS.obj(access_token: secret, token_type: "Bearer", scope: scope)
-          json(if(JS.truthy?(grant["site"]), do: Object.put(out, "site", grant["site"]), else: out))
+
+          cond do
+            # A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+            scope == "cms" ->
+              json(Object.put(Object.put(out, "site", grant["site"]), "agents_key", agents_key(rl, grant["site"])))
+
+            # site is not part of OAuth, but a hub needs to know which site it was given.
+            JS.truthy?(grant["site"]) ->
+              json(Object.put(out, "site", grant["site"]))
+
+            true ->
+              json(out)
+          end
         end
     end
   end

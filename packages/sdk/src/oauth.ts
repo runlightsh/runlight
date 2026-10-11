@@ -12,7 +12,10 @@
  * The token is an ordinary API token, so it appears in Settings, API and AI,
  * beside the others, and deleting it there disconnects the app. It reads
  * stats, or with the "manage" scope (asked for by a Runlight hub) it also
- * changes one site's settings.
+ * changes one site's settings. With the "cms" scope (asked for by the
+ * WordPress, Drupal, and Craft plugins) it is the site's dashboard key, which
+ * only opens its read-only dashboard in the CMS, and the answer also carries
+ * the site's agents key, so connecting fills in the plugin's settings.
  */
 import { hmac, randomId, sha256 } from "./hash.js";
 import { RateLimit } from "./limit.js";
@@ -32,11 +35,27 @@ interface Code {
   redirect: string;
   challenge: string;
   site: string;
-  scope: "read" | "manage";
+  scope: Scope;
   expires: number;
   /** Who allowed it, where the app has accounts, so the token goes when they do. */
   by?: string;
 }
+
+type Scope = "read" | "manage" | "cms";
+const SCOPES: Scope[] = ["read", "manage", "cms"];
+
+/** The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it. */
+export async function agentsKey(runlight: Runlight, site: string, replace = false): Promise<string> {
+  const name = `observe-key:${site}`;
+  const saved = replace ? null : await runlight.store.setting(name);
+  if (saved) return saved;
+  const key = `rlo_${randomId(20)}`;
+  await runlight.store.setSetting(name, key);
+  return key;
+}
+
+/** A redirect address's host as a site's domains are kept: lowercase, with no port and no www. */
+const siteHost = (redirect: string) => new URL(redirect).hostname.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
 
 const CODE_MS = 5 * 60_000;
 /** An app stored before client ids were signed, which never finished connecting within a day, is removed. */
@@ -139,7 +158,7 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
   if (request.method === "OPTIONS" && (known.startsWith("/.well-known/oauth-") || known.startsWith("/.well-known/openid-configuration") || path.startsWith("/oauth/"))) return new Response(null, { status: 204, headers: CORS });
 
   if (known.startsWith("/.well-known/oauth-protected-resource")) {
-    return json({ resource: `${issuer}/mcp`, authorization_servers: [issuer], scopes_supported: ["read", "manage"], bearer_methods_supported: ["header"] });
+    return json({ resource: `${issuer}/mcp`, authorization_servers: [issuer], scopes_supported: SCOPES, bearer_methods_supported: ["header"] });
   }
   if (known.startsWith("/.well-known/oauth-authorization-server") || known.startsWith("/.well-known/openid-configuration")) {
     return json({
@@ -151,7 +170,7 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
       grant_types_supported: ["authorization_code"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
-      scopes_supported: ["read", "manage"],
+      scopes_supported: SCOPES,
     });
   }
 
@@ -188,7 +207,12 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     if (form.get("response_type") !== "code") return refuse({ error: "unsupported_response_type" });
     const challenge = form.get("code_challenge") ?? "";
     if (form.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43,128}$/.test(challenge)) return refuse({ error: "invalid_request", error_description: "PKCE with S256 is required" });
-    const manage = (form.get("scope") ?? "").split(/\s+/).includes("manage");
+    const scopes = (form.get("scope") ?? "").split(/\s+/);
+    const cms = scopes.includes("cms");
+    const manage = !cms && scopes.includes("manage");
+    // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+    const host = siteHost(redirect);
+    const counting = runlight.sites.filter((s) => !runlight.remote(s.id) && s.hostnames.includes(host));
 
     if (!(await ctx.isOwner(request))) {
       // Someone signed in who may only read would be sent to sign in again and again.
@@ -207,6 +231,22 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
         .join("");
       // The app names itself, so the page also shows where the answer goes, which it cannot fake.
       const sendsTo = `<p class="note">Allowing sends you back to <strong>${esc(new URL(redirect).host)}</strong>. Only allow it if you started connecting there.</p>`;
+      if (cms) {
+        if (!counting.length && !runlight.managedSites) {
+          return page("Add this site first", `<p>No site in this Runlight counts <strong>${esc(host)}</strong>. Add it to a site's domains in your code, then connect again from ${esc(client.name)}.</p>`, 400);
+        }
+        const choices = counting.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("") + (runlight.managedSites && !counting.length ? `<option value="new">A new site for ${esc(host)}</option>` : "");
+        return page(
+          `Connect ${esc(client.name)}`,
+          `<p><strong>${esc(client.name)}</strong> wants to count <strong>${esc(host)}</strong> in this Runlight.</p>
+<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+${sendsTo}
+<form method="post" action="${esc(base)}/oauth/authorize">${hidden}
+<label>Site<select name="site">${choices}</select></label>
+<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in ${esc(client.name)}.</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`,
+        );
+      }
       if (manage) {
         // Changing settings is for one site at a time, so there is no "every site" here.
         const sites = runlight.sites.filter((s) => !runlight.remote(s.id));
@@ -238,12 +278,25 @@ ${sendsTo}
     const origin = request.headers.get("origin");
     if (origin && origin !== url.origin) return page("This request came from another site", "<p>Start connecting again from the app.</p>", 403);
     if (form.get("decision") !== "allow") return back({ error: "access_denied" });
-    const site = form.get("site") ?? "";
+    let site = form.get("site") ?? "";
+    if (cms) {
+      if (site === "new") {
+        try {
+          site = counting[0]?.id ?? (runlight.managedSites ? (await runlight.addSite({ hostnames: [host] })).id : "");
+        } catch (error) {
+          // Such as an address, which a site cannot count by: there is no new site to make.
+          if (error instanceof RangeError) return back({ error: "invalid_request", error_description: error.message });
+          throw error;
+        }
+      }
+      else if (!counting.some((s) => s.id === site)) site = "";
+      if (!site) return back({ error: "invalid_request", error_description: `Pick a site that counts ${host}` });
+    }
     if (site && !runlight.site(site)) return back({ error: "invalid_request", error_description: "Unknown site" });
     if (manage && (!site || runlight.remote(site))) return back({ error: "invalid_request", error_description: "Pick the site to manage" });
     const code = randomId(32);
     const by = (await ctx.accountOf?.(request)) ?? null;
-    const grant: Code = { client: clientId, redirect, challenge, site, scope: manage ? "manage" : "read", expires: runlight.now() + CODE_MS, ...(by ? { by } : {}) };
+    const grant: Code = { client: clientId, redirect, challenge, site, scope: cms ? "cms" : manage ? "manage" : "read", expires: runlight.now() + CODE_MS, ...(by ? { by } : {}) };
     await runlight.store.setSetting(`oauth-code:${await sha256(code)}`, JSON.stringify(grant));
     return back({ code });
   }
@@ -268,8 +321,9 @@ ${sendsTo}
       await runlight.store.setSetting(found.usedKey, stored ? JSON.stringify({ ...found.client, usedAt: runlight.now() }) : String(runlight.now()));
     }
     const secret = `rl_${randomId(20)}`;
-    const scope = grant.scope === "manage" ? "manage" : "read";
-    const row: TokenRow = { id: randomId(), name: `${client.name ?? "An app"} (OAuth)`.slice(0, 100), site: grant.site, scope, hash: await sha256(secret), hint: secret.slice(-4), createdAt: runlight.now(), lastUsedAt: null };
+    const scope = grant.scope === "cms" ? "cms" : grant.scope === "manage" ? "manage" : "read";
+    // A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
+    const row: TokenRow = { id: randomId(), name: `${client.name ?? "An app"} (OAuth)`.slice(0, 100), site: grant.site, scope: scope === "cms" ? "embed" : scope, hash: await sha256(secret), hint: secret.slice(-4), createdAt: runlight.now(), lastUsedAt: null };
     await runlight.store.insertToken(row);
     // Someone removed, or no longer an owner, between allowing the app and its swapping the code gets nothing.
     if (grant.by && ctx.tokenMade && !(await ctx.tokenMade(row, grant.by))) {
@@ -278,6 +332,8 @@ ${sendsTo}
     }
     // A hub's own address, from where it asked to be sent back, so the picker only ever sends choices there.
     if (scope === "manage") await runlight.store.setSetting(`token-origin:${row.id}`, new URL(grant.redirect).origin);
+    // A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+    if (scope === "cms") return json({ access_token: secret, token_type: "Bearer", scope, site: grant.site, agents_key: await agentsKey(runlight, grant.site) });
     // site is not part of OAuth, but a hub needs to know which site it was given.
     return json({ access_token: secret, token_type: "Bearer", scope, ...(grant.site ? { site: grant.site } : {}) });
   }

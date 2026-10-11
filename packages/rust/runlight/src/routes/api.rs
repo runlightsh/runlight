@@ -82,12 +82,7 @@ impl Routes {
         if path == "/api/embed" && method == "POST" {
             let Some(token) = self.api_token(request).await? else { return Ok(self.denied(CanRead::No)) };
             if token.scope != "embed" {
-                return Ok(coded(
-                    "Use a key for the dashboard in a CMS, made in Settings, Install",
-                    "embed_token",
-                    403,
-                    None,
-                ));
+                return Ok(coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403, None));
             }
             let Some(site) = rl.site(Some(&token.site)) else {
                 return Ok(coded("Unknown site", "unknown_site", 404, None));
@@ -257,7 +252,7 @@ impl Routes {
             return glue::csv_import(self, &site.id, &body).await;
         }
 
-        // Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+        // Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
         if (path == "/api/observe-key" && method == "GET") || (path == "/api/observe-key/new" && method == "POST") {
             let access = self.can_read(request, call).await;
             if access != CanRead::Yes {
@@ -268,14 +263,7 @@ impl Routes {
                 Ok(s) => s,
                 Err(r) => return Ok(r),
             };
-            let name = format!("observe-key:{}", site.id);
-            let mut key =
-                if path.ends_with("/new") { None } else { rl.store().setting(&name).await?.filter(|k| !k.is_empty()) };
-            if key.is_none() {
-                let made = format!("rlo_{}", random_id(20));
-                rl.store().set_setting(&name, Some(&made)).await?;
-                key = Some(made);
-            }
+            let key = crate::oauth::agents_key(&rl, &site.id, path.ends_with("/new")).await?;
             return Ok(json(&obj! { "key" => key }, 200, &[]));
         }
 

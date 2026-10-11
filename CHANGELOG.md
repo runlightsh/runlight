@@ -10,7 +10,22 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Fixed
 
+- The dashboard's Powered by Runlight link opens in a new tab everywhere, so it works inside a CMS's admin too.
 - A broken percent escape in a path, such as `%E0`, answers as an unknown goal, share, site, link domain, or short link (a 404) instead of an internal error.
+
+### Added
+
+- The WordPress plugin runs Runlight inside WordPress: activate it, choose that on its setup screen, and the site is counted, with the dashboard at `/runlight` on the site for anyone who can manage options, the numbers in WordPress's own MySQL 8.4 or MariaDB 11.4 database or else a SQLite file in uploads, AI agents recorded on the server, and the hourly check on WordPress's cron. Countries can come from DB-IP's free data, downloaded once a month when turned on. Sending to a Runlight elsewhere is the other choice in its settings. The plugin carries the PHP package under `lib/`, and running it this way needs PHP 8.2.
+- The WordPress, Drupal, and Craft plugins connect to a Runlight with a Connect button: enter its address, allow the connection on its consent page, and the plugin saves the site's id, agents key, and dashboard key itself. This works through a new `cms` OAuth scope, whose token is the site's dashboard key and whose answer also carries the site's agents key. When no site counts the plugin's domain, the consent page offers to add one, where sites are managed in the dashboard.
+- A `cms` option on the routes names the CMS that adds the script, such as WordPress, when Runlight runs inside one. The dashboard then opens on its numbers even before the first visit, in place of the welcome with the steps to add the script, Settings, Install says the plugin adds it, and pages on the same origin, the CMS's admin, may show the whole dashboard in a frame. Framed there, every button that opens a modal, sheet, or drawer, such as settings, the assistant, live visitors, a box's full list, map, or journeys, and a link's or goal's report, opens the dashboard in a new tab with it open, on the same site, range, and filters, where there is more room. Filters still open in the frame.
+- Settings, Install has a WordPress, Drupal, and Craft section listing every setting the plugins ask for, under the names they use, each with a copy button.
+
+### Changed
+
+- The key for CMS plugins is now called the agents key, and the key for the dashboard in a CMS the dashboard key, in Runlight and in every plugin. The plugins' Observe key field is now Agents key.
+- Ignoring your own visits moved from Settings, Install to Settings, General.
+- The WordPress plugin's Runlight menu item sits below the core admin items instead of near the top, as the plugin directory asks.
+- In the WordPress, Drupal, and Craft admin, the dashboard's frame grows to the dashboard's full height, so the admin page scrolls like any other instead of the dashboard scrolling inside a frame the size of the window. The dashboard tells the page its height, and the page tells it which part of the frame is on screen, so the filter drawer and other sheets open over that part. A plugin keeps fitting the frame to the window for a Runlight too old to say its height.
 
 ## 0.1.1 - 2026-10-10
 

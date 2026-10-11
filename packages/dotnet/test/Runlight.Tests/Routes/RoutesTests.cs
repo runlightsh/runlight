@@ -593,5 +593,22 @@ public sealed class RoutesTests : RoutesTestCase
         Assert.Contains("data-sign-out=\"/out?x=1&#38;y=2\"", html, StringComparison.Ordinal);
         Assert.Contains("data-sign-in=\"/in\" data-geo-credit=\"\" data-accounts=\"\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("data-share", global::Runlight.Routes.Dashboard("/runlight"), StringComparison.Ordinal);
+        Assert.Contains("data-accounts=\"\" data-cms=\"Word&#34;Press\" data-embed=\"s\"", global::Runlight.Routes.Dashboard("/runlight", "", "", false, true, "", ("s", "https://example.com"), "Word\"Press"), StringComparison.Ordinal);
+        Assert.DoesNotContain("data-cms", global::Runlight.Routes.Dashboard("/runlight"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_dashboard_says_which_cms_it_runs_in_only_when_told()
+    {
+        var runlight = await RunlightAsync(sites: [Site("blog", hostnames: ["blog.example.com"])]);
+        var alone = await runlight.Routes(new RoutesOptions()).HandleAsync(Req("/runlight/"));
+        Assert.DoesNotContain("data-cms", alone.Text(), StringComparison.Ordinal);
+        var inside = await runlight.Routes(new RoutesOptions { Cms = "WordPress" }).HandleAsync(Req("/runlight/"));
+        Assert.Contains(" data-cms=\"WordPress\"", inside.Text(), StringComparison.Ordinal);
+        // Its own admin may frame the whole dashboard; otherwise nothing may.
+        Assert.Contains("frame-ancestors 'self'", inside.Headers.Get("content-security-policy") ?? "", StringComparison.Ordinal);
+        Assert.Equal("SAMEORIGIN", inside.Headers.Get("x-frame-options"));
+        Assert.Contains("frame-ancestors 'none'", alone.Headers.Get("content-security-policy") ?? "", StringComparison.Ordinal);
+        Assert.Equal("DENY", alone.Headers.Get("x-frame-options"));
     }
 }

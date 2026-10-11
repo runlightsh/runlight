@@ -152,3 +152,33 @@ test("a signed-in viewer is told only an owner can connect, never sent to sign i
   assert.equal(viewer.status, 403);
   assert.match(await viewer.text(), /only an owner of this Runlight can connect Claude/);
 });
+
+test("a CMS plugin connects for the site that counts its domain and gets that site's agents key and a dashboard key", async () => {
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), managedSites: true });
+  const { GET, POST } = rl.routes({ token: "secret" });
+  const origin = "https://x.com";
+  const owner = { authorization: "Bearer secret" };
+  const form = { ...owner, "content-type": "application/x-www-form-urlencoded" };
+  await rl.addSite({ name: "Blog", hostnames: ["blog.com"] });
+  const agentsKey = ((await (await GET(new Request(`${origin}/runlight/api/observe-key?site=blog.com`, { headers: owner }))).json()) as any).key;
+
+  const back = "https://www.blog.com/wp-admin/options-general.php?page=runlight";
+  const registered = await POST(new Request(`${origin}/runlight/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "WordPress at www.blog.com", redirect_uris: [back] }) }));
+  const { client_id } = (await registered.json()) as any;
+  const verifier = b64url(randomBytes(32));
+  const params = new URLSearchParams({ response_type: "code", client_id, redirect_uri: back, code_challenge: b64url(createHash("sha256").update(verifier).digest()), code_challenge_method: "S256", scope: "cms", state: "s" });
+  const consent = await (await GET(new Request(`${origin}/runlight/oauth/authorize?${params}`, { headers: owner }))).text();
+  assert.match(consent, /wants to count <strong>blog\.com<\/strong>/);
+  assert.doesNotMatch(consent, /A new site/, "a site already counts the domain, so there is no second one to make");
+
+  const allow = await POST(new Request(`${origin}/runlight/oauth/authorize`, { method: "POST", headers: form, body: `${params}&decision=allow&site=blog.com` }));
+  const code = new URL(allow.headers.get("location")!).searchParams.get("code")!;
+  const swap = await POST(new Request(`${origin}/runlight/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, client_id, redirect_uri: back, code_verifier: verifier }).toString() }));
+  const granted = (await swap.json()) as any;
+  assert.equal(granted.scope, "cms");
+  assert.equal(granted.site, "blog.com");
+  assert.equal(granted.agents_key, agentsKey, "the site keeps the agents key it had");
+  const embed = await POST(new Request(`${origin}/runlight/api/embed`, { method: "POST", headers: { authorization: `Bearer ${granted.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ origin: "https://www.blog.com" }) }));
+  assert.equal(embed.status, 201, "the token is the site's dashboard key");
+  assert.equal((await GET(new Request(`${origin}/runlight/api/stats?site=blog.com&period=today`, { headers: { authorization: `Bearer ${granted.access_token}` } }))).status, 403, "and reads nothing itself");
+});

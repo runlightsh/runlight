@@ -11,7 +11,10 @@
 //! The token is an ordinary API token, so it appears in Settings, API and AI,
 //! beside the others, and deleting it there disconnects the app. It reads
 //! stats, or with the "manage" scope (asked for by a Runlight hub) it also
-//! changes one site's settings.
+//! changes one site's settings. With the "cms" scope (asked for by the
+//! WordPress, Drupal, and Craft plugins) it is the site's dashboard key, which
+//! only opens its read-only dashboard in the CMS, and the answer also carries
+//! the site's agents key, so connecting fills in the plugin's settings.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -29,6 +32,27 @@ use crate::runlight::Runlight;
 use crate::sources::encode_uri_component;
 use crate::store::TokenRow;
 use crate::{BoxFuture, arr, obj};
+
+const SCOPES: [&str; 3] = ["read", "manage", "cms"];
+
+/// The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
+pub(crate) async fn agents_key(runlight: &Runlight, site: &str, replace: bool) -> Result<String, Error> {
+    let name = format!("observe-key:{site}");
+    if !replace && let Some(saved) = runlight.store().setting(&name).await?.filter(|k| !k.is_empty()) {
+        return Ok(saved);
+    }
+    let key = format!("rlo_{}", random_id(20));
+    runlight.store().set_setting(&name, Some(&key)).await?;
+    Ok(key)
+}
+
+/// A redirect address's host as a site's domains are kept: lowercase, with no port and no www.
+fn site_host(redirect: &str) -> Result<String, Error> {
+    let hostname = Url::parse(redirect).ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?.hostname();
+    let host = hostname.to_lowercase();
+    let host = host.trim_end_matches('.');
+    Ok(host.strip_prefix("www.").unwrap_or(host).to_string())
+}
 
 const CODE_MS: i64 = 5 * 60_000;
 /// An app stored before client ids were signed, which never finished connecting within a day, is removed.
@@ -264,7 +288,7 @@ pub async fn oauth_response(
             &obj! {
                 "resource" => format!("{issuer}/mcp"),
                 "authorization_servers" => arr![issuer.clone()],
-                "scopes_supported" => arr!["read", "manage"],
+                "scopes_supported" => Value::Array(SCOPES.iter().map(|&s| Value::from(s)).collect()),
                 "bearer_methods_supported" => arr!["header"],
             },
             200,
@@ -283,7 +307,7 @@ pub async fn oauth_response(
                 "grant_types_supported" => arr!["authorization_code"],
                 "code_challenge_methods_supported" => arr!["S256"],
                 "token_endpoint_auth_methods_supported" => arr!["none"],
-                "scopes_supported" => arr!["read", "manage"],
+                "scopes_supported" => Value::Array(SCOPES.iter().map(|&s| Value::from(s)).collect()),
             },
             200,
         )));
@@ -378,7 +402,16 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     if form.get("code_challenge_method") != Some("S256") || !test(js_re!(r"^[A-Za-z0-9_-]{43,128}$"), &challenge) {
         return refuse("invalid_request", Some("PKCE with S256 is required"));
     }
-    let manage = split_space(form.get("scope").unwrap_or("")).contains(&"manage");
+    let scopes = split_space(form.get("scope").unwrap_or(""));
+    let cms = scopes.contains(&"cms");
+    let manage = !cms && scopes.contains(&"manage");
+    // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+    let host_name = site_host(&redirect)?;
+    let counting: Vec<_> = runlight
+        .sites()
+        .into_iter()
+        .filter(|s| !runlight.is_remote(&s.id) && s.hostnames.contains(&host_name))
+        .collect();
     let name = esc(&client.name_text());
 
     if !host.is_owner(request).await {
@@ -434,6 +467,39 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
             esc(&to_host)
         );
         let action = esc(base);
+        if cms {
+            if counting.is_empty() && !runlight.managed_sites() {
+                return Ok(page(
+                    "Add this site first",
+                    &format!(
+                        "<p>No site in this Runlight counts <strong>{}</strong>. Add it to a site's domains in your code, then connect again from {name}.</p>",
+                        esc(&host_name)
+                    ),
+                    400,
+                ));
+            }
+            let mut choices: String = counting
+                .iter()
+                .map(|s| format!("<option value=\"{}\">{}</option>", esc(&s.id), esc(&s.name)))
+                .collect();
+            if runlight.managed_sites() && counting.is_empty() {
+                choices.push_str(&format!("<option value=\"new\">A new site for {}</option>", esc(&host_name)));
+            }
+            let counts = esc(&host_name);
+            return Ok(page(
+                &format!("Connect {name}"),
+                &format!(
+                    "<p><strong>{name}</strong> wants to count <strong>{counts}</strong> in this Runlight.</p>
+<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+{sends_to}
+<form method=\"post\" action=\"{action}/oauth/authorize\">{hidden}
+<label>Site<select name=\"site\">{choices}</select></label>
+<p class=\"note\">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in {name}.</p>
+<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>"
+                ),
+                200,
+            ));
+        }
         if manage {
             // Changing settings is for one site at a time, so there is no "every site" here.
             let wanted = form.get("site").unwrap_or("");
@@ -493,7 +559,33 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     if form.get("decision") != Some("allow") {
         return back(&[("error", "access_denied")]);
     }
-    let site = get("site").unwrap_or_default();
+    let mut site = get("site").unwrap_or_default();
+    if cms {
+        if site == "new" {
+            site = match counting.first() {
+                Some(s) => s.id.clone(),
+                None if runlight.managed_sites() => {
+                    match runlight.add_site(&obj! { "hostnames" => arr![host_name.clone()] }).await {
+                        Ok(added) => added.id,
+                        // Such as an address, which a site cannot count by: there is no new site to make.
+                        Err(error @ (Error::Settings(_) | Error::Range(_))) => {
+                            return back(&[("error", "invalid_request"), ("error_description", error.message())]);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                None => String::new(),
+            };
+        } else if !counting.iter().any(|s| s.id == site) {
+            site.clear();
+        }
+        if site.is_empty() {
+            return back(&[
+                ("error", "invalid_request"),
+                ("error_description", &format!("Pick a site that counts {host_name}")),
+            ]);
+        }
+    }
     if !site.is_empty() && runlight.site(Some(&site)).is_none() {
         return back(&[("error", "invalid_request"), ("error_description", "Unknown site")]);
     }
@@ -507,7 +599,7 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
         "redirect" => redirect.clone(),
         "challenge" => challenge,
         "site" => site,
-        "scope" => if manage { "manage" } else { "read" },
+        "scope" => if cms { "cms" } else if manage { "manage" } else { "read" },
         "expires" => runlight.now() + CODE_MS,
     };
     if let (Some(by), Value::Object(o)) = (by, &mut grant) {
@@ -567,17 +659,22 @@ async fn token(host: &dyn OAuthHost, request: &Request) -> Result<Response, Erro
         store.set_setting(&found.used_key, Some(&value)).await?;
     }
     let secret = format!("rl_{}", random_id(20));
-    let scope = if grant.get("scope").and_then(Value::as_str) == Some("manage") { "manage" } else { "read" };
+    let scope = match grant.get("scope").and_then(Value::as_str) {
+        Some("cms") => "cms",
+        Some("manage") => "manage",
+        _ => "read",
+    };
     let name = match found.as_ref().and_then(Client::name) {
         None | Some(Value::Null) => "An app".to_string(),
         Some(v) => js::js_string(v),
     };
     let site = js::str_or_empty(grant.get("site"));
+    // A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
     let row = TokenRow {
         id: new_id(),
         name: js::head16(&format!("{name} (OAuth)"), 100),
         site: site.clone(),
-        scope: scope.into(),
+        scope: if scope == "cms" { "embed" } else { scope }.into(),
         hash: sha256(&secret),
         hint: js::tail16(&secret, 4),
         created_at: now,
@@ -597,6 +694,20 @@ async fn token(host: &dyn OAuthHost, request: &Request) -> Result<Response, Erro
             .ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?
             .origin();
         store.set_setting(&format!("token-origin:{}", row.id), Some(&origin)).await?;
+    }
+    // A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+    if scope == "cms" {
+        let agents = agents_key(runlight, &site, false).await?;
+        return Ok(json(
+            &obj! {
+                "access_token" => secret,
+                "token_type" => "Bearer",
+                "scope" => scope,
+                "site" => site,
+                "agents_key" => agents,
+            },
+            200,
+        ));
     }
     // site is not part of OAuth, but a hub needs to know which site it was given.
     let mut answer = obj! { "access_token" => secret, "token_type" => "Bearer", "scope" => scope };

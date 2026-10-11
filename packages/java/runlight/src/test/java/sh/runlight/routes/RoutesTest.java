@@ -1137,4 +1137,22 @@ class RoutesTest {
     assertTrue(html.contains("data-sign-in=\"/in\" data-geo-credit=\"\" data-accounts=\"\""), html);
     assertFalse(Routes.dashboard("/runlight", "", "", false, false, "").contains("data-share"));
   }
+
+  @Test
+  void theDashboardShellSaysWhichCmsAddsTheScriptOnlyWhenGivenOne() {
+    String html =
+        Routes.dashboard("/runlight", "", "", false, true, "", "s", "https://a.test", "W<P");
+    assertTrue(html.contains("data-accounts=\"\" data-cms=\"W&#60;P\" data-embed=\"s\""), html);
+    assertFalse(Routes.dashboard("/runlight", "", "", false, false, "").contains("data-cms"));
+    Response inside =
+        routes(new Routes.Options().token(null).cms("WordPress")).handle(req("/runlight/"));
+    assertTrue(inside.text().contains("data-cms=\"WordPress\""));
+    // Its own admin may frame the whole dashboard; otherwise nothing may.
+    assertTrue(inside.headers().get("content-security-policy").contains("frame-ancestors 'self'"));
+    assertEquals("SAMEORIGIN", inside.headers().get("x-frame-options"));
+    Response alone = routes(new Routes.Options().token(null)).handle(req("/runlight/"));
+    assertFalse(alone.text().contains("data-cms"));
+    assertTrue(alone.headers().get("content-security-policy").contains("frame-ancestors 'none'"));
+    assertEquals("DENY", alone.headers().get("x-frame-options"));
+  }
 }

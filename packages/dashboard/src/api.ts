@@ -197,6 +197,8 @@ export interface Person {
 
 /** Whether locations come from DB-IP's free data, which asks to be credited. */
 export const geoCredit = document.getElementById("app")?.dataset.geoCredit !== undefined;
+/** The CMS that adds the script to every page, when Runlight runs inside one, such as WordPress. */
+export const cms = document.getElementById("app")?.dataset.cms ?? "";
 /** How this install is run, learned from the sites list: sites managed in the dashboard (the standalone server) or set in code. */
 export const install = { managed: false };
 
@@ -240,7 +242,7 @@ export interface MailService {
 }
 
 export interface MailState {
-  source: "code" | "dashboard" | null;
+  source: "code" | "dashboard" | "app" | null;
   service: string;
   from: string;
   fromName: string;
@@ -248,6 +250,8 @@ export interface MailState {
   saved: string[];
   encrypted: boolean;
   services: MailService[];
+  /** The app's own mailer, such as a CMS's, when it has one; replaced while a service saved here sends instead. */
+  app?: { via: string; from: string; fromName: string; replaced: boolean };
 }
 
 export interface Report {

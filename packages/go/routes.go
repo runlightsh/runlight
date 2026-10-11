@@ -63,6 +63,10 @@ type RoutesOptions struct {
 	AccountsWeb *AccountsWeb
 	// GeoCredit credits DB-IP in the dashboard's footer, as its free location data asks.
 	GeoCredit bool
+	// CMS is the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one.
+	// The dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's
+	// own admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+	CMS string
 	// Origin is the address people open the app at, such as
 	// https://example.com. A link domain can never be its host, and links in
 	// email reports point there, whatever Host header a request carries.
@@ -1610,7 +1614,7 @@ func (rt *Routes) tokensAPI(c *call, path string) (*Response, error) {
 			return Coded("A token that changes settings is for one site. Pick the site.", "token_site", 400, nil), nil
 		}
 		if scope == "embed" && site == "" {
-			return Coded("A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400, nil), nil
+			return Coded("A dashboard key is for one site. Pick the site.", "embed_site", 400, nil), nil
 		}
 		secret := tokenPrefix + randomID(20)
 		row := TokenRow{ID: randomID(12), Name: name, Site: site, Scope: scope, Hash: sha256Hex(secret), Hint: secret[len(secret)-4:], CreatedAt: rt.r.now()}

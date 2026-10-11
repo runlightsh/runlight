@@ -66,6 +66,13 @@ public sealed class RoutesOptions
     /// <summary>Credits DB-IP in the dashboard's footer.</summary>
     public bool GeoCredit { get; init; }
 
+    /// <summary>
+    /// The CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
+    /// dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's
+    /// own admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+    /// </summary>
+    public string? Cms { get; init; }
+
     /// <summary>The address people open the app at, such as https://example.com.</summary>
     public string? Origin { get; init; }
 

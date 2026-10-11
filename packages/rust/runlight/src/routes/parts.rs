@@ -773,12 +773,7 @@ impl Routes {
                 ));
             }
             if scope == "embed" && site.is_empty() {
-                return Ok(coded(
-                    "A key for the dashboard in a CMS is for one site. Pick the site.",
-                    "embed_site",
-                    400,
-                    None,
-                ));
+                return Ok(coded("A dashboard key is for one site. Pick the site.", "embed_site", 400, None));
             }
             let secret = format!("{TOKEN_PREFIX}{}", random_id(20));
             let row = TokenRow {

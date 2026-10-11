@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -18,7 +19,11 @@ import (
 // resource and the authorization server. The token is an ordinary API token,
 // so it appears in Settings, API and AI, beside the others, and deleting it
 // there disconnects the app. It reads stats, or with the "manage" scope
-// (asked for by a Runlight hub) it also changes one site's settings.
+// (asked for by a Runlight hub) it also changes one site's settings. With the
+// "cms" scope (asked for by the WordPress, Drupal, and Craft plugins) it is the
+// site's dashboard key, which only opens its read-only dashboard in the CMS,
+// and the answer also carries the site's agents key, so connecting fills in
+// the plugin's settings.
 
 const (
 	codeMs = 5 * 60_000
@@ -29,6 +34,29 @@ const (
 	// maxClientID is the longest client id, which carries the app's name and redirect addresses.
 	maxClientID = 2048
 )
+
+// oauthScopes are the scopes a token from OAuth may have.
+var oauthScopes = []string{"read", "manage", "cms"}
+
+// agentsKey is the key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
+func agentsKey(ctx context.Context, r *Runlight, site string, replace bool) (string, error) {
+	name := "observe-key:" + site
+	if !replace {
+		saved, _, err := r.Store.Setting(ctx, name)
+		if err != nil || saved != "" {
+			return saved, err
+		}
+	}
+	key := "rlo_" + randomID(20)
+	return key, r.Store.SetSetting(ctx, name, &key)
+}
+
+var trailingDots = regexp.MustCompile(`\.+$`)
+
+// siteHost is a redirect address's host as a site's domains are kept: lowercase, with no port and no www.
+func siteHost(redirect string) string {
+	return strings.TrimPrefix(trailingDots.ReplaceAllString(strings.ToLower(whatwg.MustParse(redirect).Hostname), ""), "www.")
+}
 
 type oauthHost struct {
 	r         *Runlight
@@ -180,7 +208,7 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 		return web.NewResponse(204, nil, oauthCORS...), nil
 	}
 	if strings.HasPrefix(path, "/.well-known/oauth-protected-resource") {
-		return oauthJSON(js.NewObject("resource", issuer+"/mcp", "authorization_servers", []string{issuer}, "scopes_supported", []string{"read", "manage"}, "bearer_methods_supported", []string{"header"}), 200), nil
+		return oauthJSON(js.NewObject("resource", issuer+"/mcp", "authorization_servers", []string{issuer}, "scopes_supported", oauthScopes, "bearer_methods_supported", []string{"header"}), 200), nil
 	}
 	if strings.HasPrefix(path, "/.well-known/oauth-authorization-server") || strings.HasPrefix(path, "/.well-known/openid-configuration") {
 		return oauthJSON(js.NewObject(
@@ -192,7 +220,7 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 			"grant_types_supported", []string{"authorization_code"},
 			"code_challenge_methods_supported", []string{"S256"},
 			"token_endpoint_auth_methods_supported", []string{"none"},
-			"scopes_supported", []string{"read", "manage"},
+			"scopes_supported", oauthScopes,
 		), 200), nil
 	}
 	if path == "/oauth/register" && request.Method == "POST" {
@@ -287,11 +315,16 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 		}
 		secret := tokenPrefix + randomID(20)
 		scope := "read"
-		if grant.Value("scope") == "manage" {
-			scope = "manage"
+		if g := grant.Value("scope"); g == "cms" || g == "manage" {
+			scope = g.(string)
 		}
 		site := js.String(grant.Value("site"))
-		row := TokenRow{ID: randomID(12), Name: head16(name+" (OAuth)", 100), Site: site, Scope: scope, Hash: sha256Hex(secret), Hint: secret[len(secret)-4:], CreatedAt: r.now()}
+		// A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
+		rowScope := scope
+		if scope == "cms" {
+			rowScope = "embed"
+		}
+		row := TokenRow{ID: randomID(12), Name: head16(name+" (OAuth)", 100), Site: site, Scope: rowScope, Hash: sha256Hex(secret), Hint: secret[len(secret)-4:], CreatedAt: r.now()}
 		if err := r.Store.InsertToken(ctx, row); err != nil {
 			return nil, err
 		}
@@ -308,6 +341,14 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 			if err := r.Store.SetSetting(ctx, "token-origin:"+row.ID, &origin); err != nil {
 				return nil, err
 			}
+		}
+		// A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+		if scope == "cms" {
+			key, err := agentsKey(ctx, r, site, false)
+			if err != nil {
+				return nil, err
+			}
+			return oauthJSON(js.NewObject("access_token", secret, "token_type", "Bearer", "scope", scope, "site", site, "agents_key", key), 200), nil
 		}
 		// site is not part of OAuth, but a hub needs to know which site it was given.
 		out := js.NewObject("access_token", secret, "token_type", "Bearer", "scope", scope)
@@ -369,7 +410,17 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	if form.Value("code_challenge_method") != "S256" || !challengePattern.MatchString(challenge) {
 		return refuse("error", "invalid_request", "error_description", "PKCE with S256 is required"), nil
 	}
-	manage := contains(scopeSplit.Split(form.Value("scope"), -1), "manage")
+	scopes := scopeSplit.Split(form.Value("scope"), -1)
+	cms := contains(scopes, "cms")
+	manage := !cms && contains(scopes, "manage")
+	// A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+	host := siteHost(redirect)
+	var counting []SiteRow
+	for _, s := range r.Sites() {
+		if _, remote := r.Remote(s.ID); !remote && contains(s.Hostnames, host) {
+			counting = append(counting, s)
+		}
+	}
 
 	if !o.isOwner(ctx, request) {
 		// Someone signed in who may only read would be sent to sign in again and again.
@@ -401,6 +452,25 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 		// The app names itself, so the page also shows where the answer goes, which it cannot fake.
 		sendsTo := `<p class="note">Allowing sends you back to <strong>` + escapeHTML(whatwg.MustParse(redirect).Host()) + `</strong>. Only allow it if you started connecting there.</p>`
 		name := escapeHTML(client.name)
+		if cms {
+			if len(counting) == 0 && !r.ManagedSites {
+				return oauthPage("Add this site first", `<p>No site in this Runlight counts <strong>`+escapeHTML(host)+`</strong>. Add it to a site's domains in your code, then connect again from `+name+`.</p>`, 400), nil
+			}
+			var choices strings.Builder
+			for _, s := range counting {
+				choices.WriteString(`<option value="` + escapeHTML(s.ID) + `">` + escapeHTML(s.Name) + `</option>`)
+			}
+			if r.ManagedSites && len(counting) == 0 {
+				choices.WriteString(`<option value="new">A new site for ` + escapeHTML(host) + `</option>`)
+			}
+			return oauthPage("Connect "+name, `<p><strong>`+name+`</strong> wants to count <strong>`+escapeHTML(host)+`</strong> in this Runlight.</p>
+<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+`+sendsTo+`
+<form method="post" action="`+escapeHTML(base)+`/oauth/authorize">`+hidden.String()+`
+<label>Site<select name="site">`+choices.String()+`</select></label>
+<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in `+name+`.</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`, 200), nil
+		}
 		if manage {
 			// Changing settings is for one site at a time, so there is no "every site" here.
 			wanted := form.Value("site")
@@ -444,6 +514,30 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 		return back("error", "access_denied"), nil
 	}
 	site := form.Value("site")
+	if cms {
+		if site == "new" {
+			if len(counting) > 0 {
+				site = counting[0].ID
+			} else if r.ManagedSites {
+				added, err := r.AddSite(ctx, js.NewObject("hostnames", []any{host}))
+				if err != nil {
+					// Such as an address, which a site cannot count by: there is no new site to make.
+					if isRangeError(err) {
+						return back("error", "invalid_request", "error_description", err.Error()), nil
+					}
+					return nil, err
+				}
+				site = added.ID
+			} else {
+				site = ""
+			}
+		} else if !slices.ContainsFunc(counting, func(s SiteRow) bool { return s.ID == site }) {
+			site = ""
+		}
+		if site == "" {
+			return back("error", "invalid_request", "error_description", "Pick a site that counts "+host), nil
+		}
+	}
 	if _, known := r.Site(site); site != "" && !known {
 		return back("error", "invalid_request", "error_description", "Unknown site"), nil
 	}
@@ -452,7 +546,9 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	}
 	code := randomID(32)
 	scope := "read"
-	if manage {
+	if cms {
+		scope = "cms"
+	} else if manage {
 		scope = "manage"
 	}
 	grant := js.NewObject("client", clientID, "redirect", redirect, "challenge", challenge, "site", site, "scope", scope, "expires", r.now()+codeMs)

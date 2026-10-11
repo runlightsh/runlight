@@ -54,10 +54,16 @@ export interface RunlightOptions {
   /** Where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go". */
   linkPath?: string;
   /**
-   * The mail service for email reports, in code. When set, the dashboard
-   * shows it and cannot change it. Otherwise it is set up in Settings.
+   * How email reports, invites, and sign-in links are sent. Either a mail
+   * service in code, `{ service: "resend", apiKey, from }`, which the
+   * dashboard shows and cannot change, or a mailer of the app's own,
+   * `{ send, from, fromName?, via }`, such as a CMS's. The app's mailer is
+   * a default: a service saved in the dashboard takes its place, and
+   * removing that service goes back to it. `via` names it there, such as
+   * "WordPress (WP Mail SMTP)". Without either, the service is set up in
+   * Settings.
    */
-  mail?: MailSettings;
+  mail?: MailSettings | AppMailer;
   /**
    * Encrypts the keys kept in the database: the mail service's, the AI
    * Assistant's, and the tokens for connected installs. Default the
@@ -83,6 +89,19 @@ export interface RunlightOptions {
 
 /** A mail service and who reports come from. */
 export type MailSettings = MailConfig & { from: string; fromName?: string };
+
+/** A mailer of the app's own, such as a CMS's, that sends each message itself. */
+export interface AppMailer {
+  send(message: Message): Promise<void>;
+  /** The address messages come from. */
+  from: string;
+  fromName?: string;
+  /** What the dashboard calls it, such as "WordPress (WP Mail SMTP)". */
+  via: string;
+}
+
+/** The mail Runlight sends with: a service from code or the dashboard, or the app's own mailer (service "app"). */
+export type MailInUse = MailSettings & { source: "code" | "dashboard" | "app"; via?: string };
 
 /** Per request facts an adapter knows and a Fetch Request does not carry. */
 export interface RequestContext {
@@ -198,6 +217,8 @@ export class Runlight {
   /** Each timezone's salts for its current day, so a lookup is a map read until midnight there. */
   private readonly salts = new Map<string, { day: string; today: string; yesterday: string | null }>();
   private readonly mailInCode: MailSettings | undefined;
+  /** The app's own mailer, used while no service is saved in the dashboard. */
+  readonly appMailer: AppMailer | null;
   /** Encrypts the keys kept in the database; null leaves them readable, and the dashboard says so. */
   readonly secret: string | null;
   /** Whether a connected install may be on this machine, at http://localhost or http://127.0.0.1. */
@@ -224,20 +245,34 @@ export class Runlight {
     this.now = options.now ?? Date.now;
     this.links = new Links(this);
     this.linkPath = `/${(options.linkPath ?? "/go").replace(/^\/+|\/+$/g, "")}`;
-    this.mailInCode = options.mail;
+    const mail = options.mail;
+    if (mail && typeof (mail as AppMailer).send === "function") {
+      const app = mail as AppMailer;
+      if (!EMAIL.test(app.from ?? "")) throw new Error("Runlight: the app's mailer needs a from address, like reports@example.com");
+      this.appMailer = app;
+      this.mailInCode = undefined;
+    } else {
+      this.appMailer = null;
+      this.mailInCode = mail as MailSettings | undefined;
+    }
     this.localInstalls = options.localInstalls ?? false;
     this.secret = options.secret ?? envValue("RUNLIGHT_SECRET") ?? envValue("RUNLIGHT_TOKEN") ?? null;
   }
 
-  /** The mail service: from code, or as saved in the dashboard. Null when there is none. */
-  async mailSettings(): Promise<(MailSettings & { source: "code" | "dashboard" }) | null> {
+  /**
+   * The mail Runlight sends with: a service from code, or as saved in the
+   * dashboard, or else the app's own mailer, as service "app". Null when
+   * there is none.
+   */
+  async mailSettings(): Promise<MailInUse | null> {
     if (this.mailInCode) return { ...this.mailInCode, source: "code" };
     await this.init();
     const sealed = await this.store.setting("mail");
-    if (!sealed) return null;
-    const opened = await unseal(sealed, this.secret);
-    if (!opened) return null;
-    return { ...(JSON.parse(opened) as MailSettings), source: "dashboard" };
+    const opened = sealed ? await unseal(sealed, this.secret) : null;
+    if (opened) return { ...(JSON.parse(opened) as MailSettings), source: "dashboard" };
+    const app = this.appMailer;
+    if (!app) return null;
+    return { service: "app", from: app.from, ...(app.fromName ? { fromName: app.fromName } : {}), via: app.via, source: "app" };
   }
 
   /**
@@ -247,7 +282,8 @@ export class Runlight {
   async saveMailSettings(input: Record<string, unknown> | null): Promise<void> {
     if (this.mailInCode) throw new MailError("The mail service is set in code", "mail_in_code", {});
     if (input === null) return this.store.setSetting("mail", null);
-    const before = await this.mailSettings();
+    const current = await this.mailSettings();
+    const before = current?.source === "dashboard" ? current : null;
     const service = SERVICES.find((x) => x.id === input.service);
     if (!service) throw new MailError("Pick a mail service", "mail_service", {});
     const settings: Record<string, string> = { service: service.id };
@@ -271,11 +307,19 @@ export class Runlight {
     await this.store.setSetting("mail", await seal(JSON.stringify(config), this.secret));
   }
 
-  /** Sends one email through the mail service. */
+  /** Sends one email through the mail service, or the app's own mailer when no service is saved. */
   async sendMail(message: Omit<Message, "from" | "fromName">): Promise<void> {
     const settings = await this.mailSettings();
     if (!settings) throw new MailError("Set up a mail service first", "mail_unset", {});
-    await send(settings, { ...message, from: settings.from, fromName: settings.fromName });
+    const full: Message = { ...message, from: settings.from, ...(settings.fromName ? { fromName: settings.fromName } : {}) };
+    if (settings.source !== "app") return send(settings, full);
+    try {
+      await this.appMailer!.send(full);
+    } catch (error) {
+      if (error instanceof MailError) throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new MailError(`${settings.via} could not send it${detail ? `: ${detail}` : ""}`, "mail_app_failed", { via: settings.via ?? "", detail });
+    }
   }
 
   /**

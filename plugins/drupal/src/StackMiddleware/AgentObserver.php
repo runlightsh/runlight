@@ -6,6 +6,7 @@ namespace Drupal\runlight\StackMiddleware;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\runlight\Agents;
+use Drupal\runlight\Local;
 use GuzzleHttp\ClientInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -21,7 +22,8 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
  * events: Drupal does not even run terminate() for it. The report is sent
  * from a shutdown function, which PHP runs once the response is out (under
  * PHP-FPM, Symfony closes the connection first), so the page is never
- * slowed down. Only known agents' requests are reported.
+ * slowed down. Only known agents' requests are reported. When Runlight runs
+ * in this Drupal, it records them itself.
  */
 final class AgentObserver implements HttpKernelInterface {
 
@@ -30,6 +32,7 @@ final class AgentObserver implements HttpKernelInterface {
     private readonly ConfigFactoryInterface $configFactory,
     private readonly ClientInterface $httpClient,
     private readonly LoggerInterface $logger,
+    private readonly Local $local,
   ) {}
 
   public function handle(Request $request, int $type = self::MAIN_REQUEST, bool $catch = TRUE): Response {
@@ -38,6 +41,7 @@ final class AgentObserver implements HttpKernelInterface {
       $agent = (string) $request->headers->get('User-Agent', '');
       if (Agents::isAgent($agent)) {
         $url = $request->getUri();
+        $this->local->request($request);
         register_shutdown_function(fn () => $this->report($url, $agent));
       }
     }
@@ -46,6 +50,14 @@ final class AgentObserver implements HttpKernelInterface {
 
   private function report(string $url, string $agent): void {
     $config = $this->configFactory->get('runlight.settings');
+    $mode = Local::mode($config->get('mode'), $config->get('address'));
+    if ($mode === 'local') {
+      $this->record($url, $agent);
+      return;
+    }
+    if ($mode !== 'remote') {
+      return;
+    }
     $address = (string) $config->get('address');
     $key = (string) $config->get('observe_key');
     if ($address === '' || $key === '') {
@@ -61,6 +73,21 @@ final class AgentObserver implements HttpKernelInterface {
     catch (\Throwable $e) {
       // Analytics must never break the page it watches; note it and move on.
       $this->logger->notice('Could not report an AI agent fetch: @message', ['@message' => $e->getMessage()]);
+    }
+  }
+
+  /** Records the fetch in Runlight here, unless it was one of Runlight's own pages. */
+  private function record(string $url, string $agent): void {
+    try {
+      $path = (string) parse_url($url, PHP_URL_PATH);
+      $base = $this->local->base();
+      if (!$this->local->active() || $path === $base || str_starts_with($path, $base . '/')) {
+        return;
+      }
+      $this->local->observe($url, $agent);
+    }
+    catch (\Throwable $e) {
+      $this->logger->notice('Could not record an AI agent fetch: @message', ['@message' => $e->getMessage()]);
     }
   }
 

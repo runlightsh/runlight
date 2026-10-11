@@ -9,28 +9,46 @@ use craft\base\Model;
 use craft\helpers\App;
 
 /**
- * Where the site's Runlight is, and what it sends. Every string may name an
+ * Where Runlight runs, and what it sends. Every string may name an
  * environment variable ("$RUNLIGHT_OBSERVE_KEY"), so the keys need not be in
  * project config; config/runlight.php wins over the form, as every plugin's
  * config file does.
  */
 final class Settings extends Model
 {
+    /**
+     * "local" runs Runlight inside this Craft site, "remote" sends to one run elsewhere, and an empty
+     * string means the admin has not chosen yet, so nothing is counted until they do.
+     */
+    public string $mode = '';
+
     /** The address Runlight answers at, such as https://example.com/runlight in an app or https://stats.example.com for the standalone server. */
     public string $address = '';
 
-    /** Only needed when that Runlight counts several sites and cannot tell this one by hostname. */
+    /** Shown in Runlight under Settings, Install. Only needed when that Runlight cannot tell this site by its domain. */
     public string $site = '';
 
-    /** With the Runlight's RUNLIGHT_OBSERVE_KEY, AI agents reading pages are reported. */
+    /** The agents key, shown in Runlight under Settings, Install. With it, AI agents reading pages are reported. */
     public string $observeKey = '';
 
-    /** With a key from the Runlight's Settings, Install, Key for the dashboard in your CMS, the Control Panel shows the site's numbers. */
+    /** With a key made in Runlight under Settings, Install, the Control Panel shows the site's numbers. */
     public string $dashboardKey = '';
 
     public bool $skipAdmins = true;
     public bool $outbound = true;
     public bool $downloads = true;
+
+    /** With Runlight in this site, which countries visitors come from, from DB-IP's free data. */
+    public bool $locations = false;
+
+    /** Where Runlight runs. An address saved before there was a choice means one run elsewhere. */
+    public function getMode(): string
+    {
+        if (in_array($this->mode, ['local', 'remote'], true)) {
+            return $this->mode;
+        }
+        return $this->getAddress() !== '' ? 'remote' : '';
+    }
 
     /** The address with any environment variable read, tidied: no trailing slash, and the script's own address works too. */
     public function getAddress(): string
@@ -77,13 +95,24 @@ final class Settings extends Model
         }
     }
 
+    /**
+     * Whether Runlight has been set up: running in this site, or elsewhere with at least an address
+     * or a key saved. Until then the settings page shows the setup choices.
+     */
+    public function isSetUp(): bool
+    {
+        $mode = $this->getMode();
+        return $mode === 'local' || ($mode === 'remote' && ($this->getAddress() !== '' || $this->getObserveKey() !== '' || $this->getDashboardKey() !== ''));
+    }
+
     protected function defineRules(): array
     {
         return [
+            [['mode'], 'in', 'range' => ['', 'local', 'remote']],
             [['address', 'site', 'observeKey', 'dashboardKey'], 'string'],
             [['address'], 'validateAddress'],
             [['site'], 'validateSite'],
-            [['skipAdmins', 'outbound', 'downloads'], 'boolean'],
+            [['skipAdmins', 'outbound', 'downloads', 'locations'], 'boolean'],
         ];
     }
 

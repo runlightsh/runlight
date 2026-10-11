@@ -552,3 +552,18 @@ def test_the_dashboard_shell_escapes_what_it_is_given() -> None:
     assert 'data-sign-out="/out?x=1&#38;y=2"' in html
     assert 'data-sign-in="/in" data-geo-credit="" data-accounts=""' in html
     assert "data-share" not in dashboard("/runlight")
+    assert 'data-accounts="" data-cms="Word&#34;Press" data-embed=' in dashboard("/runlight", "", "", False, True, "", {"session": "s", "origin": "o"}, 'Word"Press')
+    assert "data-cms" not in dashboard("/runlight")
+
+
+def test_the_dashboard_says_which_cms_adds_the_script_only_when_told() -> None:
+    rl = runlight({"sites": [{"id": "blog", "hostnames": ["blog.example.com"]}]})
+    inside = rl.routes({"token": OPEN, "cms": "WordPress"}).handle(req("/runlight/"))
+    assert 'data-cms="WordPress"' in inside.text()
+    # Its own admin may frame the whole dashboard; otherwise nothing may.
+    assert "frame-ancestors 'self'" in (inside.headers.get("content-security-policy") or "")
+    assert inside.headers.get("x-frame-options") == "SAMEORIGIN"
+    alone = rl.routes({"token": OPEN}).handle(req("/runlight/"))
+    assert "data-cms" not in alone.text()
+    assert "frame-ancestors 'none'" in (alone.headers.get("content-security-policy") or "")
+    assert alone.headers.get("x-frame-options") == "DENY"

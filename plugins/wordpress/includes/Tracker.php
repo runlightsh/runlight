@@ -20,7 +20,8 @@ final class Tracker {
 	/** The Runlight script, before any other head output, unless this visit should not count. */
 	public static function script(): void {
 		$settings = Settings::get();
-		if ( '' === $settings['address'] ) {
+		$address  = Settings::address();
+		if ( '' === $address ) {
 			return;
 		}
 		if ( $settings['skip_admins'] && current_user_can( 'manage_options' ) ) {
@@ -28,9 +29,9 @@ final class Tracker {
 		}
 		$attributes = array(
 			'defer' => true,
-			'src'   => $settings['address'] . '/s.js',
+			'src'   => $address . '/s.js',
 		);
-		if ( '' !== $settings['site'] ) {
+		if ( 'remote' === $settings['mode'] && '' !== $settings['site'] ) {
 			$attributes['data-site'] = $settings['site'];
 		}
 		if ( ! $settings['outbound'] ) {
@@ -52,7 +53,9 @@ final class Tracker {
 	 */
 	public static function observe(): void {
 		$settings = Settings::get();
-		if ( '' === $settings['address'] || '' === $settings['observe_key'] ) {
+		$local    = 'local' === $settings['mode'];
+		// Runlight here records them itself; another one needs the agents key.
+		if ( $local ? ! Local::active() : ( '' === $settings['address'] || '' === $settings['observe_key'] ) ) {
 			return;
 		}
 		$method = isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : 'GET';
@@ -65,8 +68,8 @@ final class Tracker {
 		// Last of all at shutdown, once nothing else will write to the page.
 		add_action(
 			'shutdown',
-			static function () use ( $settings, $url, $agent ): void {
-				self::report( $settings, $url, $agent );
+			static function () use ( $settings, $local, $url, $agent ): void {
+				self::report( $local ? null : $settings, $url, $agent );
 			},
 			PHP_INT_MAX
 		);
@@ -91,11 +94,11 @@ final class Tracker {
 	 * Sends the report. Under PHP-FPM or LiteSpeed the agent waits until PHP
 	 * finishes, even after the page is out, so the connection is closed first.
 	 *
-	 * @param array{address:string,observe_key:string} $settings The plugin's settings.
-	 * @param string                                   $url      The page the agent fetched.
-	 * @param string                                   $agent    The agent's user agent.
+	 * @param array{address:string,observe_key:string}|null $settings The plugin's settings, or null for Runlight here.
+	 * @param string                                        $url      The page the agent fetched.
+	 * @param string                                        $agent    The agent's user agent.
 	 */
-	private static function report( array $settings, string $url, string $agent ): void {
+	private static function report( ?array $settings, string $url, string $agent ): void {
 		if ( session_status() === PHP_SESSION_ACTIVE ) {
 			session_write_close();
 		}
@@ -103,6 +106,10 @@ final class Tracker {
 			fastcgi_finish_request();
 		} elseif ( function_exists( 'litespeed_finish_request' ) ) {
 			litespeed_finish_request();
+		}
+		if ( null === $settings ) {
+			Local::observe( $url, $agent );
+			return;
 		}
 		wp_remote_post(
 			$settings['address'] . '/api/observe',

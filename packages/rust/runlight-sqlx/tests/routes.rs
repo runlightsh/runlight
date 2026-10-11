@@ -201,3 +201,22 @@ async fn broken_percent_escapes_in_a_path_answer_as_a_name_nobody_has_never_an_e
     let linked = rl.link_domain_response(&Request::get("https://go.example.net/%E0")).await.unwrap();
     assert_eq!(linked.map(|r| r.status), Some(404));
 }
+
+#[tokio::test]
+async fn inside_a_cms_the_dashboard_names_it_and_its_own_admin_may_frame_the_whole_dashboard_otherwise_nothing_may() {
+    let rl = runlight().await;
+    let page = async |cms: Option<&str>| {
+        let routes = rl
+            .routes(RoutesOptions { token: TokenOption::Open, cms: cms.map(String::from), ..RoutesOptions::default() })
+            .unwrap();
+        routes.handle(Request::get(format!("{APP}/runlight/"))).await
+    };
+    let inside = page(Some("WordPress")).await;
+    assert!(String::from_utf8(inside.body.clone()).unwrap().contains("data-cms=\"WordPress\""));
+    assert!(inside.headers.get("content-security-policy").unwrap_or_default().contains("frame-ancestors 'self'"));
+    assert_eq!(inside.headers.get("x-frame-options").as_deref(), Some("SAMEORIGIN"));
+    let alone = page(None).await;
+    assert!(!String::from_utf8(alone.body.clone()).unwrap().contains("data-cms"));
+    assert!(alone.headers.get("content-security-policy").unwrap_or_default().contains("frame-ancestors 'none'"));
+    assert_eq!(alone.headers.get("x-frame-options").as_deref(), Some("DENY"));
+}

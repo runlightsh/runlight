@@ -17,7 +17,8 @@ export function runlight(options: RunlightOptions): Runlight {
 }
 
 export { Runlight, SESSION_IDLE_MS, LINK_DOMAIN_CHECK } from "./runlight.js";
-export type { RunlightOptions, SiteOptions, RequestContext } from "./runlight.js";
+export type { RunlightOptions, SiteOptions, RequestContext, AppMailer, MailSettings, MailInUse } from "./runlight.js";
+export type { Message as MailMessage } from "./mail/transports.js";
 export type { Routes, RoutesOptions, FetchHandler } from "./routes.js";
 export { RUNLIGHT_ICON, DOMAIN_NAME, coded, hostName } from "./routes.js";
 export type { GeoLookup, Location } from "./geo.js";

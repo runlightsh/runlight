@@ -23,6 +23,9 @@ module Runlight
   #   development makes one up (a restart signs everyone out); anywhere else that raises ArgumentError, since
   #   each process of an app would make its own and sign the others' sessions out.
   # - geoCredit: credits DB-IP in the dashboard's footer.
+  # - cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
+  #   dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's own
+  #   admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
   # - origin: the address people open the app at, such as https://example.com.
   # - ownHosts: a callable returning more names the dashboard is reached at.
   # - accountOf: a callable taking the Request and returning the account it comes from, or nil (internal, for the
@@ -387,7 +390,7 @@ module Runlight
       # The dashboard's page, which holds no data: the API it calls checks access. `embed` is the dashboard inside a
       # CMS's admin pages: { "session", "origin" }, its session (empty once its ticket was used or ran out) and the
       # admin origin that frames it.
-      def dashboard(base, share = "", sign_out = "", geo_credit = false, accounts = false, sign_in = "", embed = nil)
+      def dashboard(base, share = "", sign_out = "", geo_credit = false, accounts = false, sign_in = "", embed = nil, cms = "")
         b = escape_attr(base)
         hash = build_hash("dashboardHash")
         attributes = (share != "" ? " data-share=\"#{escape_attr(share)}\"" : "") +
@@ -395,6 +398,7 @@ module Runlight
                      (sign_in != "" ? " data-sign-in=\"#{escape_attr(sign_in)}\"" : "") +
                      (geo_credit ? ' data-geo-credit=""' : "") +
                      (accounts ? ' data-accounts=""' : "") +
+                     (cms != "" ? " data-cms=\"#{escape_attr(cms)}\"" : "") +
                      (embed.nil? ? "" : " data-embed=\"#{escape_attr(embed["session"])}\" data-embed-origin=\"#{escape_attr(embed["origin"])}\"")
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>Runlight</title>\n" \
           "<link rel=\"icon\" href=\"#{Brand.runlight_icon}\">\n" \
@@ -1439,7 +1443,7 @@ module Runlight
         asked_scope = Js.get(body, "scope")
         scope = %w[manage embed].include?(asked_scope) ? asked_scope : "read"
         return coded("A token that changes settings is for one site. Pick the site.", "token_site", 400) if scope == "manage" && site == ""
-        return coded("A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400) if scope == "embed" && site == ""
+        return coded("A dashboard key is for one site. Pick the site.", "embed_site", 400) if scope == "embed" && site == ""
 
         secret = "#{TOKEN_PREFIX}#{Hashing.random_id(20)}"
         row = { "id" => Hashing.random_id, "name" => name, "site" => site, "scope" => scope, "hash" => Hashing.sha256(secret),
@@ -1553,7 +1557,7 @@ module Runlight
       if path == "/api/embed" && method == "POST"
         token = api_token(request)
         return denied(false) if token.nil?
-        return coded("Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403) if token["scope"] != "embed"
+        return coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403) if token["scope"] != "embed"
 
         site = token["site"] != "" ? rl.site(token["site"]) : nil
         return coded("Unknown site", "unknown_site", 404) if site.nil?
@@ -1680,7 +1684,7 @@ module Runlight
         end
       end
 
-      # Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+      # Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
       if (path == "/api/observe-key" && method == "GET") || (path == "/api/observe-key/new" && method == "POST")
         access = can_read(request)
         return denied(access) if access != true
@@ -1689,13 +1693,7 @@ module Runlight
         site = query_site(url)
         return site if site.is_a?(Http::Response)
 
-        name = "observe-key:#{site["id"]}"
-        key = path.end_with?("/new") ? nil : store.setting(name)
-        if key.nil? || key == ""
-          key = "rlo_#{Hashing.random_id(20)}"
-          store.set_setting(name, key)
-        end
-        return json({ "key" => key })
+        return json({ "key" => OAuth.agents_key(rl, site["id"], path.end_with?("/new")) })
       end
 
       # Making, changing, and deleting funnels; reading them is with the other reports.
@@ -2604,11 +2602,13 @@ module Runlight
         end
         # The page itself holds no data; the API it calls checks access and
         # the page explains how to sign in when it is refused.
-        return Http::Response.new(dashboard(base, "", @sign_out || "", Js.truthy?(@options["geoCredit"]), !@web.nil?, @sign_in || ""), status: 200, headers: {
+        # Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+        cms = @options["cms"].to_s
+        return Http::Response.new(dashboard(base, "", @sign_out || "", Js.truthy?(@options["geoCredit"]), !@web.nil?, @sign_in || "", nil, cms), status: 200, headers: {
           "content-type" => "text/html; charset=utf-8",
           "cache-control" => "no-store",
-          "content-security-policy" => DASHBOARD_CSP,
-          "x-frame-options" => "DENY",
+          "content-security-policy" => cms != "" ? DASHBOARD_CSP.sub("frame-ancestors 'none'", "frame-ancestors 'self'") : DASHBOARD_CSP,
+          "x-frame-options" => cms != "" ? "SAMEORIGIN" : "DENY",
           "referrer-policy" => "same-origin",
         })
       end

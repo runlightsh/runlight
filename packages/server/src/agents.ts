@@ -127,7 +127,7 @@ async function send(options: AgentsOptions, fetches: Fetch[]): Promise<number> {
   }).catch((error: Error) => {
     throw new SendError(error.message);
   });
-  if (answer.status === 401) throw new SendError("Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins.");
+  if (answer.status === 401) throw new SendError("Runlight refused the key. Use the site's agents key from Settings, Install.");
   if (!answer.ok) throw new SendError(`Runlight answered ${answer.status}: ${(await answer.text()).slice(0, 200)}`);
   const body = (await answer.json().catch(() => null)) as { recorded?: number } | null;
   return body?.recorded ?? 0;

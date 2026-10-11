@@ -1,0 +1,46 @@
+{% import '_includes/forms.twig' as forms %}
+
+{# The first screen, before anything is counted: run Runlight in this site with one press, or connect to one run elsewhere. #}
+{% set canChange = craft.app.config.general.allowAdminChanges %}
+{# Once Runlight runs here, the admin lands on its dashboard. #}
+{% set dashboard = 'runlight'|hash %}
+
+<h2>{{ 'Set up Runlight'|t('runlight') }}</h2>
+<p>{{ 'Runlight counts visitors without cookies, and its numbers stay in your own database. Choose where it runs. Nothing is counted until you do.'|t('runlight') }}</p>
+
+<hr>
+
+<h3>{{ 'Run Runlight in this Craft site'|t('runlight') }}</h3>
+<p>{{ 'Runlight runs inside this site and keeps its numbers in this site’s database, with a standalone dashboard at {address} as well as the one in the Control Panel. There is nothing else to set up.'|t('runlight', { address: '<code>' ~ (local ~ '/')|e ~ '</code>' })|raw }}</p>
+{% if missing %}
+  <p class="error">{{ missing }}</p>
+{% elseif canChange %}
+  <div class="field">
+    <button type="button" class="btn submit formsubmit" data-params="{{ { 'settings[mode]': 'local' }|json_encode }}" data-redirect="{{ dashboard }}">{{ 'Run Runlight in this Craft site'|t('runlight') }}</button>
+  </div>
+{% endif %}
+
+<hr>
+
+<h3>{{ 'Connect to a Runlight you run elsewhere'|t('runlight') }}</h3>
+<p>{{ 'The standalone server, or an app with Runlight in it, for one dashboard across several sites. Enter its address, shown in Runlight under Settings, Install, and press Connect. Runlight asks you to pick this site, then fills in everything.'|t('runlight') }}</p>
+
+{{ forms.autosuggestField({
+  label: 'Runlight address'|t('runlight'),
+  id: 'address',
+  name: 'address',
+  value: settings.address,
+  suggestEnvVars: true,
+  errors: settings.getErrors('address'),
+  placeholder: 'https://stats.example.com',
+}) }}
+
+{% if canChange %}
+  <div class="field">
+    <button type="button" class="btn formsubmit" data-action="runlight/connect/start">{{ 'Connect'|t('runlight') }}</button>
+  </div>
+{% endif %}
+
+<p><a href="{{ cpUrl('settings/plugins/runlight', { setup: 'manual' }) }}">{{ 'Enter the settings by hand instead'|t('runlight') }}</a></p>
+
+<p>{{ 'Not sure? <a href="{url}">Read how each one works.</a>'|t('runlight', { url: 'https://runlight.sh/docs/craft/' })|raw }}</p>

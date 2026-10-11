@@ -1,0 +1,36 @@
+<?php
+
+/**
+ * @file
+ * Points the admin to the setup screen, and cleans up on uninstall.
+ */
+
+declare(strict_types=1);
+
+use Drupal\Core\Url;
+use Drupal\runlight\Local;
+use Drupal\runlight\Storage;
+
+/**
+ * Implements hook_install().
+ *
+ * Nothing is counted until the admin chooses where Runlight runs.
+ */
+function runlight_install(bool $is_syncing): void {
+  if ($is_syncing || Local::setUp(\Drupal::config('runlight.settings'))) {
+    return;
+  }
+  \Drupal::messenger()->addStatus(t('Runlight is installed. <a href=":url">Choose where it runs</a> to start counting visitors.', [':url' => Url::fromRoute('runlight.settings')->toString()]));
+}
+
+/**
+ * Implements hook_uninstall().
+ *
+ * Removes everything the module stored besides its configuration, which
+ * Drupal removes itself: when Runlight ran in this Drupal, its numbers, in
+ * its own tables or its own folder, with the location data, and its secret.
+ */
+function runlight_uninstall(bool $is_syncing): void {
+  \Drupal::service('runlight.storage')->remove();
+  \Drupal::state()->deleteMultiple([Local::SECRET, Storage::STATE]);
+}

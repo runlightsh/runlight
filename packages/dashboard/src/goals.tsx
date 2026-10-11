@@ -8,6 +8,7 @@ import { Icon } from "./icons.js";
 import { Funnels, FunnelBars } from "./funnels.js";
 import { DeleteButton, Sheet } from "./links.js";
 import { label } from "./panel.js";
+import { openInTab, openingIn } from "./open.js";
 
 export const CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD", "NZD", "JPY", "CHF", "SEK", "NOK", "DKK", "PLN", "BRL", "MXN", "INR", "SGD", "HKD", "ZAR"];
 
@@ -38,6 +39,8 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  // A linked goal opens once the report shows it is one, so a mistyped id opens nothing.
+  const [wanted, setWanted] = useState(() => openingIn("goal") ?? "");
   const [funnels, setFunnels] = useState<Funnel[]>([]);
   const [showing, setShowing] = useState<"goals" | "funnels">("goals");
   useEffect(() => {
@@ -45,7 +48,14 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
     setError("");
     api
       .goals(view)
-      .then((r) => live && setRows(r.goals))
+      .then((r) => {
+        if (!live) return;
+        setRows(r.goals);
+        if (wanted) {
+          if (r.goals.some((g) => g.id === wanted)) setOpen(wanted);
+          setWanted("");
+        }
+      })
       .catch((e: Error) => live && setError(e.message));
     api
       .funnels(view)
@@ -132,7 +142,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
             {sorted.map((r) => (
               <li>
                 <span class="bar" style={{ width: `${(r.conversions / top) * 100}%` }} />
-                <button type="button" class="name" title={describeGoal(r)} onClick={() => setOpen(r.id)}>
+                <button type="button" class="name" title={describeGoal(r)} onClick={() => openInTab(`goal:${r.id}`) || setOpen(r.id)}>
                   <span class="name-text">{r.name}</span>
                   {r.valueMode !== "none" && r.revenue ? <span class="goal-money">{money(r.revenue, r.currency)}</span> : null}
                 </button>

@@ -7,24 +7,36 @@ namespace Drupal\runlight\Controller;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Site\Settings;
 use Drupal\Core\Url;
+use Drupal\runlight\Local;
 use Symfony\Component\HttpFoundation\JsonResponse;
 
 /**
- * Reports, Runlight: this site's dashboard, framed from your Runlight with a
- * ticket the module asks for on every visit to the page.
+ * Reports, Runlight: this site's dashboard, framed from Runlight in this
+ * Drupal, or from your Runlight elsewhere with a ticket the module asks for on
+ * every visit to the page.
  */
 final class DashboardController extends ControllerBase {
 
   public function open(): array {
     $config = $this->config('runlight.settings');
+    $mode = Local::mode($config->get('mode'), $config->get('address'));
     $address = (string) $config->get('address');
     $key = (string) $config->get('dashboard_key');
     $settings = Url::fromRoute('runlight.settings')->toString();
     // Each ticket works once, so the page is never cached.
     $build = ['#cache' => ['max-age' => 0]];
+    if (!Local::setUp($config)) {
+      $build['setup'] = [
+        '#markup' => '<p>' . $this->t('Runlight is not counting yet. <a href=":url">Set up Runlight</a>.', [':url' => $settings]) . '</p>',
+      ];
+      return $build;
+    }
+    if ($mode === 'local') {
+      return $this->local($build, $settings);
+    }
     if ($address === '') {
       $build['setup'] = [
-        '#markup' => '<p>' . $this->t('Enter your Runlight’s address and a dashboard key on the <a href=":url">settings page</a> to see this site’s numbers here.', [':url' => $settings]) . '</p>',
+        '#markup' => '<p>' . $this->t('Connect this site to your Runlight on the <a href=":url">settings page</a> to see its numbers here.', [':url' => $settings]) . '</p>',
       ];
       return $build;
     }
@@ -38,37 +50,72 @@ final class DashboardController extends ControllerBase {
     ];
     if ($ticket === NULL) {
       $build['setup'] = [
-        '#markup' => '<p>' . $this->t('To see this site’s numbers here, make a dashboard key in your Runlight under Settings, Install, Key for the dashboard in your CMS, and enter it on the <a href=":url">settings page</a>.', [':url' => $settings]) . '</p>',
+        '#markup' => '<p>' . $this->t('To see this site’s numbers here, press Connect on the <a href=":url">settings page</a>, or make a dashboard key in Runlight under Settings, Install and enter it there.', [':url' => $settings]) . '</p>',
       ];
       return $build;
     }
     if (is_string($ticket)) {
-      $build['error'] = [
-        '#theme' => 'status_messages',
-        '#message_list' => ['error' => [$ticket]],
-        '#status_headings' => ['error' => $this->t('Error message')],
-      ];
-      $build['settings'] = [
-        '#markup' => '<p>' . $this->t('<a href=":url">Check the settings</a>.', [':url' => $settings]) . '</p>',
-      ];
-      return $build;
+      return $build + $this->error($ticket, $settings);
     }
-    $build['frame'] = [
+    $build['frame'] = $this->frame($ticket['url'], $address);
+    return $build;
+  }
+
+  /**
+   * The dashboard of Runlight in this Drupal. It is on this site, signed in
+   * with this login, so the whole dashboard shows, not a share view.
+   */
+  private function local(array $build, string $settings): array {
+    /** @var \Drupal\runlight\Local $local */
+    $local = \Drupal::service('runlight.local');
+    $missing = $local->missing();
+    if ($missing !== '') {
+      return $build + $this->error($missing, $settings);
+    }
+    $build['open'] = [
+      '#type' => 'link',
+      '#title' => $this->t('Open in Runlight'),
+      '#url' => Url::fromUri($local->address() . '/'),
+      '#attributes' => ['class' => ['button', 'button--small'], 'target' => '_blank', 'rel' => 'noopener'],
+    ];
+    $build['frame'] = $this->frame($local->address() . '/', $local->address(), TRUE);
+    return $build;
+  }
+
+  /** Why there is no dashboard, with the way to the settings. */
+  private function error(string $message, string $settings): array {
+    return [
+      'error' => [
+        '#theme' => 'status_messages',
+        '#message_list' => ['error' => [$message]],
+        '#status_headings' => ['error' => $this->t('Error message')],
+      ],
+      'settings' => [
+        '#markup' => '<p>' . $this->t('<a href=":url">Check the settings</a>.', [':url' => $settings]) . '</p>',
+      ],
+    ];
+  }
+
+  /**
+   * The frame the dashboard opens in, from the Runlight at the address. The
+   * whole dashboard also submits forms and asks to confirm.
+   */
+  private function frame(string $url, string $address, bool $full = FALSE): array {
+    return [
       '#type' => 'html_tag',
       '#tag' => 'iframe',
       '#value' => '',
       '#attributes' => [
         'id' => 'runlight-embed',
-        'src' => $ticket['url'],
+        'src' => $url,
         'data-runlight-origin' => self::originOf($address),
         'title' => $this->t('Runlight dashboard'),
         'referrerpolicy' => 'no-referrer',
-        'sandbox' => 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads',
+        'sandbox' => 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads' . ($full ? ' allow-forms allow-modals' : ''),
         'style' => 'display:block;width:100%;height:calc(100vh - 200px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent',
       ],
       '#attached' => ['library' => ['runlight/embed']],
     ];
-    return $build;
   }
 
   /**
@@ -163,7 +210,7 @@ final class DashboardController extends ControllerBase {
     $code = $response->getStatusCode();
     if ($code !== 201 || !is_array($body) || !is_string($body['ticket'] ?? NULL)) {
       if ($code === 401) {
-        return (string) $this->t('Your Runlight does not know this dashboard key. Make a new one in Runlight’s Settings, Install, and enter it in the settings.');
+        return (string) $this->t('Your Runlight does not know this dashboard key. Connect again in the settings, or make a new key in Runlight under Settings, Install.');
       }
       $reason = is_array($body) && is_string($body['error'] ?? NULL) ? $body['error'] : (string) $this->t('It answered @code.', ['@code' => $code]);
       return (string) $this->t('Your Runlight would not open the dashboard here: @reason', ['@reason' => $reason]);

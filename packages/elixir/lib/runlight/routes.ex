@@ -25,6 +25,11 @@ defmodule Runlight.Routes do
     * `:origin` - the address people open the app at, such as
       "https://example.com".
     * `:sign_in`, `:sign_out`, `:geo_credit`, `:own_hosts` - as the SDK's.
+    * `:cms` - the CMS that adds the script to every page, such as
+      "WordPress", when Runlight runs inside one. The dashboard then says so
+      in place of the steps to add the script, and pages of the same origin,
+      the CMS's own admin, may show the whole dashboard in a frame. The
+      WordPress, Drupal, and Craft plugins set it.
   """
 
   alias Runlight.Assets
@@ -60,6 +65,7 @@ defmodule Runlight.Routes do
     :sign_in,
     :sign_out,
     :geo_credit,
+    :cms,
     :own_hosts,
     :account_of,
     :token_made
@@ -198,6 +204,7 @@ defmodule Runlight.Routes do
       sign_in: sign_in,
       sign_out: sign_out,
       geo_credit: Keyword.get(opts, :geo_credit, false),
+      cms: Keyword.get(opts, :cms) || "",
       own_hosts: Keyword.get(opts, :own_hosts),
       account_of: Keyword.get(opts, :account_of) || if(web, do: &Runlight.Accounts.Web.account_of(web, &1)),
       token_made: Keyword.get(opts, :token_made) || if(web, do: &Runlight.Accounts.Web.token_made(web, &1, &2))
@@ -404,7 +411,7 @@ defmodule Runlight.Routes do
 
   # The dashboard page. `embed`, for the dashboard inside a CMS's admin pages, holds its session (empty once its
   # ticket was used or ran out) and the admin origin that frames it.
-  defp dashboard(base, share, sign_out, geo_credit, accounts, sign_in, embed \\ nil) do
+  defp dashboard(base, share, sign_out, geo_credit, accounts, sign_in, embed \\ nil, cms \\ "") do
     b = escape_attr(base)
 
     attrs =
@@ -413,6 +420,7 @@ defmodule Runlight.Routes do
         if(sign_in not in [nil, ""], do: ~s( data-sign-in="#{escape_attr(sign_in)}"), else: "") <>
         if(geo_credit, do: ~s( data-geo-credit=""), else: "") <>
         if(accounts, do: ~s( data-accounts=""), else: "") <>
+        if(cms != "", do: ~s( data-cms="#{escape_attr(cms)}"), else: "") <>
         if embed,
           do: ~s( data-embed="#{escape_attr(embed.session)}" data-embed-origin="#{escape_attr(embed.origin)}"),
           else: ""
@@ -1820,7 +1828,7 @@ defmodule Runlight.Routes do
               coded("A token that changes settings is for one site. Pick the site.", "token_site", 400)
 
             scope == "embed" and site == "" ->
-              coded("A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400)
+              coded("A dashboard key is for one site. Pick the site.", "embed_site", 400)
 
             true ->
               secret = @token_prefix <> Hash.random_id(20)
@@ -2000,7 +2008,7 @@ defmodule Runlight.Routes do
         denied(false)
 
       token["scope"] != "embed" ->
-        coded("Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403)
+        coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403)
 
       site == nil ->
         coded("Unknown site", "unknown_site", 404)
@@ -2283,26 +2291,14 @@ defmodule Runlight.Routes do
           {:error, response} -> response
         end
 
-      # Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+      # Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
       (path == "/api/observe-key" and method == "GET") or (path == "/api/observe-key/new" and method == "POST") ->
         access = can_read(routes, request)
 
         with true <- access == true || {:denied, access},
              :ok <- Runlight.init(rl),
              {:ok, site} <- query_site(routes, url) do
-          name = "observe-key:#{site["id"]}"
-          key = if String.ends_with?(path, "/new"), do: nil, else: Store.setting(rl.store, name)
-
-          key =
-            if key in [nil, ""] do
-              made = "rlo_" <> Hash.random_id(20)
-              Store.set_setting(rl.store, name, made)
-              made
-            else
-              key
-            end
-
-          json(JS.obj(key: key))
+          json(JS.obj(key: Runlight.OAuth.agents_key(rl, site["id"], String.ends_with?(path, "/new"))))
         else
           {:denied, access} -> denied(access)
           {:error, response} -> response
@@ -3732,14 +3728,30 @@ defmodule Runlight.Routes do
           ])
         else
           # The page itself holds no data; the API it calls checks access and the page explains how to sign in.
+          # Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+          framed = routes.cms != ""
+
           Response.new(
-            dashboard(routes.base, "", routes.sign_out, routes.geo_credit, routes.web != nil, routes.sign_in),
+            dashboard(
+              routes.base,
+              "",
+              routes.sign_out,
+              routes.geo_credit,
+              routes.web != nil,
+              routes.sign_in,
+              nil,
+              routes.cms
+            ),
             200,
             [
               {"content-type", "text/html; charset=utf-8"},
               {"cache-control", "no-store"},
-              {"content-security-policy", @dashboard_csp},
-              {"x-frame-options", "DENY"},
+              {"content-security-policy",
+               if(framed,
+                 do: String.replace(@dashboard_csp, "frame-ancestors 'none'", "frame-ancestors 'self'"),
+                 else: @dashboard_csp
+               )},
+              {"x-frame-options", if(framed, do: "SAMEORIGIN", else: "DENY")},
               {"referrer-policy", "same-origin"}
             ]
           )

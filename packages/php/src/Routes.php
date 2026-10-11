@@ -36,6 +36,9 @@ use Runlight\Store\SqlStore;
  * - signOut, signIn: links the dashboard shows. The standalone server sets them.
  * - accounts: true for sign-in accounts, or a Runlight\Accounts\Web of your own.
  * - geoCredit: credits DB-IP in the dashboard's footer.
+ * - cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
+ *   dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's own
+ *   admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
  * - origin: the address people open the app at, such as https://example.com.
  * - ownHosts: callable(): iterable<string>, more names the dashboard is reached at.
  * - accountOf: callable(Request): ?string, the account a request comes from (internal, for the standalone server).
@@ -563,7 +566,7 @@ final class Routes
      *
      * @param array{session: string, origin: string}|null $embed
      */
-    public static function dashboard(string $base, string $share = '', string $signOut = '', bool $geoCredit = false, bool $accounts = false, string $signIn = '', ?array $embed = null): string
+    public static function dashboard(string $base, string $share = '', string $signOut = '', bool $geoCredit = false, bool $accounts = false, string $signIn = '', ?array $embed = null, string $cms = ''): string
     {
         $b = self::escapeAttr($base);
         $hash = self::hash('dashboardHash');
@@ -572,6 +575,7 @@ final class Routes
             . ($signIn !== '' ? ' data-sign-in="' . self::escapeAttr($signIn) . '"' : '')
             . ($geoCredit ? ' data-geo-credit=""' : '')
             . ($accounts ? ' data-accounts=""' : '')
+            . ($cms !== '' ? ' data-cms="' . self::escapeAttr($cms) . '"' : '')
             . ($embed !== null ? ' data-embed="' . self::escapeAttr($embed['session']) . '" data-embed-origin="' . self::escapeAttr($embed['origin']) . '"' : '');
         return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>Runlight</title>\n"
             . '<link rel="icon" href="' . Brand::runlightIcon() . "\">\n"
@@ -1351,8 +1355,9 @@ final class Routes
             if ($path === '/api/mail') {
                 if ($request->method === 'GET') {
                     $settings = $this->rl->mailSettings();
+                    $isApp = ($settings['source'] ?? null) === 'app';
                     $service = null;
-                    foreach (Transports::SERVICES as $s) {
+                    foreach ($isApp ? [] : Transports::SERVICES as $s) {
                         if ($s['id'] === ($settings['service'] ?? null)) {
                             $service = $s;
                             break;
@@ -1373,15 +1378,18 @@ final class Routes
                     }
                     // A hub with a manage token learns which service sends the reports and from where, nothing more.
                     $viaManage = isset($this->managed[$request]);
+                    // The app's own mailer, named only when there is one, so the answer without it stays as it was.
+                    $app = $this->rl->appMailer;
                     return self::json([
                         'source' => $settings['source'] ?? null,
-                        'service' => $settings['service'] ?? '',
+                        'service' => $isApp ? '' : ($settings['service'] ?? ''),
                         'from' => $settings['from'] ?? '',
                         'fromName' => $settings['fromName'] ?? '',
                         'fields' => $viaManage ? Json::object() : (object) $fields,
                         'saved' => $viaManage ? [] : $saved,
                         'encrypted' => $this->rl->secret !== null,
                         'services' => Transports::SERVICES,
+                        ...($app !== null ? ['app' => ['via' => $app['via'], 'from' => $app['from'], 'fromName' => $app['fromName'] ?? '', 'replaced' => !$isApp]] : []),
                     ]);
                 }
                 if ($request->method === 'PUT') {
@@ -1413,8 +1421,8 @@ final class Routes
                     return self::coded('Set up a mail service first', 'mail_unset', 400);
                 }
                 $t = Messages::translator(self::text($body, 'lang', 'en'))['t'];
-                $name = '';
-                foreach (Transports::SERVICES as $s) {
+                $name = $settings['source'] === 'app' ? $settings['via'] : '';
+                foreach ($settings['source'] === 'app' ? [] : Transports::SERVICES as $s) {
                     if ($s['id'] === $settings['service']) {
                         $name = $s['name'];
                         break;
@@ -1663,7 +1671,7 @@ final class Routes
                 return self::coded('A token that changes settings is for one site. Pick the site.', 'token_site', 400);
             }
             if ($scope === 'embed' && $site === '') {
-                return self::coded('A key for the dashboard in a CMS is for one site. Pick the site.', 'embed_site', 400);
+                return self::coded('A dashboard key is for one site. Pick the site.', 'embed_site', 400);
             }
             $secret = self::TOKEN_PREFIX . Hash::randomId(20);
             $row = ['id' => Hash::randomId(), 'name' => $name, 'site' => $site, 'scope' => $scope, 'hash' => Hash::sha256($secret), 'hint' => substr($secret, -4), 'createdAt' => $this->rl->now(), 'lastUsedAt' => null];
@@ -1791,7 +1799,7 @@ final class Routes
                 return self::denied(false);
             }
             if ($token['scope'] !== 'embed') {
-                return self::coded('Use a key for the dashboard in a CMS, made in Settings, Install', 'embed_token', 403);
+                return self::coded("Use the site's dashboard key, made in Settings, Install", 'embed_token', 403);
             }
             $site = $rl->site($token['site']);
             if ($site === null) {
@@ -1935,7 +1943,7 @@ final class Routes
             }
         }
 
-        // Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
+        // Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask, replaced on request.
         if (($path === '/api/observe-key' && $method === 'GET') || ($path === '/api/observe-key/new' && $method === 'POST')) {
             $access = $this->canRead($request);
             if ($access !== true) {
@@ -1946,13 +1954,7 @@ final class Routes
             if ($site instanceof Response) {
                 return $site;
             }
-            $name = "observe-key:{$site['id']}";
-            $key = str_ends_with($path, '/new') ? null : $this->store()->setting($name);
-            if ($key === null || $key === '') {
-                $key = 'rlo_' . Hash::randomId(20);
-                $this->store()->setSetting($name, $key);
-            }
-            return self::json(['key' => $key]);
+            return self::json(['key' => OAuth::agentsKey($rl, $site['id'], str_ends_with($path, '/new'))]);
         }
 
         // Making, changing, and deleting funnels; reading them is with the other reports.
@@ -3000,11 +3002,13 @@ final class Routes
             }
             // The page itself holds no data; the API it calls checks access and
             // the page explains how to sign in when it is refused.
-            return new Response(self::dashboard($base, '', $this->signOut ?? '', !empty($this->options['geoCredit']), $this->web !== null, $this->signIn ?? ''), 200, [
+            // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
+            $cms = (string) ($this->options['cms'] ?? '');
+            return new Response(self::dashboard($base, '', $this->signOut ?? '', !empty($this->options['geoCredit']), $this->web !== null, $this->signIn ?? '', null, $cms), 200, [
                 'content-type' => 'text/html; charset=utf-8',
                 'cache-control' => 'no-store',
-                'content-security-policy' => self::DASHBOARD_CSP,
-                'x-frame-options' => 'DENY',
+                'content-security-policy' => $cms !== '' ? str_replace("frame-ancestors 'none'", "frame-ancestors 'self'", self::DASHBOARD_CSP) : self::DASHBOARD_CSP,
+                'x-frame-options' => $cms !== '' ? 'SAMEORIGIN' : 'DENY',
                 'referrer-policy' => 'same-origin',
             ]);
         }

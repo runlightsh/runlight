@@ -247,7 +247,7 @@ func send(ctx context.Context, o AgentsOptions, fetches []Fetch) (float64, error
 		return 0, &sendError{err.Error()}
 	}
 	if answer.Status == 401 {
-		return 0, &sendError{"Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins."}
+		return 0, &sendError{"Runlight refused the key. Use the site's agents key from Settings, Install."}
 	}
 	if !answer.OK() {
 		return 0, &sendError{fmt.Sprintf("Runlight answered %d: %s", answer.Status, js.Head16(answer.Text(), 200))}

@@ -22,12 +22,49 @@ final class Admin {
 		add_action( 'admin_enqueue_scripts', array( self::class, 'scripts' ) );
 		add_action( 'wp_ajax_runlight_check', array( self::class, 'ajax_check' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( RUNLIGHT_PLUGIN_FILE ), array( self::class, 'action_links' ) );
+		add_action( 'admin_init', array( self::class, 'after_activation' ) );
+		add_action( 'admin_notices', array( self::class, 'setup_notice' ) );
+	}
+
+	/** Set when the plugin is activated, so the next admin page can open the setup screen. */
+	public const ACTIVATED = 'runlight_activated';
+
+	/**
+	 * Opens the setup screen once, right after the plugin is activated on its
+	 * own, and only while there is still a choice to make.
+	 */
+	public static function after_activation(): void {
+		if ( ! get_transient( self::ACTIVATED ) ) {
+			return;
+		}
+		delete_transient( self::ACTIVATED );
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- only tells a bulk activation apart, which WordPress checked.
+		if ( wp_doing_ajax() || is_network_admin() || isset( $_GET['activate-multi'] ) || Settings::set_up() || ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		wp_safe_redirect( admin_url( 'options-general.php?page=' . self::PAGE ) );
+		exit;
+	}
+
+	/** A reminder on the Dashboard and Plugins screens until Runlight is set up. */
+	public static function setup_notice(): void {
+		$screen = get_current_screen();
+		if ( null === $screen || ! in_array( $screen->id, array( 'dashboard', 'plugins' ), true ) || Settings::set_up() || ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		printf(
+			'<div class="notice notice-info"><p>%s <a href="%s">%s</a></p></div>',
+			esc_html__( 'Runlight is not counting yet. Choose where it runs.', 'runlight' ),
+			esc_url( admin_url( 'options-general.php?page=' . self::PAGE ) ),
+			esc_html__( 'Set up Runlight', 'runlight' )
+		);
 	}
 
 	public static function menu(): void {
 		add_options_page( __( 'Runlight', 'runlight' ), __( 'Runlight', 'runlight' ), 'manage_options', self::PAGE, array( self::class, 'page' ) );
 		// A top-level item for the dashboard, where the numbers are, or the steps to see them there.
-		add_menu_page( __( 'Runlight', 'runlight' ), __( 'Runlight', 'runlight' ), 'manage_options', Dashboard::PAGE, array( Dashboard::class, 'page' ), self::icon(), 3 );
+		// No position, so it sits below the core items.
+		add_menu_page( __( 'Runlight', 'runlight' ), __( 'Runlight', 'runlight' ), 'manage_options', Dashboard::PAGE, array( Dashboard::class, 'page' ), self::icon() );
 	}
 
 	/** The R mark, as wp-admin's menu wants it: a data URI it can tint. */
@@ -113,6 +150,19 @@ final class Admin {
 
 	private const SCRIPT = <<<'JS'
 (function () {
+  // Only the rows for where Runlight runs show: its address and keys for another one, locations for this one.
+  var mode = document.getElementById("runlight-mode");
+  if (!mode) return;
+  function show() {
+    var chosen = mode.querySelector("input:checked");
+    var local = chosen && chosen.value === "local";
+    document.querySelectorAll(".runlight-remote").forEach(function (row) { row.hidden = local; });
+    document.querySelectorAll(".runlight-local").forEach(function (row) { row.hidden = !local; });
+  }
+  mode.addEventListener("change", show);
+  show();
+})();
+(function () {
   var status = document.getElementById("runlight-status");
   if (!status) return;
   var line = status.firstElementChild;
@@ -142,50 +192,174 @@ final class Admin {
 })();
 JS;
 
+	/**
+	 * The first screen, before anything is counted: run Runlight in this
+	 * WordPress with one press, or connect to one run elsewhere.
+	 *
+	 * @param string $missing What stops Runlight running here, or an empty string.
+	 */
+	private static function setup( string $missing ): void {
+		$notice = Connect::notice();
+		// The counting choices keep their defaults until they can be changed on the settings page.
+		$defaults = static function (): void {
+			foreach ( array( 'skip_admins', 'outbound', 'downloads' ) as $field ) {
+				echo '<input type="hidden" name="' . esc_attr( Settings::OPTION . '[' . $field . ']' ) . '" value="1">';
+			}
+		};
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Set up Runlight', 'runlight' ); ?></h1>
+			<p><?php esc_html_e( 'Runlight counts visitors without cookies, and its numbers stay in your own database. Choose where it runs. Nothing is counted until you do.', 'runlight' ); ?></p>
+			<?php if ( null !== $notice ) : ?>
+				<div class="notice inline <?php echo $notice[0] ? 'notice-success' : 'notice-error'; ?>"><p><?php echo esc_html( $notice[1] ); ?></p></div>
+			<?php endif; ?>
+			<div class="card">
+				<h2><?php esc_html_e( 'Run Runlight in this WordPress', 'runlight' ); ?></h2>
+				<p>
+					<?php
+					printf(
+						/* translators: %s: the address of Runlight's dashboard on this site */
+						esc_html__( 'Runlight runs inside this site and keeps its numbers in this site’s database, with a standalone dashboard at %s as well as the one in wp-admin. There is nothing else to set up.', 'runlight' ),
+						'<code>' . esc_html( Local::address() . '/' ) . '</code>'
+					);
+					?>
+				</p>
+				<?php if ( '' !== $missing ) : ?>
+					<p><?php echo esc_html( $missing ); ?></p>
+				<?php else : ?>
+					<form method="post" action="options.php">
+						<?php // settings_fields(), with the Runlight page in place of this one as where WordPress goes once saved. ?>
+						<input type="hidden" name="option_page" value="runlight">
+						<input type="hidden" name="action" value="update">
+						<?php wp_nonce_field( 'runlight-options', '_wpnonce', false ); ?>
+						<input type="hidden" name="_wp_http_referer" value="<?php echo esc_attr( wp_make_link_relative( admin_url( 'admin.php?page=' . Dashboard::PAGE ) ) ); ?>">
+						<input type="hidden" name="<?php echo esc_attr( Settings::OPTION ); ?>[mode]" value="local">
+						<?php $defaults(); ?>
+						<?php submit_button( __( 'Run Runlight in this WordPress', 'runlight' ), 'primary', 'submit', false ); ?>
+					</form>
+				<?php endif; ?>
+			</div>
+			<div class="card">
+				<h2><?php esc_html_e( 'Connect to a Runlight you run elsewhere', 'runlight' ); ?></h2>
+				<p><?php esc_html_e( 'The standalone server, or an app with Runlight in it, for one dashboard across several sites. Enter its address, shown in Runlight under Settings, Install, and press Connect. Runlight asks you to pick this site, then fills in everything.', 'runlight' ); ?></p>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="runlight_connect">
+					<?php wp_nonce_field( 'runlight_connect', 'runlight_connect_nonce', false ); ?>
+					<p>
+						<label class="screen-reader-text" for="runlight-setup-address"><?php esc_html_e( 'Runlight address', 'runlight' ); ?></label>
+						<input id="runlight-setup-address" class="regular-text code" type="url" name="<?php echo esc_attr( Settings::OPTION ); ?>[address]" placeholder="https://stats.example.com" required<?php echo Settings::can_change_address() ? '' : ' readonly'; ?>>
+						<?php submit_button( __( 'Connect', 'runlight' ), 'secondary', 'submit', false ); ?>
+					</p>
+				</form>
+				<p><a href="<?php echo esc_url( admin_url( 'options-general.php?page=' . self::PAGE . '&setup=manual' ) ); ?>"><?php esc_html_e( 'Enter the settings by hand instead', 'runlight' ); ?></a></p>
+			</div>
+			<p><?php printf( /* translators: %s: link to the docs */ esc_html__( 'Not sure? %s', 'runlight' ), '<a href="https://runlight.sh/docs/wordpress/" target="_blank" rel="noopener">' . esc_html__( 'Read how each one works.', 'runlight' ) . '</a>' ); ?></p>
+		</div>
+		<?php
+	}
+
 	public static function page(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
 		$settings = Settings::get();
+		$missing  = Library::missing();
+		$local    = 'local' === $settings['mode'];
+		// The setup screen stays until a choice is made, unless the admin asked for the fields to fill in by hand.
+		$unset  = ! Settings::set_up();
+		$manual = isset( $_GET['setup'] ) && 'manual' === $_GET['setup']; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- only picks which screen to show.
+		if ( $unset && ! $manual ) {
+			self::setup( $missing );
+			return;
+		}
+		if ( $manual ) {
+			$local = false;
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Runlight', 'runlight' ); ?></h1>
-			<p><?php esc_html_e( 'Runlight counts visitors without cookies and keeps the numbers in your own database. This plugin adds its script to every page and reports AI agents that read your pages. The numbers live in your Runlight, wherever you run it.', 'runlight' ); ?></p>
-			<?php if ( '' !== $settings['address'] ) : ?>
+			<p><?php esc_html_e( 'Runlight counts visitors without cookies, and its numbers stay in your own database. This plugin adds its script to every page and records AI agents that read your pages.', 'runlight' ); ?></p>
+			<?php if ( $unset ) : ?>
+				<p><a href="<?php echo esc_url( admin_url( 'options-general.php?page=' . self::PAGE ) ); ?>"><?php esc_html_e( 'Back to the setup choices', 'runlight' ); ?></a></p>
+			<?php endif; ?>
+			<?php $notice = Connect::notice(); ?>
+			<?php if ( null !== $notice ) : ?>
+				<div class="notice inline <?php echo $notice[0] ? 'notice-success' : 'notice-error'; ?>"><p><?php echo esc_html( $notice[1] ); ?></p></div>
+			<?php elseif ( $local && '' === $missing ) : ?>
+				<div class="notice notice-success inline"><p>
+					<?php esc_html_e( 'Runlight is counting this site.', 'runlight' ); ?>
+					<a href="<?php echo esc_url( admin_url( 'admin.php?page=' . Dashboard::PAGE ) ); ?>"><?php esc_html_e( 'See the numbers', 'runlight' ); ?></a>
+				</p></div>
+			<?php elseif ( ! $local && '' !== $settings['address'] ) : ?>
 				<div id="runlight-status" class="notice notice-info inline"><p><?php esc_html_e( 'Checking that your Runlight answers…', 'runlight' ); ?></p></div>
 			<?php endif; ?>
 			<form method="post" action="options.php">
 				<?php settings_fields( 'runlight' ); ?>
+				<?php wp_nonce_field( 'runlight_connect', 'runlight_connect_nonce', false ); ?>
+				<?php // Enter in any field saves, rather than pressing Connect, the first button in the form. ?>
+				<input type="submit" value="<?php esc_attr_e( 'Save Changes', 'runlight' ); ?>" tabindex="-1" aria-hidden="true" style="position:absolute;left:-9999px">
 				<table class="form-table" role="presentation">
 					<tr>
+						<th scope="row"><?php esc_html_e( 'Where Runlight runs', 'runlight' ); ?></th>
+						<td>
+							<fieldset id="runlight-mode">
+								<label><input type="radio" name="<?php echo esc_attr( Settings::OPTION ); ?>[mode]" value="local" <?php checked( $local ); ?><?php disabled( '' !== $missing && ! $local ); ?>> <?php esc_html_e( 'In this WordPress', 'runlight' ); ?></label>
+								<p class="description">
+									<?php
+									printf(
+										/* translators: %s: the address of Runlight's dashboard on this site */
+										esc_html__( 'Runlight runs inside this site and keeps its numbers in this site’s database, with a standalone dashboard at %s as well as the one in wp-admin. There is nothing else to set up.', 'runlight' ),
+										'<code>' . esc_html( Local::address() . '/' ) . '</code>'
+									);
+									?>
+								</p>
+								<?php if ( '' !== $missing ) : ?>
+									<p class="description"><?php echo esc_html( $missing ); ?></p>
+								<?php endif; ?>
+								<br>
+								<label><input type="radio" name="<?php echo esc_attr( Settings::OPTION ); ?>[mode]" value="remote" <?php checked( ! $local ); ?>> <?php esc_html_e( 'On a Runlight you run elsewhere', 'runlight' ); ?></label>
+								<p class="description"><?php esc_html_e( 'The standalone server, or an app with Runlight in it, for one dashboard across several sites.', 'runlight' ); ?></p>
+							</fieldset>
+						</td>
+					</tr>
+					<tr class="runlight-remote">
 						<th scope="row"><label for="runlight-address"><?php esc_html_e( 'Runlight address', 'runlight' ); ?></label></th>
 						<td>
 							<input id="runlight-address" class="regular-text code" type="url" name="<?php echo esc_attr( Settings::OPTION ); ?>[address]" value="<?php echo esc_attr( $settings['address'] ); ?>" placeholder="https://example.com/runlight or https://stats.example.com"<?php echo Settings::can_change_address() ? '' : ' readonly'; ?>>
-							<p class="description"><?php esc_html_e( 'The address Runlight answers at, where its dashboard opens. That Runlight must count this site, or its visits are ignored.', 'runlight' ); ?></p>
+							<?php // Sent to admin-post.php, where this button's action follows, and so wins over, the form's own. ?>
+							<button type="submit" class="button button-primary" formaction="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" name="action" value="runlight_connect"><?php esc_html_e( 'Connect', 'runlight' ); ?></button>
+							<p class="description"><?php esc_html_e( 'Enter your Runlight’s address, shown in Runlight under Settings, Install, and press Connect. Runlight asks you to pick this site, then fills in everything below. That Runlight must count this site, or its visits are ignored.', 'runlight' ); ?></p>
 							<?php if ( ! Settings::can_change_address() ) : ?>
 								<p class="description"><?php esc_html_e( 'On a network of sites, only a network administrator can change the address, since this server connects to it.', 'runlight' ); ?></p>
 							<?php endif; ?>
 						</td>
 					</tr>
-					<tr>
+					<tr class="runlight-remote">
 						<th scope="row"><label for="runlight-site"><?php esc_html_e( 'Site id', 'runlight' ); ?></label></th>
 						<td>
 							<input id="runlight-site" class="regular-text code" type="text" name="<?php echo esc_attr( Settings::OPTION ); ?>[site]" value="<?php echo esc_attr( $settings['site'] ); ?>">
-							<p class="description"><?php esc_html_e( 'Optional. Only needed when that Runlight counts several sites and cannot tell this one by its hostname.', 'runlight' ); ?></p>
+							<p class="description"><?php esc_html_e( 'Optional. Shown in Runlight under Settings, Install. Only needed when that Runlight cannot tell this site by its domain.', 'runlight' ); ?></p>
 						</td>
 					</tr>
-					<tr>
-						<th scope="row"><label for="runlight-key"><?php esc_html_e( 'Observe key', 'runlight' ); ?></label></th>
+					<tr class="runlight-remote">
+						<th scope="row"><label for="runlight-key"><?php esc_html_e( 'Agents key', 'runlight' ); ?></label></th>
 						<td>
 							<input id="runlight-key" class="regular-text code" type="password" autocomplete="off" name="<?php echo esc_attr( Settings::OPTION ); ?>[observe_key]" value="" placeholder="<?php echo '' !== $settings['observe_key'] ? esc_attr__( 'Saved. Leave blank to keep it for this address.', 'runlight' ) : ''; ?>">
-							<p class="description"><?php esc_html_e( 'Optional. With this site’s key from Runlight’s Settings, Install, Key for CMS plugins, the plugin reports AI agents such as ChatGPT and Claude reading your pages. They run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else.', 'runlight' ); ?></p>
+							<p class="description"><?php esc_html_e( 'Optional. Shown in Runlight under Settings, Install. With it, the plugin reports AI agents such as ChatGPT and Claude reading your pages, which run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else.', 'runlight' ); ?></p>
 						</td>
 					</tr>
-					<tr>
+					<tr class="runlight-remote">
 						<th scope="row"><label for="runlight-dashboard-key"><?php esc_html_e( 'Dashboard key', 'runlight' ); ?></label></th>
 						<td>
 							<input id="runlight-dashboard-key" class="regular-text code" type="password" autocomplete="off" name="<?php echo esc_attr( Settings::OPTION ); ?>[dashboard_key]" value="" placeholder="<?php echo '' !== $settings['dashboard_key'] ? esc_attr__( 'Saved. Leave blank to keep it for this address.', 'runlight' ) : ''; ?>">
-							<p class="description"><?php esc_html_e( 'Optional. With this site’s key from Runlight’s Settings, Install, Key for the dashboard in your CMS, the Runlight item in the admin menu shows this site’s numbers right here. The key opens the same read-only view a share link shows, framed only by this admin, and cannot read anything itself.', 'runlight' ); ?></p>
+							<p class="description"><?php esc_html_e( 'Optional. Made in Runlight under Settings, Install. With it, the Runlight item in the admin menu shows this site’s numbers right here, in the same read-only view a share link shows, framed only by this admin. The key cannot read anything itself.', 'runlight' ); ?></p>
+						</td>
+					</tr>
+					<tr class="runlight-local">
+						<th scope="row"><?php esc_html_e( 'Locations', 'runlight' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="<?php echo esc_attr( Settings::OPTION ); ?>[locations]" value="1" <?php checked( $settings['locations'] ); ?>> <?php esc_html_e( 'Show which countries visitors come from', 'runlight' ); ?></label>
+							<p class="description"><?php esc_html_e( 'With DB-IP’s free country data, which the plugin downloads from db-ip.com once a month and keeps in the uploads folder. Visitors’ addresses are looked up on this server and never sent anywhere. Sites behind Cloudflare get countries without it.', 'runlight' ); ?></p>
 						</td>
 					</tr>
 					<tr>
@@ -201,7 +375,7 @@ JS;
 				</table>
 				<?php submit_button(); ?>
 			</form>
-			<p><?php printf( /* translators: %s: link to the docs */ esc_html__( 'New to Runlight? %s', 'runlight' ), '<a href="https://runlight.sh/docs/wordpress/" target="_blank" rel="noopener">' . esc_html__( 'Set it up in a few minutes.', 'runlight' ) . '</a>' ); ?></p>
+			<p><?php printf( /* translators: %s: link to the docs */ esc_html__( 'Need help? %s', 'runlight' ), '<a href="https://runlight.sh/docs/wordpress/" target="_blank" rel="noopener">' . esc_html__( 'Read the Runlight docs.', 'runlight' ) . '</a>' ); ?></p>
 		</div>
 		<?php
 	}

@@ -54,6 +54,12 @@ public sealed class OAuthContext
     /// <summary>Notes who made a token; false takes it back (accounts' tokenMade).</summary>
     public Func<JsObject, string, CancellationToken, Task<bool>>? TokenMade { get; init; }
 
+    /// <summary>Whether sites are managed in the dashboard, so a CMS plugin may be given a new one.</summary>
+    public bool ManagedSites { get; init; }
+
+    /// <summary>The Runlight's addSite(input), for a CMS plugin whose domain no site counts yet.</summary>
+    public Func<JsObject, CancellationToken, Task<JsObject>>? AddSite { get; init; }
+
     private RateLimit? _registrations;
 
     /// <summary>
@@ -76,7 +82,9 @@ public sealed class OAuthContext
 ///
 /// The token is an ordinary API token, so it appears in Settings, API and AI, beside the others, and deleting it
 /// there disconnects the app. It reads stats, or with the "manage" scope (asked for by a Runlight hub) it also
-/// changes one site's settings.
+/// changes one site's settings. With the "cms" scope (asked for by the WordPress, Drupal, and Craft plugins) it is
+/// the site's dashboard key, which only opens its read-only dashboard in the CMS, and the answer also carries the
+/// site's agents key, so connecting fills in the plugin's settings.
 /// </remarks>
 public static class OAuth
 {
@@ -111,6 +119,30 @@ public static class OAuth
     private static readonly Regex Loopback = new("^http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?/", RegexOptions.CultureInvariant);
     private static readonly Regex Challenge = new("^[A-Za-z0-9_-]{43,128}\\z", RegexOptions.CultureInvariant);
     private static readonly Regex Spaces = new("[" + Space + "]+", RegexOptions.CultureInvariant);
+
+    private static readonly Regex TrailingDots = new("\\.+\\z", RegexOptions.CultureInvariant);
+
+    /// <summary>The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.</summary>
+    public static async Task<string> AgentsKeyAsync(SqlStore store, string site, bool replace = false, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        string name = "observe-key:" + site;
+        string? saved = replace ? null : await store.SettingAsync(name, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(saved))
+        {
+            return saved;
+        }
+        string key = "rlo_" + Hash.RandomId(20);
+        await store.SetSettingAsync(name, key, cancellationToken).ConfigureAwait(false);
+        return key;
+    }
+
+    /// <summary>A redirect address's host as a site's domains are kept: lowercase, with no port and no www.</summary>
+    private static string SiteHost(string redirect)
+    {
+        string host = TrailingDots.Replace(Js.Lower(new Url(redirect).Hostname), "");
+        return host.StartsWith("www.", StringComparison.Ordinal) ? host[4..] : host;
+    }
 
     private static string Base64url(string text) => Crypto.Base64url(Js.Utf8(text));
 
@@ -209,7 +241,7 @@ public static class OAuth
             {
                 ["resource"] = issuer + "/mcp",
                 ["authorization_servers"] = Strings(issuer),
-                ["scopes_supported"] = Strings("read", "manage"),
+                ["scopes_supported"] = Strings("read", "manage", "cms"),
                 ["bearer_methods_supported"] = Strings("header"),
             });
         }
@@ -225,7 +257,7 @@ public static class OAuth
                 ["grant_types_supported"] = Strings("authorization_code"),
                 ["code_challenge_methods_supported"] = Strings("S256"),
                 ["token_endpoint_auth_methods_supported"] = Strings("none"),
-                ["scopes_supported"] = Strings("read", "manage"),
+                ["scopes_supported"] = Strings("read", "manage", "cms"),
             });
         }
 
@@ -307,8 +339,23 @@ public static class OAuth
         {
             return Refuse("invalid_request", "PKCE with S256 is required");
         }
-        bool manage = Spaces.Split(form.Get("scope") ?? "").Contains("manage");
+        string[] scopes = Spaces.Split(form.Get("scope") ?? "");
+        bool cms = scopes.Contains("cms");
+        bool manage = !cms && scopes.Contains("manage");
         string name = Js.String(client.Get("name"));
+        // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+        string host = SiteHost(redirect);
+        var counting = new List<JsObject>();
+        if (cms)
+        {
+            foreach (var s in await ctx.Sites(cancellationToken).ConfigureAwait(false))
+            {
+                if (!await ctx.IsRemote(Js.String(s.Get("id")), cancellationToken).ConfigureAwait(false) && s.Get("hostnames") is List<object?> hostnames && hostnames.Any(h => h is string t && t == host))
+                {
+                    counting.Add(s);
+                }
+            }
+        }
 
         if (!await ctx.IsOwner(request, cancellationToken).ConfigureAwait(false))
         {
@@ -349,6 +396,24 @@ public static class OAuth
             // The app names itself, so the page also shows where the answer goes, which it cannot fake.
             string sendsTo = "<p class=\"note\">Allowing sends you back to <strong>" + Esc(new Url(redirect).Host) + "</strong>. Only allow it if you started connecting there.</p>";
             var sites = await ctx.Sites(cancellationToken).ConfigureAwait(false);
+            if (cms)
+            {
+                if (counting.Count == 0 && !ctx.ManagedSites)
+                {
+                    return Page("Add this site first", "<p>No site in this Runlight counts <strong>" + Esc(host) + "</strong>. Add it to a site's domains in your code, then connect again from " + Esc(name) + ".</p>", 400);
+                }
+                string choices = string.Concat(counting.Select(s => "<option value=\"" + Esc(Js.String(s.Get("id"))) + "\">" + Esc(Js.String(s.Get("name"))) + "</option>"))
+                    + (ctx.ManagedSites && counting.Count == 0 ? "<option value=\"new\">A new site for " + Esc(host) + "</option>" : "");
+                return Page(
+                    "Connect " + Esc(name),
+                    "<p><strong>" + Esc(name) + "</strong> wants to count <strong>" + Esc(host) + "</strong> in this Runlight.</p>\n"
+                    + "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>\n"
+                    + sendsTo + "\n"
+                    + "<form method=\"post\" action=\"" + Esc(basePath) + "/oauth/authorize\">" + hidden + "\n"
+                    + "<label>Site<select name=\"site\">" + choices + "</select></label>\n"
+                    + "<p class=\"note\">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in " + Esc(name) + ".</p>\n"
+                    + "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>");
+            }
             if (manage)
             {
                 // Changing settings is for one site at a time, so there is no "every site" here.
@@ -397,6 +462,31 @@ public static class OAuth
             return Back(("error", "access_denied"));
         }
         string site = form.Get("site") ?? "";
+        if (cms)
+        {
+            if (site == "new")
+            {
+                try
+                {
+                    site = counting.Count > 0 ? Js.String(counting[0].Get("id"))
+                        : ctx.ManagedSites && ctx.AddSite != null ? Js.String((await ctx.AddSite(new JsObject { ["hostnames"] = new List<object?> { host } }, cancellationToken).ConfigureAwait(false)).Get("id"))
+                        : "";
+                }
+                catch (SettingsError error)
+                {
+                    // Such as an address, which a site cannot count by: there is no new site to make.
+                    return Back(("error", "invalid_request"), ("error_description", error.Message));
+                }
+            }
+            else if (!counting.Any(s => Js.String(s.Get("id")) == site))
+            {
+                site = "";
+            }
+            if (site.Length == 0)
+            {
+                return Back(("error", "invalid_request"), ("error_description", "Pick a site that counts " + host));
+            }
+        }
         if (site.Length > 0 && await ctx.Site(site, cancellationToken).ConfigureAwait(false) == null)
         {
             return Back(("error", "invalid_request"), ("error_description", "Unknown site"));
@@ -413,7 +503,7 @@ public static class OAuth
             ["redirect"] = redirect,
             ["challenge"] = challenge,
             ["site"] = site,
-            ["scope"] = manage ? "manage" : "read",
+            ["scope"] = cms ? "cms" : manage ? "manage" : "read",
             ["expires"] = ctx.Now() + CodeMs,
         };
         if (!string.IsNullOrEmpty(by))
@@ -461,14 +551,15 @@ public static class OAuth
             await ctx.Store.SetSettingAsync(found.Value.UsedKey, storedClient ? Json.Stringify(used) : Js.Str(now), cancellationToken).ConfigureAwait(false);
         }
         string secret = "rl_" + Hash.RandomId(20);
-        string scope = grant.Str("scope") == "manage" ? "manage" : "read";
+        string scope = grant.Str("scope") == "cms" ? "cms" : grant.Str("scope") == "manage" ? "manage" : "read";
         string grantSite = Js.String(grant.Get("site"));
         var row = new JsObject
         {
             ["id"] = Hash.RandomId(),
             ["name"] = Js.Slice(Js.String(client.Get("name") ?? "An app") + " (OAuth)", 0, 100),
             ["site"] = grantSite,
-            ["scope"] = scope,
+            // A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
+            ["scope"] = scope == "cms" ? "embed" : scope,
             ["hash"] = Hash.Sha256(secret),
             ["hint"] = secret[^4..],
             ["createdAt"] = now,
@@ -486,6 +577,11 @@ public static class OAuth
         if (scope == "manage")
         {
             await ctx.Store.SetSettingAsync("token-origin:" + row.Str("id"), new Url(Js.String(grant.Get("redirect"))).Origin, cancellationToken).ConfigureAwait(false);
+        }
+        // A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+        if (scope == "cms")
+        {
+            return JsonAnswer(new JsObject { ["access_token"] = secret, ["token_type"] = "Bearer", ["scope"] = scope, ["site"] = grantSite, ["agents_key"] = await AgentsKeyAsync(ctx.Store, grantSite, false, cancellationToken).ConfigureAwait(false) });
         }
         // site is not part of OAuth, but a hub needs to know which site it was given.
         var answer = new JsObject { ["access_token"] = secret, ["token_type"] = "Bearer", ["scope"] = scope };

@@ -23,7 +23,10 @@ use Runlight\Http\Url;
  * The token is an ordinary API token, so it appears in Settings, API and AI,
  * beside the others, and deleting it there disconnects the app. It reads
  * stats, or with the "manage" scope (asked for by a Runlight hub) it also
- * changes one site's settings.
+ * changes one site's settings. With the "cms" scope (asked for by the
+ * WordPress, Drupal, and Craft plugins) it is the site's dashboard key, which
+ * only opens its read-only dashboard in the CMS, and the answer also carries
+ * the site's agents key, so connecting fills in the plugin's settings.
  *
  * The context the routes pass is an array: runlight, base, isOwner (callable(Request): bool), and optionally
  * signIn (string), isReader (callable(Request): bool), accountOf (callable(Request): ?string), and tokenMade
@@ -45,11 +48,32 @@ final class OAuth
      */
     private const REGISTRATIONS = 'oauth-registrations';
 
+    private const SCOPES = ['read', 'manage', 'cms'];
+
     private const CORS = [
         'access-control-allow-origin' => '*',
         'access-control-allow-headers' => 'authorization, content-type, mcp-protocol-version',
         'access-control-allow-methods' => 'GET, POST, OPTIONS',
     ];
+
+    /** The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it. */
+    public static function agentsKey(Runlight $runlight, string $site, bool $replace = false): string
+    {
+        $name = "observe-key:$site";
+        $saved = $replace ? null : $runlight->store->setting($name);
+        if ($saved !== null && $saved !== '') {
+            return $saved;
+        }
+        $key = 'rlo_' . Hash::randomId(20);
+        $runlight->store->setSetting($name, $key);
+        return $key;
+    }
+
+    /** A redirect address's host as a site's domains are kept: lowercase, with no port and no www. */
+    private static function siteHost(string $redirect): string
+    {
+        return (string) preg_replace('/^www\./', '', (string) preg_replace('/\.+$/D', '', strtolower((new Url($redirect))->hostname)));
+    }
 
     private static function base64url(string $text): string
     {
@@ -160,7 +184,7 @@ final class OAuth
         }
 
         if (str_starts_with($known, '/.well-known/oauth-protected-resource')) {
-            return self::json(['resource' => "$issuer/mcp", 'authorization_servers' => [$issuer], 'scopes_supported' => ['read', 'manage'], 'bearer_methods_supported' => ['header']]);
+            return self::json(['resource' => "$issuer/mcp", 'authorization_servers' => [$issuer], 'scopes_supported' => self::SCOPES, 'bearer_methods_supported' => ['header']]);
         }
         if (str_starts_with($known, '/.well-known/oauth-authorization-server') || str_starts_with($known, '/.well-known/openid-configuration')) {
             return self::json([
@@ -172,7 +196,7 @@ final class OAuth
                 'grant_types_supported' => ['authorization_code'],
                 'code_challenge_methods_supported' => ['S256'],
                 'token_endpoint_auth_methods_supported' => ['none'],
-                'scopes_supported' => ['read', 'manage'],
+                'scopes_supported' => self::SCOPES,
             ]);
         }
 
@@ -232,7 +256,12 @@ final class OAuth
             if ($form->get('code_challenge_method') !== 'S256' || !preg_match('/^[A-Za-z0-9_-]{43,128}\z/', $challenge)) {
                 return $refuse(['error' => 'invalid_request', 'error_description' => 'PKCE with S256 is required']);
             }
-            $manage = in_array('manage', preg_split('/[' . Js::SPACE . ']+/u', $form->get('scope') ?? '') ?: [], true);
+            $scopes = preg_split('/[' . Js::SPACE . ']+/u', $form->get('scope') ?? '') ?: [];
+            $cms = in_array('cms', $scopes, true);
+            $manage = !$cms && in_array('manage', $scopes, true);
+            // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
+            $host = self::siteHost($redirect);
+            $counting = array_values(array_filter($runlight->sites(), static fn (array $s): bool => $runlight->remote($s['id']) === null && in_array($host, $s['hostnames'], true)));
             $name = (string) $client['name'];
 
             if (!($ctx['isOwner'])($request)) {
@@ -265,6 +294,28 @@ final class OAuth
                 // The app names itself, so the page also shows where the answer goes, which it cannot fake.
                 $sendsTo = '<p class="note">Allowing sends you back to <strong>' . self::esc((new Url($redirect))->host()) . '</strong>. Only allow it if you started connecting there.</p>';
                 $sites = $runlight->sites();
+                if ($cms) {
+                    if ($counting === [] && !$runlight->managedSites) {
+                        return self::page('Add this site first', '<p>No site in this Runlight counts <strong>' . self::esc($host) . "</strong>. Add it to a site's domains in your code, then connect again from " . self::esc($name) . '.</p>', 400);
+                    }
+                    $choices = '';
+                    foreach ($counting as $s) {
+                        $choices .= '<option value="' . self::esc($s['id']) . '">' . self::esc($s['name']) . '</option>';
+                    }
+                    if ($runlight->managedSites && $counting === []) {
+                        $choices .= '<option value="new">A new site for ' . self::esc($host) . '</option>';
+                    }
+                    return self::page(
+                        'Connect ' . self::esc($name),
+                        '<p><strong>' . self::esc($name) . '</strong> wants to count <strong>' . self::esc($host) . "</strong> in this Runlight.</p>\n"
+                        . "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>\n"
+                        . "$sendsTo\n"
+                        . '<form method="post" action="' . self::esc($base) . "/oauth/authorize\">$hidden\n"
+                        . "<label>Site<select name=\"site\">$choices</select></label>\n"
+                        . '<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in ' . self::esc($name) . ".</p>\n"
+                        . '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                    );
+                }
                 if ($manage) {
                     // Changing settings is for one site at a time, so there is no "every site" here.
                     $wanted = $form->get('site') ?? '';
@@ -308,6 +359,21 @@ final class OAuth
                 return $back(['error' => 'access_denied']);
             }
             $site = $form->get('site') ?? '';
+            if ($cms) {
+                if ($site === 'new') {
+                    try {
+                        $site = $counting[0]['id'] ?? ($runlight->managedSites ? $runlight->addSite(['hostnames' => [$host]])['id'] : '');
+                    } catch (\RangeException $error) {
+                        // Such as an address, which a site cannot count by: there is no new site to make.
+                        return $back(['error' => 'invalid_request', 'error_description' => $error->getMessage()]);
+                    }
+                } elseif (!in_array($site, array_column($counting, 'id'), true)) {
+                    $site = '';
+                }
+                if ($site === '') {
+                    return $back(['error' => 'invalid_request', 'error_description' => "Pick a site that counts $host"]);
+                }
+            }
             if ($site !== '' && $runlight->site($site) === null) {
                 return $back(['error' => 'invalid_request', 'error_description' => 'Unknown site']);
             }
@@ -316,7 +382,7 @@ final class OAuth
             }
             $code = Hash::randomId(32);
             $by = isset($ctx['accountOf']) ? ($ctx['accountOf'])($request) : null;
-            $grant = ['client' => $clientId, 'redirect' => $redirect, 'challenge' => $challenge, 'site' => $site, 'scope' => $manage ? 'manage' : 'read', 'expires' => $runlight->now() + self::CODE_MS];
+            $grant = ['client' => $clientId, 'redirect' => $redirect, 'challenge' => $challenge, 'site' => $site, 'scope' => $cms ? 'cms' : ($manage ? 'manage' : 'read'), 'expires' => $runlight->now() + self::CODE_MS];
             if ($by !== null && $by !== '') {
                 $grant['by'] = $by;
             }
@@ -354,12 +420,17 @@ final class OAuth
                 $runlight->store->setSetting($found['usedKey'], $storedClient ? Json::encode($used) : (string) $runlight->now());
             }
             $secret = 'rl_' . Hash::randomId(20);
-            $scope = ($grant['scope'] ?? '') === 'manage' ? 'manage' : 'read';
+            $scope = match ($grant['scope'] ?? '') {
+                'cms' => 'cms',
+                'manage' => 'manage',
+                default => 'read',
+            };
+            // A CMS plugin's token is the site's dashboard key, which only opens its read-only dashboard there.
             $row = [
                 'id' => Hash::randomId(),
                 'name' => Js::slice(Js::string($client['name'] ?? 'An app') . ' (OAuth)', 0, 100),
                 'site' => (string) $grant['site'],
-                'scope' => $scope,
+                'scope' => $scope === 'cms' ? 'embed' : $scope,
                 'hash' => Hash::sha256($secret),
                 'hint' => substr($secret, -4),
                 'createdAt' => $runlight->now(),
@@ -374,6 +445,10 @@ final class OAuth
             // A hub's own address, from where it asked to be sent back, so the picker only ever sends choices there.
             if ($scope === 'manage') {
                 $runlight->store->setSetting('token-origin:' . $row['id'], (new Url((string) $grant['redirect']))->origin());
+            }
+            // A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
+            if ($scope === 'cms') {
+                return self::json(['access_token' => $secret, 'token_type' => 'Bearer', 'scope' => $scope, 'site' => $grant['site'], 'agents_key' => self::agentsKey($runlight, (string) $grant['site'])]);
             }
             // site is not part of OAuth, but a hub needs to know which site it was given.
             $answer = ['access_token' => $secret, 'token_type' => 'Bearer', 'scope' => $scope];

@@ -37,12 +37,15 @@ function MailService({ site, admin }: { site: Site; admin: boolean }) {
   if (!state) return error ? <p class="settings-error">{error}</p> : null;
 
   const service = state.services.find((x) => x.id === state.service);
+  // The app's own mailer, such as WordPress's, goes by the name the app gives it.
+  const serviceName = state.source === "app" ? (state.app?.via ?? "") : (service?.name ?? state.service);
+  const fromLine = state.fromName ? `${state.fromName} <${state.from}>` : state.from;
   if (site.remote) {
     return state.source ? (
       <ul class="domain-list">
         <li>
           <div class="domain-main">
-            <span class="share-name">{service?.name ?? state.service}</span>
+            <span class="share-name">{serviceName}</span>
             <span class="share-meta">{t("mail.fromRemote", { from: state.fromName ? `${state.fromName} <${state.from}>` : state.from, host: new URL(site.remote).host })}</span>
           </div>
         </li>
@@ -173,20 +176,38 @@ function MailService({ site, admin }: { site: Site; admin: boolean }) {
       <ul class="domain-list">
         <li>
           <div class="domain-main">
-            <span class="share-name">{service?.name ?? state.service}</span>
-            <span class="share-meta">{t(state.source === "code" ? "mail.fromCode" : "mail.fromLine", { from: state.fromName ? `${state.fromName} <${state.from}>` : state.from })}</span>
+            <span class="share-name">{serviceName}</span>
+            <span class="share-meta">
+              {state.source === "app" ? t("mail.viaApp", { via: serviceName, from: fromLine }) : t(state.source === "code" ? "mail.fromCode" : "mail.fromLine", { from: fromLine })}
+            </span>
           </div>
-          {state.source === "dashboard" && admin ? (
+          {state.source === "app" && admin ? (
+            <div class="domain-actions">
+              <button type="button" class="copy inline" onClick={() => setEditing(true)}>
+                <Icon name="edit" />
+                {t("mail.useAnother")}
+              </button>
+            </div>
+          ) : state.source === "dashboard" && admin ? (
             <div class="domain-actions">
               <button type="button" class="copy inline" onClick={() => setEditing(true)}>
                 <Icon name="edit" />
                 {t("mail.change")}
               </button>
-              <DeleteButton name={service?.name ?? ""} onDelete={() => void api.removeMail().then(load)} />
+              {/* Removing a saved service goes back to the app's mailer, so with one it says so. */}
+              {state.app ? (
+                <button type="button" class="copy inline" disabled={busy} onClick={() => void api.removeMail().then(load).catch((err: Error) => setError(err.message))}>
+                  <Icon name="reset" />
+                  {t("mail.backToApp", { via: state.app.via })}
+                </button>
+              ) : (
+                <DeleteButton name={service?.name ?? ""} onDelete={() => void api.removeMail().then(load)} />
+              )}
             </div>
           ) : null}
         </li>
       </ul>
+      {state.source === "dashboard" && state.app ? <p class="field-hint">{t("mail.replacesApp", { via: state.app.via })}</p> : null}
       <form class="domain-add" onSubmit={test}>
         <input class="value" type="email" placeholder={t("mail.testTo")} value={testTo} onInput={(e) => setTestTo((e.target as HTMLInputElement).value)} />
         <button type="submit" class="solid" disabled={busy || !testTo.trim()}>

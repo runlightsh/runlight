@@ -780,7 +780,7 @@ public final class Agents {
       }
       if (answer.status() == 401) {
         throw new SendError(
-            "Runlight refused the key. Use the site's key from Settings, Install, Key for CMS plugins.");
+            "Runlight refused the key. Use the site's agents key from Settings, Install.");
       }
       if (!answer.ok()) {
         throw new SendError(

@@ -201,6 +201,10 @@ public final class Routes {
    *   <li>signOut, signIn: links the dashboard shows. The standalone server sets them.
    *   <li>accounts: true for sign-in accounts, or a {@link Web} of your own.
    *   <li>geoCredit: credits DB-IP in the dashboard's footer.
+   *   <li>cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs
+   *       inside one. The dashboard then says so in place of the steps to add the script, and pages
+   *       of the same origin, the CMS's own admin, may show the whole dashboard in a frame. The
+   *       WordPress, Drupal, and Craft plugins set it.
    *   <li>origin: the address people open the app at, such as https://example.com.
    *   <li>ownHosts: more names the dashboard is reached at.
    *   <li>accountOf: the account a request comes from (internal, for the standalone server).
@@ -218,6 +222,7 @@ public final class Routes {
     public String signIn;
     public Object accounts;
     public boolean geoCredit;
+    public String cms;
     public String origin;
     public Supplier<Iterable<String>> ownHosts;
     public Function<Request, String> accountOf;
@@ -268,6 +273,15 @@ public final class Routes {
 
     public Options geoCredit(boolean value) {
       geoCredit = value;
+      return this;
+    }
+
+    /**
+     * The CMS that adds the script to every page, such as "WordPress", when Runlight runs inside
+     * one. The dashboard then says so in place of the steps to add the script.
+     */
+    public Options cms(String value) {
+      cms = value;
       return this;
     }
 
@@ -927,6 +941,21 @@ public final class Routes {
       String signIn,
       String embedSession,
       String embedOrigin) {
+    return dashboard(
+        base, share, signOut, geoCredit, accounts, signIn, embedSession, embedOrigin, "");
+  }
+
+  /** The dashboard's page, saying which CMS adds the script when cms is not empty. */
+  public static String dashboard(
+      String base,
+      String share,
+      String signOut,
+      boolean geoCredit,
+      boolean accounts,
+      String signIn,
+      String embedSession,
+      String embedOrigin,
+      String cms) {
     String b = escapeAttr(base);
     String hash = hash("dashboardHash");
     String attributes =
@@ -935,6 +964,7 @@ public final class Routes {
             + (!signIn.isEmpty() ? " data-sign-in=\"" + escapeAttr(signIn) + "\"" : "")
             + (geoCredit ? " data-geo-credit=\"\"" : "")
             + (accounts ? " data-accounts=\"\"" : "")
+            + (!cms.isEmpty() ? " data-cms=\"" + escapeAttr(cms) + "\"" : "")
             + (embedOrigin != null
                 ? " data-embed=\""
                     + escapeAttr(embedSession)
@@ -1796,8 +1826,7 @@ public final class Routes {
       return denied(false);
     }
     if (!"embed".equals(token.get("scope"))) {
-      return coded(
-          "Use a key for the dashboard in a CMS, made in Settings, Install", "embed_token", 403);
+      return coded("Use the site's dashboard key, made in Settings, Install", "embed_token", 403);
     }
     Map<String, Object> site = rl.site((String) token.get("site"));
     if (site == null) {
@@ -2484,8 +2513,7 @@ public final class Routes {
             "A token that changes settings is for one site. Pick the site.", "token_site", 400);
       }
       if (scope.equals("embed") && site.isEmpty()) {
-        return coded(
-            "A key for the dashboard in a CMS is for one site. Pick the site.", "embed_site", 400);
+        return coded("A dashboard key is for one site. Pick the site.", "embed_site", 400);
       }
       String secret = TOKEN_PREFIX + Hash.randomId(20);
       Map<String, Object> row = new LinkedHashMap<>();
@@ -2817,8 +2845,8 @@ public final class Routes {
       }
     }
 
-    // Each site's key for CMS plugins reporting AI agent fetches: made on first ask, replaced on
-    // request.
+    // Each site's agents key, for CMS plugins reporting AI agent fetches: made on first ask,
+    // replaced on request.
     if ((path.equals("/api/observe-key") && method.equals("GET"))
         || (path.equals("/api/observe-key/new") && method.equals("POST"))) {
       Object access = canRead(request);
@@ -2830,13 +2858,9 @@ public final class Routes {
       if (found instanceof Response r) {
         return r;
       }
-      String name = "observe-key:" + asMap(found).get("id");
-      String key = path.endsWith("/new") ? null : store().setting(name);
-      if (key == null || key.isEmpty()) {
-        key = "rlo_" + Hash.randomId(20);
-        store().setSetting(name, key);
-      }
-      return json(Json.object("key", key));
+      return json(
+          Json.object(
+              "key", OAuth.agentsKey(rl, (String) asMap(found).get("id"), path.endsWith("/new"))));
     }
 
     // Making, changing, and deleting funnels; reading them is with the other reports.
@@ -4376,6 +4400,10 @@ public final class Routes {
       }
       // The page itself holds no data; the API it calls checks access and the page explains how to
       // sign in when it is refused.
+      // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing
+      // else may.
+      String cms = options.cms != null ? options.cms : "";
+      boolean framed = !cms.isEmpty();
       return new Response(
           dashboard(
               base,
@@ -4383,7 +4411,10 @@ public final class Routes {
               signOut != null ? signOut : "",
               options.geoCredit,
               web != null,
-              signIn != null ? signIn : ""),
+              signIn != null ? signIn : "",
+              null,
+              null,
+              cms),
           200,
           Headers.of(
               "content-type",
@@ -4391,9 +4422,11 @@ public final class Routes {
               "cache-control",
               "no-store",
               "content-security-policy",
-              DASHBOARD_CSP,
+              framed
+                  ? DASHBOARD_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+                  : DASHBOARD_CSP,
               "x-frame-options",
-              "DENY",
+              framed ? "SAMEORIGIN" : "DENY",
               "referrer-policy",
               "same-origin"));
     }

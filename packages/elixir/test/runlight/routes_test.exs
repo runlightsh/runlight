@@ -1,5 +1,5 @@
 defmodule Runlight.RoutesTest do
-  @moduledoc "The SDK's routes.test.ts on the picker's relay page and on broken percent escapes in a path."
+  @moduledoc "The SDK's routes.test.ts on the picker's relay page, broken percent escapes in a path, and the dashboard's CMS."
   use ExUnit.Case, async: true
 
   alias Runlight.Http.Request
@@ -156,5 +156,22 @@ defmodule Runlight.RoutesTest do
     Store.add_link_domain(rl.store, "go.example.net", "blog", System.system_time(:millisecond))
     Runlight.forget_link_domains(rl)
     assert Runlight.link_domain_response(rl, Request.new("https://go.example.net/%E0")).status == 404
+  end
+
+  test "the dashboard names the CMS that adds the script only when one is set" do
+    page = fn opts ->
+      Runlight.Routes.handle(Runlight.routes(rl([]), [token: "secret"] ++ opts), owner("/runlight", "GET", nil))
+    end
+
+    plain = page.([])
+    assert plain.status == 200
+    refute plain.body =~ "data-cms"
+    inside = page.(cms: ~s(Word"Press))
+    assert inside.body =~ ~s(<div id="app" data-base="/runlight" data-cms="Word&#34;Press" data-world=)
+    # Its own admin may frame the whole dashboard; otherwise nothing may.
+    assert Response.header(inside, "content-security-policy") =~ "frame-ancestors 'self'"
+    assert Response.header(inside, "x-frame-options") == "SAMEORIGIN"
+    assert Response.header(plain, "content-security-policy") =~ "frame-ancestors 'none'"
+    assert Response.header(plain, "x-frame-options") == "DENY"
   end
 end

@@ -2,9 +2,26 @@ services:
   # Ahead of the page cache (priority 200), so cached pages are seen too.
   http_middleware.runlight:
     class: Drupal\runlight\StackMiddleware\AgentObserver
-    arguments: ['@config.factory', '@http_client', '@logger.channel.runlight']
+    arguments: ['@config.factory', '@http_client', '@logger.channel.runlight', '@runlight.local']
     tags:
       - { name: http_middleware, priority: 250, responder: false }
   logger.channel.runlight:
     parent: logger.channel_base
     arguments: ['runlight']
+  runlight.connect:
+    class: Drupal\runlight\Connect
+    arguments: ['@http_client', '@keyvalue.expirable', '@config.factory', '@current_user']
+  runlight.storage:
+    class: Drupal\runlight\Storage
+    arguments: ['@state', '@database', '@file_system']
+  # Destructed once the answer is out, to finish what Runlight left for after it.
+  runlight.local:
+    class: Drupal\runlight\Local
+    arguments: ['@config.factory', '@state', '@runlight.storage', '@current_user', '@request_stack', '@http_client', '@logger.channel.runlight']
+    tags:
+      - { name: needs_destruction }
+  # After the paths are decoded (1000), before aliases (100), so an alias never shadows it.
+  runlight.path_processor:
+    class: Drupal\runlight\PathProcessor\RunlightPaths
+    tags:
+      - { name: path_processor_inbound, priority: 200 }
