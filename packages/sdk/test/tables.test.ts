@@ -225,3 +225,23 @@ test("mysql: waiting for another process creating the tables gives up after the 
     await store.close();
   }
 });
+
+test("postgres: an index left unusable is built again under a prefix that itself starts rl_", { skip: !pgUrl && "RUNLIGHT_TEST_PG is not set" }, async () => {
+  const schema = `rl_test_${Math.random().toString(36).slice(2, 10)}`;
+  const admin = new pg.Client({ connectionString: pgUrl });
+  await admin.connect();
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  const pool = new pg.Pool({ connectionString: pgUrl, max: 2, options: `-c search_path=${schema}` });
+  try {
+    await postgres({ pool, prefix: "rl_wp_" }).migrate();
+    // As a concurrent build stopped part way leaves it.
+    await admin.query(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = '${schema}.rl_wp_events_site_ts'::regclass`);
+    await postgres({ pool, prefix: "rl_wp_" }).migrate();
+    const { rows } = await admin.query(`SELECT i.indisvalid AS valid FROM pg_index i WHERE i.indexrelid = '${schema}.rl_wp_events_site_ts'::regclass`);
+    assert.deepEqual(rows, [{ valid: true }]);
+  } finally {
+    await pool.end();
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    await admin.end();
+  }
+});

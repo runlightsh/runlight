@@ -752,6 +752,11 @@ export class SqlStore {
     return TABLES.map((table) => `${this.prefix}${table}`);
   }
 
+  /** A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_. */
+  private unnamed(name: string): string {
+    return name.startsWith(this.prefix) ? `${PREFIX}${name.slice(this.prefix.length)}` : name;
+  }
+
   /** A table or index name as the database has it, under the store's prefix. */
   private named(name: string): string {
     return name.startsWith(PREFIX) ? `${this.prefix}${name.slice(PREFIX.length)}` : name;
@@ -781,7 +786,9 @@ export class SqlStore {
           `SELECT c.relname AS name FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
            WHERE NOT i.indisvalid AND c.relname LIKE '${this.prefix.replace(/_/g, "\\_")}%' AND c.relnamespace = current_schema()::regnamespace`,
         );
-        for (const { name } of broken) await db.run(`DROP INDEX IF EXISTS "${name.replace(/"/g, "")}"`);
+        // The name comes back as the database has it, so it goes back under rl_ before the prefix is put on again,
+        // which would otherwise be put on twice for a prefix that itself starts rl_, such as rl_wp_.
+        for (const { name } of broken) await db.run(`DROP INDEX IF EXISTS "${this.unnamed(name).replace(/"/g, "")}"`);
       }
       for (const statement of statements) {
         const index = /^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (\w+)/.exec(statement);
