@@ -107,7 +107,10 @@ final class Connect {
       'address' => $this->t('Enter your Runlight’s address, then press Connect.'),
       'scheme' => $this->t('Enter a web address, such as https://stats.example.com.'),
       'https' => $this->t('Connecting needs this site’s admin on https. Copy the keys from Runlight’s Settings, Install into the fields below instead.'),
-      'unreachable' => $this->t('Could not reach a Runlight at @address: @error', ['@address' => $params['address'], '@error' => $params['error']]),
+      'unreachable' => $this->t('Could not reach a Runlight at @address: @error', [
+        '@address' => $params['address'],
+        '@error' => $params['error'],
+      ]),
       'unknown' => $this->t('Could not connect to a Runlight at @address. Check the address, which is shown in Runlight under Settings, Install.', ['@address' => $params['address']]),
       'older' => $this->t('Your Runlight is older than this module. Update it, or copy the keys from its Settings, Install into the fields below.'),
       'client' => $this->t('Drupal at @host', ['@host' => $params['host']]),
