@@ -211,8 +211,7 @@ final class Local
                 'timezone' => self::timezone(),
             ],
             'secret' => self::secret(),
-            // The visitor's address comes with each request, as Craft works it out from its trustedHosts and
-            // ipHeaders settings, so no header is believed here.
+            // The visitor's address comes with each request, as Visitor works it out, so no header is believed here.
             'trustProxy' => false,
             'fetcher' => new Fetcher(),
             // Rate counts and the site's icon go in Craft's cache, never in files of Runlight's own.
@@ -304,7 +303,7 @@ final class Local
 
     /**
      * The request as Runlight reads it: the URL as the browser asked for it, its headers, its body read up to
-     * Runlight's limit, and the visitor's address as Craft works it out.
+     * Runlight's limit, and the visitor's address as Visitor works it out.
      *
      * @throws \Runlight\Http\BodyTooLarge past the body's limit
      */
@@ -322,7 +321,7 @@ final class Local
             $input = fopen('php://input', 'rb');
             $body = $input === false ? '' : Request::readBody($input, $url, $headers['content-length'][0] ?? null);
         }
-        return new Request($url, $method, $headers, $body, (string) $request->getUserIP());
+        return new Request($url, $method, $headers, $body, Visitor::of($request, $headers));
     }
 
     /**

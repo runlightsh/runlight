@@ -710,16 +710,32 @@ test("the Craft plugin keeps its tables under Craft's prefix, beside anyone else
   assert.match(extra.log.at(-1), /left the tables starting rl_ in place/);
 });
 
-test("the Craft plugin counts a visitor by the address Craft works out, and lets managers own Runlight and viewers read it", (t) => {
+test("the Craft plugin counts a visitor by an address no visitor can choose, and lets managers own Runlight and viewers read it", (t) => {
   const answer = craftPhp(t, `
     namespace CraftTest {
       \\Craft::$app = new App(new Db([]), new Cache(), sys_get_temp_dir());
       $_SERVER["REQUEST_METHOD"] = "GET";
       $runlight = new \\Runlight\\Runlight(["store" => \\Runlight\\Store\\Stores::sqlite(":memory:"), "site" => ["id" => "default", "hostnames" => []], "secret" => str_repeat("s", 32), "trustProxy" => false]);
-      // Craft's getUserIP() as its trustedHosts and ipHeaders give it; the headers themselves count for nothing here.
+      $address = static function (string $remote, array $headers, array $trustedHosts = ["any"]): string {
+        return \\Runlight\\Craft\\Local::visitorRequest(new \\craft\\web\\Request("https://www.example.com/runlight/e", $headers, $remote, $trustedHosts))->remoteAddress;
+      };
+      // With trustedHosts at Craft's default, nothing in front: the headers the visitor wrote count for nothing.
       $request = new \\craft\\web\\Request("https://www.example.com/runlight/e", ["x-forwarded-for" => "198.51.100.23", "cf-connecting-ip" => "198.51.100.24"], "203.0.113.9");
       $ours = \\Runlight\\Craft\\Local::visitorRequest($request);
       $out = [[$ours->remoteAddress, $runlight->clientIp($ours, ["ip" => $ours->remoteAddress]), $ours->url]];
+      $out[] = [
+        // A proxy on a private network, after a visitor who wrote a header of their own: the nearest public address.
+        $address("10.0.0.2", ["x-forwarded-for" => "8.8.8.8, 198.51.100.7"]),
+        // Cloudflare's header from Cloudflare, and from anywhere else.
+        $address("172.70.1.1", ["cf-connecting-ip" => "198.51.100.4"]),
+        $address("203.0.113.9", ["cf-connecting-ip" => "1.2.3.4"]),
+        // Cloudflare, then the host's nginx, which appends Cloudflare's address.
+        $address("10.0.0.2", ["x-forwarded-for" => "203.0.113.7, 172.70.1.1", "cf-connecting-ip" => "203.0.113.7"]),
+        // A site that sets trustedHosts gets Craft's own answer, by its key or its value.
+        $address("10.0.0.2", ["x-forwarded-for" => "8.8.8.8, 198.51.100.7"], ["10.0.0.0/8"]),
+        $address("10.0.0.2", ["x-forwarded-for" => "8.8.8.8"], ["10.0.0.0/8" => ["X-Forwarded-For"]]),
+        $address("203.0.113.9", ["x-forwarded-for" => "198.51.100.23"], ["any" => ["X-Forwarded-For"]]),
+      ];
       $post = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["sec-fetch-site" => "same-origin"]);
       $crossSite = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["origin" => "https://evil.example"]);
       $read = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/stats", "GET");
@@ -741,6 +757,7 @@ test("the Craft plugin counts a visitor by the address Craft works out, and lets
   if (answer === null) return;
   assert.deepEqual(JSON.parse(answer), [
     ["203.0.113.9", "203.0.113.9", "https://www.example.com/runlight/e"],
+    ["198.51.100.7", "198.51.100.4", "203.0.113.9", "203.0.113.7", "8.8.8.8", "8.8.8.8", "203.0.113.9"],
     [true, true, "read", false, false, false],
   ]);
 });

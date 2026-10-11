@@ -118,10 +118,10 @@ namespace craft\db {
 }
 
 namespace craft\web {
-    /** Craft's request, with the visitor's address as Craft's trustedHosts and ipHeaders settings give it. */
+    /** Craft's request: the connection's address, and the trustedHosts setting, at Craft's default unless given. */
     class Request
     {
-        public function __construct(private string $url, private array $headers, private string $ip)
+        public function __construct(private string $url, private array $headers, private string $ip, public array $trustedHosts = ['any'])
         {
         }
 
@@ -150,9 +150,16 @@ namespace craft\web {
             return 'GET';
         }
 
-        public function getUserIP(): ?string
+        public function getRemoteIP(): ?string
         {
             return $this->ip;
+        }
+
+        /** As Craft gives it from trusted hosts: the first address in X-Forwarded-For, else the connection's. */
+        public function getUserIP(): ?string
+        {
+            $forwarded = trim(explode(',', $this->headers['x-forwarded-for'] ?? '')[0]);
+            return $forwarded !== '' ? $forwarded : $this->ip;
         }
     }
 }
