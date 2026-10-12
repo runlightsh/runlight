@@ -1,6 +1,6 @@
 import { sesSend } from "./ses.js";
 import { smtpSend } from "./smtp.js";
-import { MetadataAddressError, serviceFetch } from "../safefetch.js";
+import { MetadataAddressError, RedirectRefusedError, serviceFetch } from "../safefetch.js";
 
 export interface Message {
   to: string;
@@ -105,6 +105,7 @@ async function post(url: string, init: { headers: Record<string, string>; body: 
     response = await serviceFetch(url, { method: "POST", headers: init.headers, body: init.body, signal: AbortSignal.timeout(20_000) });
   } catch (error) {
     if (error instanceof MetadataAddressError) throw new MailError(error.message, "address_refused", { host: error.host });
+    if (error instanceof RedirectRefusedError) throw new MailError(error.message, "redirect_refused", { host: error.host, to: error.to });
     const host = new URL(url).host;
     throw new MailError(`Could not reach ${host}: ${(error as Error).message}`, "mail_unreachable", { host, detail: (error as Error).message });
   }

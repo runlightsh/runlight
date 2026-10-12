@@ -315,18 +315,29 @@ export class MetadataAddressError extends Error {
   }
 }
 
+/** Refused before anything was sent there, because a service's redirect led to another origin. */
+export class RedirectRefusedError extends Error {
+  constructor(
+    readonly host: string,
+    readonly to: string,
+  ) {
+    super(`${host} redirected to ${to}. Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead`);
+    this.name = "RedirectRefusedError";
+  }
+}
+
 /** Headers that describe a body, dropped with it when a redirect turns a request into a GET. */
 const BODY_HEADERS = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
-/** Credentials, dropped when a redirect leads to another origin. */
-const CREDENTIAL_HEADERS = ["authorization", "proxy-authorization", "cookie"];
 
 /**
  * Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
  * this computer or a private network, but is never at a link-local or cloud metadata address. The address
  * is checked, and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch
- * follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body, and a redirect to
- * another origin goes without the credentials. A redirect past the last one comes back as it is. Throws a
- * MetadataAddressError for an address it refuses.
+ * follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body. Only a redirect on
+ * the same origin is followed: the request carries a key, in whatever header the service names it, and a
+ * 307 or 308 would carry its body too, an email or a conversation, so a redirect to another origin, https
+ * to http among them, is refused before anything is sent there. A redirect past the last one comes back as
+ * it is. Throws a MetadataAddressError or a RedirectRefusedError for an address it refuses.
  */
 export async function serviceFetch(target: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal; redirects?: number }): Promise<Response> {
   const redirects = init.redirects ?? 5;
@@ -342,12 +353,16 @@ export async function serviceFetch(target: string, init: { method?: string; head
     if (answer.status < 300 || answer.status >= 400 || !location || hop >= redirects) return answer;
     await answer.body?.cancel().catch(() => {});
     const next = new URL(location, url);
+    if (next.origin !== url.origin) {
+      const there = next.hostname.replace(/^\[|\]$/g, "");
+      if (await metadataHost(there)) throw new MetadataAddressError(there);
+      throw new RedirectRefusedError(url.host, next.protocol === "https:" || next.protocol === "http:" ? next.origin : next.protocol);
+    }
     if (answer.status === 303 || ((answer.status === 301 || answer.status === 302) && method === "POST")) {
       method = method === "HEAD" ? "HEAD" : "GET";
       body = undefined;
       headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !BODY_HEADERS.includes(name.toLowerCase())));
     }
-    if (next.origin !== url.origin) headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !CREDENTIAL_HEADERS.includes(name.toLowerCase())));
     url = next;
   }
 }

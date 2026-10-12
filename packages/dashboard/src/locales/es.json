@@ -905,6 +905,7 @@
   "error.check_status": "respondió {status}",
   "error.assistant_address": "Escribe la dirección del servicio en Ajustes, Asistente de IA.",
   "error.address_refused": "{host} es una dirección link-local o de metadatos de la nube, a la que Runlight nunca se conecta.",
+  "error.redirect_refused": "{host} redirigió a {to}. Runlight envía la clave y la solicitud de un servicio solo a la dirección con la que se configuró, así que configúralo con esa dirección.",
   "error.assistant_address_bad": "Escribe la dirección del servicio, empezando por https://",
   "error.assistant_cancelled": "La pregunta se canceló.",
   "error.assistant_key": "Escribe tu clave de {provider}.",
