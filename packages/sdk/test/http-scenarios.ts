@@ -483,6 +483,8 @@ const LINKS: Scenario[] = [
       { to: "linkDomain", host: "go.runlight-conformance.com", method: "GET", path: "/.well-known/runlight-link-domain" },
       { to: "linkDomain", host: "go.runlight-conformance.com", method: "GET", path: "/runlight/api/stats" },
       { to: "linkDomain", host: "go.runlight-conformance.com", method: "GET", path: "/" },
+      // The app's own link path is no link on a link domain, so even a link of its own is a 404 there.
+      { to: "linkDomain", host: "go.runlight-conformance.com", method: "GET", path: "/go/deal", headers: { "user-agent": FIREFOX } },
       { to: "linkDomain", host: "example.com", method: "GET", path: "/deal" },
       { to: "linkDomain", host: "app.example.net", method: "GET", path: "/deal", headers: { "x-forwarded-host": "www.go.runlight-conformance.com" } },
       get("/api/links?site=blog&period=today"),

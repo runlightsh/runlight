@@ -119,6 +119,7 @@ test("sites are added in the dashboard, counted across origins, and short links 
   assert.equal(short.headers.get("location"), "https://blog.example.com/launch");
   const fallback = await handle(req("/go/launch"));
   assert.equal(fallback.status, 302, "every link also answers at /go/:slug on the server itself");
+  assert.equal((await handle(req("/go/launch", { host: "go.example.com" }))).status, 404, "but not on a link domain, which answers only its own links at its root");
 
   assert.equal((await handle(req("/healthz"))).status, 200);
   assert.equal((await handle(req("/api/sites", { headers: { authorization: "Bearer wrong" } }))).status, 401);
