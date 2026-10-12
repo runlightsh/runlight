@@ -187,3 +187,37 @@ test("in development, or left open on purpose, the first account needs no proof;
     if (token !== undefined) process.env.RUNLIGHT_TOKEN = token;
   }
 });
+
+for (const kind of STORES) {
+  test(`${kind}: a code is accepted once, even by two processes checking it at the same moment`, async () => {
+    const store = freshStore(kind);
+    const { Accounts, totp } = await import("../src/accounts/auth.js");
+    const one = new Accounts(store, "a server secret long enough");
+    // Another process on the same database: its own Accounts, with nothing in memory shared.
+    const other = new Accounts(store, "a server secret long enough");
+    const now = Date.UTC(2026, 9, 12, 12);
+    const user = await one.setPassword("owner@example.com", "a long password", now);
+    const secret = await one.startTwoFactor(user.id);
+    const recovery = (await one.confirmTwoFactor(user.id, await totp(secret, Math.floor(now / 30_000)), now))!;
+
+    const later = now + 60_000;
+    const code = await totp(secret, Math.floor(later / 30_000));
+    for (let round = 0; round < 5; round++) {
+      const at = later + round * 30_000;
+      const fresh = await totp(secret, Math.floor(at / 30_000));
+      const both = await Promise.all([one.checkSecondFactor(user.id, fresh, at), other.checkSecondFactor(user.id, fresh, at)]);
+      assert.equal(both.filter(Boolean).length, 1, `round ${round}: one of the two is accepted`);
+    }
+    assert.equal(await one.checkSecondFactor(user.id, code, later), false, "an older code stays refused");
+
+    for (const used of recovery.slice(0, 3)) {
+      const both = await Promise.all([one.checkSecondFactor(user.id, used, later), other.checkSecondFactor(user.id, used, later)]);
+      assert.equal(both.filter(Boolean).length, 1, "a recovery code is crossed off once");
+    }
+    // Two different recovery codes at once: neither write loses the other's, though one may be asked again.
+    const pair = await Promise.all([one.checkSecondFactor(user.id, recovery[3]!, later), other.checkSecondFactor(user.id, recovery[4]!, later)]);
+    assert.equal((await one.byId(user.id))!.recoveryLeft, 7 - pair.filter(Boolean).length, "every code accepted is crossed off");
+    for (const [i, accepted] of pair.entries()) if (accepted) assert.equal(await one.checkSecondFactor(user.id, recovery[3 + i]!, later), false);
+    assert.equal((one as unknown as { checking: Map<string, unknown> }).checking.size, 0, "a finished check leaves nothing queued behind");
+  });
+}
