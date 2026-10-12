@@ -602,44 +602,36 @@ export class Runlight {
   }
 
   /**
-   * Changes a site's name or timezone from the dashboard. Stored apart from
+   * Changes a site's name, timezone, or retention from the dashboard. Stored apart from
    * the settings in code, which keep being written on every start. A managed
    * site has no settings in code, so its changes, hostnames too, go to its row.
+   * Every field is checked before anything changes, since a new timezone clears the
+   * built days and a shorter retention deletes visits, and pruning starts only once saved.
    */
-  async updateSite(id: string, patch: SiteOverrides & { hostnames?: unknown }): Promise<SiteRow> {
+  async updateSite(id: string, patch: SiteOverrides & { hostnames?: unknown; retentionMonths?: number | null }): Promise<SiteRow> {
     await this.init();
     const current = this.configured.find((site) => site.id === id);
     if (!current) throw new SettingsError("Unknown site", "unknown_site");
+    let name: string | undefined;
+    if (patch.name !== undefined) {
+      name = String(patch.name).trim();
+      if (!name || name.length > 80) throw new SettingsError("A site name is 1 to 80 characters", "site_name");
+    }
+    const timezone = patch.timezone === undefined ? undefined : String(patch.timezone);
+    if (timezone !== undefined && !isTimezone(timezone)) throw new SettingsError(`Unknown timezone "${patch.timezone}"`, "unknown_timezone", { timezone });
+    const hostnames = this.managedSites && patch.hostnames !== undefined && !this.remotes.has(id) ? this.hostnamesFor(patch.hostnames, id) : undefined;
+    if (patch.retentionMonths !== undefined) this.checkRetention(id, patch.retentionMonths);
+    if (timezone !== undefined && timezone !== this.site(id)?.timezone) await this.zoneChanged(id, timezone);
     if (this.managedSites) {
-      const next: SiteRow = { ...current };
-      if (patch.name !== undefined) {
-        const name = String(patch.name).trim();
-        if (!name || name.length > 80) throw new SettingsError("A site name is 1 to 80 characters", "site_name");
-        next.name = name;
-      }
-      if (patch.timezone !== undefined) {
-        if (!isTimezone(String(patch.timezone))) throw new SettingsError(`Unknown timezone "${patch.timezone}"`, "unknown_timezone", { timezone: String(patch.timezone) });
-        next.timezone = String(patch.timezone);
-        if (next.timezone !== this.site(id)?.timezone) await this.zoneChanged(id, next.timezone);
-      }
-      if (patch.hostnames !== undefined && !this.remotes.has(id)) next.hostnames = this.hostnamesFor(patch.hostnames, id);
+      const next: SiteRow = { ...current, ...(name !== undefined ? { name } : {}), ...(timezone !== undefined ? { timezone } : {}), ...(hostnames ? { hostnames } : {}) };
       await this.store.upsertSite(next, this.now());
       this.configured = this.configured.map((site) => (site.id === id ? next : site));
-      return this.site(id)!;
+    } else {
+      const next: SiteOverrides = { ...this.overrides.get(id), ...(name !== undefined ? { name } : {}), ...(timezone !== undefined ? { timezone } : {}) };
+      await this.store.setSiteOverrides(id, next);
+      this.overrides.set(id, next);
     }
-    const next: SiteOverrides = { ...this.overrides.get(id) };
-    if (patch.name !== undefined) {
-      const name = String(patch.name).trim();
-      if (!name || name.length > 80) throw new SettingsError("A site name is 1 to 80 characters", "site_name");
-      next.name = name;
-    }
-    if (patch.timezone !== undefined) {
-      if (!isTimezone(String(patch.timezone))) throw new SettingsError(`Unknown timezone "${patch.timezone}"`, "unknown_timezone", { timezone: String(patch.timezone) });
-      next.timezone = String(patch.timezone);
-      if (next.timezone !== this.site(id)?.timezone) await this.zoneChanged(id, next.timezone);
-    }
-    await this.store.setSiteOverrides(id, next);
-    this.overrides.set(id, next);
+    if (patch.retentionMonths !== undefined) await this.setRetention(id, patch.retentionMonths);
     return this.site(id)!;
   }
 
@@ -649,9 +641,13 @@ export class Runlight {
     return RETENTION_MONTHS.includes(value) ? value : null;
   }
 
-  async setRetention(site: string, months: number | null): Promise<void> {
+  private checkRetention(site: string, months: number | null): void {
     if (!this.site(site) || this.remotes.has(site)) throw new SettingsError("Unknown site", "unknown_site");
     if (months !== null && !RETENTION_MONTHS.includes(months)) throw new SettingsError(`Keep visits for ${RETENTION_MONTHS.join(", ")} months, or forever`, "retention_bad", { months: RETENTION_MONTHS.join(", ") });
+  }
+
+  async setRetention(site: string, months: number | null): Promise<void> {
+    this.checkRetention(site, months);
     await this.store.setSetting(`retention:${site}`, months === null ? null : String(months));
     // Deleting a long history takes a while, so it runs in pieces after the answer, with tracking going on between them.
     this.pruning = this.pruning.then(() => this.applyRetention(site)).catch((error) => console.error("Runlight: could not apply retention", error));

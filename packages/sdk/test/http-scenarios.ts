@@ -1391,6 +1391,9 @@ const SITES: Scenario[] = [
       get("/api/stats?period=today&compare=off"),
       patch("/api/sites/example.com", { hostnames: ["example.com", "example.org"] }),
       patch("/api/sites/example.com", { hostnames: ["localhost"] }),
+      // A refused domain leaves every other field as it was, retention and timezone included.
+      patch("/api/sites/example.com", { retentionMonths: 12, timezone: "Asia/Tokyo", name: "Not saved", hostnames: ["localhost"] }),
+      get("/api/sites"),
       patch("/api/sites/example.com", { name: "" }),
       patch("/api/sites/example.com", { timezone: "Nowhere/Land" }),
       patch("/api/sites/example.com", { retentionMonths: 7 }),

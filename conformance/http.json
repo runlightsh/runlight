@@ -37469,6 +37469,79 @@
             "content-type": "application/json"
           },
           "body": {
+            "retentionMonths": 12,
+            "timezone": "Asia/Tokyo",
+            "name": "Not saved",
+            "hostnames": [
+              "localhost"
+            ]
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "localhost already belongs to localhost",
+              "code": "site_domain_taken",
+              "params": {
+                "host": "localhost",
+                "site": "localhost"
+              }
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "sites": [
+                {
+                  "id": "example.com",
+                  "name": "Example",
+                  "hostnames": [
+                    "example.com",
+                    "example.org"
+                  ],
+                  "timezone": "Europe/Paris",
+                  "lastSeen": 1791288002000,
+                  "retentionMonths": null
+                },
+                {
+                  "id": "localhost",
+                  "name": "localhost",
+                  "hostnames": [
+                    "localhost"
+                  ],
+                  "timezone": "UTC",
+                  "lastSeen": null,
+                  "retentionMonths": null
+                }
+              ],
+              "managed": true
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/sites/example.com",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
             "name": ""
           },
           "expect": {

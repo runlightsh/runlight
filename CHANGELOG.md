@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- Changing a site in the dashboard checks every field, its domains included, before it changes anything, so a change refused for a bad or taken domain no longer shortens how long visits are kept, deleting the older ones, or clears the days built in the old timezone. Visits are pruned only once the change is saved.
+
 ## 0.1.2 - 2026-10-12
 
 ### Security
