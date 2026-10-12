@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.1.2 - 2026-10-12
 
 ### Added
 - Runlight can now run inside your Craft site, with its numbers in Craft's database (Postgres, MySQL 8.0.20, or MariaDB 11.4 or later) or else in a SQLite file under `storage/runlight`, its dashboard under Runlight in the Control Panel and at `/runlight/` on the site, and short links at `/go/<name>`. Its tables are named after Craft's table prefix, such as `craft_rl_events`, and marked as this install's, and tables of those names that are someone else's, such as a standalone Runlight's, are left alone. The choice is read from the database and the storage folder, so it holds on every server and through every deploy, and the secret Runlight signs with comes from Craft's security key.

@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.1
+Stable tag: 0.1.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -121,7 +121,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.1.2 =
 * Runlight can run inside WordPress. Choose it on the setup screen and the site is counted, with the dashboard in wp-admin and at /runlight on the site, and the numbers in WordPress's database, in tables named after its prefix such as wp_rl_events, or in a SQLite file in uploads. It needs PHP 8.2.
 * Running inside WordPress, Runlight counts each visitor by the address the connection came from, and believes X-Forwarded-For only from a proxy on this server or a private network, and Cloudflare's header only from Cloudflare. The runlight_client_ip filter can change it.
 * Countries can come from DB-IP's free data, downloaded once a month when you turn it on.
