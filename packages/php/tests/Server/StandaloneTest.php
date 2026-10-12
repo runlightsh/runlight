@@ -122,6 +122,7 @@ final class StandaloneTest extends TestCase
         $this->assertSame(302, $short->status);
         $this->assertSame('https://blog.example.com/launch', $short->headers->get('location'));
         $this->assertSame(302, $server->handle(self::req('/go/launch'))->status, 'every link also answers at /go/:slug on the server itself');
+        $this->assertSame(404, $server->handle(self::req('/go/launch', host: 'go.example.com'))->status, 'but not on a link domain, which answers only its own links at its root');
 
         $health = $server->handle(self::req('/healthz'));
         $this->assertSame([200, 'ok'], [$health->status, $health->text()]);
