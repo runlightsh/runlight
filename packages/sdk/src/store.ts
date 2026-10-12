@@ -1526,9 +1526,25 @@ export class SqlStore {
   async takeSetting(key: string): Promise<string | null> {
     const value = await this.setting(key);
     if (value === null) return null;
-    const sql = `DELETE FROM rl_settings WHERE "key" = ?`;
-    const gone = this.db.affected ? await this.db.affected(sql, [key]) : (await this.db.all(`${sql} RETURNING "key"`, [key])).length;
-    return gone === 1 ? value : null;
+    return (await this.settingChanged(`DELETE FROM rl_settings WHERE "key" = ?`, [key])) === 1 ? value : null;
+  }
+
+  /** Writes a setting only if it is not there yet. Of two callers at once, only one gets true. */
+  async addSetting(key: string, value: string): Promise<boolean> {
+    // mysql2 counts a row a duplicate key found as written, so MySQL ignores the insert instead.
+    const sql = this.db.dialect === "mysql" ? `INSERT IGNORE INTO rl_settings ("key", value) VALUES (?, ?)` : upsert(this.db.dialect, "rl_settings", ['"key"', "value"], ['"key"'], []);
+    return (await this.settingChanged(sql, [key, value])) === 1;
+  }
+
+  /** Changes a setting only if it still holds `from`. Of two callers at once, only one gets true. */
+  async swapSetting(key: string, from: string, to: string): Promise<boolean> {
+    return (await this.settingChanged(`UPDATE rl_settings SET value = ? WHERE "key" = ? AND value = ?`, [to, key, from])) === 1;
+  }
+
+  /** How many settings a statement wrote. SQLite and D1 have no lock to lean on, so this is how a write knows it won. */
+  private async settingChanged(sql: string, params: unknown[]): Promise<number> {
+    if (this.db.affected) return this.db.affected(sql, params);
+    return (await this.db.all(`${sql} RETURNING "key"`, params)).length;
   }
 
   async setSetting(key: string, value: string | null): Promise<void> {

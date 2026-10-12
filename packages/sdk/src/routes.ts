@@ -1121,26 +1121,57 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
    */
   async function askTurn(who: string, owner: boolean): Promise<Response | (() => void)> {
     const now = runlight.now();
-    const mine = asked.get(who) ?? { at: [], open: 0 };
+    let mine = asked.get(who);
+    if (!mine) asked.set(who, (mine = { at: [], open: 0 }));
     mine.at = mine.at.filter((at) => now - at < 3_600_000);
     if (mine.at.length >= ASK_PER_HOUR || mine.open >= ASK_AT_ONCE) return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429);
+    // Taken before anything is awaited, so questions sent at once each see the others.
+    const held = mine;
+    held.at.push(now);
+    held.open++;
+    const release = () => {
+      held.open--;
+    };
     if (!owner) {
-      const limit = await viewerDaily();
-      const day = `assistant-asked:${new Date(now).toISOString().slice(0, 10)}`;
-      const counts = JSON.parse((await runlight.store.setting(day)) ?? "{}") as Record<string, number>;
-      if ((counts[who] ?? 0) >= limit) return coded(`Viewers can ask ${limit} questions a day. Ask again tomorrow.`, "assistant_daily", 429, { limit: String(limit) });
-      counts[who] = (counts[who] ?? 0) + 1;
-      await runlight.store.setSetting(day, JSON.stringify(counts));
-      for (const { key } of await runlight.store.settingsStartingWith("assistant-asked:")) if (key !== day) await runlight.store.setSetting(key, null);
+      const counted = await countAsk(who, now).catch((error) => {
+        release();
+        throw error;
+      });
+      if (counted !== true) {
+        release();
+        const at = held.at.indexOf(now);
+        if (at >= 0) held.at.splice(at, 1);
+        if (counted === null) return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429);
+        return coded(`Viewers can ask ${counted} questions a day. Ask again tomorrow.`, "assistant_daily", 429, { limit: String(counted) });
+      }
     }
-    mine.at.push(now);
-    mine.open++;
-    asked.set(who, mine);
     // People who stopped asking are dropped, so the map holds only the last hour's.
     if (asked.size > 1000) for (const [key, value] of asked) if (!value.open && !value.at.some((at) => now - at < 3_600_000)) asked.delete(key);
-    return () => {
-      mine.open--;
-    };
+    return release;
+  }
+
+  /**
+   * Counts a viewer's question in their own row for the day, or answers the daily limit when it is reached.
+   * The row only ever moves from the count read to the next one, so of questions sent at once, by one viewer
+   * or by every process on the database, each count is taken once. Null when the row kept changing underneath.
+   */
+  async function countAsk(who: string, now: number): Promise<true | number | null> {
+    const limit = await viewerDaily();
+    if (limit < 1) return limit;
+    const day = `assistant-asked:${new Date(now).toISOString().slice(0, 10)}:`;
+    const key = `${day}${who}`;
+    for (let tries = 0; tries < 20; tries++) {
+      const seen = await runlight.store.setting(key);
+      if (seen === null) {
+        if (!(await runlight.store.addSetting(key, "1"))) continue;
+        // A viewer's first question of the day clears the days before.
+        for (const { key: old } of await runlight.store.settingsStartingWith("assistant-asked:")) if (!old.startsWith(day)) await runlight.store.setSetting(old, null);
+        return true;
+      }
+      if (Number(seen) >= limit) return limit;
+      if (await runlight.store.swapSetting(key, seen, String(Number(seen) + 1))) return true;
+    }
+    return null;
   }
 
   async function tokensApi(request: Request, path: string): Promise<Response> {
