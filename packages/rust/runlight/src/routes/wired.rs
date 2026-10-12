@@ -94,9 +94,12 @@ pub(crate) async fn public_addresses(_rl: &Runlight, name: &str) -> Vec<String> 
     crate::safefetch::public_addresses(name, None).await
 }
 
-/// A public fetch, or whether it timed out.
-pub(crate) async fn public_fetch(rl: &Runlight, url: &str, ms: u64) -> Result<Response, bool> {
-    match crate::safefetch::public_fetch(&**rl.fetcher(), url, &crate::safefetch::PublicFetchInit::new(ms)).await {
+/// A public fetch of no more than `max_bytes` of the answer (the start of a longer one), or whether it timed out.
+pub(crate) async fn public_fetch(rl: &Runlight, url: &str, ms: u64, max_bytes: usize) -> Result<Response, bool> {
+    let mut init = crate::safefetch::PublicFetchInit::new(ms);
+    init.max_bytes = Some(max_bytes);
+    init.truncate = true;
+    match crate::safefetch::public_fetch(&**rl.fetcher(), url, &init).await {
         Ok(r) => Ok(r),
         Err(crate::safefetch::PublicFetchError::Fetch(crate::http::FetchError::TimedOut)) => Err(true),
         Err(_) => Err(false),
@@ -210,53 +213,91 @@ async fn viewer_daily(rl: &Runlight) -> Result<f64, Error> {
 async fn ask_turn<'a>(routes: &'a Routes, who: &str, owner: bool) -> Result<Result<Asking<'a>, Response>, Error> {
     let rl = routes.rl();
     let now = rl.now();
+    let soon =
+        || coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429, None);
+    // The slot is taken in the same step as the check, before anything is awaited, so questions sent at once each see the others.
     {
         let mut asked = routes.0.asked.lock().unwrap_or_else(|e| e.into_inner());
         let mine = asked.entry(who.to_string()).or_default();
         mine.0.retain(|at| now - at < 3_600_000);
         if mine.0.len() >= 30 || mine.1 >= 2 {
-            return Ok(Err(coded(
-                "You have asked a lot in a short time. Wait a little and ask again.",
-                "assistant_soon",
-                429,
-                None,
-            )));
+            return Ok(Err(soon()));
+        }
+        mine.0.push(now);
+        mine.1 += 1;
+        // People who stopped asking are dropped, so the map holds only the last hour's.
+        if asked.len() > 1000 {
+            asked.retain(|_, v| v.1 > 0 || v.0.iter().any(|at| now - at < 3_600_000));
         }
     }
+    let asking = Asking { routes, who: who.to_string() };
     if !owner {
-        let limit = viewer_daily(rl).await?;
-        let day = format!("assistant-asked:{}", js::head16(&js::iso_string(now), 10));
-        let mut counts = match rl.store().setting(&day).await?.map(|s| js::parse(&s)) {
-            Some(Ok(Value::Object(o))) => o,
-            _ => js::Object::new(),
-        };
-        let mine = counts.get(who).and_then(Value::as_f64).unwrap_or(0.0);
-        if mine >= limit {
-            let l = js::format_number(limit);
-            return Ok(Err(coded(
-                &format!("Viewers can ask {l} questions a day. Ask again tomorrow."),
-                "assistant_daily",
-                429,
-                Some(&[("limit", &l)]),
-            )));
-        }
-        counts.set(who, mine + 1.0);
-        rl.store().set_setting(&day, Some(&counts.to_json())).await?;
-        for (key, _) in rl.store().settings_starting_with("assistant-asked:").await? {
-            if key != day {
-                rl.store().set_setting(&key, None).await?;
+        match count_ask(rl, who, now).await? {
+            Counted::Yes => {}
+            refused => {
+                // A refused question does not count toward the hour's thirty.
+                if let Some(mine) = routes.0.asked.lock().unwrap_or_else(|e| e.into_inner()).get_mut(who)
+                    && let Some(at) = mine.0.iter().position(|at| *at == now)
+                {
+                    mine.0.remove(at);
+                }
+                return Ok(Err(match refused {
+                    Counted::Soon => soon(),
+                    Counted::Limit(limit) => {
+                        let l = js::format_number(limit);
+                        coded(
+                            &format!("Viewers can ask {l} questions a day. Ask again tomorrow."),
+                            "assistant_daily",
+                            429,
+                            Some(&[("limit", &l)]),
+                        )
+                    }
+                    Counted::Yes => unreachable!(),
+                }));
             }
         }
     }
-    let mut asked = routes.0.asked.lock().unwrap_or_else(|e| e.into_inner());
-    let mine = asked.entry(who.to_string()).or_default();
-    mine.0.push(now);
-    mine.1 += 1;
-    // People who stopped asking are dropped, so the map holds only the last hour's.
-    if asked.len() > 1000 {
-        asked.retain(|_, v| v.1 > 0 || v.0.iter().any(|at| now - at < 3_600_000));
+    Ok(Ok(asking))
+}
+
+enum Counted {
+    Yes,
+    Limit(f64),
+    Soon,
+}
+
+/// Counts a viewer's question in their own row for the day, or answers the daily limit when it is reached.
+/// The row only ever moves from the count read to the next one, so of questions sent at once, by one viewer
+/// or by every process on the database, each count is taken once.
+async fn count_ask(rl: &Runlight, who: &str, now: i64) -> Result<Counted, Error> {
+    let limit = viewer_daily(rl).await?;
+    if limit < 1.0 {
+        return Ok(Counted::Limit(limit));
     }
-    Ok(Ok(Asking { routes, who: who.to_string() }))
+    let day = format!("assistant-asked:{}:", js::head16(&js::iso_string(now), 10));
+    let key = format!("{day}{who}");
+    for _ in 0..20 {
+        let Some(seen) = rl.store().setting(&key).await? else {
+            if !rl.store().add_setting(&key, "1").await? {
+                continue;
+            }
+            // A viewer's first question of the day clears the days before.
+            for (old, _) in rl.store().settings_starting_with("assistant-asked:").await? {
+                if !old.starts_with(&day) {
+                    rl.store().set_setting(&old, None).await?;
+                }
+            }
+            return Ok(Counted::Yes);
+        };
+        let n = js::text_number(&seen);
+        if n >= limit {
+            return Ok(Counted::Limit(limit));
+        }
+        if rl.store().swap_setting(&key, &seen, &js::format_number(n + 1.0)).await? {
+            return Ok(Counted::Yes);
+        }
+    }
+    Ok(Counted::Soon)
 }
 
 /// A question being answered. Let go of, however the answer ends (a request cancelled part way too), it

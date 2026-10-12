@@ -198,7 +198,9 @@ pub async fn ses_send(
     })
     .map_err(mail_error)?;
     headers.remove("host");
-    let mut init = FetchInit::method("POST").body(body).timeout(20_000);
+    // Read no further than an error could need, so an answer without end never fills memory.
+    let mut init = FetchInit::method("POST").body(body).timeout(20_000).max_bytes(65_536);
+    init.truncate = true;
     for (k, v) in headers.iter() {
         init = init.header(k, js::js_string(v));
     }

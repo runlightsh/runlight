@@ -17,7 +17,9 @@ use crate::js::{self, Value};
 use crate::mcp::{ApiRead, INSTRUCTIONS, TOOLS, call_tool};
 use crate::obj;
 use crate::re::uni_re;
-use crate::safefetch::{MetadataAddressError, SERVICE_REDIRECTS, ServiceFetchError, service_fetch};
+use crate::safefetch::{
+    MetadataAddressError, RedirectRefusedError, SERVICE_REDIRECTS, ServiceFetchError, service_fetch,
+};
 
 /// A service the assistant can ask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,6 +323,14 @@ fn refused(error: MetadataAddressError) -> AssistantFailure {
     AssistantError::new(error.to_string(), "address_refused", &[("host", &error.host)]).into()
 }
 
+/// The most read from a model's answer or its list of models. A longer one is cut off, which leaves it unreadable.
+const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
+
+/// A service that sent the request to another origin, which would have carried the key, and the question with it.
+fn redirected(error: RedirectRefusedError) -> AssistantFailure {
+    AssistantError::new(error.to_string(), "redirect_refused", &[("host", &error.host), ("to", &error.to)]).into()
+}
+
 /// Sends the request, giving up as soon as the person has left (checked
 /// every 50 milliseconds), as the TypeScript's signal aborts the fetch.
 async fn fetch(
@@ -372,10 +382,12 @@ async fn post(
     for (name, value) in headers {
         init = init.header(name, value);
     }
-    let init = init.body(js::stringify(body)).timeout(left.clamp(1, 90_000) as u64);
+    let mut init = init.body(js::stringify(body)).timeout(left.clamp(1, 90_000) as u64).max_bytes(MAX_ANSWER_BYTES);
+    init.truncate = true;
     let answer = match fetch(fetcher, url, init, cancelled).await {
         Ok(answer) => answer,
         Err(ServiceFetchError::Metadata(error)) => return Err(refused(error)),
+        Err(ServiceFetchError::Redirect(error)) => return Err(redirected(error)),
         Err(ServiceFetchError::Fetch(error)) => {
             let host = parse_url(url)?.host();
             return Err(match error {
@@ -694,7 +706,8 @@ pub async fn list_models(
         .into());
     }
     let anthropic = provider.protocol == "anthropic";
-    let mut init = FetchInit::default().timeout(20_000);
+    let mut init = FetchInit::default().timeout(20_000).max_bytes(MAX_ANSWER_BYTES);
+    init.truncate = true;
     if anthropic {
         init = init.header("x-api-key", &settings.key).header("anthropic-version", "2023-06-01");
     } else if !settings.key.is_empty() {
@@ -704,6 +717,7 @@ pub async fn list_models(
     let answer = match fetch(fetcher, &url, init, None).await {
         Ok(answer) => answer,
         Err(ServiceFetchError::Metadata(error)) => return Err(refused(error)),
+        Err(ServiceFetchError::Redirect(error)) => return Err(redirected(error)),
         Err(_) => {
             let host = parse_url(&base)?.host();
             return Err(

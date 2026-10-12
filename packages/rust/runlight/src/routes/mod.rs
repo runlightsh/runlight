@@ -721,13 +721,8 @@ impl Routes {
     /// The key picker tickets are signed with, made on first use and kept in the database.
     async fn pick_key(&self) -> Result<String, crate::Error> {
         self.rl().init().await?;
-        let store = self.rl().store();
-        if let Some(saved) = store.setting("pick-key").await? {
-            return Ok(saved);
-        }
-        let made = random_id(32);
-        store.set_setting("pick-key", Some(&made)).await?;
-        Ok(made)
+        // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        Ok(self.rl().store().setting_or_add("pick-key", || random_id(32)).await?)
     }
 
     /// A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
@@ -781,13 +776,8 @@ impl Routes {
     /// The key embed tickets and sessions are signed with, made on first use and kept in the database for every process.
     async fn embed_key(&self) -> Result<String, crate::Error> {
         self.rl().init().await?;
-        let store = self.rl().store();
-        if let Some(saved) = store.setting("embed-key").await?.filter(|s| !s.is_empty()) {
-            return Ok(saved);
-        }
-        let made = random_id(32);
-        store.set_setting("embed-key", Some(&made)).await?;
-        Ok(made)
+        // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        Ok(self.rl().store().setting_or_add("embed-key", || random_id(32)).await?)
     }
 
     /// An embed token that still exists, for a site that still does.

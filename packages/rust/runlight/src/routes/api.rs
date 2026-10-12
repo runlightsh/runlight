@@ -1109,12 +1109,13 @@ impl Routes {
                     return Ok(Err(answer));
                 }
                 rl.forget_remote_info(&id);
-            } else if remote.is_none()
-                && let Some(r) = retention
-            {
-                rl.set_retention(&id, if r.is_null() { None } else { Some(js::js_number(r) as i64) }).await?;
             }
             let mut patch = js::Object::new();
+            if remote.is_none()
+                && let Some(r) = retention
+            {
+                patch.set("retentionMonths", r.clone());
+            }
             if let Some(name) = body.get("name") {
                 patch.set("name", js::js_string(name));
             }

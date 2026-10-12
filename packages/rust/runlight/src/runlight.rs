@@ -858,7 +858,8 @@ impl Runlight {
         Ok(())
     }
 
-    /// Changes a site's name, timezone, or (when managed) hostnames from the dashboard.
+    /// Changes a site's name, timezone, retention, or (when managed) hostnames from the dashboard. Every
+    /// field is checked before anything changes, and pruning starts only once the change is saved.
     pub async fn update_site(&self, id: &str, patch: &Value) -> Result<SiteRow, Error> {
         self.init().await?;
         let Some(current) = self.configured().into_iter().find(|s| s.id == id) else {
@@ -882,43 +883,58 @@ impl Runlight {
             }
             Ok(tz)
         };
+        let name = patch.get("name").map(name_of).transpose()?;
+        let timezone = patch.get("timezone").map(zone_of).transpose()?;
+        let hostnames = match patch.get("hostnames") {
+            Some(hostnames) if self.0.managed_sites && !self.is_remote(id) => {
+                Some(self.hostnames_for(Some(hostnames), Some(id))?)
+            }
+            _ => None,
+        };
+        let retention = match patch.get("retentionMonths") {
+            Some(r) => {
+                let months = if r.is_null() { None } else { Some(js::js_number(r)) };
+                let months = months.map(|n| if n.fract() == 0.0 { n as i64 } else { -1 });
+                self.check_retention(id, months)?;
+                Some(months)
+            }
+            None => None,
+        };
+        if let Some(tz) = &timezone
+            && Some(tz.clone()) != self.site(Some(id)).map(|s| s.timezone)
+        {
+            self.zone_changed(id, tz).await?;
+        }
         if self.0.managed_sites {
             let mut next = current.clone();
-            if let Some(name) = patch.get("name") {
-                next.name = name_of(name)?;
+            if let Some(name) = name {
+                next.name = name;
             }
-            if let Some(tz) = patch.get("timezone") {
-                next.timezone = zone_of(tz)?;
-                if Some(next.timezone.clone()) != self.site(Some(id)).map(|s| s.timezone) {
-                    self.zone_changed(id, &next.timezone).await?;
-                }
+            if let Some(tz) = timezone {
+                next.timezone = tz;
             }
-            if let Some(hostnames) = patch.get("hostnames")
-                && !self.is_remote(id)
-            {
-                next.hostnames = self.hostnames_for(Some(hostnames), Some(id))?;
+            if let Some(hostnames) = hostnames {
+                next.hostnames = hostnames;
             }
             self.0.store.upsert_site(&next, self.now()).await?;
             let mut state = self.state();
             if let Some(slot) = state.configured.iter_mut().find(|s| s.id == id) {
                 *slot = next;
             }
-            drop(state);
-            return self.site(Some(id)).ok_or_else(|| Error::Range("Unknown site".into()));
-        }
-        let mut next = self.state().overrides.get(id).cloned().unwrap_or_default();
-        if let Some(name) = patch.get("name") {
-            next.set("name", name_of(name)?);
-        }
-        if let Some(tz) = patch.get("timezone") {
-            let tz = zone_of(tz)?;
-            next.set("timezone", tz.clone());
-            if Some(tz.clone()) != self.site(Some(id)).map(|s| s.timezone) {
-                self.zone_changed(id, &tz).await?;
+        } else {
+            let mut next = self.state().overrides.get(id).cloned().unwrap_or_default();
+            if let Some(name) = name {
+                next.set("name", name);
             }
+            if let Some(tz) = timezone {
+                next.set("timezone", tz);
+            }
+            self.0.store.set_site_overrides(id, &next).await?;
+            self.state().overrides.insert(id.to_string(), next);
         }
-        self.0.store.set_site_overrides(id, &next).await?;
-        self.state().overrides.insert(id.to_string(), next);
+        if let Some(months) = retention {
+            self.set_retention(id, months).await?;
+        }
         self.site(Some(id)).ok_or_else(|| Error::Range("Unknown site".into()))
     }
 
@@ -931,6 +947,14 @@ impl Runlight {
 
     /// Sets how many months of visits a site keeps; the deleting runs after the answer.
     pub async fn set_retention(&self, site: &str, months: Option<i64>) -> Result<(), Error> {
+        self.check_retention(site, months)?;
+        self.0.store.set_setting(&format!("retention:{site}"), months.map(|m| m.to_string()).as_deref()).await?;
+        // Deleting a long history takes a while, so it runs in pieces after the answer, with tracking going on between them.
+        self.prune_later(Some(site.to_string()));
+        Ok(())
+    }
+
+    fn check_retention(&self, site: &str, months: Option<i64>) -> Result<(), Error> {
         if self.site(Some(site)).is_none() || self.is_remote(site) {
             return Err(Error::settings("Unknown site", "unknown_site", &[]));
         }
@@ -943,9 +967,6 @@ impl Runlight {
                 &[("months", "6, 12, 24, 36, 60")],
             ));
         }
-        self.0.store.set_setting(&format!("retention:{site}"), months.map(|m| m.to_string()).as_deref()).await?;
-        // Deleting a long history takes a while, so it runs in pieces after the answer, with tracking going on between them.
-        self.prune_later(Some(site.to_string()));
         Ok(())
     }
 
@@ -1367,7 +1388,8 @@ impl Runlight {
                 },
                 screen_width,
             );
-            let location = locate(&request.headers, &ip, self.0.geo.as_ref()).await;
+            let location =
+                locate(&request.headers, &ip, self.0.geo.as_ref(), self.0.trust_proxy != TrustProxy::Off).await;
             store
                 .insert_session(&SessionRow {
                     id: id.clone(),

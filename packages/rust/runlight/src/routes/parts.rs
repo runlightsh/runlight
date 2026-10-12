@@ -253,8 +253,13 @@ impl Routes {
                 return Ok(result("check_not_public", "is not a public domain name", None));
             }
             return Ok(
-                match glue::public_fetch(rl, &format!("https://{domain}{}", crate::runlight::LINK_DOMAIN_CHECK), 5000)
-                    .await
+                match glue::public_fetch(
+                    rl,
+                    &format!("https://{domain}{}", crate::runlight::LINK_DOMAIN_CHECK),
+                    5000,
+                    16_384,
+                )
+                .await
                 {
                     Ok(answer) => {
                         let body = answer.json_body().ok();
@@ -831,6 +836,10 @@ impl Routes {
                 .header("authorization", format!("Bearer {}", remote.token))
                 .timeout(if write { 30_000 } else { 120_000 });
         init.manual_redirect = true;
+        // The hub reads an install's live answer for a share or embed, so it reads no more than a live answer needs.
+        if path == "/api/realtime" {
+            init.max_bytes = Some(4 * 1024 * 1024);
+        }
         if write && let Some(r) = request {
             if let Some(ct) = r.headers.get("content-type").filter(|c| !c.is_empty()) {
                 init.headers.set("content-type", &ct);

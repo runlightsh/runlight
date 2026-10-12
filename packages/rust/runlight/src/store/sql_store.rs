@@ -1309,6 +1309,38 @@ impl SqlStore {
         Ok((gone == 1).then_some(value))
     }
 
+    /// Writes a setting only if it is not there yet. Of two callers at once, only one gets true.
+    pub async fn add_setting(&self, key: &str, value: &str) -> R<bool> {
+        // MySQL drivers count a row a duplicate key found as written, so MySQL ignores the insert instead.
+        let sql = if self.dialect() == Dialect::Mysql {
+            "INSERT IGNORE INTO rl_settings (\"key\", value) VALUES (?, ?)".to_string()
+        } else {
+            upsert(self.dialect(), "rl_settings", &["\"key\"", "value"], &["\"key\""], &[])
+        };
+        Ok(self.changed(&sql, params![key, value]).await? == 1)
+    }
+
+    /// Changes a setting only if it still holds `from`. Of two callers at once, only one gets true.
+    pub async fn swap_setting(&self, key: &str, from: &str, to: &str) -> R<bool> {
+        let sql = "UPDATE rl_settings SET value = ? WHERE \"key\" = ? AND value = ?";
+        Ok(self.changed(sql, params![to, key, from]).await? == 1)
+    }
+
+    /// A setting that is made the first time it is asked for. Every caller gets the value written first,
+    /// however many ask at once.
+    pub async fn setting_or_add(&self, key: &str, make: impl Fn() -> String) -> R<String> {
+        for _ in 0..5 {
+            if let Some(value) = self.setting(key).await? {
+                return Ok(value);
+            }
+            let made = make();
+            if self.add_setting(key, &made).await? {
+                return Ok(made);
+            }
+        }
+        Err(DbError(format!("Could not make the setting {key}")))
+    }
+
     /// Saves a setting, or deletes it with `None`.
     pub async fn set_setting(&self, key: &str, value: Option<&str>) -> R<()> {
         match value {

@@ -505,11 +505,34 @@ impl std::fmt::Display for MetadataAddressError {
 
 impl std::error::Error for MetadataAddressError {}
 
+/// Refused before anything was sent there, because a service's redirect led to another origin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedirectRefusedError {
+    /// The host that redirected.
+    pub host: String,
+    /// Where it pointed: the origin, or the protocol for one that is not http or https.
+    pub to: String,
+}
+
+impl std::fmt::Display for RedirectRefusedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} redirected to {}. Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead",
+            self.host, self.to
+        )
+    }
+}
+
+impl std::error::Error for RedirectRefusedError {}
+
 /// Why a service fetch gave nothing back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceFetchError {
     /// The address, or one a redirect named, is link-local or a metadata service.
     Metadata(MetadataAddressError),
+    /// A redirect led to another origin.
+    Redirect(RedirectRefusedError),
     /// The request failed, or time ran out (`FetchError::TimedOut`).
     Fetch(FetchError),
 }
@@ -518,6 +541,7 @@ impl std::fmt::Display for ServiceFetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServiceFetchError::Metadata(e) => e.fmt(f),
+            ServiceFetchError::Redirect(e) => e.fmt(f),
             ServiceFetchError::Fetch(e) => e.fmt(f),
         }
     }
@@ -537,16 +561,19 @@ pub const SERVICE_REDIRECTS: u32 = 5;
 /// Headers that describe a body, dropped with it when a redirect turns a request into a GET.
 const BODY_HEADERS: [&str; 5] =
     ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
-/// Credentials, dropped when a redirect leads to another origin.
-const CREDENTIAL_HEADERS: [&str; 3] = ["authorization", "proxy-authorization", "cookie"];
 
 /// Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
 /// this computer or a private network, but is never at a link-local or cloud metadata address. The address
 /// is checked, and so is every redirect's, up to `redirects` of them ([`SERVICE_REDIRECTS`] as a rule),
 /// each followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no
-/// body, and a redirect to another origin goes without the credentials. A redirect past the last one comes
-/// back as it is. `init.timeout_ms` is the whole fetch's limit, every hop included. `with` stands in for
-/// DNS in tests.
+/// body. Only a redirect on the same origin is followed: the request carries a key, in whatever header the
+/// service names it, and a 307 or 308 would carry its body too, so a redirect to another origin, https to
+/// http among them, is refused before anything is sent there. A redirect past the last one comes back as it
+/// is. `init.timeout_ms` is the whole fetch's limit, every hop included.
+///
+/// With a Fetcher that pins ([`Fetcher::pins`]) each hop connects to the address that was checked: the name is
+/// looked up, every address must be off the link-local and metadata ranges (private ones stay allowed), and a
+/// name that does not resolve is refused. `with` stands in for DNS in tests.
 pub async fn service_fetch(
     fetcher: &dyn Fetcher,
     target: &str,
@@ -565,6 +592,31 @@ pub async fn service_fetch(
         if metadata_host(&host, with).await {
             return Err(ServiceFetchError::Metadata(MetadataAddressError { host }));
         }
+        let mut pin = Vec::new();
+        if fetcher.pins() {
+            let port = url.port().parse::<u16>().unwrap_or(if url.protocol() == "https:" { 443 } else { 80 });
+            let name = host.to_lowercase();
+            let name = name.trim_end_matches('.');
+            let addresses = if is_literal(name) {
+                vec![name.to_string()]
+            } else {
+                match tokio::time::timeout(until.saturating_duration_since(Instant::now()), resolve(name, with)).await {
+                    Ok(found) => found,
+                    Err(_) => return Err(FetchError::TimedOut.into()),
+                }
+            };
+            if addresses.is_empty() {
+                return Err(FetchError::Failed(format!("getaddrinfo ENOTFOUND {name}")).into());
+            }
+            if addresses.iter().any(|a| metadata_address(a)) {
+                return Err(ServiceFetchError::Metadata(MetadataAddressError { host }));
+            }
+            let ips: Vec<IpAddr> = addresses.iter().filter_map(|a| unbracket(a).parse().ok()).collect();
+            if ips.len() != addresses.len() {
+                return Err(FetchError::Failed(format!("{name} has no address to connect to")).into());
+            }
+            pin = vec![(name.to_string(), port, ips)];
+        }
         // The first hop has the whole limit; each after it, what is left of it.
         let left =
             if hop == 0 { init.timeout_ms } else { until.saturating_duration_since(Instant::now()).as_millis() as u64 };
@@ -578,6 +630,7 @@ pub async fn service_fetch(
             body: body.clone(),
             manual_redirect: true,
             timeout_ms: left,
+            resolve: pin,
             ..init.clone()
         };
         let answer = fetcher.fetch(&href, options).await?;
@@ -586,17 +639,21 @@ pub async fn service_fetch(
             return Ok(answer);
         }
         let next = Url::parse_with_base(&location, &href).ok_or_else(|| FetchError::Failed("Invalid URL".into()))?;
+        if next.origin() != url.origin() {
+            let there = unbracket(&next.hostname()).to_string();
+            if metadata_host(&there, with).await {
+                return Err(ServiceFetchError::Metadata(MetadataAddressError { host: there }));
+            }
+            let to =
+                if next.protocol() == "https:" || next.protocol() == "http:" { next.origin() } else { next.protocol() };
+            return Err(ServiceFetchError::Redirect(RedirectRefusedError { host: url.host(), to }));
+        }
         if answer.status == 303 || ((answer.status == 301 || answer.status == 302) && method == "POST") {
             if method != "HEAD" {
                 method = "GET".into();
             }
             body = None;
             for name in BODY_HEADERS {
-                headers.delete(name);
-            }
-        }
-        if next.origin() != url.origin() {
-            for name in CREDENTIAL_HEADERS {
                 headers.delete(name);
             }
         }

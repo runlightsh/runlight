@@ -38,8 +38,8 @@ const SCOPES: [&str; 3] = ["read", "manage", "cms"];
 /// The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
 pub(crate) async fn agents_key(runlight: &Runlight, site: &str, replace: bool) -> Result<String, Error> {
     let name = format!("observe-key:{site}");
-    if !replace && let Some(saved) = runlight.store().setting(&name).await?.filter(|k| !k.is_empty()) {
-        return Ok(saved);
+    if !replace {
+        return Ok(runlight.store().setting_or_add(&name, || format!("rlo_{}", random_id(20))).await?);
     }
     let key = format!("rlo_{}", random_id(20));
     runlight.store().set_setting(&name, Some(&key)).await?;
@@ -111,14 +111,8 @@ fn from_base64url(text: &str) -> Result<String, Error> {
 
 /// The key client ids are signed with, made on first use and kept in the database for every process.
 async fn client_key(runlight: &Runlight) -> Result<String, Error> {
-    if let Some(saved) = runlight.store().setting("oauth-key").await?
-        && !saved.is_empty()
-    {
-        return Ok(saved);
-    }
-    let made = random_id(32);
-    runlight.store().set_setting("oauth-key", Some(&made)).await?;
-    Ok(made)
+    // Written only if no other request wrote one first, so every process signs with the same key.
+    Ok(runlight.store().setting_or_add("oauth-key", || random_id(32)).await?)
 }
 
 /// An app that registered: its name, its addresses, and when it was first given a token.

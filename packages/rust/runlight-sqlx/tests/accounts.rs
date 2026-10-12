@@ -394,6 +394,42 @@ async fn a_code_used_by_two_sign_ins_at_once_lets_one_in() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_code_is_accepted_once_even_by_two_accounts_on_one_store() {
+    each(async |kind, store| {
+        // Two Accounts share only the database, as two processes do, so their queues cannot help.
+        let (one, two) = (Arc::new(Accounts::new(store.clone(), SECRET)), Arc::new(Accounts::new(store, SECRET)));
+        let user = one.set_password("jon@example.com", "a long password", NOW, None).await.unwrap();
+        let secret = one.start_two_factor(&user.id).await.unwrap();
+        let step = NOW / 30_000;
+        let recovery = one.confirm_two_factor(&user.id, &totp(&secret, step).unwrap(), NOW).await.unwrap().unwrap();
+        let both = async |given: String, now: i64| {
+            let runs: Vec<_> = [one.clone(), two.clone()]
+                .into_iter()
+                .map(|accounts| {
+                    let (id, given) = (user.id.clone(), given.clone());
+                    tokio::spawn(async move { accounts.check_second_factor(&id, &given, now).await.unwrap() })
+                })
+                .collect();
+            let mut passed = 0;
+            for run in runs {
+                passed += usize::from(run.await.unwrap());
+            }
+            passed
+        };
+        for round in 1..=4 {
+            let now = NOW + round * 30_000;
+            let code = totp(&secret, now / 30_000).unwrap();
+            assert_eq!(both(code, now).await, 1, "{kind}: a step {round}");
+        }
+        for (i, code) in recovery.iter().take(3).enumerate() {
+            assert_eq!(both(code.clone(), NOW).await, 1, "{kind}: recovery code {i}");
+            assert_eq!(both(code.clone(), NOW).await, 0, "{kind}: and never again");
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn an_old_table_gains_roles_and_keeps_one_owner() {
     let store = runlight_sqlx::connect(":memory:").await.unwrap();
