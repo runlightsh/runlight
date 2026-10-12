@@ -152,6 +152,15 @@ fn queries_and_filters_match_the_sdk() {
     let f = fixture("query");
     let dims: Vec<Value> = query::dimensions().into_iter().map(Value::from).collect();
     assert_eq!(Value::Array(dims), *f.at("dimensions"));
+    let map = |pairs: &[(&str, &str)]| {
+        let mut o = js::Object::new();
+        for (k, v) in pairs {
+            o.set(*k, *v);
+        }
+        Value::Object(o)
+    };
+    assert_eq!(map(&query::EVENT_DIMENSIONS), *f.at("eventDimensions"));
+    assert_eq!(map(&query::SESSION_DIMENSIONS), *f.at("sessionDimensions"));
     assert_eq!(f.at("maxFilters").as_f64(), Some(query::MAX_FILTERS as f64));
     for case in list(&f, "dimensionTests") {
         let v = s(case, "value");
@@ -168,6 +177,7 @@ fn queries_and_filters_match_the_sdk() {
 #[test]
 fn payloads_match_the_sdk() {
     let f = fixture("payload");
+    assert_eq!(f.at("maxBody").as_f64(), Some(payload::MAX_BODY as f64));
     let mut failures = Vec::new();
     for case in list(&f, "cases") {
         let got = payload::parse_payload(s(case, "text")).map_or(Value::Null, |p| {
