@@ -278,15 +278,19 @@ if Code.ensure_loaded?(Plug.Conn) do
     end
 
     # A router forwarded the link path here (it moved onto the script name), so every request is this Plug's.
-    defp routed?(conn, rl), do: conn.script_name != [] and String.ends_with?("/" <> Enum.join(conn.script_name, "/"), rl.link_path)
+    defp routed?(conn, rl),
+      do: conn.script_name != [] and String.ends_with?("/" <> Enum.join(conn.script_name, "/"), rl.link_path)
 
     defp route(conn, rl) do
       case follow(conn, rl, conn.method) do
         %{status: 404} = missing ->
           case conn.private do
             %{phoenix_router: router} ->
-              if Code.ensure_loaded?(Phoenix.Router.NoRouteError),
-                do: raise(Phoenix.Router.NoRouteError, conn: conn, router: router),
+              # Named at run time, since Phoenix is the app's dependency and not Runlight's.
+              no_route = Module.concat([Phoenix, Router, NoRouteError])
+
+              if Code.ensure_loaded?(no_route),
+                do: raise(no_route, conn: conn, router: router),
                 else: Runlight.Plug.answer(conn, missing)
 
             _ ->
