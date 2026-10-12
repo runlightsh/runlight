@@ -303,6 +303,10 @@ class StandaloneTest {
         302,
         server.handle(req("/go/launch")).status(),
         "every link also answers at /go/:slug on the server itself");
+    assertEquals(
+        404,
+        server.handle(req("/go/launch", "GET", Map.of(), "", "go.example.com")).status(),
+        "but not on a link domain, which answers only its own links at its root");
 
     Response health = server.handle(req("/healthz"));
     assertEquals(List.of(200, "ok"), List.of(health.status(), health.text()));
