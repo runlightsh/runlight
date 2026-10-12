@@ -126,6 +126,7 @@ export async function metadataHost(host: string): Promise<boolean> {
   }
 }
 
+type Http = typeof import("node:http");
 type Https = typeof import("node:https");
 type Dns = typeof import("node:dns");
 type Stream = typeof import("node:stream");
@@ -136,15 +137,18 @@ type Stream = typeof import("node:stream");
  * So does Bun, whose https module connects by address and then checks the certificate against it; there
  * the name is resolved and checked just before each request instead.
  */
-function builtins(): { https: Https; dns: Dns; stream: Stream } | null {
+function builtins(): { http: Http; https: Https; dns: Dns; stream: Stream } | null {
   const scope = globalThis as { process?: { getBuiltinModule?: (id: string) => unknown }; navigator?: { userAgent?: string }; Bun?: unknown };
   const get = scope.process?.getBuiltinModule;
   if (typeof get !== "function" || scope.navigator?.userAgent === "Cloudflare-Workers" || scope.Bun !== undefined) return null;
   try {
+    const http = get("node:http") as Http | undefined;
     const https = get("node:https") as Https | undefined;
     const dns = get("node:dns") as Dns | undefined;
     const stream = get("node:stream") as Stream | undefined;
-    return typeof https?.request === "function" && typeof dns?.lookup === "function" && typeof stream?.Readable?.toWeb === "function" ? { https, dns, stream } : null;
+    return typeof http?.request === "function" && typeof https?.request === "function" && typeof dns?.lookup === "function" && typeof stream?.Readable?.toWeb === "function"
+      ? { http, https, dns, stream }
+      : null;
   } catch {
     return null;
   }
@@ -200,14 +204,25 @@ interface Ask {
   body?: string;
 }
 
-/** One request with no redirects, connecting only to public addresses. */
-function once(node: NonNullable<ReturnType<typeof builtins>>, url: URL, ask: Ask, signal: AbortSignal): Promise<Response> {
+/** Which addresses a request may connect to, and what it throws for one it may not. */
+interface Rule {
+  allowed(ip: string): boolean;
+  refused(host: string): Error;
+}
+
+const PUBLIC: Rule = { allowed: publicAddress, refused: (host) => new PrivateAddressError(host) };
+
+/**
+ * One request with no redirects, connecting only to addresses `rule` allows: by default, public ones over https.
+ * A host written as an address is never looked up, so the caller checks it first.
+ */
+function once(node: NonNullable<ReturnType<typeof builtins>>, url: URL, ask: Ask, signal: AbortSignal | undefined, rule: Rule = PUBLIC): Promise<Response> {
   // The lookup Node calls when it connects, so the address checked is the address used.
   const lookup = (hostname: string, options: { all?: boolean }, callback: (error: Error | null, address?: string | LookupAddress[], family?: number) => void) => {
     node.dns.lookup(hostname, { all: true }, (error, addresses) => {
       if (error) return callback(error);
-      const bad = addresses.find((a) => !publicAddress(a.address));
-      if (bad || !addresses.length) return callback(new PrivateAddressError(hostname));
+      const bad = addresses.find((a) => !rule.allowed(a.address));
+      if (bad || !addresses.length) return callback(rule.refused(hostname));
       if (options.all) return callback(null, addresses);
       callback(null, addresses[0]!.address, addresses[0]!.family);
     });
@@ -216,7 +231,7 @@ function once(node: NonNullable<ReturnType<typeof builtins>>, url: URL, ask: Ask
     const headers = ask.body === undefined ? ask.headers : { ...ask.headers, "content-length": String(new TextEncoder().encode(ask.body).byteLength) };
     // An agent of its own, never the global one: with NODE_USE_ENV_PROXY that one goes through a proxy, which
     // looks the name up again itself, so the checked address would not be the one used.
-    const request = node.https.request(url, { method: ask.method, headers, signal, lookup: lookup as never, agent: false }, (answer) => {
+    const request = (url.protocol === "http:" ? node.http : node.https).request(url, { method: ask.method, headers, signal, lookup: lookup as never, agent: false }, (answer) => {
       const back = new Headers();
       for (const [name, value] of Object.entries(answer.headers)) {
         for (const one of Array.isArray(value) ? value : value === undefined ? [] : [value]) back.append(name, one);
@@ -238,22 +253,23 @@ const onBun = () => (globalThis as { Bun?: unknown }).Bun !== undefined;
  * resolves to has been checked. Bun takes the Host header for the TLS name and the certificate check, so the
  * request still goes to, and is verified as, the name. A name that does not resolve is refused.
  */
-async function pin(url: URL): Promise<URL> {
+async function pin(url: URL, rule: Rule = PUBLIC): Promise<URL> {
   const host = url.hostname.replace(/^\[|\]$/g, "");
   if (v4(host) || v6(host)) return url;
   const dns = await resolver();
-  if (!dns) throw new PrivateAddressError(host);
+  if (!dns) throw rule.refused(host);
   const found = await dns.lookup(host, { all: true }).catch(() => []);
-  if (!found.length || found.some((a) => !publicAddress(a.address))) throw new PrivateAddressError(host);
+  if (!found.length || found.some((a) => !rule.allowed(a.address))) throw rule.refused(host);
   const pinned = new URL(url);
   pinned.hostname = found[0]!.family === 6 ? `[${found[0]!.address}]` : found[0]!.address;
   return pinned;
 }
 
 /**
- * For tests: publicFetch asks the runtime's fetch, as a test has replaced it,
- * instead of connecting itself. Addresses written as an IP, and localhost,
- * are still refused; names are not looked up, since a test makes them up.
+ * For tests: publicFetch and serviceFetch ask the runtime's fetch, as a test
+ * has replaced it, instead of connecting themselves. Addresses written as an
+ * IP, and localhost, are still refused by publicFetch; names are not looked
+ * up by it, since a test makes them up.
  */
 let throughGlobalFetch = false;
 export function publicFetchThroughGlobal(on: boolean): void {
@@ -315,6 +331,23 @@ export class MetadataAddressError extends Error {
   }
 }
 
+/** A service may be on this computer or a private network, but never at a link-local or metadata address. */
+const SERVICE: Rule = { allowed: (ip) => !metadataAddress(ip), refused: (host) => new MetadataAddressError(host) };
+
+/**
+ * Where fetch looks a name up itself, its addresses are checked just before. A name that cannot be looked up
+ * here is refused, since fetch may find an address for it a moment later; a runtime with no resolver at all
+ * reaches no network of the install's own, so there the name alone was checked.
+ */
+async function checkServiceName(host: string): Promise<void> {
+  if (v4(host) || v6(host)) return;
+  const dns = await resolver();
+  if (!dns) return;
+  const found = await dns.lookup(host, { all: true }).catch(() => null);
+  if (!found?.length) throw new Error(`Could not look up ${host}`);
+  if (found.some((a) => metadataAddress(a.address))) throw new MetadataAddressError(host);
+}
+
 /** Refused before anything was sent there, because a service's redirect led to another origin. */
 export class RedirectRefusedError extends Error {
   constructor(
@@ -332,7 +365,10 @@ const BODY_HEADERS = ["content-type", "content-length", "content-encoding", "con
 /**
  * Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
  * this computer or a private network, but is never at a link-local or cloud metadata address. The address
- * is checked, and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch
+ * the connection uses is checked, as publicFetch checks it, so a name that answers differently a moment
+ * later gets nowhere, and no proxy from the environment looks it up again; a name that cannot be looked up
+ * is refused. On a runtime with no resolver, such as Workers, only the name is checked. Every redirect is
+ * checked the same way, up to `redirects` of them (default 5), each followed as fetch
  * follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body. Only a redirect on
  * the same origin is followed: the request carries a key, in whatever header the service names it, and a
  * 307 or 308 would carry its body too, an email or a conversation, so a redirect to another origin, https
@@ -345,17 +381,38 @@ export async function serviceFetch(target: string, init: { method?: string; head
   let method = (init.method ?? "GET").toUpperCase();
   let headers: Record<string, string> = { ...init.headers };
   let body = init.body;
+  const node = throughGlobalFetch ? null : builtins();
   for (let hop = 0; ; hop++) {
     const host = url.hostname.replace(/^\[|\]$/g, "");
-    if (await metadataHost(host)) throw new MetadataAddressError(host);
-    const answer = await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), redirect: "manual", ...(init.signal ? { signal: init.signal } : {}) });
+    if (METADATA_NAMES.has(host.toLowerCase().replace(/\.+$/, "")) || metadataAddress(host)) throw new MetadataAddressError(host);
+    const ask: Ask = { method, headers, ...(body === undefined ? {} : { body }) };
+    const web = url.protocol === "http:" || url.protocol === "https:";
+    let answer: Response;
+    try {
+      if (node && web) {
+        // Node connects itself, checking the address it connects to, with no proxy from the environment between.
+        answer = await once(node, url, ask, init.signal, SERVICE);
+      } else {
+        // Bun connects to the address checked; elsewhere a runtime with a resolver checks the name first, and
+        // refuses one that does not resolve. Without one, as on Workers, there is no network of the install's own.
+        const pinned = !throughGlobalFetch && web && onBun() ? await pin(url, SERVICE) : null;
+        if (!pinned && !throughGlobalFetch) await checkServiceName(host);
+        answer = pinned
+          ? await fetch(pinned, { ...ask, headers: { ...headers, host: url.host }, redirect: "manual", ...(init.signal ? { signal: init.signal } : {}) })
+          : await fetch(url, { ...ask, redirect: "manual", ...(init.signal ? { signal: init.signal } : {}) });
+      }
+    } catch (error) {
+      // Whichever way the runtime says it gave up, the caller hears why the signal stopped it, such as time running out.
+      if (init.signal?.aborted) throw init.signal.reason;
+      throw error;
+    }
     const location = answer.headers.get("location");
     if (answer.status < 300 || answer.status >= 400 || !location || hop >= redirects) return answer;
     await answer.body?.cancel().catch(() => {});
     const next = new URL(location, url);
     if (next.origin !== url.origin) {
       const there = next.hostname.replace(/^\[|\]$/g, "");
-      if (await metadataHost(there)) throw new MetadataAddressError(there);
+      if (await metadataHost(there).catch(() => false)) throw new MetadataAddressError(there);
       throw new RedirectRefusedError(url.host, next.protocol === "https:" || next.protocol === "http:" ? next.origin : next.protocol);
     }
     if (answer.status === 303 || ((answer.status === 301 || answer.status === 302) && method === "POST")) {
