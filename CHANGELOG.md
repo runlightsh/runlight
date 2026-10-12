@@ -23,6 +23,9 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - The dashboard's Powered by Runlight link opens in a new tab everywhere, so it works inside a CMS's admin too.
 - Removing a saved mail service in Settings, Email service says why when it fails, and an app's mailer is shown with its sender's name.
 - A broken percent escape in a path, such as `%E0`, answers as an unknown goal, share, site, link domain, or short link (a 404) instead of an internal error.
+- On a link domain, `/go/<name>` is a 404 like any other path with no link of that domain's, in the standalone server of every language that has one too, which redirected it to any site's link of that name.
+- .NET: `MapRunlight()` inside `UseEndpoints` on a Startup-style host answers link domains, which it left to the app before. On an endpoint builder that reaches no middleware at all it refuses to start and says to use `UseRunlight()`.
+- Elixir sorts names the way TypeScript does with punctuation in them, such as `a-b` and `a_b`, and reads a whole number past 2^53 in a location database as its decimal text, as the other languages do.
 
 ### Added
 
@@ -44,6 +47,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Changed
 
+- A short link nobody has on the app's own host is the app's to answer, in every language: middleware hands the request on to the app, and a handler the app routes the link path to answers with the framework's own not found where there is one (chi's NotFound handler, Echo's `ErrNotFound`, Phoenix's `NoRouteError` from `Runlight.Plug.Links`, and a bare 404 from ASP.NET Core's endpoint, for the app's status code pages), so the app's own 404 page shows. A front controller and the standalone server, with no app behind them, still answer the 404 themselves.
+- Go: `runlightchi.Mount` after the app's own routes panics with the way to fix it, since chi takes no middleware after a route and a link domain's links then answered only on paths the app does not route. `runlightchi.MountRoutes` adds everything but the link domains, for an app that wraps its router with `rl.LinkDomains`. `LinksHTTP` answers link domains first, and `LinksHTTPOr` hands a slug no link has to a handler of the app's.
 - The key for CMS plugins is now called the agents key, and the key for the dashboard in a CMS the dashboard key, in Runlight and in every plugin. The plugins' Observe key field is now Agents key.
 - Runlight's tables need MySQL 8.0.20 or later, rather than 8.4, in every language and in the WordPress, Drupal, and Craft plugins, and CI runs the tests on MySQL 8.0 as well. MariaDB still needs 11.4.
 - The dashboard key's help says that whoever holds it can read the site's dashboard, so it is kept like a password.

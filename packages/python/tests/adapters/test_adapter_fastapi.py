@@ -20,6 +20,11 @@ def fastapi_app(rl: Any, **options: Any) -> FastAPI:
     def hello() -> str:
         return APP_PAGE
 
+    # The app has a page under the link path too, which a slug with no link reaches.
+    @app.get("/go/{slug}", response_class=PlainTextResponse)
+    def go(slug: str) -> str:
+        return APP_PAGE
+
     if options:
         runlight.fastapi.init_app(app, rl, **options)
     else:

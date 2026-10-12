@@ -127,6 +127,10 @@ class StarterTest {
       RawHttp.Answer go = RawHttp.get(port, "/go/sale", "User-Agent", CHROME);
       assertEquals(302, go.status());
       assertEquals("https://example.org/sale", go.header("location"));
+      // A slug with no link is the app's: Spring Boot's own 404, not Runlight's.
+      RawHttp.Answer nothing = RawHttp.get(port, "/go/nothing", "Accept", "application/json");
+      assertEquals(404, nothing.status());
+      assertTrue(nothing.text().contains("\"path\":\"/go/nothing\""), nothing.text());
 
       RawHttp.get(port, "/about", "User-Agent", GPTBOT);
       RawHttp.get(port, "/contact", "User-Agent", CHROME);

@@ -108,6 +108,8 @@ final class HttpFoundationTest extends TestCase
         $this->assertSame(302, $redirected->getStatusCode(), 'a link-domain request is redirected');
         $this->assertSame('https://example.org/a', $redirected->headers->get('location'));
         $this->assertSame(404, $send('https://t.example.com/missing')->getStatusCode(), 'a link domain answers every path itself');
+        $this->assertSame(404, $send('https://t.example.com/go/a')->getStatusCode(), 'even the app\'s link path, which is no link there');
+        $this->assertSame(404, HttpFoundation::handle($rl, $routes, Request::create('https://t.example.com/go/a'))->getStatusCode(), 'as the front controller answers it');
         $this->assertSame('{"runlight":true,"domain":"t.example.com"}', $send('https://t.example.com/.well-known/runlight-link-domain')->getContent());
         $this->assertSame('https://example.org/a', $send('https://example.com/go/a')->headers->get('location'), 'the link path answers on the app\'s own host');
         $this->assertSame([], $reached);

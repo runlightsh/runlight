@@ -139,6 +139,8 @@ def test_sites_are_added_counted_and_short_links_answer_on_their_own_domains() -
     assert short.headers.get("location") == "https://blog.example.com/launch"
     # Every link also answers at /go/:slug on the server itself.
     assert server.handle(req("/go/launch")).status == 302
+    # But not on a link domain, which answers only its own links at its root.
+    assert server.handle(req("/go/launch", host="go.example.com")).status == 404
 
     health = server.handle(req("/healthz"))
     assert (health.status, health.text()) == (200, "ok")

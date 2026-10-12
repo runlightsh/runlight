@@ -22,7 +22,7 @@ from runlight.http import BodyTooLong, FetchError, Headers, Request, Response, S
 FILE = Path(__file__).resolve().parents[4] / "conformance" / "http.json"
 
 # The SHA-256 of http.json's description this runner was written against.
-FORMAT_SHA256 = "9721f5d81842e566cbe725d3823b9e1b02580936b9366e0e7ea316d4f49c3acb"
+FORMAT_SHA256 = "d78e8af310f1c99155b84090df4ad252dfe4f78649943b0495a3998354c20134"
 
 # Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.
 ENV = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV"]

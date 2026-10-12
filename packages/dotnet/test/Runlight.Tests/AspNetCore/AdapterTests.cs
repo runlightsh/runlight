@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Runlight.AspNetCore;
 using Xunit;
@@ -61,6 +62,7 @@ public sealed class AdapterTests : IAsyncLifetime
         }
         app.MapGet("/", () => "the app's home");
         app.MapGet("/blog/{slug}", (string slug) => "post " + slug);
+        app.MapFallback(() => Results.Text("the app's own 404", statusCode: 404));
         await app.StartAsync();
         return app;
     }
@@ -136,6 +138,19 @@ public sealed class AdapterTests : IAsyncLifetime
         Assert.Equal("https://example.com/launch", linked.Headers.Location?.ToString());
         Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(Message(HttpMethod.Get, "/", null, "go.example.net"))).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(Message(HttpMethod.Get, "/runlight/s.js", null, "go.example.net"))).StatusCode);
+        // The app's own link path is no link on a link domain.
+        var elsewhere = await client.SendAsync(Message(HttpMethod.Get, "/go/launch", null, "go.example.net"));
+        Assert.Equal(HttpStatusCode.NotFound, elsewhere.StatusCode);
+        Assert.Equal("Not found", await elsewhere.Content.ReadAsStringAsync());
+
+        // A short link nobody has is the app's 404: middleware hands it on, and the endpoint answers it as
+        // ASP.NET Core answers a path with no endpoint, bare, for the app's status code pages to fill.
+        var missing = await client.SendAsync(Message(HttpMethod.Get, "/go/missing"));
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        Assert.Equal(middleware ? "the app's own 404" : "", await missing.Content.ReadAsStringAsync());
+        var broken = await client.SendAsync(Message(HttpMethod.Get, "/go/%E0"));
+        Assert.Equal(HttpStatusCode.NotFound, broken.StatusCode);
+        Assert.Equal(middleware ? "the app's own 404" : "", await broken.Content.ReadAsStringAsync());
 
         // The app's own pages are the app's, and an AI agent fetching one is counted on the way past.
         Assert.Equal("the app's home", await client.GetStringAsync("http://example.com/"));
@@ -194,6 +209,85 @@ public sealed class AdapterTests : IAsyncLifetime
         await using WebApplication app = builder.Build();
         var error = Assert.Throws<InvalidOperationException>(() => app.MapGroup("/admin").MapRunlight(rl));
         Assert.Contains("BasePath", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// MapRunlight inside UseEndpoints, on a WebApplication and on a Startup-style host, whose endpoint builder is
+    /// not the app, with a page of the app's own at every one-segment path.
+    /// </summary>
+    private static async Task<IHost> InsideUseEndpointsAsync(Runlight rl, bool startup)
+    {
+        Action<IApplicationBuilder> configure = app =>
+        {
+            app.UseRouting();
+#pragma warning disable ASP0014 // An app that moved from Startup still maps its endpoints here.
+            app.UseEndpoints(endpoints =>
+            {
+                endpoints.MapRunlight(new RoutesOptions { Token = "tok" });
+                endpoints.MapGet("/{page}", (string page) => "the app's " + page);
+            });
+#pragma warning restore ASP0014
+        };
+        if (startup)
+        {
+            IHost host = new HostBuilder()
+                .ConfigureLogging(logging => logging.ClearProviders())
+                .ConfigureWebHost(web => web.UseTestServer().ConfigureServices(services => services.AddRouting().AddSingleton(rl)).Configure(configure))
+                .Build();
+            await host.StartAsync();
+            return host;
+        }
+        WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(rl);
+        WebApplication app = builder.Build();
+        configure(app);
+        await app.StartAsync();
+        return app;
+    }
+
+    [Theory]
+    [MemberData(nameof(Ways))]
+    public async Task Mapped_inside_UseEndpoints_link_domains_still_answer(bool startup)
+    {
+        var rl = await RunlightAsync();
+        using IHost app = await InsideUseEndpointsAsync(rl, startup);
+        HttpClient client = app.GetTestClient();
+
+        var json = new[] { ("authorization", "Bearer tok"), ("content-type", "application/json") };
+        Assert.Equal(HttpStatusCode.Created, (await client.SendAsync(Message(HttpMethod.Post, "/runlight/api/link-domains", Json.Stringify(new JsObject { ["domain"] = "go.example.net" }), null, json))).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await client.SendAsync(Message(HttpMethod.Post, "/runlight/api/links", Json.Stringify(new JsObject { ["url"] = "https://example.com/launch", ["slug"] = "launch", ["domain"] = "go.example.net" }), null, json))).StatusCode);
+
+        // The slug is also a path the app answers, which the link domain must win.
+        var linked = await client.SendAsync(Message(HttpMethod.Get, "/launch", null, "go.example.net"));
+        Assert.Equal(HttpStatusCode.Found, linked.StatusCode);
+        Assert.Equal("https://example.com/launch", linked.Headers.Location?.ToString());
+        Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(Message(HttpMethod.Get, "/go/launch", null, "go.example.net"))).StatusCode);
+        Assert.Equal("the app's launch", await client.GetStringAsync("http://example.com/launch"));
+        Assert.Equal(HttpStatusCode.Found, (await client.SendAsync(Message(HttpMethod.Get, "/go/launch"))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Mapping_where_no_middleware_can_go_is_refused_with_the_way_to_do_it()
+    {
+        var rl = await RunlightAsync();
+        WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseTestServer();
+        await using WebApplication app = builder.Build();
+        var error = Assert.Throws<InvalidOperationException>(() => new EndpointsOnly(app).MapRunlight(rl));
+        Assert.Contains("UseRunlight", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>An endpoint builder of an app's own making, which reaches no pipeline.</summary>
+    private sealed class EndpointsOnly(WebApplication app) : IEndpointRouteBuilder
+    {
+        public IServiceProvider ServiceProvider => app.Services;
+
+        public System.Collections.Generic.ICollection<EndpointDataSource> DataSources { get; } = [];
+
+        public IApplicationBuilder CreateApplicationBuilder() => ((IApplicationBuilder)app).New();
     }
 
     [Fact]

@@ -135,8 +135,11 @@ module Runlight
         begin
           # A domain pointed at this server for short links answers at its root, with links one segment deep. The
           # server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
-          # signed in, so a link domain added on the dashboard's own name can always be removed again.
-          linkable = path == Core::LINK_DOMAIN_CHECK ||
+          # signed in, so a link domain added on the dashboard's own name can always be removed again. /go/:slug is
+          # the server's own link path, which a link domain answers as a path with no link (a 404), as every adapter
+          # does.
+          own = request.method == "GET" && path.match?(%r{\A/go/[^/]+/?\z})
+          linkable = path == Core::LINK_DOMAIN_CHECK || own ||
                      (path.match?(%r{\A/[^/]*\z}) && !SERVER_PATHS.include?(path) &&
                       !(path == "/" && !@web.signed_in(request).nil?))
           if linkable && !(!@public_host.nil? && host_of(request) == @public_host)
@@ -146,9 +149,7 @@ module Runlight
           if path == "/healthz"
             return Http::Response.new("ok", status: 200, headers: { "content-type" => "text/plain", "cache-control" => "no-store" })
           end
-          if request.method == "GET" && path.match?(%r{\A/go/[^/]+/?\z})
-            return @runlight.link_handler.call(request, context)
-          end
+          return @runlight.link_handler.call(request, context) if own
 
           # Everything else, the sign-in pages and People included, is the routes'.
           @routes.handle(request, context)
