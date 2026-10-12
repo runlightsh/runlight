@@ -10,6 +10,15 @@ namespace Runlight.Tests;
 public sealed class PureTests
 {
     [Fact]
+    public void Versions_and_icon_are_the_TypeScript_SDKs()
+    {
+        var f = Load("version");
+        Assert.Equal(f.Str("version"), Version.Current);
+        Assert.Equal(f.Num("apiVersion"), (double)Version.Api);
+        Assert.Equal(f.Str("icon"), Brand.RunlightIcon);
+    }
+
+    [Fact]
     public void Ua_conformance()
     {
         var failures = new List<string>();

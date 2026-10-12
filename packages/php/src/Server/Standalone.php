@@ -226,8 +226,11 @@ final class Standalone
         try {
             // A domain pointed at this server for short links answers at its root, with links one segment deep. The
             // server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
-            // signed in, so a link domain added on the dashboard's own name can always be removed again.
+            // signed in, so a link domain added on the dashboard's own name can always be removed again. /go/:slug is
+            // the server's own link path, which a link domain answers as a path with no link (a 404), as every adapter does.
+            $own = $request->method === 'GET' && preg_match('#^/go/[^/]+/?$#D', $path) === 1;
             $linkable = $path === Runlight::LINK_DOMAIN_CHECK
+                || $own
                 || (preg_match('#^/[^/]*$#D', $path) && !in_array($path, self::SERVER_PATHS, true) && !($path === '/' && $this->web->signedIn($request) !== null));
             if ($linkable && !($this->publicHost !== null && $this->hostOf($request) === $this->publicHost)) {
                 $linked = $this->runlight->linkDomainResponse($request, $context);
@@ -238,7 +241,7 @@ final class Standalone
             if ($path === '/healthz') {
                 return new Response('ok', 200, ['content-type' => 'text/plain', 'cache-control' => 'no-store']);
             }
-            if ($request->method === 'GET' && preg_match('#^/go/[^/]+/?$#D', $path)) {
+            if ($own) {
                 return ($this->runlight->linkHandler())($request, $context);
             }
             // Everything else, the sign-in pages and People included, is the routes'.

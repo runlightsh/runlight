@@ -191,8 +191,11 @@ defmodule Runlight.Mmdb do
           n = if size == 4 and n >= 0x80000000, do: n - 0x100000000, else: n
           {n, at + size}
 
+        # A uint64 or uint128 past Number.MAX_SAFE_INTEGER comes back as its decimal text, as the other ports
+        # give it (mmdb-lib's BigInt, as the shared fixture writes it).
         t when t in [9, 10] ->
-          {unsigned(read(db, at, size)), at + size}
+          n = unsigned(read(db, at, size))
+          {if(n <= 9_007_199_254_740_991, do: n, else: Integer.to_string(n)), at + size}
 
         11 ->
           {list, at} =

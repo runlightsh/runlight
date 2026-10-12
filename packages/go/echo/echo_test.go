@@ -2,6 +2,7 @@ package runlightecho_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +62,13 @@ func TestRegister(t *testing.T) {
 	r.Use(runlightecho.Observer(rl))
 	runlightecho.Register(r, rl, routes)
 	r.GET("/:page", func(c *echo.Context) error { return c.String(200, "the app") })
+	r.HTTPErrorHandler = func(c *echo.Context, err error) {
+		if errors.Is(err, echo.ErrNotFound) {
+			_ = c.String(404, "the app's own 404")
+			return
+		}
+		_ = c.String(500, err.Error())
+	}
 	server := httptest.NewServer(r)
 	defer server.Close()
 
@@ -72,7 +80,8 @@ func TestRegister(t *testing.T) {
 		{"/runlight", `data-base="/runlight"`, 200},
 		{"/runlight/api/stats", "unauthorized", 401},
 		{"/.well-known/oauth-protected-resource/runlight/mcp", `"resource":"` + server.URL + `/runlight/mcp"`, 200},
-		{"/go/nothing", "", 404},
+		{"/go/nothing", "the app's own 404", 404},
+		{"/go/%E0", "the app's own 404", 404},
 		{"/about", "the app", 200},
 	} {
 		res, body := get(t, server, "", c.path)
@@ -83,6 +92,12 @@ func TestRegister(t *testing.T) {
 
 	if res, _ := get(t, server, "go.example.com", "/hello"); res.StatusCode != 302 || res.Header.Get("location") != "https://example.org/landing" {
 		t.Errorf("a link on its link domain: %d %s", res.StatusCode, res.Header.Get("location"))
+	}
+	if res, body := get(t, server, "go.example.com", "/go/hello"); res.StatusCode != 404 || body != "Not found" {
+		t.Errorf("the app's link path is no link on a link domain: %d %s", res.StatusCode, body)
+	}
+	if res, _ := get(t, server, "example.com", "/go/hello"); res.StatusCode != 302 {
+		t.Errorf("the app's own link path: %d", res.StatusCode)
 	}
 	if res, body := get(t, server, "go.example.com", "/about"); res.StatusCode != 404 || body == "the app" {
 		t.Errorf("a link domain is not the app: %d %s", res.StatusCode, body)

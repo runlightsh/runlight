@@ -25,7 +25,8 @@ import sh.runlight.http.Url;
  *       there: {@code /{slug}} with its redirect, anything else with a 404, the dashboard's own
  *       paths left alone so its owner can always reach it.
  *   <li>A GET for {@code {linkPath}/{slug}} ({@code /go/{slug}} by default) on the app's own
- *       domain, within the web app's context, is answered with the short link's redirect.
+ *       domain, within the web app's context, is answered with the short link's redirect when the
+ *       link exists. A slug with no link goes down the chain, so the app's own 404 page answers it.
  *   <li>Every other request goes down the chain, and a GET is then reported with {@link
  *       Runlight#observe(Request)}, which records it when it came from a known AI agent (they run
  *       no JavaScript, so the tracker never sees them) and ignores it otherwise.
@@ -79,7 +80,10 @@ public final class RunlightFilter implements Filter {
     }
   }
 
-  /** The link domain's or short link's answer, or null for a request the app answers. */
+  /**
+   * The link domain's answer, or a short link's redirect, or null for a request the app answers, an
+   * unknown slug on the app's own domain included.
+   */
   private Response answer(HttpServletRequest req, Request request) {
     Map<String, Object> context = ServletBridge.context(req);
     try {
@@ -96,7 +100,9 @@ public final class RunlightFilter implements Filter {
         return null;
       }
       url.pathname = within;
-      return runlight.linkHandler().apply(request.withUrl(url.href()));
+      Response followed = runlight.linkHandler().apply(request.withUrl(url.href()));
+      // No link by that name (or a slug that is not valid percent-encoding): the app's to answer.
+      return followed.status() == 404 ? null : followed;
     } catch (RuntimeException e) {
       ServletBridge.log(e);
       return ServletBridge.internalError();

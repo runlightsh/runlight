@@ -2,6 +2,7 @@ package runlightchi_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -106,21 +107,63 @@ func TestMountAnswersLinkDomains(t *testing.T) {
 	}
 }
 
-func TestMountAfterTheAppsRoutesStillAnswersLinkDomains(t *testing.T) {
+func TestMountAfterTheAppsRoutesSaysHowToDoIt(t *testing.T) {
 	rl, routes := setup(t)
 	r := chi.NewRouter()
 	r.Get("/about", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "the app") })
+	defer func() {
+		refused := fmt.Sprint(recover())
+		if !strings.Contains(refused, "before the app's own routes") || !strings.Contains(refused, "MountRoutes") {
+			t.Errorf("Mount after a route: %q", refused)
+		}
+	}()
 	runlightchi.Mount(r, rl, routes)
-	server := httptest.NewServer(r)
+}
+
+func TestMountRoutesAfterTheAppsRoutesWithLinkDomainsAroundTheRouter(t *testing.T) {
+	rl, routes := setup(t)
+	r := chi.NewRouter()
+	r.Get("/{page}", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "the app") })
+	runlightchi.MountRoutes(r, rl, routes)
+	server := httptest.NewServer(rl.LinkDomains(r))
 	defer server.Close()
 
+	// The slug is also a path the app routes, which the link domain must win.
 	if res, _ := get(t, server, "go.example.com", "/hello"); res.StatusCode != 302 || res.Header.Get("location") != "https://example.org/landing" {
 		t.Errorf("a link on its link domain: %d %s", res.StatusCode, res.Header.Get("location"))
 	}
-	if res, body := get(t, server, "example.com", "/about"); res.StatusCode != 200 || body != "the app" {
+	if res, body := get(t, server, "go.example.com", "/go/hello"); res.StatusCode != 404 || body != "Not found" {
+		t.Errorf("the app's link path is no link on a link domain: %d %s", res.StatusCode, body)
+	}
+	if res, body := get(t, server, "example.com", "/hello"); res.StatusCode != 200 || body != "the app" {
 		t.Errorf("the app's own host reaches the app: %d %s", res.StatusCode, body)
 	}
-	if res, _ := get(t, server, "example.com", "/hello"); res.StatusCode != 404 {
-		t.Errorf("a slug on the app's own host is no link: %d", res.StatusCode)
+	if res, _ := get(t, server, "example.com", "/go/hello"); res.StatusCode != 302 {
+		t.Errorf("the app's own link path: %d", res.StatusCode)
+	}
+}
+
+func TestAShortLinkNobodyHasIsTheAppsNotFound(t *testing.T) {
+	rl, routes := setup(t)
+	r := chi.NewRouter()
+	runlightchi.Mount(r, rl, routes)
+	// Set after Mount, as apps often do.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(404)
+		_, _ = io.WriteString(w, "the app's own 404")
+	})
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	for _, path := range []string{"/go/nothing", "/go/%E0"} {
+		if res, body := get(t, server, "example.com", path); res.StatusCode != 404 || body != "the app's own 404" {
+			t.Errorf("%s: %d %s", path, res.StatusCode, body)
+		}
+	}
+	if res, _ := get(t, server, "example.com", "/go/hello"); res.StatusCode != 302 {
+		t.Errorf("a link still answers: %d", res.StatusCode)
+	}
+	if res, body := get(t, server, "go.example.com", "/go/hello"); res.StatusCode != 404 || body != "Not found" {
+		t.Errorf("the app's link path is no link on a link domain: %d %s", res.StatusCode, body)
 	}
 }

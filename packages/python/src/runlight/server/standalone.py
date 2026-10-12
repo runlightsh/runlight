@@ -163,7 +163,10 @@ class RunlightServer:
             # A domain pointed at this server for short links answers at its root, with links one segment deep. The
             # server's own pages and its public address never answer as links, and "/" stays the dashboard for
             # someone signed in, so a link domain added on the dashboard's own name can always be removed again.
-            linkable = path == LINK_DOMAIN_CHECK or (
+            # /go/:slug is the server's own link path, which a link domain answers as a path with no link (a 404), as
+            # every adapter does.
+            own = request.method == "GET" and re.fullmatch(r"/go/[^/]+/?", path) is not None
+            linkable = path == LINK_DOMAIN_CHECK or own or (
                 re.fullmatch(r"/[^/]*", path) is not None
                 and path not in SERVER_PATHS
                 and not (path == "/" and self.web.signed_in(request))
@@ -174,7 +177,7 @@ class RunlightServer:
                     return linked
             if path == "/healthz":
                 return Response("ok", 200, {"content-type": "text/plain", "cache-control": "no-store"})
-            if request.method == "GET" and re.fullmatch(r"/go/[^/]+/?", path):
+            if own:
                 return self._links(request, context)
             # Everything else, the sign-in pages and People included, is the routes'.
             return self.routes.handle(request)
