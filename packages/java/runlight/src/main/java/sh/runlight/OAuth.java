@@ -112,9 +112,8 @@ public final class OAuth {
    */
   public static String agentsKey(Install runlight, String site, boolean replace) {
     String name = "observe-key:" + site;
-    String saved = replace ? null : runlight.store().setting(name);
-    if (saved != null && !saved.isEmpty()) {
-      return saved;
+    if (!replace) {
+      return runlight.store().settingOrAdd(name, () -> "rlo_" + Hash.randomId(20));
     }
     String key = "rlo_" + Hash.randomId(20);
     runlight.store().setSetting(name, key);
@@ -185,13 +184,8 @@ public final class OAuth {
    * process.
    */
   private static String clientKey(Install runlight) {
-    String saved = runlight.store().setting("oauth-key");
-    if (saved != null && !saved.isEmpty()) {
-      return saved;
-    }
-    String made = Hash.randomId(32);
-    runlight.store().setSetting("oauth-key", made);
-    return made;
+    // Written only if no other request wrote one first, so every process signs with the same key.
+    return runlight.store().settingOrAdd("oauth-key", () -> Hash.randomId(32));
   }
 
   /** The app a client id names (client), and where to note that it connected (usedKey). */

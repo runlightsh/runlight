@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import sh.runlight.Js;
@@ -1513,6 +1514,29 @@ public final class SqlStore implements AutoCloseable {
             ? db.affected(sql, List.of(key))
             : db.all(sql + " RETURNING \"key\"", List.of(key)).size();
     return gone == 1 ? value : null;
+  }
+
+  /** Writes a setting only if it is not there yet. Of two callers at once, only one gets true. */
+  public boolean addSetting(String key, String value) {
+    return swapSetting(key, null, value);
+  }
+
+  /**
+   * A setting's value, made and written first if it is not there. Every caller at once gets the
+   * value written first, so a key made on first use is the same for all of them.
+   */
+  public String settingOrAdd(String key, Supplier<String> make) {
+    for (int tries = 0; tries < 5; tries++) {
+      String saved = setting(key);
+      if (saved != null) {
+        return saved;
+      }
+      String made = make.get();
+      if (addSetting(key, made)) {
+        return made;
+      }
+    }
+    throw new IllegalStateException("Could not save " + key);
   }
 
   /**

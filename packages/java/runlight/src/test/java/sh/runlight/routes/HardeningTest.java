@@ -47,4 +47,27 @@ class HardeningTest {
     assertTrue(Make.dig(check, "target.addresses") instanceof List<?>);
     assertEquals(false, check.get("working"));
   }
+
+  @Test
+  void aLinkDomainsAnswerIsReadOnlySoFar() {
+    // A body well past what the check could need; the request is capped, and so is the read.
+    String huge = "{\"x\":\"" + "a".repeat(1024 * 1024);
+    sh.runlight.RecordingFetcher fetcher =
+        new sh.runlight.RecordingFetcher((url, init) -> new Response(huge, 200));
+    Runlight rl =
+        Make.runlight(
+            new Runlight.Options()
+                .site(Json.object("hostnames", List.of("example.com")))
+                .fetcher(fetcher));
+    rl.init();
+    rl.store.addLinkDomain("go.example.net", "default", 0);
+    Map<String, Object> check =
+        Make.body(
+            rl.routes(new Routes.Options().token("secret"))
+                .handle(Make.owner("/runlight/api/link-domains/go.example.net/check")));
+    assertEquals("check_not_runlight", check.get("code"));
+    sh.runlight.http.FetchInit sent = fetcher.inits.get(0);
+    assertEquals(16_385L, sent.maxBytes);
+    assertTrue(sent.truncate);
+  }
 }

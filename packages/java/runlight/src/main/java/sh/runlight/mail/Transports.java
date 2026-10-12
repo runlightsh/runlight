@@ -7,10 +7,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import sh.runlight.Body;
 import sh.runlight.Hash;
 import sh.runlight.Js;
 import sh.runlight.Json;
 import sh.runlight.MetadataAddressError;
+import sh.runlight.RedirectRefusedError;
 import sh.runlight.Safefetch;
 import sh.runlight.http.FetchError;
 import sh.runlight.http.FetchInit;
@@ -156,6 +158,18 @@ public final class Transports {
     return "";
   }
 
+  /** The most of a service's error read, so an answer without end never fills memory. */
+  static final long MAX_ERROR_BYTES = 65_536;
+
+  /** A service's error text, no further than an error could need; empty if it is longer. */
+  static String errorText(Response response) {
+    try {
+      return Body.readTextCapped(response, MAX_ERROR_BYTES);
+    } catch (RuntimeException e) {
+      return "";
+    }
+  }
+
   /** POSTs to a service, with the errors the dashboard shows. */
   private static void post(
       Fetcher fetcher, String url, Map<String, String> headers, String body, boolean explains) {
@@ -169,10 +183,17 @@ public final class Transports {
                   .method("POST")
                   .headers(Headers.of(headers))
                   .body(body)
-                  .timeoutMs(20_000),
+                  .timeoutMs(20_000)
+                  .maxBytes(MAX_ERROR_BYTES + 1)
+                  .truncate(true),
               fetcher);
     } catch (MetadataAddressError error) {
       throw new MailError(error.getMessage(), "address_refused", Json.object("host", error.host()));
+    } catch (RedirectRefusedError error) {
+      throw new MailError(
+          error.getMessage(),
+          "redirect_refused",
+          Json.object("host", error.host(), "to", error.to()));
     } catch (FetchError error) {
       String host = new Url(url).host();
       throw new MailError(
@@ -183,7 +204,7 @@ public final class Transports {
     if (response.ok()) {
       return;
     }
-    String message = explains ? serviceMessage(response.text()) : "";
+    String message = explains ? serviceMessage(errorText(response)) : "";
     String host = new Url(url).host();
     throw new MailError(
         host + " answered " + response.status() + (message.isEmpty() ? "" : ": " + message),

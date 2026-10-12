@@ -84,6 +84,69 @@ class CliTest {
   }
 
   @Test
+  void serversStartingAtOnceOnOneFolderAgreeOnOneSecretKeptReadableOnlyByThisUser()
+      throws Exception {
+    Path dir = root.resolve("runlight-data");
+    java.util.concurrent.ExecutorService pool =
+        java.util.concurrent.Executors.newFixedThreadPool(6);
+    try {
+      java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+      List<java.util.concurrent.Future<String>> secrets = new ArrayList<>();
+      for (int i = 0; i < 6; i++) {
+        secrets.add(
+            pool.submit(
+                () -> {
+                  go.await();
+                  try (Config config = new Config(root)) {
+                    return config.secret();
+                  }
+                }));
+      }
+      go.countDown();
+      Set<String> seen = new java.util.HashSet<>();
+      for (java.util.concurrent.Future<String> secret : secrets) {
+        seen.add(secret.get());
+      }
+      assertEquals(1, seen.size(), seen.toString());
+      String secret = seen.iterator().next();
+      assertTrue(secret.matches("^[0-9a-f]{64}$"), secret);
+      try (Config again = new Config(root)) {
+        assertEquals(secret, again.secret());
+      }
+    } finally {
+      pool.shutdown();
+    }
+    assertEquals("rw-------", permissions(dir.resolve("secret")));
+    try (Stream<Path> files = Files.list(dir)) {
+      assertEquals(
+          List.of("secret"),
+          files.map(f -> f.getFileName().toString()).toList(),
+          "no file made on the way is left behind");
+    }
+  }
+
+  @Test
+  void aSecretFileReadEmptyOrShortIsWaitedForAndRefusedRatherThanUsed() throws IOException {
+    Path dir = root.resolve("runlight-data");
+    Files.createDirectories(dir);
+    Files.writeString(dir.resolve("secret"), "abc\n");
+    long started = System.nanoTime();
+    IllegalStateException tooShort =
+        assertThrows(IllegalStateException.class, () -> new Config(root).secret());
+    assertTrue(tooShort.getMessage().contains("holds no whole secret"), tooShort.getMessage());
+    assertTrue(
+        (System.nanoTime() - started) / 1_000_000 >= 1000,
+        "it waited for a writer to finish first");
+    Files.writeString(dir.resolve("secret"), "");
+    IllegalStateException empty =
+        assertThrows(IllegalStateException.class, () -> new Config(root).secret());
+    assertTrue(empty.getMessage().contains("holds no whole secret"), empty.getMessage());
+    String own = "a".repeat(40);
+    Files.writeString(dir.resolve("secret"), own + "\n");
+    assertEquals(own, new Config(root).secret(), "one that is whole is kept as it is");
+  }
+
+  @Test
   void settingsComeFromRunlightPropertiesWithPathsFromTheProjectFolder() throws IOException {
     configure(
         "RUNLIGHT_URL=https://stats.example.com",

@@ -38,7 +38,7 @@ public final class Time {
 
   private static final int MAX_BUCKETS = 1000;
 
-  /** A month of hours. Longer hourly ranges are cut off rather than refused. */
+  /** A month of hours. A longer range is counted by the day instead. */
   private static final int MAX_HOURS = 744;
 
   /** Names Intl reads as another zone where java.time has no name, or reads it otherwise. */
@@ -409,7 +409,41 @@ public final class Time {
         interval instanceof String s && INTERVALS.contains(s)
             ? s
             : defaultInterval(fromDate, toDate);
+    long start = startOf(fromDate, timezone);
+    long end = startOf(addDays(toDate, 1), timezone);
+    // An interval too fine for the range moves up to the next one that fits, and the range says
+    // which it is. Past 1,000 months there is none.
+    while (bucketCount(start, end, fromDate, toDate, chosen)
+        > (chosen.equals("hour") ? MAX_HOURS : MAX_BUCKETS)) {
+      chosen =
+          switch (chosen) {
+            case "hour" -> "day";
+            case "day" -> "week";
+            case "week" -> "month";
+            default -> null;
+          };
+      if (chosen == null) {
+        return null;
+      }
+    }
     return range(fromDate, toDate, timezone, chosen);
+  }
+
+  /** How many chart buckets a range has at an interval, the first and last counted when partial. */
+  private static long bucketCount(
+      long from, long to, String fromDate, String toDate, String interval) {
+    if (interval.equals("hour")) {
+      return Math.floorDiv(to - from + 3_600_000 - 1, 3_600_000L);
+    }
+    if (interval.equals("day")) {
+      return daysBetween(fromDate, toDate) + 1;
+    }
+    if (interval.equals("week")) {
+      return Math.floorDiv(daysBetween(addDays(fromDate, -weekday(fromDate)), toDate), 7) + 1;
+    }
+    int[] f = split(fromDate);
+    int[] t = split(toDate);
+    return (long) (t[0] - f[0]) * 12 + (t[1] - f[1]) + 1;
   }
 
   private static Map<String, Object> range(
@@ -473,14 +507,19 @@ public final class Time {
     return range(fromDate, toDate, timezone, range.get("interval"));
   }
 
-  /** Chart buckets covering a range, each starting on a local boundary. */
+  /**
+   * Chart buckets covering a range, each starting on a local boundary and ending at the next, so
+   * only the first and last can be partial. resolveRange picks an interval that fits; a range given
+   * here with more buckets than that, such as a longer comparison, is cut off at a boundary, never
+   * merged into its last bucket.
+   */
   public static List<Map<String, Object>> buckets(Map<String, Object> range, String timezone) {
     List<Long> starts = new ArrayList<>();
     long from = Js.asLong(range.get("from"));
     long to = Js.asLong(range.get("to"));
     String interval = (String) range.get("interval");
     if (interval.equals("hour")) {
-      for (long t = from; t < to && starts.size() < MAX_HOURS; t += 3_600_000) {
+      for (long t = from; t < to && starts.size() <= MAX_HOURS; t += 3_600_000) {
         starts.add(t);
       }
     } else {
@@ -491,7 +530,7 @@ public final class Time {
       } else if (interval.equals("month")) {
         date = date.substring(0, 8) + "01";
       }
-      while (date.compareTo(toDate) <= 0 && starts.size() < MAX_BUCKETS) {
+      while (date.compareTo(toDate) <= 0 && starts.size() <= MAX_BUCKETS) {
         starts.add(startOf(date, timezone));
         date =
             switch (interval) {
@@ -501,8 +540,10 @@ public final class Time {
             };
       }
     }
-    List<Map<String, Object>> out = new ArrayList<>(starts.size());
-    for (int i = 0; i < starts.size(); i++) {
+    // One start was taken past the limit, so the last bucket kept still ends where the next begins.
+    int kept = Math.min(starts.size(), interval.equals("hour") ? MAX_HOURS : MAX_BUCKETS);
+    List<Map<String, Object>> out = new ArrayList<>(kept);
+    for (int i = 0; i < kept; i++) {
       long next = i + 1 < starts.size() ? starts.get(i + 1) : to;
       out.add(Json.object("start", Math.max(starts.get(i), from), "end", Math.min(next, to)));
     }

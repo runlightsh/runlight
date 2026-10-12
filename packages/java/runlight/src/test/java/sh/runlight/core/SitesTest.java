@@ -573,4 +573,71 @@ class SitesTest {
     rl.saveAssistantSettings(null);
     assertNull(rl.assistantSettings());
   }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void aSiteChangeRefusedForABadDomainChangesNothingRetentionAndTimezoneIncluded(String kind) {
+    Harness t = new Harness(kind, new Runlight.Options().managedSites(true));
+    Runlight rl = t.rl;
+    Routes routes = rl.routes(new Routes.Options().token("t"));
+    t.now = Harness.utc(2025, 10, 1, 12);
+    for (String domain : List.of("blog.example.com", "shop.example.com")) {
+      assertEquals(
+          201,
+          routes
+              .handle(
+                  sh.runlight.routes.Make.owner(
+                      "/runlight/api/sites", "POST", Json.object("hostnames", domain), "t"))
+              .status());
+    }
+    rl.collect(
+        Harness.hit(
+            "https://stats.example.com/runlight/e",
+            Json.object("k", "pageview", "u", "https://blog.example.com/"),
+            Json.object("ip", "203.0.113.1")));
+    t.now = Harness.utc(2026, 10, 6, 12);
+    String zone = rl.store.setting("rollup-zone:blog.example.com");
+    Map<String, Object> before =
+        Json.object(
+            "id",
+            "blog.example.com",
+            "name",
+            "blog.example.com",
+            "hostnames",
+            List.of("blog.example.com"),
+            "timezone",
+            "UTC");
+    java.util.function.Function<Map<String, Object>, Response> patch =
+        body ->
+            routes.handle(
+                sh.runlight.routes.Make.owner(
+                    "/runlight/api/sites/blog.example.com", "PATCH", body, "t"));
+    String visits = "SELECT COUNT(*) AS n FROM rl_events WHERE site = ?";
+
+    for (String hostnames : List.of("not a domain", "shop.example.com")) {
+      Response answer =
+          patch.apply(
+              Json.object(
+                  "retentionMonths",
+                  6L,
+                  "timezone",
+                  "Europe/Paris",
+                  "name",
+                  "Renamed",
+                  "hostnames",
+                  hostnames));
+      assertEquals(400, answer.status(), hostnames);
+      rl.idle();
+      assertNull(rl.retention("blog.example.com"), "retention is unchanged");
+      assertEquals(zone, rl.store.setting("rollup-zone:blog.example.com"), "built days are kept");
+      Fixtures.assertJson(before, rl.site("blog.example.com"));
+      assertEquals(1, t.count(visits, "blog.example.com"), "the old visit is still there");
+    }
+
+    assertEquals(
+        200,
+        patch.apply(Json.object("retentionMonths", 6L, "hostnames", "blog.example.com")).status());
+    rl.idle();
+    assertEquals(0, t.count(visits, "blog.example.com"), "a change that passes prunes once saved");
+  }
 }

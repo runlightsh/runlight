@@ -147,9 +147,19 @@ public final class Geo {
     return new String(bytes, StandardCharsets.ISO_8859_1);
   }
 
-  /** Where a request comes from: platform headers first, then the lookup. */
+  /** As {@link #locate(Headers, String, Lookup, boolean)}, believing the headers. */
   public static Map<String, Object> locate(Headers headers, String ip, Lookup lookup) {
-    Map<String, Object> fromHeaders = locationFromHeaders(headers);
+    return locate(headers, ip, lookup, true);
+  }
+
+  /**
+   * Where a request comes from: platform headers first, then the lookup. The headers are believed
+   * only with {@code trustHeaders}, as the address is: without a proxy in front, a client writes
+   * them itself.
+   */
+  public static Map<String, Object> locate(
+      Headers headers, String ip, Lookup lookup, boolean trustHeaders) {
+    Map<String, Object> fromHeaders = trustHeaders ? locationFromHeaders(headers) : null;
     if (fromHeaders != null && !"".equals(fromHeaders.get("country"))) {
       return fromHeaders;
     }

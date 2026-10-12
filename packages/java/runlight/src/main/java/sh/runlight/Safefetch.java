@@ -459,10 +459,6 @@ public final class Safefetch {
           "content-language",
           "content-location");
 
-  /** Credentials, dropped when a redirect leads to another origin. */
-  private static final List<String> CREDENTIAL_HEADERS =
-      List.of("authorization", "proxy-authorization", "cookie");
-
   /** As {@link #serviceFetch(String, FetchInit, int, Fetcher)}, following up to 5 redirects. */
   public static Response serviceFetch(String target, FetchInit init, Fetcher fetcher) {
     return serviceFetch(target, init, 5, fetcher);
@@ -473,13 +469,18 @@ public final class Safefetch {
    * well be on this computer or a private network, but is never at a link-local or cloud metadata
    * address. The address is checked, and so is every redirect's, up to {@code redirects} of them,
    * each followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET
-   * with no body, and a redirect to another origin goes without the credentials. A redirect past
-   * the last one comes back as it is. Each request is pinned to the addresses checked, so a name
-   * that answers differently a moment later gets nowhere. {@code init}'s timeout covers the
+   * with no body. Only a redirect on the same origin is followed: the request carries a key, in
+   * whatever header the service names it, and a 307 or 308 would carry its body too, an email or a
+   * conversation, so a redirect to another origin, https to http among them, is refused before
+   * anything is sent there. A redirect past the last one comes back as it is. Each request is
+   * pinned to the addresses checked, so a name that answers differently a moment later gets
+   * nowhere, and a name that cannot be looked up is refused. {@code init}'s timeout covers the
    * redirects too.
    *
    * @param fetcher what sends each request; null for a {@link JdkFetcher}
    * @throws MetadataAddressError for an address it refuses
+   * @throws RedirectRefusedError for a redirect to another origin
+   * @throws FetchError when a name cannot be looked up
    */
   public static Response serviceFetch(
       String target, FetchInit init, int redirects, Fetcher fetcher) {
@@ -494,6 +495,11 @@ public final class Safefetch {
       List<String> addresses = metadataChecked(host, sender::lookup);
       if (addresses == null) {
         throw new MetadataAddressError(host);
+      }
+      // A name that cannot be looked up is refused, since the connection could find an address for
+      // it a moment later that was never checked.
+      if (addresses.isEmpty() && v4(host) == null && v6(Js.lower(host)) == null) {
+        throw new FetchError("Could not look up " + host);
       }
       // The first request has the whole timeout; each redirect, what is left of it.
       long left = hop == 0 ? init.timeoutMs : Math.floorDiv(until - System.nanoTime(), 1_000_000L);
@@ -529,16 +535,28 @@ public final class Safefetch {
         return answer;
       }
       Url next = new Url(location, url.href());
+      if (!next.origin().equals(url.origin())) {
+        String there = BRACKETS.matcher(next.hostname).replaceAll("");
+        List<String> found;
+        try {
+          found = metadataChecked(there, sender::lookup);
+        } catch (RuntimeException e) {
+          found = List.of();
+        }
+        if (found == null) {
+          throw new MetadataAddressError(there);
+        }
+        throw new RedirectRefusedError(
+            url.host(),
+            next.protocol.equals("https:") || next.protocol.equals("http:")
+                ? next.origin()
+                : next.protocol);
+      }
       if (answer.status() == 303
           || ((answer.status() == 301 || answer.status() == 302) && method.equals("POST"))) {
         method = method.equals("HEAD") ? "HEAD" : "GET";
         body = null;
         for (String name : BODY_HEADERS) {
-          headers.delete(name);
-        }
-      }
-      if (!next.origin().equals(url.origin())) {
-        for (String name : CREDENTIAL_HEADERS) {
           headers.delete(name);
         }
       }
