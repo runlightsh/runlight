@@ -377,36 +377,47 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
     }
   }
 
-  const script = await fetch(`${home}/runlight/s.js`);
+  // PHP's built-in server now and then drops a connection mid-answer, so a read is tried again; the visit is not.
+  const get = async (url: string, init?: RequestInit): Promise<Response> => {
+    for (let i = 0; ; i++) {
+      try {
+        return await fetch(url, init);
+      } catch (error) {
+        if (i >= 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  };
+  const script = await get(`${home}/runlight/s.js`);
   assert.equal(script.status, 200, await script.clone().text());
   assert.match(script.headers.get("content-type") ?? "", /javascript/);
-  const page = await fetch(`${home}/runlight/`);
+  const page = await get(`${home}/runlight/`);
   const html = await page.text();
   assert.equal(page.status, 200, html);
   assert.match(html, /data-cms="WordPress"/);
   // The dashboard's script, styles, map, and a translation, each from the zip.
   const assets = [...html.matchAll(/(?:src|href|data-world)="(\/runlight\/assets\/[^"]+)"/g), ...html.matchAll(/(\/runlight\/assets\/locale\.de\.[^&]+)&/g)].map((m) => m[1]!);
   assert.equal(assets.length, 4, html);
-  for (const asset of assets) assert.equal((await fetch(home + asset)).status, 200, asset);
+  for (const asset of assets) assert.equal((await get(home + asset)).status, 200, asset);
   const hit = await fetch(`${home}/runlight/e`, {
     method: "POST",
     headers: { "content-type": "text/plain", "user-agent": "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36", "x-forwarded-for": "198.51.100.20" },
     body: JSON.stringify({ k: "pageview", u: `${home}/hello` }),
   });
   assert.ok(hit.status < 300, `${hit.status} ${await hit.text()}`);
-  const stats = await fetch(`${home}/runlight/api/stats?period=today`, { headers: { accept: "application/json" } });
+  const stats = await get(`${home}/runlight/api/stats?period=today`, { headers: { accept: "application/json" } });
   const body = await stats.text();
   assert.equal(stats.status, 200, body);
   assert.equal(JSON.parse(body).stats.visitors, 1);
-  const check = await fetch(`${home}/__check`);
+  const check = await get(`${home}/__check`);
   assert.match(await check.text(), /^checked [1-9]/);
-  const other = await fetch(`${home}/hello`);
+  const other = await get(`${home}/hello`);
   assert.equal(await other.text(), "WordPress");
 
   // With plain permalinks nothing rewrites /runlight to WordPress on Apache, so it answers through index.php.
   option("permalink_structure", `""`);
-  assert.equal((await fetch(`${home}/index.php/runlight/s.js`)).status, 200);
-  assert.equal(await (await fetch(`${home}/runlight/s.js`)).text(), "WordPress");
+  assert.equal((await get(`${home}/index.php/runlight/s.js`)).status, 200);
+  assert.equal(await (await get(`${home}/runlight/s.js`)).text(), "WordPress");
 });
 
 /** Runs PHP with the Drupal stand-ins loaded, or skips the test where PHP is not installed. */
