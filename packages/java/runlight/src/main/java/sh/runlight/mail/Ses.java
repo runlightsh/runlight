@@ -191,7 +191,13 @@ public final class Ses {
           (fetcher != null ? fetcher : new JdkFetcher())
               .fetch(
                   url.href(),
-                  new FetchInit().method("POST").headers(sent).body(body).timeoutMs(20_000));
+                  new FetchInit()
+                      .method("POST")
+                      .headers(sent)
+                      .body(body)
+                      .timeoutMs(20_000)
+                      .maxBytes(Transports.MAX_ERROR_BYTES + 1)
+                      .truncate(true));
     } catch (FetchError error) {
       throw new MailError(
           "Could not reach Amazon SES: " + error.getMessage(),
@@ -199,7 +205,7 @@ public final class Ses {
           Json.object("host", "Amazon SES", "detail", error.getMessage()));
     }
     if (!response.ok()) {
-      String message = Transports.serviceMessage(response.text());
+      String message = Transports.serviceMessage(Transports.errorText(response));
       throw new MailError(
           "Amazon SES answered " + response.status() + (message.isEmpty() ? "" : ": " + message),
           "mail_refused",

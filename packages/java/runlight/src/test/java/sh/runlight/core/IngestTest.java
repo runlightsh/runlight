@@ -494,6 +494,46 @@ class IngestTest {
   }
 
   @Test
+  void aHostingPlatformsLocationHeadersCountOnlyWhenProxyHeadersAreTrusted() {
+    Map<String, String> platform = new java.util.LinkedHashMap<>();
+    platform.put("cf-ipcountry", "US");
+    platform.put("cf-region-code", "CA");
+    platform.put("cf-ipcity", "San Francisco");
+    platform.put("x-vercel-ip-country", "FR");
+    platform.put(
+        "x-nf-geo",
+        java.util.Base64.getEncoder()
+            .encodeToString(
+                Json.stringify(Json.object("country", Json.object("code", "JP")))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    for (boolean trust : new boolean[] {false, true}) {
+      Harness t =
+          new Harness(
+              "sqlite",
+              new Runlight.Options()
+                  .trustProxy(trust)
+                  .geo(ip -> Json.object("country", "DE", "region", "BE", "city", "Berlin")));
+      int i = 0;
+      for (Map.Entry<String, String> header : platform.entrySet()) {
+        // A visitor each, so each request opens a visit of its own.
+        String ip = "203.0.113." + ++i;
+        t.rl.collect(
+            Harness.hit(
+                "https://x.com/runlight/e",
+                Json.object("k", "pageview", "u", "https://x.com/" + header.getKey()),
+                Json.object("ip", ip, "headers", Json.object(header.getKey(), header.getValue()))),
+            Json.object("ip", ip));
+      }
+      assertEquals(
+          trust ? List.of("DE", "FR", "JP", "US") : List.of("DE"),
+          sorted(t.values(t.today(), "country")),
+          trust
+              ? "behind a proxy they come first, and the lookup answers where they name no country"
+              : "without a proxy in front, a client writes them itself, so the lookup answers");
+    }
+  }
+
+  @Test
   void trackerRequestsOverThePerAddressLimitAreDroppedUntilTheNextMinute() {
     Harness t =
         new Harness(

@@ -225,6 +225,81 @@ class AccountsTest {
     assertNotNull(accounts.fromSession(accounts.sessionFor(changed, NOW), NOW + 1));
   }
 
+  /** How many of these checks were accepted, all started together, each on its own thread. */
+  private static int accepted(List<java.util.concurrent.Callable<Boolean>> checks)
+      throws Exception {
+    ExecutorService pool = Executors.newFixedThreadPool(checks.size());
+    try {
+      CountDownLatch go = new CountDownLatch(1);
+      List<Future<Boolean>> answers = new ArrayList<>();
+      for (java.util.concurrent.Callable<Boolean> check : checks) {
+        answers.add(
+            pool.submit(
+                () -> {
+                  go.await();
+                  return check.call();
+                }));
+      }
+      go.countDown();
+      int count = 0;
+      for (Future<Boolean> answer : answers) {
+        if (answer.get()) {
+          count++;
+        }
+      }
+      return count;
+    } finally {
+      pool.shutdown();
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void aCodeIsAcceptedOnceEvenByTwoProcessesCheckingItAtTheSameMoment(String kind)
+      throws Exception {
+    SqlStore store = store(kind);
+    Accounts one = new Accounts(store, SECRET);
+    // Another process on the same database: its own Accounts, with nothing shared in memory.
+    Accounts other = new Accounts(store, SECRET);
+    Map<String, Object> user = one.setPassword("owner@example.com", "a long password", NOW);
+    String id = (String) user.get("id");
+    String secret = one.startTwoFactor(id);
+    List<String> recovery = one.confirmTwoFactor(id, Crypto.totp(secret, NOW / 30_000), NOW);
+
+    long later = NOW + 60_000;
+    String old = Crypto.totp(secret, later / 30_000);
+    for (int round = 0; round < 5; round++) {
+      long at = later + round * 30_000L;
+      String fresh = Crypto.totp(secret, at / 30_000);
+      assertEquals(
+          1,
+          accepted(
+              List.of(
+                  () -> one.checkSecondFactor(id, fresh, at),
+                  () -> other.checkSecondFactor(id, fresh, at))),
+          "round " + round + ": one of the two is accepted");
+    }
+    assertFalse(one.checkSecondFactor(id, old, later), "an older code stays refused");
+
+    for (String used : recovery.subList(0, 3)) {
+      assertEquals(
+          1,
+          accepted(
+              List.of(
+                  () -> one.checkSecondFactor(id, used, later),
+                  () -> other.checkSecondFactor(id, used, later))),
+          "a recovery code is crossed off once");
+    }
+    // Two different recovery codes at once: neither write loses the other's, though one may be
+    // asked again.
+    int pair =
+        accepted(
+            List.of(
+                () -> one.checkSecondFactor(id, recovery.get(3), later),
+                () -> other.checkSecondFactor(id, recovery.get(4), later)));
+    assertEquals(7L - pair, one.byId(id).get("recoveryLeft"), "every code accepted is crossed off");
+  }
+
   @ParameterizedTest
   @MethodSource("kinds")
   void twoFactorCodesWorkOnceAndRecoveryCodesAreCrossedOff(String kind) {

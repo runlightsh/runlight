@@ -424,8 +424,7 @@ class SafefetchTest {
       assertThrows(
           MetadataAddressError.class,
           () -> Safefetch.serviceFetch("http://169.254.169.254/v1/models", new FetchInit(), null));
-      // Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and
-      // the key goes no further than the origin it was meant for.
+      // Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both.
       seen.clear();
       assertEquals("ok", Safefetch.serviceFetch(base + "/see-other", ask.get(), null).text());
       assertEquals(new Seen("GET", "/landed", "", "Bearer key", ""), seen.get(1));
@@ -433,9 +432,15 @@ class SafefetchTest {
       Safefetch.serviceFetch(base + "/keep", ask.get(), null);
       assertEquals(
           new Seen("POST", "/landed", "{}", "Bearer key", "application/json"), seen.get(1));
+      // A redirect to another origin is refused before anything is sent there.
       seen.clear();
-      Safefetch.serviceFetch(base + "/elsewhere", ask.get(), null);
-      assertEquals(new Seen("POST", "/landed", "{}", "", "application/json"), seen.get(1));
+      RedirectRefusedError away =
+          assertThrows(
+              RedirectRefusedError.class,
+              () -> Safefetch.serviceFetch(base + "/elsewhere", ask.get(), null));
+      assertEquals("127.0.0.1:" + port, away.host());
+      assertEquals("http://localhost:" + port, away.to());
+      assertEquals(1, seen.size(), "nothing was asked of the other origin");
       // Past the last redirect, the redirect comes back as it is.
       seen.clear();
       assertEquals(302, Safefetch.serviceFetch(base + "/loop", new FetchInit(), 2, null).status());
@@ -476,5 +481,143 @@ class SafefetchTest {
     } finally {
       server.stop(0);
     }
+  }
+
+  /** Answers every request with a redirect, and records them. */
+  private static RecordingFetcher redirecting(int status, String to) {
+    return new RecordingFetcher(
+        (url, init) ->
+            new Response(
+                "", status, sh.runlight.http.Headers.of("location", to, "content-length", "0")));
+  }
+
+  @Test
+  void aServicesRedirectToAnotherOriginIsRefusedWithNoSecondRequest() {
+    // Every header a service's key may travel in, not only Authorization.
+    for (String header :
+        List.of(
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "x-api-key",
+            "api-key",
+            "x-postmark-server-token")) {
+      RecordingFetcher fetcher = redirecting(307, "http://198.51.100.7/steal");
+      RedirectRefusedError refused =
+          assertThrows(
+              RedirectRefusedError.class,
+              () ->
+                  Safefetch.serviceFetch(
+                      "https://svc.example/hook",
+                      new FetchInit().method("POST").header(header, "secret").body("{\"a\":1}"),
+                      fetcher));
+      assertEquals("svc.example", refused.host(), header);
+      assertEquals("http://198.51.100.7", refused.to(), header);
+      assertEquals(1, fetcher.requests.size(), header + ": nothing reached the other origin");
+    }
+    // https to http on the same host is another origin, and a 308 would keep the body.
+    RecordingFetcher downgrade = redirecting(308, "http://svc.example/hook");
+    RedirectRefusedError refused =
+        assertThrows(
+            RedirectRefusedError.class,
+            () ->
+                Safefetch.serviceFetch(
+                    "https://svc.example/hook",
+                    new FetchInit().method("POST").header("api-key", "k").body("{}"),
+                    downgrade));
+    assertEquals("http://svc.example", refused.to());
+    assertEquals(1, downgrade.requests.size());
+    assertEquals(
+        "svc.example redirected to http://svc.example. Runlight sends a service's key and request"
+            + " only to the address it was set up with, so set it up with that address instead",
+        refused.getMessage());
+    // A redirect to a scheme that is not http names the scheme.
+    assertEquals(
+        "ftp:",
+        assertThrows(
+                RedirectRefusedError.class,
+                () ->
+                    Safefetch.serviceFetch(
+                        "https://svc.example/", new FetchInit(), redirecting(302, "ftp://x/y")))
+            .to());
+    // A redirect on the same origin is still followed, key and body kept on a 307.
+    RecordingFetcher same =
+        new RecordingFetcher(
+            (url, init) ->
+                url.endsWith("/hook")
+                    ? new Response("", 307, sh.runlight.http.Headers.of("location", "/landed"))
+                    : new Response("ok", 200, new sh.runlight.http.Headers()));
+    assertEquals(
+        "ok",
+        Safefetch.serviceFetch(
+                "https://svc.example/hook",
+                new FetchInit().method("POST").header("api-key", "k").body("{}"),
+                same)
+            .text());
+    assertEquals(2, same.requests.size());
+    Map<String, Object> second = same.requests.get(1);
+    assertEquals("{}", second.get("body"));
+    assertEquals("k", Js.map(second.get("headers")).get("api-key"));
+    // Each service says so in its own words.
+    for (String provider : List.of("anthropic", "custom")) {
+      AssistantError error =
+          assertThrows(
+              AssistantError.class,
+              () ->
+                  Assistant.listModels(
+                      Json.object(
+                          "provider", provider, "baseUrl", "https://svc.example/v1", "key", "k"),
+                      redirecting(307, "http://198.51.100.7/")));
+      assertEquals("redirect_refused", error.code());
+      assertEquals(Json.object("host", "svc.example", "to", "http://198.51.100.7"), error.params());
+    }
+    for (Map<String, Object> config :
+        List.of(
+            Json.object("service", "brevo", "apiKey", "k"),
+            Json.object("service", "postmark", "serverToken", "k"),
+            Json.object("service", "resend", "apiKey", "k"),
+            Json.object("service", "webhook", "url", "https://svc.example/hook"))) {
+      RecordingFetcher fetcher = redirecting(307, "http://198.51.100.7/");
+      MailError error =
+          assertThrows(
+              MailError.class,
+              () ->
+                  Transports.send(
+                      config,
+                      Json.object(
+                          "to", "me@example.com",
+                          "from", "reports@example.com",
+                          "subject", "Hi",
+                          "html", "<p>Hi</p>",
+                          "text", "Hi"),
+                      fetcher));
+      assertEquals("redirect_refused", error.code(), String.valueOf(config.get("service")));
+      assertEquals(1, fetcher.requests.size());
+    }
+  }
+
+  @Test
+  void aServiceNameThatCannotBeLookedUpIsRefusedBeforeAnythingIsSent() {
+    RecordingFetcher fetcher = new RecordingFetcher("network");
+    fetcher.dns = name -> List.of();
+    FetchError error =
+        assertThrows(
+            FetchError.class,
+            () -> Safefetch.serviceFetch("https://nowhere.example/v1", new FetchInit(), fetcher));
+    assertEquals("Could not look up nowhere.example", error.getMessage());
+    assertEquals(0, fetcher.requests.size());
+    // A name that resolves to a metadata address is refused too, and a pin carries the checked one.
+    fetcher.dns = name -> List.of("169.254.169.254");
+    assertThrows(
+        MetadataAddressError.class,
+        () -> Safefetch.serviceFetch("https://metadata.example/", new FetchInit(), fetcher));
+    fetcher.dns = name -> List.of("10.0.0.5");
+    RecordingFetcher lan =
+        new RecordingFetcher(
+            (url, init) -> new Response("ok", 200, new sh.runlight.http.Headers()));
+    lan.dns = fetcher.dns;
+    assertEquals(
+        "ok", Safefetch.serviceFetch("http://model.lan:11434/v1", new FetchInit(), lan).text());
+    assertEquals(List.of("model.lan:11434:10.0.0.5"), lan.inits.get(0).resolve);
   }
 }

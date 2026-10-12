@@ -1402,10 +1402,12 @@ public final class Runlight
   }
 
   /**
-   * Changes a site's name or timezone from the dashboard. Stored apart from the settings in code,
-   * which keep being written on every start. A managed site has no settings in code, so its
-   * changes, hostnames too, go to its row. A key left out of the patch is left alone, as TS's
-   * undefined is.
+   * Changes a site's name, timezone, or retention from the dashboard. Stored apart from the
+   * settings in code, which keep being written on every start. A managed site has no settings in
+   * code, so its changes, hostnames too, go to its row. A key left out of the patch is left alone,
+   * as TS's undefined is. Every field is checked before anything changes, since a new timezone
+   * clears the built days and a shorter retention deletes visits, and pruning starts only once
+   * saved.
    */
   public Map<String, Object> updateSite(String id, Map<String, Object> patch) {
     sitesLock.lock();
@@ -1420,47 +1422,66 @@ public final class Runlight
       if (current == null) {
         throw new SettingsError("Unknown site", "unknown_site");
       }
-      Map<String, Object> next =
-          new LinkedHashMap<>(managedSites ? current : overrides.getOrDefault(id, Map.of()));
+      String name = null;
       if (patch.containsKey("name") && patch.get("name") != Json.UNDEFINED) {
-        String name = Js.trim(Js.string(patch.get("name")));
+        name = Js.trim(Js.string(patch.get("name")));
         if (name.isEmpty() || name.length() > 80) {
           throw new SettingsError("A site name is 1 to 80 characters", "site_name");
         }
-        next.put("name", name);
       }
+      String timezone = null;
       if (patch.containsKey("timezone") && patch.get("timezone") != Json.UNDEFINED) {
-        String timezone = Js.string(patch.get("timezone"));
+        timezone = Js.string(patch.get("timezone"));
         if (!Time.isTimezone(timezone)) {
           throw new SettingsError(
               "Unknown timezone \"" + timezone + "\"",
               "unknown_timezone",
               Json.object("timezone", timezone));
         }
+      }
+      List<String> hostnames = null;
+      if (managedSites
+          && patch.containsKey("hostnames")
+          && patch.get("hostnames") != Json.UNDEFINED
+          && !remotes.containsKey(id)) {
+        hostnames = hostnamesFor(patch.get("hostnames"), id);
+      }
+      boolean retains =
+          patch.containsKey("retentionMonths") && patch.get("retentionMonths") != Json.UNDEFINED;
+      if (retains) {
+        checkRetention(id, patch.get("retentionMonths"));
+      }
+      Map<String, Object> next =
+          new LinkedHashMap<>(managedSites ? current : overrides.getOrDefault(id, Map.of()));
+      if (name != null) {
+        next.put("name", name);
+      }
+      if (timezone != null) {
         next.put("timezone", timezone);
         Map<String, Object> now = site(id);
         if (now == null || !timezone.equals(now.get("timezone"))) {
           zoneChanged(id, timezone);
         }
       }
+      if (hostnames != null) {
+        next.put("hostnames", new ArrayList<Object>(hostnames));
+      }
       if (managedSites) {
-        if (patch.containsKey("hostnames")
-            && patch.get("hostnames") != Json.UNDEFINED
-            && !remotes.containsKey(id)) {
-          next.put("hostnames", new ArrayList<Object>(hostnamesFor(patch.get("hostnames"), id)));
-        }
         store.upsertSite(next, now());
         List<Map<String, Object>> all = new ArrayList<>();
         for (Map<String, Object> site : configured) {
           all.add(id(site).equals(id) ? next : site);
         }
         configured = List.copyOf(all);
-        return site(id);
+      } else {
+        store.setSiteOverrides(id, next);
+        Map<String, Map<String, Object>> over = new LinkedHashMap<>(overrides);
+        over.put(id, next);
+        overrides = over;
       }
-      store.setSiteOverrides(id, next);
-      Map<String, Map<String, Object>> over = new LinkedHashMap<>(overrides);
-      over.put(id, next);
-      overrides = over;
+      if (retains) {
+        setRetention(id, patch.get("retentionMonths"));
+      }
       return site(id);
     } finally {
       sitesLock.unlock();
@@ -1479,12 +1500,7 @@ public final class Runlight
     return null;
   }
 
-  /**
-   * Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs
-   * in pieces in idle(), after the answer, with tracking going on between them, as TS runs it after
-   * answering.
-   */
-  public void setRetention(String site, Object months) {
+  private void checkRetention(String site, Object months) {
     if (site(site) == null || remotes.containsKey(site)) {
       throw new SettingsError("Unknown site", "unknown_site");
     }
@@ -1501,6 +1517,15 @@ public final class Runlight
           "retention_bad",
           Json.object("months", list));
     }
+  }
+
+  /**
+   * Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs
+   * in pieces in idle(), after the answer, with tracking going on between them, as TS runs it after
+   * answering.
+   */
+  public void setRetention(String site, Object months) {
+    checkRetention(site, months);
     store.setSetting("retention:" + site, months == null ? null : Js.string(Js.num(months)));
     pruning.add(site);
   }
@@ -2145,7 +2170,7 @@ public final class Runlight
                   "mobile", h.get("sec-ch-ua-mobile"),
                   "platform", h.get("sec-ch-ua-platform")),
               screenWidth instanceof Number n ? n.doubleValue() : null);
-      Map<String, Object> location = Geo.locate(h, address, geo);
+      Map<String, Object> location = Geo.locate(h, address, geo, Js.truthy(trustProxy));
       Map<String, Object> utm = Js.map(page.get("utm"));
       Map<String, Object> row = new LinkedHashMap<>();
       row.put("id", session.get("id"));

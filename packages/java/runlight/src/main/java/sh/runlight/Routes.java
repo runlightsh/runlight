@@ -12,7 +12,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -343,8 +342,11 @@ public final class Routes {
 
   private final Map<String, Asked> asked = new LinkedHashMap<>();
 
-  /** Taken while a viewer's question is counted toward the day. */
-  private final ReentrantLock dailyTurn = new ReentrantLock();
+  /** The most of a link domain's check answer read; the real one is a few dozen bytes. */
+  private static final long LINK_DOMAIN_ANSWER_BYTES = 16_384;
+
+  /** The most of a connected install's live answer read, for a share or an embed. */
+  private static final long REMOTE_REALTIME_BYTES = 4L * 1024 * 1024;
 
   private record Script(String body, String etag, long at) {}
 
@@ -1501,13 +1503,23 @@ public final class Routes {
           Response answer =
               Safefetch.publicFetch(
                   "https://" + domain + Runlight.LINK_DOMAIN_CHECK,
-                  Json.object("timeoutMs", 5000L),
+                  Json.object(
+                      "timeoutMs",
+                      5000L,
+                      "maxBytes",
+                      LINK_DOMAIN_ANSWER_BYTES + 1,
+                      "truncate",
+                      true),
                   rl.fetcher);
+          // Read no further than the check's answer needs, so a domain that never stops writing
+          // fills nothing.
           Object body;
           try {
-            Json.Parsed parsed = Json.tryParse(answer.text());
-            body = parsed.ok() && Js.isObject(parsed.value()) ? parsed.value() : null;
+            body = Body.readJsonCapped(answer, LINK_DOMAIN_ANSWER_BYTES);
           } catch (RuntimeException e) {
+            body = null;
+          }
+          if (body != null && !Js.isObject(body)) {
             body = null;
           }
           if (answer.ok()
@@ -1735,13 +1747,9 @@ public final class Routes {
   /** The key picker tickets are signed with, made on first use and kept in the database. */
   private String pickKey() {
     rl.init();
-    String saved = store().setting("pick-key");
-    if (saved != null && !saved.isEmpty()) {
-      return saved;
-    }
-    String made = Hash.randomId(32);
-    store().setSetting("pick-key", made);
-    return made;
+    // Written only if no other request wrote one first, so nothing signed with a key that lost goes
+    // stale.
+    return store().settingOrAdd("pick-key", () -> Hash.randomId(32));
   }
 
   /**
@@ -1802,13 +1810,9 @@ public final class Routes {
    */
   private String embedKey() {
     rl.init();
-    String saved = store().setting("embed-key");
-    if (saved != null && !saved.isEmpty()) {
-      return saved;
-    }
-    String made = Hash.randomId(32);
-    store().setSetting("embed-key", made);
-    return made;
+    // Written only if no other request wrote one first, so nothing signed with a key that lost goes
+    // stale.
+    return store().settingOrAdd("embed-key", () -> Hash.randomId(32));
   }
 
   /** An embed token that still exists, for a site that still does. */
@@ -2470,41 +2474,51 @@ public final class Routes {
   }
 
   /**
-   * Counts a viewer's question toward the owner's daily number, or refuses it. The day's counts are
-   * written back only if they are still the ones read, so viewers asking at once, here or through
-   * another process, cannot each read the same count and all get past it.
+   * Counts a viewer's question in their own row for the day, or refuses it past the owner's daily
+   * number. The row only ever moves from the count read to the next one, so of questions sent at
+   * once, by one viewer or by every process on the database, each count is taken once. Answers
+   * "assistant_soon" when the row kept changing underneath.
    */
   private Response countDaily(String who, long now) {
     Object limit = viewerDaily();
-    String day = "assistant-asked:" + Time.isoString(now).substring(0, 10);
-    dailyTurn.lock();
-    try {
-      while (true) {
-        String stored = store().setting(day);
-        Map<String, Object> counts =
-            new LinkedHashMap<>(Js.map(Json.parse(stored != null ? stored : "{}")));
-        double count = counts.containsKey(who) ? Js.asDouble(counts.get(who)) : 0;
-        if (count >= Js.asDouble(limit)) {
-          return coded(
-              "Viewers can ask " + Js.string(limit) + " questions a day. Ask again tomorrow.",
-              "assistant_daily",
-              429,
-              Json.object("limit", Js.string(limit)));
-        }
-        counts.put(who, Js.num(count + 1));
-        if (store().swapSetting(day, stored, Json.stringify(counts))) {
-          break;
-        }
-      }
-    } finally {
-      dailyTurn.unlock();
+    double max = Js.asDouble(limit);
+    Response over =
+        coded(
+            "Viewers can ask " + Js.string(limit) + " questions a day. Ask again tomorrow.",
+            "assistant_daily",
+            429,
+            Json.object("limit", Js.string(limit)));
+    if (max < 1) {
+      return over;
     }
-    for (Map<String, Object> entry : store().settingsStartingWith("assistant-asked:")) {
-      if (!day.equals(entry.get("key"))) {
-        store().setSetting((String) entry.get("key"), null);
+    String day = "assistant-asked:" + Time.isoString(now).substring(0, 10) + ":";
+    String key = day + who;
+    for (int tries = 0; tries < 20; tries++) {
+      String seen = store().setting(key);
+      if (seen == null) {
+        if (!store().addSetting(key, "1")) {
+          continue;
+        }
+        // A viewer's first question of the day clears the days before.
+        for (Map<String, Object> entry : store().settingsStartingWith("assistant-asked:")) {
+          if (!((String) entry.get("key")).startsWith(day)) {
+            store().setSetting((String) entry.get("key"), null);
+          }
+        }
+        return null;
+      }
+      double count = Js.toNumber(seen);
+      if (count >= max) {
+        return over;
+      }
+      if (store().swapSetting(key, seen, Js.string(Js.num(count + 1)))) {
+        return null;
       }
     }
-    return null;
+    return coded(
+        "You have asked a lot in a short time. Wait a little and ask again.",
+        "assistant_soon",
+        429);
   }
 
   private Response tokensApi(Request request, String path) {
@@ -3498,10 +3512,12 @@ public final class Routes {
           return answer;
         }
         rl.forgetRemoteInfo(id);
-      } else if (remote == null && retention != Json.UNDEFINED) {
-        rl.setRetention(id, retention == null ? null : Js.num(Js.toNumber(retention)));
       }
+      // updateSite checks every field, hostnames too, before it changes anything.
       Map<String, Object> patch = new LinkedHashMap<>();
+      if (remote == null && retention != Json.UNDEFINED) {
+        patch.put("retentionMonths", retention == null ? null : Js.num(Js.toNumber(retention)));
+      }
       if (defined(body, "name")) {
         patch.put("name", Js.string(Js.get(body, "name")));
       }
@@ -3656,12 +3672,17 @@ public final class Routes {
       if (!path.equals("/api/realtime") || !unfeed || !answer.ok()) {
         return answer;
       }
-      Json.Parsed live = Json.tryParse(answer.text());
-      if (!live.ok() || !(live.value() instanceof Map<?, ?>)) {
+      Object live;
+      try {
+        live = Body.readJsonCapped(answer, REMOTE_REALTIME_BYTES);
+      } catch (RuntimeException e) {
+        live = null;
+      }
+      if (!(live instanceof Map<?, ?>)) {
         String host = new Url(Js.string(remote.get("url"))).host();
         return coded("Could not reach " + host, "unreachable", 502, Json.object("host", host));
       }
-      Map<String, Object> out = new LinkedHashMap<>(asMap(live.value()));
+      Map<String, Object> out = new LinkedHashMap<>(asMap(live));
       out.put("recent", new ArrayList<>());
       return json(out);
     }

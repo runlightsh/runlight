@@ -224,6 +224,12 @@ class ManageTest {
   private static final class MailCatcher implements Fetcher {
     final List<Map<String, Object>> mail = new ArrayList<>();
 
+    /** The webhook's name is made up, so it is on the public internet wherever it points. */
+    @Override
+    public List<String> lookup(String name) {
+      return List.of("93.184.215.14");
+    }
+
     @Override
     public synchronized Response fetch(String url, FetchInit init) {
       String body = init.bodyText();

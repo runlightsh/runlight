@@ -207,9 +207,20 @@ public final class Assistant {
     return true;
   }
 
+  /**
+   * The most of a model's answer, or its list of models, read; past it the answer is unreadable.
+   */
+  private static final long MAX_ANSWER_BYTES = 4L * 1024 * 1024;
+
+  /**
+   * The answer's JSON, or null where it is not JSON or is longer than {@link #MAX_ANSWER_BYTES}.
+   */
   private static Object parse(Response answer) {
-    Json.Parsed parsed = Json.tryParse(answer.text());
-    return parsed.ok() ? parsed.value() : null;
+    try {
+      return Body.readJsonCapped(answer, MAX_ANSWER_BYTES);
+    } catch (RuntimeException e) {
+      return null;
+    }
   }
 
   /**
@@ -220,6 +231,17 @@ public final class Assistant {
   private static AssistantError refused(MetadataAddressError error) {
     return new AssistantError(
         error.getMessage(), "address_refused", Json.object("host", error.host()));
+  }
+
+  /**
+   * A service that sent the request to another origin, which would have carried the key, and the
+   * question with it.
+   */
+  private static AssistantError redirected(RedirectRefusedError error) {
+    return new AssistantError(
+        error.getMessage(),
+        "redirect_refused",
+        Json.object("host", error.host(), "to", error.to()));
   }
 
   private static Object post(
@@ -246,10 +268,14 @@ public final class Assistant {
                   .method("POST")
                   .headers(all)
                   .body(Json.stringify(body))
-                  .timeoutMs(Math.min(90_000, left)),
+                  .timeoutMs(Math.min(90_000, left))
+                  .maxBytes(MAX_ANSWER_BYTES + 1)
+                  .truncate(true),
               fetcher);
     } catch (MetadataAddressError error) {
       throw refused(error);
+    } catch (RedirectRefusedError error) {
+      throw redirected(error);
     } catch (RuntimeException error) {
       String host = new Url(url).host();
       throw error instanceof FetchError f && f.timedOut()
@@ -589,10 +615,16 @@ public final class Assistant {
       answer =
           Safefetch.serviceFetch(
               base + "/models" + (anthropic ? "?limit=100" : ""),
-              new FetchInit().headers(headers).timeoutMs(20_000),
+              new FetchInit()
+                  .headers(headers)
+                  .timeoutMs(20_000)
+                  .maxBytes(MAX_ANSWER_BYTES + 1)
+                  .truncate(true),
               fetcher);
     } catch (MetadataAddressError error) {
       throw refused(error);
+    } catch (RedirectRefusedError error) {
+      throw redirected(error);
     } catch (RuntimeException error) {
       String host = new Url(base).host();
       throw new AssistantError("Could not reach " + host, "unreachable", Json.object("host", host));

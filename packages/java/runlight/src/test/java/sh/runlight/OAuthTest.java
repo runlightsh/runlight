@@ -403,4 +403,61 @@ final class OAuthTest {
         signIn.headers().get("location"));
     assertNotEquals(null, signIn.headers().get("cache-control"));
   }
+
+  @Test
+  void aKeyMadeOnFirstUseIsTheSameForEveryRequestThatAsksAtOnce() throws Exception {
+    FakeInstall install = new FakeInstall(List.of());
+    java.util.concurrent.atomic.AtomicInteger made =
+        new java.util.concurrent.atomic.AtomicInteger();
+    java.util.concurrent.ExecutorService pool =
+        java.util.concurrent.Executors.newFixedThreadPool(10);
+    try {
+      java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+      List<java.util.concurrent.Future<String>> keys = new java.util.ArrayList<>();
+      for (int i = 0; i < 10; i++) {
+        keys.add(
+            pool.submit(
+                () -> {
+                  go.await();
+                  return install
+                      .store()
+                      .settingOrAdd("embed-key", () -> "key-" + made.incrementAndGet());
+                }));
+      }
+      go.countDown();
+      java.util.Set<String> seen = new java.util.HashSet<>();
+      for (java.util.concurrent.Future<String> key : keys) {
+        seen.add(key.get());
+      }
+      assertEquals(1, seen.size(), "every caller signs with the one written first");
+      assertEquals(seen.iterator().next(), install.store().setting("embed-key"));
+
+      List<java.util.concurrent.Future<String>> agents = new java.util.ArrayList<>();
+      java.util.concurrent.CountDownLatch again = new java.util.concurrent.CountDownLatch(1);
+      for (int i = 0; i < 5; i++) {
+        agents.add(
+            pool.submit(
+                () -> {
+                  again.await();
+                  return OAuth.agentsKey(install, "default", false);
+                }));
+      }
+      again.countDown();
+      java.util.Set<String> kept = new java.util.HashSet<>();
+      for (java.util.concurrent.Future<String> key : agents) {
+        kept.add(key.get());
+      }
+      assertEquals(1, kept.size());
+      String agent = kept.iterator().next();
+      assertEquals(agent, install.store().setting("observe-key:default"));
+      assertNotEquals(
+          agent, OAuth.agentsKey(install, "default", true), "replacing still makes a new one");
+    } finally {
+      pool.shutdown();
+    }
+    // The store's own write-if-absent says which caller wrote.
+    assertTrue(install.store().addSetting("fresh", "a"));
+    assertEquals(false, install.store().addSetting("fresh", "b"));
+    assertEquals("a", install.store().setting("fresh"));
+  }
 }

@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -206,33 +207,79 @@ public final class Config implements AutoCloseable {
       return secret = given;
     }
     Path path = dataDir().resolve("secret");
-    String saved = read(path);
-    if (!saved.isEmpty()) {
-      return secret = saved;
+    String found = readWhole(path);
+    if (found != null) {
+      return secret = found;
     }
     String made = Hash.randomId(32);
-    // Made once: whoever writes the file first wins, and everyone else reads theirs.
-    if (!create(path, made + "\n")) {
-      pause();
-      saved = read(path);
-      if (saved.isEmpty()) {
-        throw new IllegalStateException(
-            "Runlight: could not write "
-                + path
-                + ". Make the data folder writable, or set RUNLIGHT_SECRET.");
+    // Made once, written whole to a file of its own and then linked into place, which refuses to
+    // replace a file already there, so a server starting at the same moment never reads half a
+    // secret: whoever links first wins, and everyone else reads theirs.
+    Path temp =
+        dataDir().resolve(".secret-" + ProcessHandle.current().pid() + "-" + Hash.randomId(6));
+    try {
+      if (!create(temp, made + "\n")) {
+        throw new IllegalStateException("Runlight: could not write " + temp);
       }
-      return secret = saved;
+      try {
+        Files.createLink(path, temp);
+        return secret = made;
+      } catch (FileAlreadyExistsException e) {
+        return secret = Objects.requireNonNullElseGet(readWhole(path), () -> refuse(path));
+      } catch (IOException | UnsupportedOperationException e) {
+        // A file system with no hard links still creates the file only if it is not there; a reader
+        // that catches it before its contents land reads it again.
+        if (create(path, made + "\n")) {
+          return secret = made;
+        }
+        return secret = Objects.requireNonNullElseGet(readWhole(path), () -> refuse(path));
+      }
+    } finally {
+      try {
+        Files.deleteIfExists(temp);
+      } catch (IOException e) {
+        // Gone already, or left for the next start to ignore.
+      }
     }
-    return secret = made;
   }
 
-  /** A file's text, trimmed, or "" when there is none. */
-  private static String read(Path path) {
-    try {
-      return Files.isRegularFile(path) ? Js.trim(Files.readString(path)) : "";
-    } catch (IOException e) {
-      return "";
+  /** Shorter than any secret this file has been given, so one caught half written is not used. */
+  private static final int SHORTEST = 32;
+
+  /**
+   * The secret in a file, waiting up to two seconds for one too short to be whole; null when there
+   * is no file.
+   */
+  private static String readWhole(Path path) {
+    for (int tries = 0; ; tries++) {
+      String text;
+      try {
+        if (!Files.isRegularFile(path)) {
+          return null;
+        }
+        text = Js.trim(Files.readString(path));
+      } catch (IOException e) {
+        if (!Files.exists(path)) {
+          return null;
+        }
+        throw new UncheckedIOException(e);
+      }
+      if (text.length() >= SHORTEST) {
+        return text;
+      }
+      if (tries >= 20) {
+        refuse(path);
+      }
+      pause(100);
     }
+  }
+
+  private static String refuse(Path path) {
+    throw new IllegalStateException(
+        "Runlight: "
+            + path
+            + " holds no whole secret. Delete it to have a new one made, which signs everyone out,"
+            + " or set RUNLIGHT_SECRET.");
   }
 
   /**
@@ -267,8 +314,12 @@ public final class Config implements AutoCloseable {
   }
 
   private static void pause() {
+    pause(50);
+  }
+
+  private static void pause(long millis) {
     try {
-      Thread.sleep(50);
+      Thread.sleep(millis);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }

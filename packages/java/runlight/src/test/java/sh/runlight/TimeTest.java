@@ -262,4 +262,72 @@ class TimeTest {
           Fixtures.label(c));
     }
   }
+
+  @Test
+  void anIntervalTooFineForALongRangeMovesUpToOneThatFitsAndNoBucketTakesInTheRest() {
+    long now = utc(2026, 9, 12, 12);
+    long day = 86_400_000L;
+    Map<String, Object> hourly =
+        Time.resolveRange(
+            Map.of("from", "2026-08-01", "to", "2026-09-09", "interval", "hour"), "UTC", now, null);
+    assertEquals("day", hourly.get("interval"), "40 days of hours is too many hours");
+    assertEquals(40, Time.buckets(hourly, "UTC").size());
+    assertEquals(
+        "hour",
+        Time.resolveRange(
+                Map.of("from", "2026-08-01", "to", "2026-08-31", "interval", "hour"),
+                "UTC",
+                now,
+                null)
+            .get("interval"),
+        "a month of hours still fits");
+
+    Map<String, Object> daily =
+        Time.resolveRange(
+            Map.of("from", "2018-01-03", "to", "2026-10-12", "interval", "day"),
+            "Europe/London",
+            now,
+            null);
+    assertEquals("week", daily.get("interval"));
+    List<Map<String, Object>> weeks = Time.buckets(daily, "Europe/London");
+    assertEquals(daily.get("from"), weeks.get(0).get("start"));
+    assertEquals(
+        daily.get("to"), weeks.get(weeks.size() - 1).get("end"), "the buckets reach the end");
+    for (int i = 0; i < weeks.size(); i++) {
+      long start = (Long) weeks.get(i).get("start");
+      long end = (Long) weeks.get(i).get("end");
+      if (i > 0) {
+        assertEquals(weeks.get(i - 1).get("end"), start);
+      }
+      // A week across a clock change is an hour short or long; none is longer than that.
+      assertTrue(end - start <= 7 * day + 3_600_000L, "week " + i);
+      if (i > 0 && i < weeks.size() - 1) {
+        assertTrue(end - start >= 7 * day - 3_600_000L, "week " + i);
+      }
+    }
+
+    Map<String, Object> decades =
+        Time.resolveRange(
+            Map.of("from", "1990-01-01", "to", "2026-10-12", "interval", "day"), "UTC", now, null);
+    assertEquals("month", decades.get("interval"));
+    List<Map<String, Object>> months = Time.buckets(decades, "UTC");
+    assertEquals(442, months.size());
+    for (Map<String, Object> m : months) {
+      assertTrue((Long) m.get("end") - (Long) m.get("start") <= 31 * day);
+    }
+    assertNull(
+        Time.resolveRange(Map.of("from", "1900-01-01", "to", "2026-10-12"), "UTC", now, null),
+        "past 1,000 months there is no interval that fits");
+
+    // A comparison longer than its range keeps whole buckets, cut off at a boundary.
+    Map<String, Object> longer = new java.util.LinkedHashMap<>(decades);
+    longer.put("from", utc(2000, 0, 1, 0));
+    longer.put("fromDate", "2000-01-01");
+    longer.put("toDate", "2026-10-12");
+    longer.put("interval", "day");
+    List<Map<String, Object>> cut = Time.buckets(longer, "UTC");
+    assertEquals(1000, cut.size());
+    Map<String, Object> last = cut.get(cut.size() - 1);
+    assertEquals(day, (Long) last.get("end") - (Long) last.get("start"));
+  }
 }

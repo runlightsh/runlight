@@ -315,19 +315,37 @@ public final class Accounts {
       if (step == null) {
         return false;
       }
-      db().run("UPDATE rl_users SET totp_step = ? WHERE id = ?", List.of(step, id));
-      return true;
+      // Only if no check since has used this step or a later one: of two at once, one moves it and
+      // the other is refused.
+      return changed(
+              "UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)",
+              List.of(step, id, step))
+          == 1;
     }
-    List<Object> hashes = stringList(r.get("totp_recovery"));
+    Object read = r.get("totp_recovery");
+    List<Object> hashes = stringList(read);
     int at = hashes.indexOf(Crypto.recoveryHash(given));
     if (at < 0) {
       return false;
     }
     hashes.remove(at);
-    db().run(
-            "UPDATE rl_users SET totp_recovery = ? WHERE id = ?",
-            List.of(Json.stringify(hashes), id));
-    return true;
+    // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere
+    // is not used twice.
+    return changed(
+            "UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?",
+            List.of(Json.stringify(hashes), id, Js.string(read)))
+        == 1;
+  }
+
+  /**
+   * How many rows a statement on a user changed. SQLite has no lock to lean on across processes, so
+   * this is how a write knows it won.
+   */
+  private long changed(String sql, List<?> params) {
+    if (db().dialect().equals("mysql")) {
+      return db().affected(sql, params);
+    }
+    return db().all(sql + " RETURNING id", params).size();
   }
 
   /**
