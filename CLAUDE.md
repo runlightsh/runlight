@@ -11,8 +11,9 @@ many sites. Planning docs and specs live outside the repo; never commit them.
 - Commits: short one-line messages that read like a person wrote them, no
   attribution lines. Review the full diff before committing. Never push unless
   asked.
-- Never store an IP address, a full user agent, or any identifier that lasts
-  longer than a day.
+- Never store an IP address or a full user agent. No identifier lasts more
+  than two days: a visitor lasts one day, or until a visit that runs past
+  midnight ends.
 - Behaviour lands in TypeScript first, then `conformance/` is regenerated
   (`npm run conformance` writes `conformance/http.json`) and the other
   implementations follow.
