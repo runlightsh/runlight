@@ -47,8 +47,7 @@ const SCOPES: Scope[] = ["read", "manage", "cms"];
 /** The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it. */
 export async function agentsKey(runlight: Runlight, site: string, replace = false): Promise<string> {
   const name = `observe-key:${site}`;
-  const saved = replace ? null : await runlight.store.setting(name);
-  if (saved) return saved;
+  if (!replace) return runlight.store.settingOrAdd(name, () => `rlo_${randomId(20)}`);
   const key = `rlo_${randomId(20)}`;
   await runlight.store.setSetting(name, key);
   return key;
@@ -73,11 +72,8 @@ const fromBase64url = (text: string) => new TextDecoder().decode(Uint8Array.from
 
 /** The key client ids are signed with, made on first use and kept in the database for every process. */
 async function clientKey(runlight: Runlight): Promise<string> {
-  const saved = await runlight.store.setting("oauth-key");
-  if (saved) return saved;
-  const made = randomId(32);
-  await runlight.store.setSetting("oauth-key", made);
-  return made;
+  // Written only if no other request wrote one first, so every process signs with the same key.
+  return runlight.store.settingOrAdd("oauth-key", () => randomId(32));
 }
 
 /**

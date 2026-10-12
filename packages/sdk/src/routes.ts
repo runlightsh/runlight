@@ -797,11 +797,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   /** The key picker tickets are signed with, made on first use and kept in the database for every process. */
   async function pickKey(): Promise<string> {
     await runlight.init();
-    const saved = await runlight.store.setting("pick-key");
-    if (saved) return saved;
-    const made = randomId(32);
-    await runlight.store.setSetting("pick-key", made);
-    return made;
+    // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+    return runlight.store.settingOrAdd("pick-key", () => randomId(32));
   }
 
   const hex = (text: string) => Array.from(new TextEncoder().encode(text), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -832,11 +829,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   /** The key embed tickets and sessions are signed with, made on first use and kept in the database for every process. */
   async function embedKey(): Promise<string> {
     await runlight.init();
-    const saved = await runlight.store.setting("embed-key");
-    if (saved) return saved;
-    const made = randomId(32);
-    await runlight.store.setSetting("embed-key", made);
-    return made;
+    // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+    return runlight.store.settingOrAdd("embed-key", () => randomId(32));
   }
 
   /** An embed token that still exists, for a site that still does. */

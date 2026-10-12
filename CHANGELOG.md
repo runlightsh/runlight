@@ -16,6 +16,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 - Changing a site in the dashboard checks every field, its domains included, before it changes anything, so a change refused for a bad or taken domain no longer shortens how long visits are kept, deleting the older ones, or clears the days built in the old timezone. Visits are pruned only once the change is saved.
 - Answers from an AI model's API, its list of models, a mail service's error, a link domain's check, and a connected install's live visitors are read only so far (4 MiB for a model and an install, 64 KiB for an error, 16 KiB for a check), and a body nobody reads is let go, so a service that answers without end cannot fill memory.
+- The keys Runlight makes on first use and keeps in the database (the OAuth client key, the goal picker's and the embedded dashboard's signing keys, and a site's agents key) are written only if none is there yet, and every request reads back the one written first, so requests arriving together no longer overwrite each other's key and leave what was signed with the others invalid.
+- The standalone server makes its secret in the data folder whole in a file of its own and links it into place, so two servers starting at once on one folder agree on it, and a secret file read empty or short is read again for a moment and then refused, never used. It stays readable only by its user.
 
 ## 0.1.2 - 2026-10-12
 

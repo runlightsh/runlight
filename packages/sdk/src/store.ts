@@ -1536,6 +1536,20 @@ export class SqlStore {
     return (await this.settingChanged(sql, [key, value])) === 1;
   }
 
+  /**
+   * A setting, or `made()` written as it when there is none yet, such as a signing key made on first use. Of two
+   * callers at once, both get the value written first, so nothing signed with a key that lost is left invalid.
+   */
+  async settingOrAdd(key: string, made: () => string): Promise<string> {
+    for (let tries = 0; tries < 5; tries++) {
+      const saved = await this.setting(key);
+      if (saved !== null) return saved;
+      const value = made();
+      if (await this.addSetting(key, value)) return value;
+    }
+    throw new Error(`Runlight: could not read or write the setting ${key}`);
+  }
+
   /** Changes a setting only if it still holds `from`. Of two callers at once, only one gets true. */
   async swapSetting(key: string, from: string, to: string): Promise<boolean> {
     return (await this.settingChanged(`UPDATE rl_settings SET value = ? WHERE "key" = ? AND value = ?`, [to, key, from])) === 1;
