@@ -613,4 +613,57 @@ defmodule Runlight.PureTest do
 
     assert Runlight.Assistant.acknowledgement("merci", "fr") =~ "plaisir"
   end
+
+  test "a hosting platform's location headers count only when they are trusted" do
+    headers = Headers.new([{"cf-ipcountry", "US"}, {"cf-region-code", "CA"}, {"cf-ipcity", "San Francisco"}])
+    lookup = fn _ -> %{country: "DE", region: "BE", city: "Berlin"} end
+
+    assert Geo.locate(headers, "203.0.113.9", lookup, true).country == "US"
+    assert Geo.locate(headers, "203.0.113.9", lookup).country == "US"
+    untrusted = Geo.locate(headers, "203.0.113.9", lookup, false)
+    assert {untrusted.country, untrusted.city} == {"DE", "Berlin"}
+    assert Geo.locate(headers, "203.0.113.9", nil, false).country == ""
+  end
+
+  test "an interval too fine for a long range moves up instead of merging the tail" do
+    now = 1_791_288_000_000
+
+    # Hours over forty days are counted by the day, and the range says so.
+    range = Time.resolve_range(%{from: "2026-08-01", to: "2026-09-09", interval: "hour"}, "UTC", now)
+    assert range.interval == "day"
+    days = Time.buckets(range, "UTC")
+    assert length(days) == 40
+    assert Enum.all?(days, &(&1.end - &1.start == 86_400_000))
+
+    # A short range keeps the hour; a long one moves from day to week to month as the count grows.
+    assert Time.resolve_range(%{from: "2026-08-01", to: "2026-08-31", interval: "hour"}, "UTC", now).interval == "hour"
+    assert Time.resolve_range(%{from: "2020-01-01", to: "2026-09-09", interval: "day"}, "UTC", now).interval == "week"
+    assert Time.resolve_range(%{from: "2005-01-01", to: "2026-09-09", interval: "day"}, "UTC", now).interval == "month"
+    assert Time.resolve_range(%{from: "1900-01-01", to: "2026-09-09", interval: "day"}, "UTC", now) == nil
+
+    # Every bucket follows the interval's boundaries, and none swallows the rest of the range.
+    range = Time.resolve_range(%{from: "2005-03-15", to: "2026-09-09", interval: "day"}, "America/New_York", now)
+    months = Time.buckets(range, "America/New_York")
+    assert length(months) == 259
+
+    assert Enum.all?(
+             Enum.slice(months, 1..-2//1),
+             &((&1.end - &1.start) in (28 * 86_400_000)..(31 * 86_400_000 + 3_600_000))
+           )
+
+    assert List.last(months).end == range.to
+
+    # A comparison range longer than the main one is cut off at a boundary, not merged into its last bucket.
+    long = %{
+      from: Time.start_of("2020-01-01", "UTC"),
+      to: Time.start_of("2026-01-01", "UTC"),
+      from_date: "2020-01-01",
+      to_date: "2025-12-31",
+      interval: "day"
+    }
+
+    cut = Time.buckets(long, "UTC")
+    assert length(cut) == 1000
+    assert List.last(cut).end - List.last(cut).start == 86_400_000
+  end
 end

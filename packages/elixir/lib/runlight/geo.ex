@@ -111,10 +111,11 @@ defmodule Runlight.Geo do
   defp latin1(bytes), do: :unicode.characters_to_binary(bytes, :latin1, :utf8)
 
   @doc false
-  # The visitor's location: the platform's headers, else the lookup, else nothing.
-  @spec locate(Headers.t(), String.t(), (String.t() -> map() | nil) | nil) :: map()
-  def locate(headers, ip, lookup \\ nil) do
-    from_headers = location_from_headers(headers)
+  # The visitor's location: the platform's headers, else the lookup, else nothing. The headers are believed only
+  # with `trust_headers`, as the address is: without a proxy in front, a client writes them itself.
+  @spec locate(Headers.t(), String.t(), (String.t() -> map() | nil) | nil, boolean()) :: map()
+  def locate(headers, ip, lookup \\ nil, trust_headers \\ true) do
+    from_headers = if trust_headers, do: location_from_headers(headers)
 
     cond do
       from_headers != nil and from_headers.country != "" ->

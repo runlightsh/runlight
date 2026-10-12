@@ -1029,44 +1029,35 @@ defmodule Runlight do
       zone
     end
 
+    # Every field is checked before anything changes, since a new timezone clears the built days and a
+    # shorter retention deletes visits; pruning starts only once the site is saved.
+    name = if Object.has_key?(patch, "name"), do: check_name.()
+    zone = if Object.has_key?(patch, "timezone"), do: check_zone.()
+
+    hostnames =
+      if rl.managed_sites and Object.has_key?(patch, "hostnames") and remote(rl, id) == nil,
+        do: hostnames_for(rl, patch["hostnames"], id)
+
+    retention = if Object.has_key?(patch, "retentionMonths"), do: patch["retentionMonths"], else: :undefined
+    if retention != :undefined, do: check_retention(rl, id, retention)
+    if zone != nil and zone != (site(rl, id) || %{})["timezone"], do: zone_changed(rl, id, zone)
+
     if rl.managed_sites do
-      next = current
-      next = if Object.has_key?(patch, "name"), do: Object.put(next, "name", check_name.()), else: next
-
-      next =
-        if Object.has_key?(patch, "timezone") do
-          zone = check_zone.()
-          if zone != (site(rl, id) || %{})["timezone"], do: zone_changed(rl, id, zone)
-          Object.put(next, "timezone", zone)
-        else
-          next
-        end
-
-      next =
-        if Object.has_key?(patch, "hostnames") and remote(rl, id) == nil,
-          do: Object.put(next, "hostnames", hostnames_for(rl, patch["hostnames"], id)),
-          else: next
-
+      next = if name != nil, do: Object.put(current, "name", name), else: current
+      next = if zone != nil, do: Object.put(next, "timezone", zone), else: next
+      next = if hostnames != nil, do: Object.put(next, "hostnames", hostnames), else: next
       Store.upsert_site(rl.store, next, now(rl))
       set_configured(rl, Enum.map(configured(rl), &if(&1["id"] == id, do: next, else: &1)))
-      site(rl, id)
     else
       next = Map.get(overrides(rl), id, Object.new())
-      next = if Object.has_key?(patch, "name"), do: Object.put(next, "name", check_name.()), else: next
-
-      next =
-        if Object.has_key?(patch, "timezone") do
-          zone = check_zone.()
-          if zone != site(rl, id)["timezone"], do: zone_changed(rl, id, zone)
-          Object.put(next, "timezone", zone)
-        else
-          next
-        end
-
+      next = if name != nil, do: Object.put(next, "name", name), else: next
+      next = if zone != nil, do: Object.put(next, "timezone", zone), else: next
       Store.set_site_overrides(rl.store, id, next)
       State.put(rl.table, :overrides, Map.put(overrides(rl), id, next))
-      site(rl, id)
     end
+
+    if retention != :undefined, do: set_retention(rl, id, retention)
+    site(rl, id)
   end
 
   @doc "How many months of visits a site keeps, or nil to keep everything (the default)."
@@ -1079,6 +1070,14 @@ defmodule Runlight do
   @doc "Sets how long a site keeps its visits, in months, or nil for ever; a shorter time deletes visits after the answer."
   @spec set_retention(t(), String.t(), integer() | nil) :: :ok
   def set_retention(rl, site, months) do
+    check_retention(rl, site, months)
+
+    Store.set_setting(rl.store, "retention:#{site}", if(months == nil, do: nil, else: JS.string(months)))
+    # Deleting a long history takes a while, so it runs in pieces after the answer.
+    State.later(rl.table, fn -> safely_apply_retention(rl, site) end)
+  end
+
+  defp check_retention(rl, site, months) do
     if site(rl, site) == nil or remote(rl, site) != nil,
       do: raise(SettingsError, message: "Unknown site", code: "unknown_site")
 
@@ -1091,10 +1090,6 @@ defmodule Runlight do
           code: "retention_bad",
           params: %{"months" => choices}
         )
-
-    Store.set_setting(rl.store, "retention:#{site}", if(months == nil, do: nil, else: JS.string(months)))
-    # Deleting a long history takes a while, so it runs in pieces after the answer.
-    State.later(rl.table, fn -> safely_apply_retention(rl, site) end)
   end
 
   defp safely_apply_retention(rl, only) do
@@ -1570,7 +1565,7 @@ defmodule Runlight do
               client[:screen_width]
             )
 
-          location = Runlight.Geo.locate(request.headers, ip, rl.geo)
+          location = Runlight.Geo.locate(request.headers, ip, rl.geo, rl.trust_proxy not in [nil, false, ""])
 
           Store.insert_session(rl.store, %{
             id: session.id,

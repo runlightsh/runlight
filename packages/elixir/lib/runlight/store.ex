@@ -1300,19 +1300,51 @@ defmodule Runlight.Store do
   @spec take_setting(t(), String.t()) :: String.t() | nil
   def take_setting(store, key) do
     case setting(store, key) do
-      nil ->
-        nil
-
-      value ->
-        sql = ~s(DELETE FROM rl_settings WHERE "key" = ?)
-
-        gone =
-          if dialect(store) == "mysql",
-            do: Db.affected(store.db, sql, [key]),
-            else: length(all(store, ~s(#{sql} RETURNING "key"), [key]))
-
-        if gone == 1, do: value, else: nil
+      nil -> nil
+      value -> if setting_changed(store, ~s(DELETE FROM rl_settings WHERE "key" = ?), [key]) == 1, do: value
     end
+  end
+
+  @doc "Writes a setting only if it is not there yet. Of two callers at once, only one gets true."
+  @spec add_setting(t(), String.t(), String.t()) :: boolean()
+  def add_setting(store, key, value) do
+    # mysql2 counts a row a duplicate key found as written, so MySQL ignores the insert instead.
+    sql =
+      if dialect(store) == "mysql",
+        do: ~s{INSERT IGNORE INTO rl_settings ("key", value) VALUES (?, ?)},
+        else: Sql.upsert(dialect(store), "rl_settings", [~s("key"), "value"], [~s("key")], [])
+
+    setting_changed(store, sql, [key, value]) == 1
+  end
+
+  @doc "Changes a setting only if it still holds `from`. Of two callers at once, only one gets true."
+  @spec swap_setting(t(), String.t(), String.t(), String.t()) :: boolean()
+  def swap_setting(store, key, from, to) do
+    setting_changed(store, ~s(UPDATE rl_settings SET value = ? WHERE "key" = ? AND value = ?), [to, key, from]) == 1
+  end
+
+  @doc "A setting that is made once: every caller gets the value written first, whoever made it."
+  @spec setting_or_add(t(), String.t(), (-> String.t())) :: String.t()
+  def setting_or_add(store, key, make), do: setting_or_add(store, key, make, 5)
+
+  defp setting_or_add(_store, key, _make, 0), do: raise("Could not make the setting #{key}")
+
+  defp setting_or_add(store, key, make, tries) do
+    case setting(store, key) do
+      nil ->
+        made = make.()
+        if add_setting(store, key, made), do: made, else: setting_or_add(store, key, make, tries - 1)
+
+      found ->
+        found
+    end
+  end
+
+  # How many settings a statement wrote. SQLite has no lock to lean on, so this is how a write knows it won.
+  defp setting_changed(store, sql, params) do
+    if dialect(store) == "mysql",
+      do: Db.affected(store.db, sql, params),
+      else: length(all(store, ~s(#{sql} RETURNING "key"), params))
   end
 
   @spec set_setting(t(), String.t(), String.t() | nil) :: :ok

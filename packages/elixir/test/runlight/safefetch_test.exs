@@ -408,13 +408,6 @@ defmodule Runlight.SafefetchTest do
     assert {second["method"], second["body"]} == {"POST", ~s({"a":1})}
     assert second["headers"]["content-type"] == "application/json"
 
-    # Another origin gets no credentials.
-    {fetcher, agent} = service(%{"http://127.0.0.1:8080/a" => {307, "http://localhost:8080/b"}})
-    assert {:ok, _} = Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/a", sent)
-    [_, second] = FakeFetcher.requests(agent)
-    assert second["url"] == "http://localhost:8080/b"
-    assert second["headers"] == JS.obj("content-type": "application/json")
-
     # A loop stops after five redirects, and the last answer comes back as it is.
     {fetcher, agent} = service(%{"http://127.0.0.1:8080/loop" => {302, "/loop"}})
 
@@ -422,6 +415,97 @@ defmodule Runlight.SafefetchTest do
              Safefetch.service_fetch(fetcher, "http://127.0.0.1:8080/loop", timeout: 5_000)
 
     assert length(FakeFetcher.requests(agent)) == 6
+  end
+
+  test "a service's redirect to another origin is refused before anything is sent there" do
+    keys = [
+      {"authorization", "Bearer k"},
+      {"proxy-authorization", "Basic k"},
+      {"cookie", "a=1"},
+      {"x-api-key", "k"},
+      {"api-key", "k"},
+      {"x-postmark-server-token", "k"}
+    ]
+
+    for {from, status, to, refused} <- [
+          {"http://127.0.0.1:8080/a", 307, "http://localhost:8080/b", "http://localhost:8080"},
+          {"http://127.0.0.1:8080/a", 308, "http://127.0.0.1:9090/b", "http://127.0.0.1:9090"},
+          {"https://api.example.com/a", 307, "http://198.51.100.7/b", "http://198.51.100.7"},
+          {"https://api.example.com/a", 308, "http://api.example.com/b", "http://api.example.com"},
+          {"https://api.example.com/a", 302, "ftp://files.example.com/b", "ftp:"}
+        ] do
+      {fetcher, agent} = service(%{from => {status, to}})
+
+      sent = [method: "POST", headers: [{"content-type", "application/json"} | keys], body: ~s({"a":1}), timeout: 5_000]
+      host = Runlight.Url.host(Runlight.Url.new(from))
+
+      assert Safefetch.service_fetch(fetcher, from, sent) == {:error, {:redirect_refused, host, refused}}
+      assert [_] = FakeFetcher.requests(agent), "nothing asked at #{to}"
+    end
+
+    # A metadata address named by the redirect is still refused as one.
+    {fetcher, _} = service(%{"https://api.example.com/a" => {307, "http://169.254.169.254/b"}})
+
+    assert Safefetch.service_fetch(fetcher, "https://api.example.com/a", timeout: 5_000) ==
+             {:error, {:address_refused, "169.254.169.254"}}
+  end
+
+  test "the assistant and mail services say a redirect was refused" do
+    {fetcher, agent} = service(%{"https://api.anthropic.com/v1/models?limit=100" => {307, "http://198.51.100.7/v1"}})
+    {rl, _} = instance(fetcher)
+
+    error =
+      assert_raise Runlight.AssistantError, fn ->
+        Runlight.Assistant.list_models(rl, JS.obj(provider: "anthropic", baseUrl: "", key: "sk-secret"))
+      end
+
+    assert {error.code, error.params} ==
+             {"redirect_refused", [{"host", "api.anthropic.com"}, {"to", "http://198.51.100.7"}]}
+
+    assert length(FakeFetcher.requests(agent)) == 1
+
+    {fetcher, agent} = service(%{"https://api.postmarkapp.com/email" => {307, "http://198.51.100.7/email"}})
+    message = %{to: "a@example.com", from: "r@example.com", subject: "Hi", html: "<p>Hi</p>", text: "Hi", headers: []}
+
+    error =
+      assert_raise Runlight.MailError, fn ->
+        Runlight.Mail.deliver(fetcher, JS.obj(service: "postmark", serverToken: "pm-secret"), message)
+      end
+
+    assert {error.code, error.params} ==
+             {"redirect_refused", [{"host", "api.postmarkapp.com"}, {"to", "http://198.51.100.7"}]}
+
+    assert length(FakeFetcher.requests(agent)) == 1
+  end
+
+  test "a service is fetched from the address its name was checked at" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listener)
+    me = self()
+
+    spawn_link(fn ->
+      {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+      {:ok, request} = :gen_tcp.recv(socket, 0, 5_000)
+      send(me, {:asked, request})
+      :ok = :gen_tcp.send(socket, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+      :gen_tcp.close(socket)
+    end)
+
+    # A name on this computer is allowed, and the connection goes to the address checked, with the name as Host.
+    assert {:ok, %Response{status: 200, body: "ok"}} =
+             Runlight.Fetch.httpc("http://localhost:#{port}/hook", service: true, timeout: 5_000)
+
+    assert_receive {:asked, request}
+    assert request =~ ~r/host: localhost:#{port}/i
+    :gen_tcp.close(listener)
+
+    # A name that cannot be looked up fails the connection, and a name with a metadata address is refused.
+    assert Runlight.Fetch.httpc("http://no-such-host.invalid/", service: true, timeout: 5_000) == {:error, :nxdomain}
+    assert Safefetch.service_address("localhost") |> elem(0) == :ok
+    assert Safefetch.service_address("no-such-host.invalid") == {:error, :nxdomain}
+
+    # The profile has no proxy of its own to look a name up again.
+    assert Runlight.Fetch.profile(true) == :runlight_public
   end
 
   test "the assistant's list of models and a mail webhook refuse a redirect to a metadata address" do
