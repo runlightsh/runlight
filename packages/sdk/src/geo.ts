@@ -63,8 +63,12 @@ export function locationFromHeaders(headers: Headers): Location | null {
   return null;
 }
 
-export async function locate(headers: Headers, ip: string, lookup?: GeoLookup): Promise<Location> {
-  const fromHeaders = locationFromHeaders(headers);
+/**
+ * Where a visitor is, from a hosting platform's headers or else the lookup. The headers are believed only
+ * with `trustHeaders`, as the address is: without a proxy in front, a client writes them itself.
+ */
+export async function locate(headers: Headers, ip: string, lookup?: GeoLookup, trustHeaders = true): Promise<Location> {
+  const fromHeaders = trustHeaders ? locationFromHeaders(headers) : null;
   if (fromHeaders?.country) return fromHeaders;
   if (lookup && ip) {
     try {

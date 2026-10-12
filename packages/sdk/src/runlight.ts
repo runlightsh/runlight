@@ -1011,7 +1011,7 @@ export class Runlight {
         },
         client.screenWidth,
       );
-      const location = await locate(request.headers, ip, this.geo);
+      const location = await locate(request.headers, ip, this.geo, Boolean(this.trustProxy));
       await this.store.insertSession({
         id: session.id,
         site: site.id,

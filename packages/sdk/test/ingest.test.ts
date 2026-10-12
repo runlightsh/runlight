@@ -232,6 +232,26 @@ test("a region name from a location database is kept readable, and a code stays 
   assert.deepEqual(rows.rows.map((r: any) => r.value).sort(), ["CA-Ontario", "GB-ENG"]);
 });
 
+test("a hosting platform's location headers count only when proxy headers are trusted", async () => {
+  const { runlight } = await import("../src/index.js");
+  const { sqlite } = await import("../src/stores/sqlite.js");
+  const countries = async (trustProxy: boolean) => {
+    const rl = runlight({ store: sqlite({ path: ":memory:" }), trustProxy, geo: () => ({ country: "DE", region: "BE", city: "Berlin" }) });
+    const { GET, POST } = rl.routes({ token: null });
+    const platform = { "cf-ipcountry": "US", "cf-region-code": "CA", "cf-ipcity": "San Francisco", "x-vercel-ip-country": "FR", "x-nf-geo": btoa(JSON.stringify({ country: { code: "JP" } })) };
+    for (const [i, [name, value]] of Object.entries(platform).entries()) {
+      // A visitor each, so each request opens a visit of its own.
+      const ip = `203.0.113.${i + 1}`;
+      const headers = { "user-agent": "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36", "x-forwarded-for": ip, [name]: value };
+      await POST(new Request("https://x.com/runlight/e", { method: "POST", headers, body: JSON.stringify({ k: "pageview", u: `https://x.com/${name}` }) }), { ip });
+    }
+    const rows = (await (await GET(new Request("https://x.com/runlight/api/breakdown?period=today&dimension=country"))).json()) as any;
+    return rows.rows.map((r: any) => r.value).sort();
+  };
+  assert.deepEqual(await countries(false), ["DE"], "without a proxy in front, a client writes them itself, so the lookup answers");
+  assert.deepEqual(await countries(true), ["DE", "FR", "JP", "US"], "behind one, they come first, and the lookup answers where they name no country");
+});
+
 test("tracker requests over the per-address limit are dropped until the next minute", async () => {
   const { runlight } = await import("../src/index.js");
   const { sqlite } = await import("../src/stores/sqlite.js");
