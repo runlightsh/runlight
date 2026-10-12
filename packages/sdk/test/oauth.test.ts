@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { runlight } from "../src/index.js";
+import { agentsKey } from "../src/oauth.js";
 import { sqlite } from "../src/stores/sqlite.js";
+import { STORES, cleanup, freshStore } from "./helpers.js";
+
+after(cleanup);
 
 const b64url = (buf: Buffer) => buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -182,3 +186,21 @@ test("a CMS plugin connects for the site that counts its domain and gets that si
   assert.equal(embed.status, 201, "the token is the site's dashboard key");
   assert.equal((await GET(new Request(`${origin}/runlight/api/stats?site=blog.com&period=today`, { headers: { authorization: `Bearer ${granted.access_token}` } }))).status, 403, "and reads nothing itself");
 });
+
+for (const kind of STORES) {
+  test(`${kind}: a key made on first use is the same for every request that asks at once`, async () => {
+    const store = freshStore(kind);
+    await store.migrate();
+    // Two processes on one database, each making its own key when it finds none.
+    let made = 0;
+    const keys = await Promise.all(Array.from({ length: 10 }, () => store.settingOrAdd("embed-key", () => `key-${++made}`)));
+    assert.equal(new Set(keys).size, 1, "every caller signs with the one written first");
+    assert.equal(await store.setting("embed-key"), keys[0]);
+    const rl = runlight({ store, site: { hostnames: ["example.com"] } });
+    await rl.init();
+    const agents = await Promise.all(Array.from({ length: 5 }, () => agentsKey(rl, "default")));
+    assert.equal(new Set(agents).size, 1);
+    assert.equal(await store.setting("observe-key:default"), agents[0]);
+    assert.notEqual(await agentsKey(rl, "default", true), agents[0], "replacing it still makes a new one");
+  });
+}

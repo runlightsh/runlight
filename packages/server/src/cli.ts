@@ -13,12 +13,13 @@
  *   RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import path from "node:path";
 import type { SqlStore } from "@runlight/sdk";
 import { BodyTooLarge, toRequest, writeResponse } from "@runlight/sdk/node";
 import { Geo, fileLookup } from "./geo.js";
+import { secretIn } from "./secret.js";
 import { createServer } from "./server.js";
 import { VERSION } from "./version.js";
 
@@ -64,14 +65,7 @@ async function openStore(dataDir: string): Promise<SqlStore> {
 
 /** RUNLIGHT_SECRET, or one made on first run and kept beside the data, readable only by this user. */
 function secretFor(dataDir: string): string {
-  const given = env("RUNLIGHT_SECRET");
-  if (given) return given;
-  const file = path.join(dataDir, "secret");
-  if (existsSync(file)) return readFileSync(file, "utf8").trim();
-  const made = randomBytes(32).toString("hex");
-  writeFileSync(file, `${made}\n`, { mode: 0o600 });
-  chmodSync(file, 0o600);
-  return made;
+  return env("RUNLIGHT_SECRET") ?? secretIn(dataDir);
 }
 
 const AGENTS_HELP = `Count AI agents on a site that has only the script tag, from its web server's log.
