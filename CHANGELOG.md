@@ -18,6 +18,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - Java's app mailer answers an empty `via` rather than `null`, Rust refuses `mail` and `app_mailer` set together as Go does, and an app mailer in Rust that returns `runlight::Error::Mail` has its error passed on as it is.
 - Running inside Craft with `trustedHosts` left at its default, which believes forwarded headers from anyone, the plugin works out each visitor's address itself, as the WordPress plugin does. A site that sets `trustedHosts` gets Craft's own answer.
 - The dashboard has words for `mail_url`, `mail_port`, `busy`, and `tables_busy` in every language, and the `mail_service` refusal says the service is not offered here.
+- The dashboard has words for `embed_token`, `embed_origin`, `embed_host`, and `token_embed_only` in every language, so a refused dashboard key says what to do in the dashboard's language.
+- The prompt to copy for a custom link domain in Settings, Custom domains covers every language and framework Runlight runs in, from Next.js and Express to Laravel, Django, Rails, Go, Spring Boot, ASP.NET Core, Phoenix, and axum, and says no code is needed for a standalone server.
 - The dashboard's Powered by Runlight link opens in a new tab everywhere, so it works inside a CMS's admin too.
 - Removing a saved mail service in Settings, Email service says why when it fails, and an app's mailer is shown with its sender's name.
 - A broken percent escape in a path, such as `%E0`, answers as an unknown goal, share, site, link domain, or short link (a 404) instead of an internal error.
