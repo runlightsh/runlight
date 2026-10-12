@@ -917,9 +917,38 @@ class SqlStore:
         value = self.setting(key)
         if value is None:
             return None
-        sql = 'DELETE FROM rl_settings WHERE "key" = ?'
-        gone = self.db.affected(sql, [key]) if self.db.dialect() == "mysql" else len(self.db.all(f'{sql} RETURNING "key"', [key]))
-        return value if gone == 1 else None
+        return value if self._setting_changed('DELETE FROM rl_settings WHERE "key" = ?', [key]) == 1 else None
+
+    def add_setting(self, key: str, value: str) -> bool:
+        """Writes a setting only if it is not there yet. Of two callers at once, only one gets True."""
+        # A driver may count a row a duplicate key found as written, so MySQL ignores the insert instead.
+        if self.db.dialect() == "mysql":
+            sql = 'INSERT IGNORE INTO rl_settings ("key", value) VALUES (?, ?)'
+        else:
+            sql = upsert(self.db.dialect(), "rl_settings", ['"key"', "value"], ['"key"'], [])
+        return self._setting_changed(sql, [key, value]) == 1
+
+    def swap_setting(self, key: str, old: str, new: str) -> bool:
+        """Changes a setting only if it still holds `old`. Of two callers at once, only one gets True."""
+        return self._setting_changed('UPDATE rl_settings SET value = ? WHERE "key" = ? AND value = ?', [new, key, old]) == 1
+
+    def _setting_changed(self, sql: str, params: list[Any]) -> int:
+        """How many settings a statement wrote. A lock in this process is no help across processes, so this is how
+        a write knows it won."""
+        if self.db.dialect() == "mysql":
+            return self.db.affected(sql, params)
+        return len(self.db.all(f'{sql} RETURNING "key"', params))
+
+    def setting_or_add(self, key: str, make: Callable[[], str]) -> str:
+        """A setting made once: of callers at once, each gets the value the first one wrote."""
+        for _ in range(5):
+            value = self.setting(key)
+            if value is not None:
+                return value
+            made = make()
+            if self.add_setting(key, made):
+                return made
+        raise RuntimeError(f"Could not make the setting {key}")
 
     def set_setting(self, key: str, value: str | None) -> None:
         if value is None:

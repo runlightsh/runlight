@@ -27,7 +27,7 @@ INTERVALS = ["hour", "day", "week", "month"]
 COMPARE_MODES = ["previous", "year", "custom", "off"]
 
 MAX_BUCKETS = 1000
-# A month of hours. Longer hourly ranges are cut off rather than refused.
+# A month of hours. A longer range is counted by the day instead.
 MAX_HOURS = 744
 
 # Names Intl reads as another zone than the time zone database's own entry, or that only ICU has.
@@ -214,13 +214,32 @@ def resolve_range(input: dict[str, Any], timezone: str, now: int, first_date: st
     interval = input.get("interval")
     if interval not in INTERVALS:
         interval = _default_interval(from_date, to_date)
-    return {
-        "from": start_of(from_date, timezone),
-        "to": start_of(add_days(to_date, 1), timezone),
-        "fromDate": from_date,
-        "toDate": to_date,
-        "interval": interval,
-    }
+    from_ = start_of(from_date, timezone)
+    to = start_of(add_days(to_date, 1), timezone)
+    # An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+    # Past 1,000 months there is none.
+    while _bucket_count(from_, to, from_date, to_date, interval) > (MAX_HOURS if interval == "hour" else MAX_BUCKETS):
+        coarser = _COARSER[interval]
+        if coarser is None:
+            return None
+        interval = coarser
+    return {"from": from_, "to": to, "fromDate": from_date, "toDate": to_date, "interval": interval}
+
+
+_COARSER = {"hour": "day", "day": "week", "week": "month", "month": None}
+
+
+def _bucket_count(from_: int, to: int, from_date: str, to_date: str, interval: str) -> int:
+    """How many chart buckets a range has at an interval, the first and last counted even when partial."""
+    if interval == "hour":
+        return -((from_ - to) // 3_600_000)
+    if interval == "day":
+        return _days_between(from_date, to_date) + 1
+    if interval == "week":
+        return _days_between(add_days(from_date, -_weekday(from_date)), to_date) // 7 + 1
+    fy, fm, _fd = _split(from_date)
+    ty, tm, _td = _split(to_date)
+    return (ty - fy) * 12 + (tm - fm) + 1
 
 
 def _add_years(date: str, years: int) -> str:
@@ -267,11 +286,15 @@ def compare_range(
 
 
 def buckets(range: dict[str, Any], timezone: str) -> list[dict[str, int]]:
-    """Chart buckets covering a range, each starting on a local boundary."""
+    """Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the first and
+    last can be partial. resolve_range picks an interval that fits; a range given here with more buckets than that,
+    such as a longer comparison, is cut off at a boundary, never merged into its last bucket."""
     starts: list[int] = []
+    cap = MAX_HOURS if range["interval"] == "hour" else MAX_BUCKETS
+    # One start past the limit, so the last bucket kept still ends where the next would begin.
     if range["interval"] == "hour":
         t = range["from"]
-        while t < range["to"] and len(starts) < MAX_HOURS:
+        while t < range["to"] and len(starts) <= MAX_HOURS:
             starts.append(t)
             t += 3_600_000
     else:
@@ -280,7 +303,7 @@ def buckets(range: dict[str, Any], timezone: str) -> list[dict[str, int]]:
             date = add_days(date, -_weekday(date))
         elif range["interval"] == "month":
             date = f"{date[:8]}01"
-        while date <= range["toDate"] and len(starts) < MAX_BUCKETS:
+        while date <= range["toDate"] and len(starts) <= MAX_BUCKETS:
             starts.append(start_of(date, timezone))
             if range["interval"] == "day":
                 date = add_days(date, 1)
@@ -290,7 +313,7 @@ def buckets(range: dict[str, Any], timezone: str) -> list[dict[str, int]]:
                 date = add_months(date, 1)
     return [
         {"start": max(start, range["from"]), "end": min(starts[i + 1] if i + 1 < len(starts) else range["to"], range["to"])}
-        for i, start in enumerate(starts)
+        for i, start in enumerate(starts[:cap])
     ]
 
 

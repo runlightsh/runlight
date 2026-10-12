@@ -225,3 +225,38 @@ def test_compare_ranges() -> None:
     for case in fixtures.load("time")["compares"]:
         got = compare_range(case["range"], case["mode"], case["zone"], case["custom"])
         assert _js.dumps(got) == _js.dumps(case["compare"]), fixtures.label(case)
+
+
+def test_an_interval_too_fine_for_a_long_range_moves_up_to_one_that_fits_and_no_bucket_takes_in_the_rest() -> None:
+    now = utc(2026, 9, 12, 12)
+    day = 86_400_000
+    hourly = resolve_range({"from": "2026-08-01", "to": "2026-09-09", "interval": "hour"}, "UTC", now)
+    assert hourly["interval"] == "day", "40 days of hours is too many hours"
+    assert len(buckets(hourly, "UTC")) == 40
+    assert resolve_range({"from": "2026-08-01", "to": "2026-08-31", "interval": "hour"}, "UTC", now)["interval"] == "hour", "a month of hours still fits"
+
+    daily = resolve_range({"from": "2018-01-03", "to": "2026-10-12", "interval": "day"}, "Europe/London", now)
+    assert daily["interval"] == "week"
+    weeks = buckets(daily, "Europe/London")
+    assert weeks[0]["start"] == daily["from"]
+    assert weeks[-1]["end"] == daily["to"], "the buckets reach the end of the range"
+    for i, week in enumerate(weeks):
+        if i > 0:
+            assert week["start"] == weeks[i - 1]["end"]
+        # A week across a clock change is an hour short or long; none is longer than that.
+        assert week["end"] - week["start"] <= 7 * day + 3_600_000, f"week {i} is {(week['end'] - week['start']) / day} days"
+        if 0 < i < len(weeks) - 1:
+            assert week["end"] - week["start"] >= 7 * day - 3_600_000
+
+    decades = resolve_range({"from": "1990-01-01", "to": "2026-10-12", "interval": "day"}, "UTC", now)
+    assert decades["interval"] == "month"
+    months = buckets(decades, "UTC")
+    assert len(months) == 442
+    assert all(m["end"] - m["start"] <= 31 * day for m in months)
+    assert resolve_range({"from": "1900-01-01", "to": "2026-10-12"}, "UTC", now) is None, "past 1,000 months there is no interval that fits"
+
+    # A comparison longer than its range keeps whole buckets, cut off at a boundary.
+    longer = {**decades, "from": utc(2000, 0, 1), "fromDate": "2000-01-01", "toDate": "2026-10-12", "interval": "day"}
+    cut = buckets(longer, "UTC")
+    assert len(cut) == 1000
+    assert cut[-1]["end"] - cut[-1]["start"] == day

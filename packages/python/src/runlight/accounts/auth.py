@@ -342,7 +342,9 @@ class Accounts:
         """Checks a six-digit code, or a recovery code, for an account with two-factor on.
         A code works once: one already used, or older, is refused, and a recovery code is crossed off.
         One check at a time, so two sign-ins at once cannot both use the same code: TypeScript queues them per
-        account in its process, and this takes the database's lock, which holds across threads and processes."""
+        account in its process, and this takes the database's lock, which holds across threads and processes. The
+        database has the last word too: the code is spent by an update that only applies if no other check has
+        spent it first, for a database whose lock does not reach another process."""
         self._init()
         return self._turn(lambda: self._check_second_factor_now(id, code, now))
 
@@ -358,15 +360,18 @@ class Accounts:
             step = match_step(secret, digits, now, after) if secret else None
             if step is None:
                 return False
-            self.store.db.run("UPDATE rl_users SET totp_step = ? WHERE id = ?", [step, id])
-            return True
+            # Only if no check since has used this step or a later one: of two at once, one moves it and the other
+            # is refused.
+            return self.store.db.affected("UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)", [step, id, step]) == 1
+        read = _js.string(row["totp_recovery"]) if _js.truthy(row.get("totp_recovery")) else None
         hashes = _recovery_list(row.get("totp_recovery"))
         wanted = recovery_hash(given)
         if wanted not in hashes:
             return False
         hashes.remove(wanted)
-        self.store.db.run("UPDATE rl_users SET totp_recovery = ? WHERE id = ?", [_js.dumps(hashes), id])
-        return True
+        # Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used
+        # twice.
+        return self.store.db.affected("UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?", [_js.dumps(hashes), id, read]) == 1
 
     def pending_for(self, user: dict[str, Any], now: int) -> str:
         """A short-lived ticket naming an account whose password checked out and

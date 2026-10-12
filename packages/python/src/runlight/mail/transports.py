@@ -15,7 +15,7 @@ from typing import Any
 
 from .. import _js
 from ..http import Fetcher, FetchError, SearchParams, Url, UrllibFetcher
-from ..safefetch import MetadataAddressError, service_fetch
+from ..safefetch import MetadataAddressError, RedirectRefusedError, service_fetch
 
 
 class MailError(Exception):
@@ -119,6 +119,8 @@ def _post(fetcher: Fetcher, url: str, init: dict[str, Any], explains: bool = Tru
         )
     except MetadataAddressError as error:
         raise MailError(str(error), "address_refused", {"host": error.host}) from None
+    except RedirectRefusedError as error:
+        raise MailError(str(error), "redirect_refused", {"host": error.host, "to": error.to}) from None
     except FetchError as error:
         host = Url(url).host
         raise MailError(f"Could not reach {host}: {error}", "mail_unreachable", {"host": host, "detail": str(error)}) from None

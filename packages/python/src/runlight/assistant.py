@@ -24,7 +24,7 @@ from typing import Any
 from . import _js
 from .http import Fetcher, FetchError, Url, UrllibFetcher
 from .mcp import INSTRUCTIONS, TOOLS, ApiRead, call_tool
-from .safefetch import MetadataAddressError, service_fetch
+from .safefetch import MetadataAddressError, RedirectRefusedError, service_fetch
 
 # Each provider: id, name, protocol ("anthropic" or "openai"), baseUrl (the API's address, filled in for known
 # services and asked for otherwise), model (one to start with, or "" when the person picks one), and key ("yes",
@@ -55,8 +55,9 @@ MAX_ROUNDS = 8
 # However many rounds a question takes, the answer comes within this long or the assistant stops.
 DEADLINE_MS = 120_000
 MAX_TOKENS = 1500
-# The most of a provider's answer read: a reply of MAX_TOKENS, or a list of models, is far smaller.
-ANSWER_MAX_BYTES = 8 * 1024 * 1024
+# The most of a provider's answer read: a reply of MAX_TOKENS, or a list of models, is far smaller. Past it the
+# answer counts as unreadable.
+ANSWER_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _system(context: dict[str, Any]) -> str:
@@ -118,6 +119,11 @@ def _refused(error: MetadataAddressError) -> AssistantError:
     return AssistantError(str(error), "address_refused", {"host": error.host})
 
 
+def _redirected(error: RedirectRefusedError) -> AssistantError:
+    """A service that sent the request to another origin, which would have carried the key, and the question with it."""
+    return AssistantError(str(error), "redirect_refused", {"host": error.host, "to": error.to})
+
+
 def _post(
     fetcher: Fetcher,
     url: str,
@@ -138,11 +144,14 @@ def _post(
                 "body": _js.dumps(body),
                 "timeoutMs": min(90_000, left),
                 "maxBytes": ANSWER_MAX_BYTES,
+                "truncate": True,
             },
             fetcher,
         )
     except MetadataAddressError as error:
         raise _refused(error) from None
+    except RedirectRefusedError as error:
+        raise _redirected(error) from None
     except Exception as error:
         host = _host(url)
         if isinstance(error, FetchError) and error.timed_out:
@@ -423,11 +432,13 @@ def list_models(settings: dict[str, Any], fetcher: Fetcher | None = None) -> lis
     try:
         answer = service_fetch(
             f"{base}/models{'?limit=100' if provider['protocol'] == 'anthropic' else ''}",
-            {"headers": headers, "timeoutMs": 20_000, "maxBytes": ANSWER_MAX_BYTES},
+            {"headers": headers, "timeoutMs": 20_000, "maxBytes": ANSWER_MAX_BYTES, "truncate": True},
             fetcher,
         )
     except MetadataAddressError as error:
         raise _refused(error) from None
+    except RedirectRefusedError as error:
+        raise _redirected(error) from None
     except Exception:
         host = _host(base)
         raise AssistantError(f"Could not reach {host}", "unreachable", {"host": host}) from None

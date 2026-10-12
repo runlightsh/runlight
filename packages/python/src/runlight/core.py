@@ -760,36 +760,55 @@ class Runlight:
         self._overrides.pop(site_id, None)
 
     def update_site(self, site_id: str, patch: Mapping[str, Any]) -> dict[str, Any]:
-        """Changes a site's name or timezone from the dashboard. Stored apart from the settings in code, which keep
-        being written on every start. A managed site has no settings in code, so its changes, hostnames too, go to
-        its row. A key left out of `patch` is left alone, as TS's undefined is."""
+        """Changes a site's name, timezone, or retention from the dashboard. Stored apart from the settings in code,
+        which keep being written on every start. A managed site has no settings in code, so its changes, hostnames
+        too, go to its row. Every field is checked before anything changes, since a new timezone clears the built
+        days and a shorter retention deletes visits, and pruning starts only once saved. A key left out of `patch`
+        is left alone, as TS's undefined is."""
         from .time import is_timezone
 
         self.init()
         current = next((site for site in self._configured if site["id"] == site_id), None)
         if current is None:
             raise SettingsError("Unknown site", "unknown_site")
-        nxt = dict(current) if self.managed_sites else dict(self._overrides.get(site_id, {}))
+        name = None
         if "name" in patch and patch["name"] is not _js.UNDEFINED:
             name = _js.trim(_js.string(patch["name"]))
             if not name or _js.length(name) > 80:
                 raise SettingsError("A site name is 1 to 80 characters", "site_name")
-            nxt["name"] = name
+        timezone = None
         if "timezone" in patch and patch["timezone"] is not _js.UNDEFINED:
             timezone = _js.string(patch["timezone"])
             if not is_timezone(timezone):
                 raise SettingsError(f'Unknown timezone "{timezone}"', "unknown_timezone", {"timezone": timezone})
-            nxt["timezone"] = timezone
-            if timezone != (self.site(site_id) or {}).get("timezone"):
-                self._zone_changed(site_id, timezone)
+        hostnames = None
+        if self.managed_sites and "hostnames" in patch and patch["hostnames"] is not _js.UNDEFINED and site_id not in self._remotes:
+            hostnames = self._hostnames_for(patch["hostnames"], site_id)
+        retention_set = "retentionMonths" in patch and patch["retentionMonths"] is not _js.UNDEFINED
+        if retention_set:
+            self._check_retention(site_id, patch["retentionMonths"])
+        if timezone is not None and timezone != (self.site(site_id) or {}).get("timezone"):
+            self._zone_changed(site_id, timezone)
         if self.managed_sites:
-            if "hostnames" in patch and patch["hostnames"] is not _js.UNDEFINED and site_id not in self._remotes:
-                nxt["hostnames"] = self._hostnames_for(patch["hostnames"], site_id)
+            nxt = dict(current)
+            if name is not None:
+                nxt["name"] = name
+            if timezone is not None:
+                nxt["timezone"] = timezone
+            if hostnames is not None:
+                nxt["hostnames"] = hostnames
             self.store.upsert_site(nxt, self.now())
             self._configured = [nxt if site["id"] == site_id else site for site in self._configured]
-            return self.site(site_id)  # type: ignore[return-value]
-        self.store.set_site_overrides(site_id, nxt)
-        self._overrides[site_id] = nxt
+        else:
+            nxt = dict(self._overrides.get(site_id, {}))
+            if name is not None:
+                nxt["name"] = name
+            if timezone is not None:
+                nxt["timezone"] = timezone
+            self.store.set_site_overrides(site_id, nxt)
+            self._overrides[site_id] = nxt
+        if retention_set:
+            self.set_retention(site_id, patch["retentionMonths"])
         return self.site(site_id)  # type: ignore[return-value]
 
     # Retention
@@ -799,14 +818,17 @@ class Runlight:
         value = _js.number(self.store.setting(f"retention:{site}"))
         return int(value) if value in RETENTION_MONTHS else None
 
-    def set_retention(self, site: str, months: int | float | None) -> None:
-        """Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs in pieces
-        in idle(), after the answer, with tracking going on between them, as TS runs it after answering."""
+    def _check_retention(self, site: str, months: int | float | None) -> None:
         if self.site(site) is None or site in self._remotes:
             raise SettingsError("Unknown site", "unknown_site")
         if months is not None and months not in RETENTION_MONTHS:
             months_list = ", ".join(str(m) for m in RETENTION_MONTHS)
             raise SettingsError(f"Keep visits for {months_list} months, or forever", "retention_bad", {"months": months_list})
+
+    def set_retention(self, site: str, months: int | float | None) -> None:
+        """Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs in pieces
+        in idle(), after the answer, with tracking going on between them, as TS runs it after answering."""
+        self._check_retention(site, months)
         self.store.set_setting(f"retention:{site}", None if months is None else _js.number_text(months))
         with self._pruning_lock:
             self._pruning.append(site)
@@ -1231,7 +1253,7 @@ class Runlight:
                 },
                 client.get("screenWidth"),
             )
-            location = locate(request.headers, ip, self._geo)
+            location = locate(request.headers, ip, self._geo, bool(self._trust_proxy))
             self.store.insert_session(
                 {
                     "id": session["id"],
