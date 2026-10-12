@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { MetadataAddressError, PrivateAddressError, RedirectRefusedError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, resolvesPrivately, serviceFetch } from "../src/safefetch.js";
+import { MetadataAddressError, PrivateAddressError, RedirectRefusedError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, publicFetchThroughGlobal, resolvesPrivately, serviceFetch } from "../src/safefetch.js";
 
 test("link-local and cloud metadata addresses are told apart from loopback and private ones", async () => {
   for (const ip of ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe"]) {
@@ -139,6 +139,7 @@ test("a service's redirects are followed only while each one stays off link-loca
 
 test("a service's redirect to another origin is refused before anything, its key or its body, is sent there", async () => {
   const real = globalThis.fetch;
+  publicFetchThroughGlobal(true);
   const asked: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
   globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
     asked.push({ url: String(input), headers: { ...(init.headers as Record<string, string>) }, body: String(init.body ?? "") });
@@ -186,5 +187,43 @@ test("a service's redirect to another origin is refused before anything, its key
     }
   } finally {
     globalThis.fetch = real;
+    publicFetchThroughGlobal(false);
+  }
+});
+
+test("a service is fetched from the address its name was checked at, and a name that cannot be looked up is refused", async () => {
+  const dns = (await import("node:dns")).default;
+  const realLookup = dns.lookup;
+  let answers: Record<string, string> = {};
+  let reached = 0;
+  const server = createServer((req, res) => {
+    reached++;
+    res.end("ok");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  // The resolver the connection itself asks, so what it answers is what gets connected to.
+  dns.lookup = ((name: string, options: unknown, callback: (error: Error | null, addresses?: Array<{ address: string; family: number }>) => void) => {
+    const address = answers[name];
+    if (!address) return callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${name}`), { code: "ENOTFOUND" }));
+    callback(null, [{ address, family: address.includes(":") ? 6 : 4 }]);
+  }) as typeof dns.lookup;
+  try {
+    // A model on this computer, by a name of its own, is fine.
+    answers = { "models.example": "127.0.0.1" };
+    assert.equal(await (await serviceFetch(`http://models.example:${port}/v1/models`, {})).text(), "ok");
+    assert.equal(reached, 1);
+    // The same name answering with a metadata address next time is refused at the connection, before anything is sent.
+    answers = { "models.example": "169.254.169.254" };
+    await assert.rejects(serviceFetch(`http://models.example:${port}/v1/models`, { method: "POST", headers: { "x-api-key": "secret" }, body: "{}" }), MetadataAddressError);
+    answers = { "models.example": "fd00:ec2::254" };
+    await assert.rejects(serviceFetch(`http://models.example:${port}/v1/models`, {}), MetadataAddressError);
+    // A name that cannot be looked up gets nowhere, rather than being let through to a lookup of fetch's own.
+    answers = {};
+    await assert.rejects(serviceFetch(`http://models.example:${port}/v1/models`, {}), /ENOTFOUND/);
+    assert.equal(reached, 1);
+  } finally {
+    dns.lookup = realLookup;
+    server.close();
   }
 });

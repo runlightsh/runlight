@@ -216,6 +216,7 @@ test("an answer from a model, a mail service, or a link domain is read only so f
   const real = globalThis.fetch;
   let next = () => endless(200);
   let last = endless(200).seen;
+  publicFetchThroughGlobal(true);
   globalThis.fetch = (async () => {
     const made = next();
     last = made.seen;
@@ -241,7 +242,6 @@ test("an answer from a model, a mail service, or a link domain is read only so f
     const t = setup("sqlite", { site: { hostnames: ["example.com"] } });
     await t.rl.init();
     await t.rl.store.addLinkDomain("go.example.net", "default", t.now);
-    publicFetchThroughGlobal(true);
     const check = await t.get("/api/link-domains/go.example.net/check");
     assert.equal(check.code, "check_not_runlight");
     assert.ok(last.cancelled && last.read < 1024 * 1024, "a link domain's check");

@@ -8,7 +8,11 @@ import { signV4 } from "../src/mail/ses.js";
 import { mime, smtpReplies, smtpSend } from "../src/mail/smtp.js";
 import { MailError, send } from "../src/mail/transports.js";
 import { lastPeriod } from "../src/reports.js";
+import { publicFetchThroughGlobal } from "../src/safefetch.js";
 import { sqlite } from "../src/stores/sqlite.js";
+
+// Service requests go to the stand-in fetch each test sets.
+publicFetchThroughGlobal(true);
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
