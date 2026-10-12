@@ -4,6 +4,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Security
+
+- The assistant's limits hold for questions sent at once. A person's place among their two at a time and thirty an hour is taken before anything else is awaited, and a viewer's daily count is a row of their own for the day, moved only from the number read to the next, so a burst of questions, or several processes on one database, can no longer spend the owner's AI credit past the daily number, and two viewers' counts no longer overwrite each other.
+
 ### Fixed
 
 - Changing a site in the dashboard checks every field, its domains included, before it changes anything, so a change refused for a bad or taken domain no longer shortens how long visits are kept, deleting the older ones, or clears the days built in the old timezone. Visits are pruned only once the change is saved.

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { runlight } from "../src/index.js";
 import { sqlite } from "../src/stores/sqlite.js";
+import { STORES, cleanup, freshStore } from "./helpers.js";
+
+after(cleanup);
 
 const body = (req: IncomingMessage) => new Promise<any>((resolve) => {
   let text = "";
@@ -148,3 +151,36 @@ test("the assistant has a per-person limit, and viewers a daily number an owner 
   for (let i = 0; i < 30; i++) assert.notEqual((await ask("owner")).status, 429);
   assert.equal(((await (await ask("owner")).json()) as any).code, "assistant_soon");
 });
+
+for (const kind of STORES) {
+  test(`${kind}: questions sent at once count once each against a viewer's daily number`, async () => {
+    const store = freshStore(kind);
+    const now = () => Date.UTC(2026, 9, 12, 12);
+    const made = () => runlight({ store, now, sites: [{ id: "a", name: "A", hostnames: ["a.example.com"] }] });
+    const first = made();
+    await first.init();
+    // The model is never reached; a question that gets past the limits fails fast instead.
+    await first.saveAssistantSettings({ provider: "custom", model: "m", baseUrl: "http://127.0.0.1:9/v1", key: "k" });
+    await first.store.setSetting("assistant-viewer-daily", "1");
+    const routes = (rl: ReturnType<typeof made>) => rl.routes({ authorize: (r) => (r.headers.get("x-who") ? "read" : false), accountOf: async (r) => r.headers.get("x-who") });
+    const ask = (handler: (r: Request) => Promise<Response>, who: string) =>
+      handler(new Request("https://x.com/runlight/api/assistant/chat", { method: "POST", headers: { "x-who": who, "content-type": "application/json" }, body: JSON.stringify({ site: "a", messages: [{ role: "user", content: "hi" }] }) }));
+    const passed = (answers: Response[]) => answers.filter((answer) => answer.status !== 429).length;
+    const count = (who: string) => first.store.setting(`assistant-asked:2026-10-12:${who}`);
+
+    // One process: the second and later questions see the first before anything is awaited.
+    const { handler } = routes(first);
+    assert.equal(passed(await Promise.all(Array.from({ length: 10 }, () => ask(handler, "viewer-1")))), 1);
+    assert.equal(await count("viewer-1"), "1");
+
+    // Ten processes on one database, each with its own counts in memory: the database lets one through.
+    const handlers = Array.from({ length: 10 }, () => routes(made()).handler);
+    assert.equal(passed(await Promise.all(handlers.map((h) => ask(h, "viewer-2")))), 1);
+    assert.equal(await count("viewer-2"), "1");
+
+    // Two viewers at once each have their own row, and neither write loses the other's.
+    assert.equal(passed(await Promise.all([ask(handlers[0]!, "viewer-3"), ask(handlers[1]!, "viewer-4")])), 2);
+    assert.equal(await count("viewer-3"), "1");
+    assert.equal(await count("viewer-4"), "1");
+  });
+}
