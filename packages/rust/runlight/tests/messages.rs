@@ -215,4 +215,5 @@ fn the_versions_are_the_typescript_sdks() {
     let f = fixture("version");
     assert_eq!(version::VERSION, s(&f, "version"));
     assert_eq!(f64::from(version::API_VERSION), f.at("apiVersion").as_f64().unwrap());
+    assert_eq!(runlight::brand::RUNLIGHT_ICON, s(&f, "icon"));
 }
