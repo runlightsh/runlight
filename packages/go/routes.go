@@ -634,7 +634,7 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 		}
 		// Only a public address is fetched, whatever the name resolves to now, so the check cannot be pointed
 		// into a private network.
-		answer, err := web.PublicFetch(ctx, rt.r.fetcher, "https://"+domain+LinkDomainCheck, FetchInit{Headers: &Headers{}, Timeout: 5 * time.Second, MaxBytes: 1 << 20}, 0)
+		answer, err := web.PublicFetch(ctx, rt.r.fetcher, "https://"+domain+LinkDomainCheck, FetchInit{Headers: &Headers{}, Timeout: 5 * time.Second, MaxBytes: linkCheckBytes, Truncate: true}, 0)
 		if err != nil {
 			// A refused private address answers as a closed port does, so the check tells nothing about a private network.
 			if web.IsTimeout(err) {
@@ -642,7 +642,7 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 			}
 			return result("check_https", "could not connect over HTTPS", nil), nil
 		}
-		body, _ := answer.JSON()
+		body, _ := answer.JSONWithin(linkCheckBytes)
 		if answer.OK() && js.Dig(body, "runlight") == true && js.Dig(body, "domain") == domain {
 			return result("", "", nil), nil
 		}
@@ -851,12 +851,8 @@ func (rt *Routes) pickKey(ctx context.Context) (string, error) {
 	if err := rt.r.Init(ctx); err != nil {
 		return "", err
 	}
-	saved, ok, err := rt.r.Store.Setting(ctx, "pick-key")
-	if err != nil || (ok && saved != "") {
-		return saved, err
-	}
-	made := randomID(32)
-	return made, rt.r.Store.SetSetting(ctx, "pick-key", &made)
+	// Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+	return rt.r.Store.SettingOrAdd(ctx, "pick-key", func() string { return randomID(32) })
 }
 
 // pickBack is where a picker sends its choice: the relay page on the dashboard's origin, and the nonce the
@@ -921,12 +917,8 @@ func (rt *Routes) embedKey(ctx context.Context) (string, error) {
 	if err := rt.r.Init(ctx); err != nil {
 		return "", err
 	}
-	saved, ok, err := rt.r.Store.Setting(ctx, "embed-key")
-	if err != nil || (ok && saved != "") {
-		return saved, err
-	}
-	made := randomID(32)
-	return made, rt.r.Store.SetSetting(ctx, "embed-key", &made)
+	// Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+	return rt.r.Store.SettingOrAdd(ctx, "embed-key", func() string { return randomID(32) })
 }
 
 // embedToken is an embed token that still exists, for a site that still does.
@@ -1452,6 +1444,9 @@ func (rt *Routes) sharesAPI(c *call, path string, u *whatwg.URL) (*Response, err
 	return Coded("Method not allowed", "method_not_allowed", 405, nil), nil
 }
 
+// linkCheckBytes is the most of a link domain's answer read, which is a few words.
+const linkCheckBytes = 16 << 10
+
 // viewerDaily is how many questions each viewer may ask the assistant a day, as an owner set it.
 func (rt *Routes) viewerDaily(ctx context.Context) (float64, error) {
 	saved, ok, err := rt.r.Store.Setting(ctx, "assistant-viewer-daily")
@@ -1528,50 +1523,62 @@ func (rt *Routes) askTurn(ctx context.Context, who string, owner bool) (*Respons
 }
 
 // viewerAsked counts a viewer's question against the owner's daily number,
-// or refuses it. Questions are counted one at a time, so two asked at once
-// cannot both read the count before either writes it.
+// or refuses it. The count is the viewer's own row for the day, and it only
+// ever moves from the number read to the next one, so questions asked at once,
+// here or by any process on the database, each count once.
 func (rt *Routes) viewerAsked(ctx context.Context, who string, now int64) (*Response, error) {
-	defer rt.r.oneAtATime("assistant-asked")()
 	limit, err := rt.viewerDaily(ctx)
 	if err != nil {
 		return nil, err
 	}
-	day := "assistant-asked:" + js.ISOString(now)[:10]
-	stored, has, err := rt.r.Store.Setting(ctx, day)
-	if err != nil {
-		return nil, err
-	}
-	if !has {
-		stored = "{}"
-	}
-	parsed, err := js.Parse(stored)
-	if err != nil {
-		return nil, err
-	}
-	counts, _ := parsed.(*js.Object)
-	if counts == nil {
-		counts = &js.Object{}
-	}
-	if js.ToNumber(counts.Value(who)) >= limit {
+	refusal := func() *Response {
 		l := js.FormatNumber(limit)
-		return Coded("Viewers can ask "+l+" questions a day. Ask again tomorrow.", "assistant_daily", 429, params("limit", l)), nil
+		return Coded("Viewers can ask "+l+" questions a day. Ask again tomorrow.", "assistant_daily", 429, params("limit", l))
 	}
-	counts.Set(who, js.ToNumber(counts.Value(who))+1)
-	if err := rt.r.Store.SetSetting(ctx, day, ptr(js.Stringify(counts))); err != nil {
-		return nil, err
+	if limit < 1 {
+		return refusal(), nil
 	}
-	old, err := rt.r.Store.SettingsStartingWith(ctx, "assistant-asked:")
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range old {
-		if s.Key != day {
-			if err := rt.r.Store.SetSetting(ctx, s.Key, nil); err != nil {
+	prefix := "assistant-asked:" + js.ISOString(now)[:10] + ":"
+	key := prefix + who
+	for range 20 {
+		seen, has, err := rt.r.Store.Setting(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			added, err := rt.r.Store.AddSetting(ctx, key, "1")
+			if err != nil {
 				return nil, err
 			}
+			if !added {
+				continue
+			}
+			// A viewer's first question of the day clears the days before.
+			old, err := rt.r.Store.SettingsStartingWith(ctx, "assistant-asked:")
+			if err != nil {
+				return nil, err
+			}
+			for _, s := range old {
+				if !strings.HasPrefix(s.Key, prefix) {
+					if err := rt.r.Store.SetSetting(ctx, s.Key, nil); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return nil, nil
+		}
+		if js.Number(seen) >= limit {
+			return refusal(), nil
+		}
+		swapped, err := rt.r.Store.SwapSetting(ctx, key, seen, js.FormatNumber(js.Number(seen)+1))
+		if err != nil {
+			return nil, err
+		}
+		if swapped {
+			return nil, nil
 		}
 	}
-	return nil, nil
+	return Coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429, nil), nil
 }
 
 var tokenPath = regexp.MustCompile(`^/api/tokens/([a-f0-9]{24})$`)

@@ -202,7 +202,7 @@ var bracketsAndDots = regexp.MustCompile(`^\[|\]$|\.+$`)
 // then goes nowhere such a check could have stopped.
 func MetadataHost(ctx context.Context, host string) bool {
 	name := bracketsAndDots.ReplaceAllString(strings.ToLower(strings.TrimSpace(host)), "")
-	if metadataNames[name] || MetadataAddress(name) {
+	if metadataName(name) {
 		return true
 	}
 	if v4(name) != nil || v6(name) != nil {
@@ -218,6 +218,11 @@ func MetadataHost(ctx context.Context, host string) bool {
 		}
 	}
 	return false
+}
+
+// metadataName reports whether a host, cleaned, is a metadata name or a link-local or metadata address.
+func metadataName(name string) bool {
+	return metadataNames[name] || MetadataAddress(name)
 }
 
 // Resolver looks a name up; net.DefaultResolver unless a test sets another.
@@ -338,21 +343,31 @@ func (e *MetadataAddressError) Error() string {
 	return e.Host + " is a link-local or cloud metadata address, which Runlight never connects to"
 }
 
+// RedirectRefusedError is a request refused before anything was sent there,
+// because a service's redirect led to another origin.
+type RedirectRefusedError struct{ Host, To string }
+
+func (e *RedirectRefusedError) Error() string {
+	return e.Host + " redirected to " + e.To + ". Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead"
+}
+
 // bodyHeaders describe a body, and go with it when a redirect turns a request into a GET.
 var bodyHeaders = []string{"content-type", "content-length", "content-encoding", "content-language", "content-location"}
-
-// credentialHeaders go no further than the origin they were meant for.
-var credentialHeaders = []string{"authorization", "proxy-authorization", "cookie"}
 
 // ServiceFetch fetches from a service someone set up, such as an AI model's
 // API or a mail webhook, which may well be on this computer or a private
 // network, but is never at a link-local or cloud metadata address. The
 // address is checked, and so is every redirect's, up to redirects of them,
 // each followed as fetch follows it: a 303, or a 301 or 302 answering a
-// POST, goes on as a GET with no body, and a redirect to another origin
-// goes without the credentials. A redirect past the last one comes back as
+// POST, goes on as a GET with no body. Only a redirect on the same origin is
+// followed: the request carries a key, in whatever header the service names
+// it, and a 307 or 308 would carry its body too, an email or a conversation,
+// so a redirect to another origin, https to http among them, is refused
+// before anything is sent there. A redirect past the last one comes back as
 // it is. init.Timeout is the limit for all of it (30 seconds when zero). It
-// fails with a *MetadataAddressError for an address it refuses.
+// fails with a *MetadataAddressError or a *RedirectRefusedError for an
+// address it refuses. The real Fetcher checks the address the connection
+// uses (FetchInit.ServiceOnly); for any other, the name is looked up first.
 func ServiceFetch(ctx context.Context, fetcher Fetcher, target string, init FetchInit, redirects int) (*Response, error) {
 	if init.Timeout <= 0 {
 		init.Timeout = 30 * time.Second
@@ -364,6 +379,7 @@ func ServiceFetch(ctx context.Context, fetcher Fetcher, target string, init Fetc
 		init.Method = "GET"
 	}
 	init.Redirect = "manual"
+	init.ServiceOnly = true
 	init.Headers = init.Headers.Clone()
 	u, err := whatwg.Parse(target)
 	if err != nil {
@@ -371,7 +387,13 @@ func ServiceFetch(ctx context.Context, fetcher Fetcher, target string, init Fetc
 	}
 	for hop := 0; ; hop++ {
 		host := strings.TrimSuffix(strings.TrimPrefix(u.Hostname, "["), "]")
-		if MetadataHost(ctx, host) {
+		if checksAtDial(fetcher) {
+			// The connection looks the name up and checks what it got, so a name that answers differently
+			// a moment later, or not at all, gets nowhere.
+			if metadataName(bracketsAndDots.ReplaceAllString(strings.ToLower(strings.TrimSpace(host)), "")) {
+				return nil, &MetadataAddressError{host}
+			}
+		} else if MetadataHost(ctx, host) {
 			return nil, &MetadataAddressError{host}
 		}
 		answer, err := fetcher.Fetch(ctx, u.Href(), init)
@@ -390,17 +412,23 @@ func ServiceFetch(ctx context.Context, fetcher Fetcher, target string, init Fetc
 		if err != nil {
 			return nil, &FetchError{Message: "Invalid URL"}
 		}
+		if next.Origin() != u.Origin() {
+			there := strings.TrimSuffix(strings.TrimPrefix(next.Hostname, "["), "]")
+			if MetadataHost(ctx, there) {
+				return nil, &MetadataAddressError{there}
+			}
+			to := next.Protocol
+			if next.Protocol == "https:" || next.Protocol == "http:" {
+				to = next.Origin()
+			}
+			return nil, &RedirectRefusedError{u.Host(), to}
+		}
 		if answer.Status == 303 || ((answer.Status == 301 || answer.Status == 302) && init.Method == "POST") {
 			if init.Method != "HEAD" {
 				init.Method = "GET"
 			}
 			init.Body = nil
 			for _, name := range bodyHeaders {
-				init.Headers.Delete(name)
-			}
-		}
-		if next.Origin() != u.Origin() {
-			for _, name := range credentialHeaders {
 				init.Headers.Delete(name)
 			}
 		}

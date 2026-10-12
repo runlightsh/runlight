@@ -79,7 +79,7 @@ func TestMetadataAddresses(t *testing.T) {
 	}
 }
 
-// A service's redirects are followed only while each one stays off link-local and metadata addresses.
+// A service's redirects are followed only while each one stays on its origin and off link-local and metadata addresses.
 func TestServiceFetchChecksEveryRedirect(t *testing.T) {
 	type seen struct{ method, url, body, authorization, kind string }
 	var mu sync.Mutex
@@ -105,6 +105,10 @@ func TestServiceFetchChecksEveryRedirect(t *testing.T) {
 			redirect(307, "/landed")
 		case "/elsewhere":
 			redirect(307, strings.Replace(server.URL, "127.0.0.1", "localhost", 1)+"/landed")
+		case "/downgrade":
+			redirect(308, "http://198.51.100.7/landed")
+		case "/scheme":
+			redirect(307, "ftp://example.com/landed")
 		case "/loop":
 			redirect(302, "/loop")
 		default:
@@ -134,12 +138,10 @@ func TestServiceFetchChecksEveryRedirect(t *testing.T) {
 	if _, err := ServiceFetch(ctx, never, "http://169.254.169.254/v1/models", FetchInit{}, 5); !errors.As(err, &refused) || asked {
 		t.Fatalf("metadata address: %v, asked %v", err, asked)
 	}
-	// Followed as fetch follows them: a 303 goes on as a GET with no body, a 307 keeps both, and the key
-	// goes no further than the origin it was meant for.
+	// Followed as fetch follows them on the same origin: a 303 goes on as a GET with no body, and a 307 keeps both.
 	for path, want := range map[string]seen{
 		"/see-other": {"GET", "/landed", "", "Bearer key", ""},
 		"/keep":      {"POST", "/landed", "{}", "Bearer key", "application/json"},
-		"/elsewhere": {"POST", "/landed", "{}", "", "application/json"},
 	} {
 		mu.Lock()
 		got = nil
@@ -151,6 +153,32 @@ func TestServiceFetchChecksEveryRedirect(t *testing.T) {
 		mu.Lock()
 		if len(got) != 2 || got[1] != want {
 			t.Errorf("%s: %+v, want %+v second", path, got, want)
+		}
+		mu.Unlock()
+	}
+	// A redirect to another origin is refused before anything is sent there, whatever header the key is in
+	// and whether or not the body would go too: exactly one request is made, to the service itself.
+	keys := FetchInit{Method: "POST", Body: []byte(`{"secret":"mail"}`), Headers: NewHeaders("authorization", "Bearer key", "proxy-authorization", "x", "cookie", "a=b",
+		"x-api-key", "k", "api-key", "k", "x-postmark-server-token", "k", "content-type", "application/json")}
+	for path, to := range map[string]string{
+		"/elsewhere": strings.Replace(server.URL, "127.0.0.1", "localhost", 1),
+		"/downgrade": "http://198.51.100.7",
+		"/scheme":    "ftp:",
+	} {
+		mu.Lock()
+		got = nil
+		mu.Unlock()
+		_, err := ServiceFetch(ctx, fetcher, server.URL+path, keys, 5)
+		var redirected *RedirectRefusedError
+		if !errors.As(err, &redirected) || redirected.To != to || redirected.Host != strings.TrimPrefix(server.URL, "http://") {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if want := redirected.Host + " redirected to " + to + ". Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead"; err.Error() != want {
+			t.Errorf("%s: %q", path, err.Error())
+		}
+		mu.Lock()
+		if len(got) != 1 {
+			t.Errorf("%s: %d requests, want 1", path, len(got))
 		}
 		mu.Unlock()
 	}
@@ -191,5 +219,67 @@ func TestPublicFetchesNeverGoThroughAProxy(t *testing.T) {
 	}
 	if proxied.Load() {
 		t.Error("went through the proxy")
+	}
+}
+
+// A service is connected to at the address its name was checked at, and never through a proxy, which would look
+// the name up again itself.
+func TestServiceFetchesRefuseMetadataAtConnect(t *testing.T) {
+	if serviceTransport.Proxy != nil {
+		t.Fatal("the service transport has a proxy")
+	}
+	var proxied atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxied.Store(true)
+		w.WriteHeader(200)
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	for _, target := range []string{"http://169.254.169.254/", "http://[fd00:ec2::254]/", "http://[::ffff:169.254.169.254]/"} {
+		_, err := HTTPFetcher{}.Fetch(context.Background(), target, FetchInit{ServiceOnly: true, Timeout: 5 * time.Second})
+		var refused *MetadataAddressError
+		if !errors.As(err, &refused) {
+			t.Fatalf("%s: %v, want a MetadataAddressError", target, err)
+		}
+	}
+	// A server on this computer is still reachable, and a lookup that fails is a connection that fails.
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer local.Close()
+	answer, err := HTTPFetcher{}.Fetch(context.Background(), local.URL, FetchInit{ServiceOnly: true, Timeout: 5 * time.Second})
+	if err != nil || answer.Text() != "ok" {
+		t.Fatalf("local service: %v", err)
+	}
+	if _, err := (HTTPFetcher{}).Fetch(context.Background(), "http://no-such-name.invalid/", FetchInit{ServiceOnly: true, Timeout: 5 * time.Second}); err == nil {
+		t.Fatal("a name that does not resolve was connected to")
+	}
+	if proxied.Load() {
+		t.Error("went through the proxy")
+	}
+}
+
+// A body past the limit is cut off at it, and counts as unreadable.
+func TestFetchCutsABodyAtItsLimit(t *testing.T) {
+	endless := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		chunk := []byte(strings.Repeat("x", 64<<10))
+		for range 1 << 12 {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer endless.Close()
+	answer, err := HTTPFetcher{}.Fetch(context.Background(), endless.URL, FetchInit{MaxBytes: 1 << 20, Truncate: true})
+	if err != nil || len(answer.Body) != 1<<20 || !answer.Truncated {
+		t.Fatalf("%d bytes, truncated %v, %v", len(answer.Body), answer != nil && answer.Truncated, err)
+	}
+	if _, err := answer.JSONWithin(1 << 20); err == nil {
+		t.Error("a cut-off body was read as JSON")
+	}
+	if answer.TextWithin(1<<20) != "" {
+		t.Error("a cut-off body was read as text")
+	}
+	if got := NewResponse(200, []byte(`{"a":1}`)); got.TextWithin(7) == "" || got.TextWithin(6) != "" {
+		t.Error("a body is read up to its limit and no further")
 	}
 }

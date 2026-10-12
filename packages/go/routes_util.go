@@ -423,6 +423,10 @@ func passThrough(ctx context.Context, r *Runlight, remote Remote, path string, u
 		// two minutes.
 		init.Timeout = 30 * time.Second
 	}
+	// What a share shows of the install's live answer is read in memory, so it is read no further than this.
+	if path == "/api/realtime" {
+		init.MaxBytes = 4 << 20
+	}
 	host := whatwg.MustParse(remote.URL).Host()
 	// An install that answers with a redirect gets no fetch of somewhere else on its behalf.
 	answer, err := r.installFetch(ctx, target.Href(), init)

@@ -42,10 +42,7 @@ var oauthScopes = []string{"read", "manage", "cms"}
 func agentsKey(ctx context.Context, r *Runlight, site string, replace bool) (string, error) {
 	name := "observe-key:" + site
 	if !replace {
-		saved, _, err := r.Store.Setting(ctx, name)
-		if err != nil || saved != "" {
-			return saved, err
-		}
+		return r.Store.SettingOrAdd(ctx, name, func() string { return "rlo_" + randomID(20) })
 	}
 	key := "rlo_" + randomID(20)
 	return key, r.Store.SetSetting(ctx, name, &key)
@@ -95,12 +92,8 @@ func fromBase64urlText(text string) string {
 
 // clientKey is the key client ids are signed with, made on first use and kept in the database for every process.
 func (o *oauthHost) clientKey(ctx context.Context) (string, error) {
-	saved, ok, err := o.r.Store.Setting(ctx, "oauth-key")
-	if err != nil || (ok && saved != "") {
-		return saved, err
-	}
-	made := randomID(32)
-	return made, o.r.Store.SetSetting(ctx, "oauth-key", &made)
+	// Written only if no other request wrote one first, so every process signs with the same key.
+	return o.r.Store.SettingOrAdd(ctx, "oauth-key", func() string { return randomID(32) })
 }
 
 var (

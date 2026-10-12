@@ -219,6 +219,8 @@ type Response struct {
 	Body   []byte
 	// URL is where a fetched answer came from, after any redirects.
 	URL string
+	// Truncated is a body cut short at FetchInit.MaxBytes.
+	Truncated bool
 }
 
 // NewResponse is an answer with headers from name and value pairs.
@@ -244,3 +246,22 @@ func (r *Response) Text() string { return DecodeUTF8(r.Body) }
 
 // JSON is response.json().
 func (r *Response) JSON() (any, error) { return js.Parse(r.Text()) }
+
+// TooLong reports whether the body went past max bytes, and so was cut off or is not to be read.
+func (r *Response) TooLong(max int) bool { return r.Truncated || len(r.Body) > max }
+
+// TextWithin is the body as text, or "" past max bytes: the answer of a service that does not stop is not read.
+func (r *Response) TextWithin(max int) string {
+	if r.TooLong(max) {
+		return ""
+	}
+	return r.Text()
+}
+
+// JSONWithin is response.json() for a body of at most max bytes, and an error past that.
+func (r *Response) JSONWithin(max int) (any, error) {
+	if r.TooLong(max) {
+		return nil, ErrBodyTooLong
+	}
+	return r.JSON()
+}

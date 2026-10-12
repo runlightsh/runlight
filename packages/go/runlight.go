@@ -1053,17 +1053,22 @@ func (r *Runlight) DeleteSite(ctx context.Context, id string) error {
 	return nil
 }
 
-// SitePatch is a change to a site: a nil field is left as it is.
+// SitePatch is a change to a site: a nil field is left as it is. Retention
+// applies only when HasRetention is set, and a nil Retention then keeps everything.
 type SitePatch struct {
-	Name      any
-	Timezone  any
-	Hostnames any
+	Name         any
+	Timezone     any
+	Hostnames    any
+	HasRetention bool
+	Retention    *float64
 }
 
-// UpdateSite changes a site's name or timezone from the dashboard. Stored
-// apart from the settings in code, which keep being written on every start.
-// A managed site has no settings in code, so its changes, hostnames too, go
-// to its row.
+// UpdateSite changes a site's name, timezone, or retention from the dashboard.
+// Stored apart from the settings in code, which keep being written on every
+// start. A managed site has no settings in code, so its changes, hostnames
+// too, go to its row. Every field is checked before anything changes, since a
+// new timezone clears the built days and a shorter retention deletes visits,
+// and pruning starts only once saved.
 func (r *Runlight) UpdateSite(ctx context.Context, id string, patch SitePatch) (SiteRow, error) {
 	if err := r.Init(ctx); err != nil {
 		return SiteRow{}, err
@@ -1079,46 +1084,50 @@ func (r *Runlight) UpdateSite(ctx context.Context, id string, patch SitePatch) (
 	if current == nil {
 		return SiteRow{}, settingsError("Unknown site", "unknown_site")
 	}
-	checkName := func() (string, error) {
-		name := jsTrim(js.String(patch.Name))
+	name := ""
+	if patch.Name != nil {
+		name = jsTrim(js.String(patch.Name))
 		if name == "" || len16(name) > 80 {
-			return "", settingsError("A site name is 1 to 80 characters", "site_name")
+			return SiteRow{}, settingsError("A site name is 1 to 80 characters", "site_name")
 		}
-		return name, nil
 	}
-	checkZone := func() (string, error) {
-		timezone := js.String(patch.Timezone)
+	timezone := ""
+	if patch.Timezone != nil {
+		timezone = js.String(patch.Timezone)
 		if !IsTimezone(timezone) {
-			return "", settingsError(`Unknown timezone "`+timezone+`"`, "unknown_timezone", "timezone", timezone)
+			return SiteRow{}, settingsError(`Unknown timezone "`+timezone+`"`, "unknown_timezone", "timezone", timezone)
 		}
-		return timezone, nil
+	}
+	var hostnames []string
+	_, remote := r.Remote(id)
+	hasHostnames := r.ManagedSites && patch.Hostnames != nil && !remote
+	if hasHostnames {
+		var err error
+		if hostnames, err = r.hostnamesFor(patch.Hostnames, id); err != nil {
+			return SiteRow{}, err
+		}
+	}
+	if patch.HasRetention {
+		if err := r.checkRetention(id, patch.Retention); err != nil {
+			return SiteRow{}, err
+		}
+	}
+	if patch.Timezone != nil {
+		if site, ok := r.Site(id); !ok || timezone != site.Timezone {
+			if _, err := r.zoneChanged(ctx, id, timezone); err != nil {
+				return SiteRow{}, err
+			}
+		}
 	}
 	if r.ManagedSites {
 		next := *current
 		if patch.Name != nil {
-			name, err := checkName()
-			if err != nil {
-				return SiteRow{}, err
-			}
 			next.Name = name
 		}
 		if patch.Timezone != nil {
-			timezone, err := checkZone()
-			if err != nil {
-				return SiteRow{}, err
-			}
 			next.Timezone = timezone
-			if site, ok := r.Site(id); !ok || next.Timezone != site.Timezone {
-				if _, err := r.zoneChanged(ctx, id, next.Timezone); err != nil {
-					return SiteRow{}, err
-				}
-			}
 		}
-		if _, remote := r.Remote(id); patch.Hostnames != nil && !remote {
-			hostnames, err := r.hostnamesFor(patch.Hostnames, id)
-			if err != nil {
-				return SiteRow{}, err
-			}
+		if hasHostnames {
 			next.Hostnames = hostnames
 		}
 		if err := r.Store.UpsertSite(ctx, next, r.now()); err != nil {
@@ -1131,40 +1140,31 @@ func (r *Runlight) UpdateSite(ctx context.Context, id string, patch SitePatch) (
 			}
 		}
 		r.mu.Unlock()
-		site, _ := r.Site(id)
-		return site, nil
-	}
-	r.mu.Lock()
-	next := r.overrides[id].Clone()
-	r.mu.Unlock()
-	if next == nil {
-		next = &js.Object{}
-	}
-	if patch.Name != nil {
-		name, err := checkName()
-		if err != nil {
+	} else {
+		r.mu.Lock()
+		next := r.overrides[id].Clone()
+		r.mu.Unlock()
+		if next == nil {
+			next = &js.Object{}
+		}
+		if patch.Name != nil {
+			next.Set("name", name)
+		}
+		if patch.Timezone != nil {
+			next.Set("timezone", timezone)
+		}
+		if err := r.Store.SetSiteOverrides(ctx, id, next); err != nil {
 			return SiteRow{}, err
 		}
-		next.Set("name", name)
+		r.mu.Lock()
+		r.overrides[id] = next
+		r.mu.Unlock()
 	}
-	if patch.Timezone != nil {
-		timezone, err := checkZone()
-		if err != nil {
+	if patch.HasRetention {
+		if err := r.SetRetention(ctx, id, patch.Retention); err != nil {
 			return SiteRow{}, err
 		}
-		next.Set("timezone", timezone)
-		if site, ok := r.Site(id); !ok || timezone != site.Timezone {
-			if _, err := r.zoneChanged(ctx, id, timezone); err != nil {
-				return SiteRow{}, err
-			}
-		}
 	}
-	if err := r.Store.SetSiteOverrides(ctx, id, next); err != nil {
-		return SiteRow{}, err
-	}
-	r.mu.Lock()
-	r.overrides[id] = next
-	r.mu.Unlock()
 	site, _ := r.Site(id)
 	return site, nil
 }
@@ -1187,8 +1187,7 @@ func (r *Runlight) Retention(ctx context.Context, site string) (*int64, error) {
 	return nil, nil
 }
 
-// SetRetention sets how many months of visits a site keeps; nil keeps everything.
-func (r *Runlight) SetRetention(ctx context.Context, site string, months *float64) error {
+func (r *Runlight) checkRetention(site string, months *float64) error {
 	_, known := r.Site(site)
 	if _, remote := r.Remote(site); !known || remote {
 		return settingsError("Unknown site", "unknown_site")
@@ -1204,6 +1203,14 @@ func (r *Runlight) SetRetention(ctx context.Context, site string, months *float6
 	if !allowed {
 		list := retentionList()
 		return settingsError("Keep visits for "+list+" months, or forever", "retention_bad", "months", list)
+	}
+	return nil
+}
+
+// SetRetention sets how many months of visits a site keeps; nil keeps everything.
+func (r *Runlight) SetRetention(ctx context.Context, site string, months *float64) error {
+	if err := r.checkRetention(site, months); err != nil {
+		return err
 	}
 	var value *string
 	if months != nil {
@@ -1772,7 +1779,7 @@ func (r *Runlight) sessionFor(ctx context.Context, site SiteRow, request *Reques
 		hints.Platform = &v
 	}
 	parsed := ParseClient(ua, hints, screenWidth)
-	location := Locate(request.Header, ip, r.geo)
+	location := LocateTrusting(request.Header, ip, r.geo, r.trust != "")
 	err = r.Store.InsertSession(ctx, SessionRow{
 		ID: session.ID, Site: site.ID, Visitor: session.Visitor, StartedAt: now, Hostname: page.Hostname,
 		ReferrerHost: attribution.ReferrerHost, ReferrerPath: attribution.ReferrerPath, Source: attribution.Source, Channel: attribution.Channel,

@@ -16,7 +16,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -156,17 +155,7 @@ func secretFor(dataDir string) (string, error) {
 	if given := env("RUNLIGHT_SECRET"); given != "" {
 		return given, nil
 	}
-	file := filepath.Join(dataDir, "secret")
-	if saved, err := os.ReadFile(file); err == nil {
-		return strings.TrimSpace(string(saved)), nil
-	}
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	made := hex.EncodeToString(b)
-	if err := os.WriteFile(file, []byte(made+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	return made, os.Chmod(file, 0o600)
+	return secretIn(dataDir)
 }
 
 func flag(args []string, name string) string {
