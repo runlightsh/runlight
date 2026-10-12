@@ -1,6 +1,7 @@
 package sh.runlight.servlet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -207,7 +208,17 @@ class ServletTest {
     RawHttp.Answer go = RawHttp.get(port, "/go/sale", "User-Agent", CHROME);
     assertEquals(302, go.status());
     assertEquals("https://example.org/sale", go.header("location"));
-    assertEquals(404, RawHttp.get(port, "/go/nothing").status());
+    RawHttp.Answer nothing = RawHttp.get(port, "/go/nothing");
+    assertEquals(
+        List.of(200, "app /go/nothing"),
+        List.of(nothing.status(), nothing.text()),
+        "a slug with no link is the app's to answer, with its own 404 page");
+    // Jetty turns away a path that is not valid UTF-8 itself, ahead of the app; either way it is
+    // never Runlight's own 404.
+    assertNotEquals(
+        "Not found",
+        RawHttp.get(port, "/go/%E0").text(),
+        "nor is one that is not valid percent-encoding");
     assertEquals("app /go", RawHttp.get(port, "/go").text(), "not a link");
     assertEquals(
         "app /go/sale",
@@ -258,6 +269,14 @@ class ServletTest {
     assertEquals(302, linked.status());
     assertEquals("https://example.org/launch", linked.header("location"));
     assertEquals("app /launch", RawHttp.get(port, "/launch").text(), "the app keeps its own");
+    assertEquals(
+        404,
+        RawHttp.get(port, "/go/launch", "Host", "t.example.com", "User-Agent", CHROME).status(),
+        "the app's link path is no link on a link domain");
+    assertEquals(
+        302,
+        RawHttp.get(port, "/go/launch", "User-Agent", CHROME).status(),
+        "but answers on the app's own domain");
     assertEquals(
         200,
         RawHttp.get(port, "/runlight/api/sites", "Host", "t.example.com").status(),
