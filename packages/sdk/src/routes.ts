@@ -1707,10 +1707,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
           );
           if (!answer.ok) return answer;
           runlight.forgetRemoteInfo(id);
-        } else if (!remote && body.retentionMonths !== undefined) {
-          await runlight.setRetention(id, body.retentionMonths === null ? null : Number(body.retentionMonths));
         }
+        // updateSite checks every field, hostnames too, before it changes anything.
         const site = await runlight.updateSite(id, {
+          ...(!remote && body.retentionMonths !== undefined ? { retentionMonths: body.retentionMonths === null ? null : Number(body.retentionMonths) } : {}),
           ...(body.name !== undefined ? { name: String(body.name) } : {}),
           ...(body.timezone !== undefined ? { timezone: String(body.timezone) } : {}),
           ...(body.hostnames !== undefined && runlight.managedSites ? { hostnames: body.hostnames } : {}),

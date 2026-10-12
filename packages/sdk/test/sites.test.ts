@@ -144,3 +144,39 @@ test("deleting a site forgets its retention, its plugin key, and its Umami impor
   assert.equal(await rl.store.setting(`observe-key:${site.id}`), null);
   assert.equal(await rl.store.setting(`import:umami-visits:${site.id}:w1`), null);
 });
+
+for (const kind of STORES) {
+  test(`${kind}: a site change refused for a bad domain changes nothing, retention and timezone included`, async () => {
+    const store = freshStore(kind);
+    let now = Date.UTC(2025, 9, 1);
+    const rl = runlight({ store, managedSites: true, now: () => now });
+    const { GET, POST, PATCH } = rl.routes({ token: "t" });
+    const auth = { authorization: "Bearer t", "content-type": "application/json" };
+    const url = (path: string) => `https://stats.example.com/runlight${path}`;
+    assert.equal((await POST(new Request(url("/api/sites"), { method: "POST", headers: auth, body: JSON.stringify({ hostnames: "blog.example.com" }) }))).status, 201);
+    assert.equal((await POST(new Request(url("/api/sites"), { method: "POST", headers: auth, body: JSON.stringify({ hostnames: "shop.example.com" }) }))).status, 201);
+    await POST(new Request(url("/e"), {
+      method: "POST",
+      headers: { "user-agent": "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36", "x-forwarded-for": "203.0.113.1" },
+      body: JSON.stringify({ k: "pageview", u: "https://blog.example.com/" }),
+    }));
+    now = Date.UTC(2026, 9, 6, 12);
+    const zone = await rl.store.setting("rollup-zone:blog.example.com");
+    const visits = async () => ((await (await GET(new Request(url("/api/stats?site=blog.example.com&period=all"), { headers: auth }))).json()) as any).stats.visits;
+    const patch = (body: unknown) => PATCH(new Request(url("/api/sites/blog.example.com"), { method: "PATCH", headers: auth, body: JSON.stringify(body) }));
+
+    for (const hostnames of ["not a domain", "shop.example.com"]) {
+      const answer = await patch({ retentionMonths: 6, timezone: "Europe/Paris", name: "Renamed", hostnames });
+      assert.equal(answer.status, 400);
+      await rl.idle();
+      assert.equal(await rl.retention("blog.example.com"), null, "retention is unchanged");
+      assert.equal(await rl.store.setting("rollup-zone:blog.example.com"), zone, "the built days are kept");
+      assert.deepEqual(rl.site("blog.example.com"), { id: "blog.example.com", name: "blog.example.com", hostnames: ["blog.example.com"], timezone: "UTC" });
+      assert.equal(await visits(), 1, "the old visit is still there");
+    }
+
+    assert.equal((await patch({ retentionMonths: 6, hostnames: "blog.example.com" })).status, 200);
+    await rl.idle();
+    assert.equal(await visits(), 0, "a change that passes prunes once saved");
+  });
+}
