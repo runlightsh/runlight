@@ -141,7 +141,11 @@ where
     }
 }
 
-/// Short links on the app's own domain, `{link_path}/{slug}`, as a tower `Service`.
+/// Short links on the app's own domain, `{link_path}/{slug}`, as a tower `Service`. It is what the app
+/// routes its link path to, so it answers every request it is handed: a link domain's first (where the
+/// link path is a path with no link, a 404), then the link's redirect, or Runlight's own 404 for a slug
+/// with no link. A router has already matched the path by then and cannot hand it on to the app's
+/// fallback, so the app's own 404 page does not show there.
 #[derive(Clone)]
 pub struct LinkService(pub Runlight);
 
@@ -212,7 +216,8 @@ pub mod axum_support {
     }
 
     impl Runlight {
-        /// A `Router` serving short links at `{link_path}/{slug}`.
+        /// A `Router` serving short links at `{link_path}/{slug}`, through [`LinkService`]: a slug with
+        /// no link is Runlight's own 404, since a matched route cannot reach the app's fallback.
         pub fn link_router<S: Clone + Send + Sync + 'static>(&self) -> axum::Router<S> {
             axum::Router::new().route_service(&format!("{}/{{slug}}", self.link_path()), self.link_service())
         }
