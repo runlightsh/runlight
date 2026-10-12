@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -344,7 +344,6 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
   const php = spawnSync("php", ["--version"]);
   if (php.error && !process.env.CI) return t.skip("PHP is not installed");
   const dir = mkdtempSync(path.join(tmpdir(), "runlight-wp-zip-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const built = execFileSync("php", [WORDPRESS + "build.php", dir], { encoding: "utf8" });
   const zip = /build: (\S+\.zip)/.exec(built)?.[1];
   assert.ok(zip, built);
@@ -365,11 +364,17 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
 
   const port = 47000 + (process.pid % 2000);
   const home = `http://127.0.0.1:${port}`;
-  const server = spawn("php", ["-S", `127.0.0.1:${port}`, WORDPRESS + "tests/serve.php"], { cwd: dir, env: { ...env, RUNLIGHT_WP_HOME: home }, stdio: "ignore" });
-  t.after(() => server.kill());
+  // PHP's own log of the server, shown in CI, where a failure here cannot be watched as it happens.
+  const log = openSync(path.join(dir, "server.log"), "w");
+  const server = spawn("php", ["-S", `127.0.0.1:${port}`, WORDPRESS + "tests/serve.php"], { cwd: dir, env: { ...env, RUNLIGHT_WP_HOME: home }, stdio: ["ignore", log, log] });
+  t.after(() => {
+    server.kill();
+    if (process.env.CI && existsSync(path.join(dir, "server.log"))) console.log(`PHP's server log:\n${readFileSync(path.join(dir, "server.log"), "utf8")}`);
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (let i = 0; ; i++) {
     try {
-      await fetch(`${home}/`);
+      await (await fetch(`${home}/`)).arrayBuffer();
       break;
     } catch (error) {
       if (i > 50) throw error;
@@ -377,11 +382,14 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
     }
   }
 
-  // PHP's built-in server now and then drops a connection mid-answer, so a read is tried again; the visit is not.
+  // Every answer is read in full before PHP's built-in server closes the connection: undici trips over its own
+  // assertion when a socket ends under a body nobody read. A read that fails is tried again; the visit is not.
   const get = async (url: string, init?: RequestInit): Promise<Response> => {
     for (let i = 0; ; i++) {
       try {
-        return await fetch(url, init);
+        const answer = await fetch(url, init);
+        const body = await answer.arrayBuffer();
+        return new Response([101, 204, 205, 304].includes(answer.status) ? null : body, { status: answer.status, headers: answer.headers });
       } catch (error) {
         if (i >= 2) throw error;
         await new Promise((resolve) => setTimeout(resolve, 100));
