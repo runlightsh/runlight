@@ -150,8 +150,32 @@ export function resolveRange(
     }
   }
 
-  const interval = (["hour", "day", "week", "month"] as const).find((i) => i === input.interval) ?? defaultInterval(fromDate, toDate);
-  return { from: startOf(fromDate, timezone), to: startOf(addDays(toDate, 1), timezone), fromDate, toDate, interval };
+  let interval = (["hour", "day", "week", "month"] as const).find((i) => i === input.interval) ?? defaultInterval(fromDate, toDate);
+  const from = startOf(fromDate, timezone);
+  const to = startOf(addDays(toDate, 1), timezone);
+  // An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+  // Past 1,000 months there is none.
+  while (bucketCount(from, to, fromDate, toDate, interval) > (interval === "hour" ? MAX_HOURS : MAX_BUCKETS)) {
+    const coarser = COARSER[interval];
+    if (!coarser) return null;
+    interval = coarser;
+  }
+  return { from, to, fromDate, toDate, interval };
+}
+
+const COARSER: Record<Interval, Interval | null> = { hour: "day", day: "week", week: "month", month: null };
+
+/** How many chart buckets a range has at an interval, the first and last counted even when partial. */
+function bucketCount(from: number, to: number, fromDate: string, toDate: string, interval: Interval): number {
+  if (interval === "hour") return Math.ceil((to - from) / 3_600_000);
+  if (interval === "day") return daysBetween(fromDate, toDate) + 1;
+  if (interval === "week") {
+    const weekday = (new Date(`${fromDate}T00:00:00Z`).getUTCDay() + 6) % 7;
+    return Math.floor(daysBetween(addDays(fromDate, -weekday), toDate) / 7) + 1;
+  }
+  const [fy, fm] = fromDate.split("-").map(Number);
+  const [ty, tm] = toDate.split("-").map(Number);
+  return (ty! - fy!) * 12 + (tm! - fm!) + 1;
 }
 
 export type CompareMode = "previous" | "year" | "custom" | "off";
@@ -195,14 +219,19 @@ export function compareRange(
 
 
 const MAX_BUCKETS = 1000;
-/** A month of hours. Longer hourly ranges are cut off rather than refused. */
+/** A month of hours. A longer range is counted by the day instead. */
 const MAX_HOURS = 744;
 
-/** Chart buckets covering a range, each starting on a local boundary. */
+/**
+ * Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the
+ * first and last can be partial. resolveRange picks an interval that fits; a range given here with more
+ * buckets than that, such as a longer comparison, is cut off at a boundary, never merged into its last bucket.
+ */
 export function buckets(range: Range, timezone: string): Bucket[] {
   const starts: number[] = [];
+  // One start past the limit, so the last bucket kept still ends where the next would begin.
   if (range.interval === "hour") {
-    for (let t = range.from; t < range.to && starts.length < MAX_HOURS; t += 3_600_000) starts.push(t);
+    for (let t = range.from; t < range.to && starts.length <= MAX_HOURS; t += 3_600_000) starts.push(t);
   } else {
     let date = range.fromDate;
     if (range.interval === "week") {
@@ -211,12 +240,12 @@ export function buckets(range: Range, timezone: string): Bucket[] {
     } else if (range.interval === "month") {
       date = `${date.slice(0, 8)}01`;
     }
-    while (date <= range.toDate && starts.length < MAX_BUCKETS) {
+    while (date <= range.toDate && starts.length <= MAX_BUCKETS) {
       starts.push(startOf(date, timezone));
       date = range.interval === "day" ? addDays(date, 1) : range.interval === "week" ? addDays(date, 7) : addMonths(date, 1);
     }
   }
-  return starts.map((start, i) => ({
+  return starts.slice(0, range.interval === "hour" ? MAX_HOURS : MAX_BUCKETS).map((start, i) => ({
     start: Math.max(start, range.from),
     end: Math.min(starts[i + 1] ?? range.to, range.to),
   }));

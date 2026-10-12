@@ -312,6 +312,10 @@ const REPORTS: Scenario[] = [
       get("/api/series?period=30d&interval=week&compare=off"),
       get("/api/series?period=12mo&interval=month&compare=off"),
       get("/api/series?period=today&interval=hour&compare=year"),
+      // An interval too fine for the range moves up to one that fits, and range.interval says which.
+      get("/api/series?from=2026-08-01&to=2026-09-09&interval=hour&compare=off"),
+      get("/api/series?from=2005-01-01&to=2026-10-06&interval=day&compare=off"),
+      get("/api/stats?from=1900-01-01&to=2026-10-06&compare=off"),
       // Filters on visit, page, and event dimensions, with each way of matching.
       ...[
         "channel:not:Direct",
