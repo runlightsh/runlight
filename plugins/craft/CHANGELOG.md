@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.1.3 - 2026-10-12
 
 ### Security
 - A mail service, mail webhook, or AI assistant that redirects to another address is refused before anything is sent there, so its key and the message never leave for a server you didn't choose.
