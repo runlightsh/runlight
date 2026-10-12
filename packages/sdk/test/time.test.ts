@@ -81,3 +81,37 @@ test("a date with a month or day that does not exist is not a date, rather than 
   const answer = await t.routes.GET(new Request("https://example.com/runlight/api/stats?from=2026-13-01&to=2026-13-05", { headers: { authorization: "Bearer secret" } }));
   assert.equal(answer.status, 400);
 });
+
+test("an interval too fine for a long range moves up to one that fits, and no bucket takes in the rest", () => {
+  const now = Date.UTC(2026, 9, 12, 12);
+  const DAY = 86_400_000;
+  const hourly = resolveRange({ from: "2026-08-01", to: "2026-09-09", interval: "hour" }, "UTC", now)!;
+  assert.equal(hourly.interval, "day", "40 days of hours is too many hours");
+  assert.equal(buckets(hourly, "UTC").length, 40);
+  assert.equal(resolveRange({ from: "2026-08-01", to: "2026-08-31", interval: "hour" }, "UTC", now)!.interval, "hour", "a month of hours still fits");
+
+  const daily = resolveRange({ from: "2018-01-03", to: "2026-10-12", interval: "day" }, "Europe/London", now)!;
+  assert.equal(daily.interval, "week");
+  const weeks = buckets(daily, "Europe/London");
+  assert.equal(weeks[0]!.start, daily.from);
+  assert.equal(weeks.at(-1)!.end, daily.to, "the buckets reach the end of the range");
+  for (const [i, week] of weeks.entries()) {
+    if (i > 0) assert.equal(week.start, weeks[i - 1]!.end);
+    // A week across a clock change is an hour short or long; none is longer than that.
+    assert.ok(week.end - week.start <= 7 * DAY + 3_600_000, `week ${i} is ${(week.end - week.start) / DAY} days`);
+    if (i > 0 && i < weeks.length - 1) assert.ok(week.end - week.start >= 7 * DAY - 3_600_000);
+  }
+
+  const decades = resolveRange({ from: "1990-01-01", to: "2026-10-12", interval: "day" }, "UTC", now)!;
+  assert.equal(decades.interval, "month");
+  const months = buckets(decades, "UTC");
+  assert.equal(months.length, 442);
+  assert.ok(months.every((m) => m.end - m.start <= 31 * DAY));
+  assert.equal(resolveRange({ from: "1900-01-01", to: "2026-10-12" }, "UTC", now), null, "past 1,000 months there is no interval that fits");
+
+  // A comparison longer than its range keeps whole buckets, cut off at a boundary.
+  const longer = { ...decades, from: Date.UTC(2000, 0, 1), fromDate: "2000-01-01", toDate: "2026-10-12", interval: "day" as const };
+  const cut = buckets(longer, "UTC");
+  assert.equal(cut.length, 1000);
+  assert.equal(cut.at(-1)!.end - cut.at(-1)!.start, DAY);
+});
