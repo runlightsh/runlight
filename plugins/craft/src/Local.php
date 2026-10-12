@@ -315,7 +315,9 @@ final class Local
             $input = fopen('php://input', 'rb');
             $body = $input === false ? '' : Request::readBody($input, $url, $headers['content-length'][0] ?? null);
         }
-        return new Request($url, $method, $headers, $body, Visitor::of($request, $headers));
+        // Cloudflare's location headers are believed only for a connection from Cloudflare, as its CF-Connecting-IP is.
+        $cloudflare = Visitor::fromCloudflare((string) $request->getRemoteIP(), $headers);
+        return new Request($url, $method, $headers, $body, Visitor::of($request, $headers), $cloudflare);
     }
 
     /**

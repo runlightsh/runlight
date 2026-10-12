@@ -157,6 +157,38 @@ final class RecordsTest extends StoreTestCase
     }
 
     #[DataProvider('kinds')]
+    public function testASettingIsAddedOnceAndSwappedOnlyFromWhatWasRead(string $kind): void
+    {
+        $store = $this->store($kind);
+        $this->assertTrue($store->addSetting('k', 'first'));
+        $this->assertFalse($store->addSetting('k', 'second'), 'the second to add loses');
+        $this->assertSame('first', $store->setting('k'));
+        $this->assertTrue($store->swapSetting('k', 'first', '2'));
+        $this->assertFalse($store->swapSetting('k', 'first', '3'), 'a swap from what is no longer there loses');
+        $this->assertFalse($store->swapSetting('nothing', 'a', 'b'));
+        $this->assertSame('2', $store->setting('k'));
+
+        // A key made on first use, with a racer who wrote one between this caller's read and its write.
+        $made = 0;
+        $key = $store->settingOrAdd('embed-key', function () use ($store, &$made): string {
+            $made++;
+            $store->addSetting('embed-key', 'racer');
+            return "mine-$made";
+        });
+        $this->assertSame('racer', $key, 'the value written first wins');
+        $this->assertSame('racer', $store->setting('embed-key'));
+        $this->assertSame('racer', $store->settingOrAdd('embed-key', fn (): string => 'never'));
+        $this->assertSame(1, $made);
+
+        $rl = new \Runlight\Runlight(['store' => $store, 'site' => ['hostnames' => ['example.com']]]);
+        $rl->init();
+        $agents = \Runlight\OAuth::agentsKey($rl, 'default');
+        $this->assertSame($agents, \Runlight\OAuth::agentsKey($rl, 'default'));
+        $this->assertSame($agents, $store->setting('observe-key:default'));
+        $this->assertNotSame($agents, \Runlight\OAuth::agentsKey($rl, 'default', true), 'replacing it still makes a new one');
+    }
+
+    #[DataProvider('kinds')]
     public function testSaltsSessionsAndTheLiveView(string $kind): void
     {
         $store = $this->store($kind);

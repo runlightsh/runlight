@@ -104,7 +104,7 @@ final class Ses
         ]);
         unset($headers['host']);
         try {
-            $response = ($fetcher ?? new CurlFetcher())->fetch($url->href(), ['method' => 'POST', 'headers' => $headers, 'body' => $body, 'timeoutMs' => 20_000]);
+            $response = ($fetcher ?? new CurlFetcher())->fetch($url->href(), ['method' => 'POST', 'headers' => $headers, 'body' => $body, 'timeoutMs' => 20_000, 'maxBytes' => 65_536, 'truncate' => true]);
         } catch (FetchError $error) {
             throw new MailError("Could not reach Amazon SES: {$error->getMessage()}", 'mail_unreachable', ['host' => 'Amazon SES', 'detail' => $error->getMessage()]);
         }

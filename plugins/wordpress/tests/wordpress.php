@@ -62,6 +62,10 @@ function add_option( $name, $value = '', $deprecated = '', $autoload = null ): b
 	return false === get_option( $name ) ? update_option( $name, $value ) : false;
 }
 
+function wp_cache_delete( $key, $group = '' ): bool {
+	return true;
+}
+
 function delete_option( $name ): bool {
 	$options = wp_test_options();
 	unset( $options[ $name ] );

@@ -134,12 +134,15 @@ final class Geo
     }
 
     /**
+     * Where a visitor is, from a hosting platform's headers or else the lookup. The headers are believed only
+     * with `$trustHeaders`, as the address is: without a proxy in front, a client writes them itself.
+     *
      * @param (callable(string): ?array)|null $lookup
      * @return array{country: string, region: string, city: string}
      */
-    public static function locate(Headers $headers, string $ip, ?callable $lookup = null): array
+    public static function locate(Headers $headers, string $ip, ?callable $lookup = null, bool $trustHeaders = true): array
     {
-        $fromHeaders = self::locationFromHeaders($headers);
+        $fromHeaders = $trustHeaders ? self::locationFromHeaders($headers) : null;
         if ($fromHeaders !== null && $fromHeaders['country'] !== '') {
             return $fromHeaders;
         }

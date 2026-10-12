@@ -380,22 +380,27 @@ final class Safefetch
 
     /** Headers that describe a body, dropped with it when a redirect turns a request into a GET. */
     private const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location'];
-    /** Credentials, dropped when a redirect leads to another origin. */
-    private const CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie'];
-
     /**
      * Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
-     * this computer or a private network, but is never at a link-local or cloud metadata address. The address
-     * is checked, and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch
-     * follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body, and a redirect to
-     * another origin goes without the credentials. A redirect past the last one comes back as it is, and
-     * `timeoutMs` (default 30000) covers them all. Throws a MetadataAddressError for an address it refuses.
+     * this computer or a private network, but is never at a link-local or cloud metadata address. The name is
+     * resolved here and the request is pinned to the addresses checked (the Fetcher's `resolve`), through no
+     * proxy, so a name that answers differently a moment later gets nowhere; a name that does not resolve is
+     * refused rather than let through. Every redirect is checked the same way, up to `redirects` of them
+     * (default 5), each followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET
+     * with no body. Only a redirect on the same origin is followed: the request carries a key, in whatever
+     * header the service names it, and a 307 or 308 would carry its body too, an email or a conversation, so a
+     * redirect to another origin, https to http among them, is refused before anything is sent there. A
+     * redirect past the last one comes back as it is, and `timeoutMs` (default 30000) covers them all. Throws a
+     * MetadataAddressError or a RedirectRefusedError for an address it refuses, and a FetchError when the name
+     * does not resolve. `maxBytes` and `truncate` go to the Fetcher, for a capped read. `lookup` stands in for
+     * DNS in tests.
      *
-     * @param array{method?: string, headers?: array<string, string>, body?: string, timeoutMs?: int, redirects?: int} $init
+     * @param array{method?: string, headers?: array<string, string>, body?: string, timeoutMs?: int, redirects?: int, maxBytes?: int, truncate?: bool, lookup?: callable(string): list<string>} $init
      */
     public static function serviceFetch(string $target, array $init, ?Fetcher $fetcher = null): Response
     {
         $fetcher ??= new CurlFetcher();
+        $lookup = $init['lookup'] ?? self::$testLookup ?? self::lookup(...);
         $redirects = $init['redirects'] ?? 5;
         $until = hrtime(true) + ($init['timeoutMs'] ?? 30_000) * 1_000_000;
         $url = new Url($target);
@@ -404,16 +409,48 @@ final class Safefetch
         $body = $init['body'] ?? null;
         for ($hop = 0; ; $hop++) {
             $host = (string) preg_replace('/^\[|\]\z/', '', $url->hostname);
-            if (self::metadataHost($host)) {
+            $name = strtolower((string) preg_replace('/\.+\z/', '', Js::trim($host)));
+            if (in_array($name, self::METADATA_NAMES, true) || self::metadataAddress($name)) {
                 throw new MetadataAddressError($host);
+            }
+            $port = $url->port !== '' ? $url->port : ($url->protocol === 'https:' ? '443' : '80');
+            $pin = [];
+            if (self::v4($name) !== null) {
+                // An address written out needs no lookup, but is pinned too, so no proxy is asked to connect to it.
+                $pin = ["{$url->hostname}:$port:$name"];
+            } elseif (self::v6($name) === null) {
+                // The address checked is the address used: every one the name gives must be off the metadata
+                // addresses, and the connection is pinned to them, so a second lookup cannot hand back another.
+                try {
+                    $addresses = $lookup($name);
+                } catch (\Throwable) {
+                    $addresses = [];
+                }
+                if ($addresses === []) {
+                    throw new FetchError("Could not look up $host");
+                }
+                foreach ($addresses as $address) {
+                    if (self::metadataAddress($address)) {
+                        throw new MetadataAddressError($host);
+                    }
+                }
+                $pin = ["{$url->hostname}:$port:" . implode(',', array_map(static fn ($a) => str_contains($a, ':') ? "[$a]" : $a, $addresses))];
             }
             $left = (int) ceil(($until - hrtime(true)) / 1_000_000);
             if ($left <= 0) {
                 throw self::timedOut();
             }
             $options = ['method' => $method, 'headers' => $headers, 'redirect' => 'manual', 'timeoutMs' => $left];
+            foreach (['maxBytes', 'truncate'] as $key) {
+                if (isset($init[$key])) {
+                    $options[$key] = $init[$key];
+                }
+            }
             if ($body !== null) {
                 $options['body'] = $body;
+            }
+            if ($pin !== []) {
+                $options['resolve'] = $pin;
             }
             $answer = $fetcher->fetch($url->href(), $options);
             $location = $answer->headers->get('location');
@@ -421,13 +458,17 @@ final class Safefetch
                 return $answer;
             }
             $next = new Url($location, $url->href());
+            if ($next->origin() !== $url->origin()) {
+                $there = (string) preg_replace('/^\[|\]\z/', '', $next->hostname);
+                if (self::metadataHost($there)) {
+                    throw new MetadataAddressError($there);
+                }
+                throw new RedirectRefusedError($url->host(), $next->protocol === 'https:' || $next->protocol === 'http:' ? $next->origin() : $next->protocol);
+            }
             if ($answer->status === 303 || (($answer->status === 301 || $answer->status === 302) && $method === 'POST')) {
                 $method = $method === 'HEAD' ? 'HEAD' : 'GET';
                 $body = null;
                 $headers = array_filter($headers, static fn (string $name): bool => !in_array(strtolower($name), self::BODY_HEADERS, true), ARRAY_FILTER_USE_KEY);
-            }
-            if ($next->origin() !== $url->origin()) {
-                $headers = array_filter($headers, static fn (string $name): bool => !in_array(strtolower($name), self::CREDENTIAL_HEADERS, true), ARRAY_FILTER_USE_KEY);
             }
             $url = $next;
         }

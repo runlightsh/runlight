@@ -304,7 +304,7 @@ final class Routes
      *
      * @param array<string, mixed> $remote
      */
-    private function passThrough(array $remote, string $path, Url $url, ?Request $request = null): Response
+    private function passThrough(array $remote, string $path, Url $url, ?Request $request = null, ?int $maxBytes = null): Response
     {
         $target = new Url($remote['url'] . $path);
         $query = $target->searchParams();
@@ -332,6 +332,9 @@ final class Routes
                 $init['body'] = $request->text();
             }
             // An install that answers with a redirect gets no fetch of somewhere else on its behalf.
+            if ($maxBytes !== null) {
+                $init['maxBytes'] = $maxBytes;
+            }
             $answer = Safefetch::installFetch($target->href(), [...$init, 'local' => $this->rl->localInstalls], $this->rl->fetcher);
         } catch (\Throwable $error) {
             if ($error instanceof FetchError && $error->timedOut) {
@@ -970,7 +973,7 @@ final class Routes
                 try {
                     // Only a public address is fetched, whatever the name resolves to now, so the check cannot be pointed
                     // into a private network.
-                    $answer = Safefetch::publicFetch("https://$domain" . self::LINK_DOMAIN_CHECK, ['timeoutMs' => 5000], $this->rl->fetcher);
+                    $answer = Safefetch::publicFetch("https://$domain" . self::LINK_DOMAIN_CHECK, ['timeoutMs' => 5000, 'maxBytes' => 16_384, 'truncate' => true], $this->rl->fetcher);
                     try {
                         [$parsed, $body] = Js::parseJson($answer->text());
                     } catch (\Throwable) {
@@ -1130,13 +1133,8 @@ final class Routes
     private function pickKey(): string
     {
         $this->rl->init();
-        $saved = $this->store()->setting('pick-key');
-        if ($saved !== null && $saved !== '') {
-            return $saved;
-        }
-        $made = Hash::randomId(32);
-        $this->store()->setSetting('pick-key', $made);
-        return $made;
+        // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        return $this->store()->settingOrAdd('pick-key', static fn (): string => Hash::randomId(32));
     }
 
     /**
@@ -1181,13 +1179,8 @@ final class Routes
     private function embedKey(): string
     {
         $this->rl->init();
-        $saved = $this->store()->setting('embed-key');
-        if ($saved !== null && $saved !== '') {
-            return $saved;
-        }
-        $made = Hash::randomId(32);
-        $this->store()->setSetting('embed-key', $made);
-        return $made;
+        // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        return $this->store()->settingOrAdd('embed-key', static fn (): string => Hash::randomId(32));
     }
 
     /**
@@ -1621,18 +1614,12 @@ final class Routes
             return self::coded('You have asked a lot in a short time. Wait a little and ask again.', 'assistant_soon', 429);
         }
         if (!$owner) {
-            $limit = $this->viewerDaily();
-            $day = 'assistant-asked:' . gmdate('Y-m-d', intdiv($now, 1000));
-            $counts = Json::decode($this->store()->setting($day) ?? '{}', true);
-            if (($counts[$who] ?? 0) >= $limit) {
-                return self::coded('Viewers can ask ' . Js::string($limit) . ' questions a day. Ask again tomorrow.', 'assistant_daily', 429, ['limit' => Js::string($limit)]);
+            $counted = $this->countAsk($who, $now);
+            if ($counted === null) {
+                return self::coded('You have asked a lot in a short time. Wait a little and ask again.', 'assistant_soon', 429);
             }
-            $counts[$who] = ($counts[$who] ?? 0) + 1;
-            $this->store()->setSetting($day, Json::encode((object) $counts));
-            foreach ($this->store()->settingsStartingWith('assistant-asked:') as $entry) {
-                if ($entry['key'] !== $day) {
-                    $this->store()->setSetting($entry['key'], null);
-                }
+            if ($counted !== true) {
+                return self::coded('Viewers can ask ' . Js::string($counted) . ' questions a day. Ask again tomorrow.', 'assistant_daily', 429, ['limit' => Js::string($counted)]);
             }
         }
         $at[] = $now;
@@ -1641,6 +1628,44 @@ final class Routes
         return function () use ($who): void {
             $this->open[$who]--;
         };
+    }
+
+    /**
+     * Counts a viewer's question in their own row for the day, or answers the daily limit when it is reached.
+     * The row only ever moves from the count read to the next one, so of questions sent at once, by one viewer
+     * or by every process on the database, each count is taken once. Null when the row kept changing underneath.
+     */
+    private function countAsk(string $who, int|float $now): true|int|float|null
+    {
+        $limit = $this->viewerDaily();
+        if ($limit < 1) {
+            return $limit;
+        }
+        $day = 'assistant-asked:' . gmdate('Y-m-d', intdiv((int) $now, 1000)) . ':';
+        $key = $day . $who;
+        $store = $this->store();
+        for ($tries = 0; $tries < 20; $tries++) {
+            $seen = $store->setting($key);
+            if ($seen === null) {
+                if (!$store->addSetting($key, '1')) {
+                    continue;
+                }
+                // A viewer's first question of the day clears the days before.
+                foreach ($store->settingsStartingWith('assistant-asked:') as $entry) {
+                    if (!str_starts_with($entry['key'], $day)) {
+                        $store->setSetting($entry['key'], null);
+                    }
+                }
+                return true;
+            }
+            if (Js::number($seen) >= $limit) {
+                return $limit;
+            }
+            if ($store->swapSetting($key, $seen, Js::string(Js::number($seen) + 1))) {
+                return true;
+            }
+        }
+        return null;
     }
 
     private function tokensApi(Request $request, string $path): Response
@@ -2451,10 +2476,12 @@ final class Routes
                     return $answer;
                 }
                 $rl->forgetRemoteInfo($id);
-            } elseif ($remote === null && !($retention instanceof Undefined)) {
-                $rl->setRetention($id, $retention === null ? null : Js::number($retention));
             }
+            // updateSite checks every field, hostnames too, before it changes anything.
             $patch = [];
+            if ($remote === null && !($retention instanceof Undefined)) {
+                $patch['retentionMonths'] = $retention === null ? null : Js::number($retention);
+            }
             if (self::defined($body, 'name')) {
                 $patch['name'] = Js::string(Js::get($body, 'name'));
             }
@@ -2571,7 +2598,8 @@ final class Routes
             return $live;
         };
         if ($remote !== null) {
-            $answer = $this->passThrough($remote, $path, $url, $request);
+            // A shared view parses the install's live answer here, so it is read only so far.
+            $answer = $this->passThrough($remote, $path, $url, $request, $path === '/api/realtime' && $shared !== null ? 4 * 1024 * 1024 : null);
             if ($path !== '/api/realtime' || $shared === null || !$answer->ok()) {
                 return $answer;
             }

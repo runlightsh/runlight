@@ -116,6 +116,28 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
         return new AssistantError($error->getMessage(), 'address_refused', ['host' => $error->host]);
     }
 
+    /** A service that sent the request to another origin, which would have carried the key, and the question with it. */
+    private static function redirected(RedirectRefusedError $error): AssistantError
+    {
+        return new AssistantError($error->getMessage(), 'redirect_refused', ['host' => $error->host, 'to' => $error->to]);
+    }
+
+    /**
+     * The most of a model's answer, or its list of models, read; past it the answer counts as unreadable.
+     * Reading stops there, so a service that never stops sending cannot fill memory.
+     */
+    private const MAX_ANSWER_BYTES = 4 * 1024 * 1024;
+
+    /** The body of an answer as JSON, or null when it is not, or ran past the limit. */
+    private static function readAnswer(Response $answer): mixed
+    {
+        if (strlen($answer->text()) >= self::MAX_ANSWER_BYTES) {
+            return null;
+        }
+        [$parsed, $data] = Js::parseJson($answer->text());
+        return $parsed ? $data : null;
+    }
+
     /** @param array<string, string> $headers */
     private static function post(Fetcher $fetcher, string $url, array $headers, mixed $body, int $deadline, \Closure $now, ?\Closure $cancelled): mixed
     {
@@ -127,20 +149,22 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
                 'headers' => array_merge(['content-type' => 'application/json'], $headers),
                 'body' => Json::encode($body),
                 'timeoutMs' => min(90_000, $left),
+                'maxBytes' => self::MAX_ANSWER_BYTES,
+                'truncate' => true,
             ], $fetcher);
         } catch (\Throwable $error) {
             if ($error instanceof MetadataAddressError) {
                 throw self::refused($error);
+            }
+            if ($error instanceof RedirectRefusedError) {
+                throw self::redirected($error);
             }
             $host = (new Url($url))->host();
             throw $error instanceof FetchError && $error->timedOut
                 ? new AssistantError("Could not reach $host: it took too long to answer", 'assistant_timeout', ['host' => $host])
                 : new AssistantError("Could not reach $host: the connection failed", 'unreachable', ['host' => $host]);
         }
-        [$parsed, $data] = Js::parseJson($answer->text());
-        if (!$parsed) {
-            $data = null;
-        }
+        $data = self::readAnswer($answer);
         if (!$answer->ok()) {
             $message = self::serviceMessage($data);
             $host = (new Url($url))->host();
@@ -387,18 +411,18 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
             ? ['x-api-key' => $key, 'anthropic-version' => '2023-06-01']
             : ($key !== '' ? ['authorization' => "Bearer $key"] : []);
         try {
-            $answer = Safefetch::serviceFetch("$base/models" . ($provider['protocol'] === 'anthropic' ? '?limit=100' : ''), ['headers' => $headers, 'timeoutMs' => 20_000], $fetcher);
+            $answer = Safefetch::serviceFetch("$base/models" . ($provider['protocol'] === 'anthropic' ? '?limit=100' : ''), ['headers' => $headers, 'timeoutMs' => 20_000, 'maxBytes' => self::MAX_ANSWER_BYTES, 'truncate' => true], $fetcher);
         } catch (\Throwable $error) {
             if ($error instanceof MetadataAddressError) {
                 throw self::refused($error);
             }
+            if ($error instanceof RedirectRefusedError) {
+                throw self::redirected($error);
+            }
             $host = (new Url($base))->host();
             throw new AssistantError("Could not reach $host", 'unreachable', ['host' => $host]);
         }
-        [$parsed, $data] = Js::parseJson($answer->text());
-        if (!$parsed) {
-            $data = null;
-        }
+        $data = self::readAnswer($answer);
         if (!$answer->ok()) {
             $message = self::serviceMessage($data);
             $host = (new Url($base))->host();

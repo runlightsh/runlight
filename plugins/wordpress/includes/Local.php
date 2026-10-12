@@ -92,8 +92,18 @@ final class Local {
 	private static function secret(): string {
 		$secret = (string) get_option( self::SECRET, '' );
 		if ( '' === $secret ) {
-			$secret = bin2hex( random_bytes( 32 ) );
-			update_option( self::SECRET, $secret, false );
+			$made = bin2hex( random_bytes( 32 ) );
+			// add_option writes only if no other request has, so a request that loses reads the winner's secret.
+			if ( add_option( self::SECRET, $made, '', false ) ) {
+				return $made;
+			}
+			wp_cache_delete( self::SECRET, 'options' );
+			wp_cache_delete( 'notoptions', 'options' );
+			wp_cache_delete( 'alloptions', 'options' );
+			$secret = (string) get_option( self::SECRET, '' );
+			if ( '' === $secret ) {
+				throw new \RuntimeException( 'Runlight could not make or read its secret.' );
+			}
 		}
 		return $secret;
 	}
@@ -236,7 +246,12 @@ final class Local {
 			exit;
 		}
 		self::load();
-		$context = array( 'ip' => Visitor::address( wp_unslash( $_SERVER ) ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Visitor reads only REMOTE_ADDR and two headers, each checked to be an IP address.
+		$server  = wp_unslash( $_SERVER ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Visitor reads only REMOTE_ADDR and two headers, each checked to be an IP address.
+		$context = array( 'ip' => Visitor::address( $server ) );
+		// Cloudflare's location headers are believed only for a connection from Cloudflare, as its CF-Connecting-IP is.
+		if ( Visitor::from_cloudflare( $server ) ) {
+			$request = $request->with( platformHeaders: true );
+		}
 		try {
 			if ( $link ) {
 				$response = ( self::runlight()->linkHandler() )( $request, $context );

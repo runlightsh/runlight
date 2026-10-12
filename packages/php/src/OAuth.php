@@ -60,9 +60,8 @@ final class OAuth
     public static function agentsKey(Runlight $runlight, string $site, bool $replace = false): string
     {
         $name = "observe-key:$site";
-        $saved = $replace ? null : $runlight->store->setting($name);
-        if ($saved !== null && $saved !== '') {
-            return $saved;
+        if (!$replace) {
+            return $runlight->store->settingOrAdd($name, static fn (): string => 'rlo_' . Hash::randomId(20));
         }
         $key = 'rlo_' . Hash::randomId(20);
         $runlight->store->setSetting($name, $key);
@@ -88,13 +87,8 @@ final class OAuth
     /** The key client ids are signed with, made on first use and kept in the database for every process. */
     private static function clientKey(object $runlight): string
     {
-        $saved = $runlight->store->setting('oauth-key');
-        if ($saved !== null && $saved !== '') {
-            return $saved;
-        }
-        $made = Hash::randomId(32);
-        $runlight->store->setSetting('oauth-key', $made);
-        return $made;
+        // Written only if no other request wrote one first, so every process signs with the same key.
+        return $runlight->store->settingOrAdd('oauth-key', static fn (): string => Hash::randomId(32));
     }
 
     /**

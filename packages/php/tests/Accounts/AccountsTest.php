@@ -10,8 +10,10 @@ use Runlight\Accounts\AccountError;
 use Runlight\Accounts\Accounts;
 use Runlight\Accounts\Crypto;
 use Runlight\Accounts\Throttle;
+use Runlight\Json;
 use Runlight\Store\SqlStore;
 use Runlight\Tests\Store\Databases;
+use Runlight\Tests\Store\WatchedDb;
 
 /** Accounts and the throttle on their own, on every database at hand. */
 final class AccountsTest extends TestCase
@@ -209,6 +211,42 @@ final class AccountsTest extends TestCase
         $accounts->startTwoFactor($user['id']);
         $accounts->cancelTwoFactorSetup($user['id']);
         $this->assertNull($accounts->confirmTwoFactor($user['id'], Crypto::totp($secret, $step), self::NOW), 'a cancelled set-up confirms nothing');
+    }
+
+    #[DataProvider('kinds')]
+    public function testACodeIsAcceptedOnceEvenWhenAnotherProcessUsesItBetweenTheReadAndTheWrite(string $kind): void
+    {
+        $watched = new WatchedDb(self::store($kind)->db);
+        $store = new SqlStore($watched);
+        $accounts = new Accounts($store, self::SECRET);
+        $user = $accounts->setPassword('owner@example.com', 'a long password', self::NOW);
+        $secret = $accounts->startTwoFactor($user['id']);
+        $recovery = $accounts->confirmTwoFactor($user['id'], Crypto::totp($secret, intdiv(self::NOW, 30_000)), self::NOW);
+        $later = self::NOW + 60_000;
+        $step = intdiv($later, 30_000);
+        $raced = static function (string $match, callable $write) use ($watched): void {
+            $done = false;
+            $watched->before = static function (string $sql) use ($match, $write, &$done, $watched): void {
+                if (!$done && str_contains($sql, $match)) {
+                    $done = true;
+                    $watched->before = null;
+                    $write();
+                }
+            };
+        };
+
+        // Another process takes the step just before this one writes it: this one is refused.
+        $raced('SET totp_step', fn () => $watched->inner->run('UPDATE rl_users SET totp_step = ? WHERE id = ?', [$step, $user['id']]));
+        $this->assertFalse($accounts->checkSecondFactor($user['id'], Crypto::totp($secret, $step), $later), 'the other process used the step first');
+        $this->assertTrue($accounts->checkSecondFactor($user['id'], Crypto::totp($secret, $step + 1), $later), 'a later step still works');
+
+        // Another process crosses off the recovery code just before this one does: this one is refused, and nothing is lost.
+        $hashes = array_map(Crypto::recoveryHash(...), $recovery);
+        $raced('SET totp_recovery', fn () => $watched->inner->run('UPDATE rl_users SET totp_recovery = ? WHERE id = ?', [Json::encode(array_slice($hashes, 1)), $user['id']]));
+        $this->assertFalse($accounts->checkSecondFactor($user['id'], $recovery[0], $later), 'a code crossed off at the same moment is not used twice');
+        $this->assertSame(9, $accounts->byId($user['id'])['recoveryLeft']);
+        $this->assertTrue($accounts->checkSecondFactor($user['id'], $recovery[1], $later));
+        $this->assertSame(8, $accounts->byId($user['id'])['recoveryLeft']);
     }
 
     public function testAnOldTableGainsRolesAndKeepsOneOwner(): void

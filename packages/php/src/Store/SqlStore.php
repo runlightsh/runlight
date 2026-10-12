@@ -1106,11 +1106,53 @@ final class SqlStore
         if ($value === null) {
             return null;
         }
-        $sql = 'DELETE FROM rl_settings WHERE "key" = ?';
-        $gone = method_exists($this->db, 'affected')
-            ? $this->db->affected($sql, [$key])
-            : count($this->db->all("$sql RETURNING \"key\"", [$key]));
-        return $gone === 1 ? $value : null;
+        return $this->settingChanged('DELETE FROM rl_settings WHERE "key" = ?', [$key]) === 1 ? $value : null;
+    }
+
+    /** Writes a setting only if it is not there yet. Of two callers at once, only one gets true. */
+    public function addSetting(string $key, string $value): bool
+    {
+        // MySQL drivers may count a row a duplicate key found as written, so MySQL ignores the insert instead.
+        $sql = $this->db->dialect() === 'mysql'
+            ? 'INSERT IGNORE INTO rl_settings ("key", value) VALUES (?, ?)'
+            : Sql::upsert($this->db->dialect(), 'rl_settings', ['"key"', 'value'], ['"key"'], []);
+        return $this->settingChanged($sql, [$key, $value]) === 1;
+    }
+
+    /** Changes a setting only if it still holds `$from`. Of two callers at once, only one gets true. */
+    public function swapSetting(string $key, string $from, string $to): bool
+    {
+        return $this->settingChanged('UPDATE rl_settings SET value = ? WHERE "key" = ? AND value = ?', [$to, $key, $from]) === 1;
+    }
+
+    /**
+     * A setting that is made the first time it is wanted, such as a signing key. Of callers at once, every one
+     * gets the value that was written first, never one that was then overwritten.
+     *
+     * @param callable(): string $make
+     */
+    public function settingOrAdd(string $key, callable $make): string
+    {
+        for ($tries = 0; $tries < 5; $tries++) {
+            $found = $this->setting($key);
+            if ($found !== null) {
+                return $found;
+            }
+            $value = $make();
+            if ($this->addSetting($key, $value)) {
+                return $value;
+            }
+        }
+        throw new \RuntimeException("Could not make the setting $key");
+    }
+
+    /** How many settings a statement wrote. SQLite has no lock to lean on here, so this is how a write knows it won. */
+    private function settingChanged(string $sql, array $params): int
+    {
+        if (method_exists($this->db, 'affected')) {
+            return $this->db->affected($sql, $params);
+        }
+        return count($this->db->all("$sql RETURNING \"key\"", $params));
     }
 
     public function setSetting(string $key, ?string $value): void

@@ -83,6 +83,28 @@ final class Visitor
      */
     public static function address(string $remote, array $headers): string
     {
+        return self::resolve($remote, $headers)[0];
+    }
+
+    /**
+     * Whether the request came through Cloudflare, by the same check that lets its CF-Connecting-IP header name
+     * the visitor: the connection is from one of Cloudflare's own addresses. Only then are its location headers real.
+     *
+     * @param array<string,list<string>> $headers The request's headers, by lower-case name.
+     */
+    public static function fromCloudflare(string $remote, array $headers): bool
+    {
+        return self::resolve($remote, $headers)[1];
+    }
+
+    /**
+     * The visitor's address, and whether Cloudflare's header was believed for it.
+     *
+     * @param array<string,list<string>> $headers The request's headers, by lower-case name.
+     * @return array{string, bool}
+     */
+    private static function resolve(string $remote, array $headers): array
+    {
         $hop = self::ip($remote);
         $forwarded = implode(',', $headers['x-forwarded-for'] ?? []);
         $chain = $forwarded !== '' ? explode(',', $forwarded) : [];
@@ -95,13 +117,14 @@ final class Visitor
             }
             $address = $next;
         }
-        if ($address !== '' && self::cloudflare($address)) {
+        $cloudflare = $address !== '' && self::cloudflare($address);
+        if ($cloudflare) {
             $visitor = self::ip($headers['cf-connecting-ip'][0] ?? '');
             if ($visitor !== '') {
                 $address = $visitor;
             }
         }
-        return $address;
+        return [$address, $cloudflare];
     }
 
     /** An address as text, without the port or brackets a header may give it, or an empty string when it is not one. */
