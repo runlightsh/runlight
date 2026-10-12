@@ -243,9 +243,21 @@ if Code.ensure_loaded?(Plug.Conn) do
     Short links on the app's own domain: forward the instance's link path
     (default "/go") here, and `/go/{slug}` redirects to the link's
     destination, with the click recorded. A request on a link domain is
-    answered as that domain's links first.
+    answered as that domain's links first, so `/go/{slug}` there is a 404.
 
         forward "/go", Runlight.Plug.Links
+
+    A slug no link has is the app's to answer. Forwarded from a Phoenix
+    router, that raises `Phoenix.Router.NoRouteError`, so the app's own 404
+    page shows; from a plain `Plug.Router`, which has no such page to hand
+    it to, it is answered with a 404.
+
+    Anywhere else, such as an endpoint or a pipeline ahead of the routes, it
+    is middleware: it answers link domains and a GET for `/go/{slug}` when
+    the link exists, and every other request, an unknown slug too, carries
+    on to the app untouched.
+
+        plug Runlight.Plug.Links
     """
     @behaviour Plug
 
@@ -261,10 +273,48 @@ if Code.ensure_loaded?(Plug.Conn) do
           conn
 
         {:pass, conn} ->
-          # A short link reads no body, so none is read.
-          {:ok, request, _} = Runlight.Plug.request(%{conn | method: "GET"}, 0)
-          Runlight.Plug.answer(conn, Runlight.link_handler(rl, %{request | method: conn.method}))
+          if routed?(conn, rl), do: route(conn, rl), else: middleware(conn, rl)
       end
+    end
+
+    # A router forwarded the link path here (it moved onto the script name), so every request is this Plug's.
+    defp routed?(conn, rl), do: conn.script_name != [] and String.ends_with?("/" <> Enum.join(conn.script_name, "/"), rl.link_path)
+
+    defp route(conn, rl) do
+      case follow(conn, rl, conn.method) do
+        %{status: 404} = missing ->
+          case conn.private do
+            %{phoenix_router: router} ->
+              if Code.ensure_loaded?(Phoenix.Router.NoRouteError),
+                do: raise(Phoenix.Router.NoRouteError, conn: conn, router: router),
+                else: Runlight.Plug.answer(conn, missing)
+
+            _ ->
+              Runlight.Plug.answer(conn, missing)
+          end
+
+        found ->
+          Runlight.Plug.answer(conn, found)
+      end
+    end
+
+    defp middleware(conn, rl) do
+      if conn.method == "GET" and own?(conn.request_path, rl.link_path) do
+        case follow(conn, rl, "GET") do
+          %{status: 404} -> conn
+          found -> Runlight.Plug.answer(conn, found)
+        end
+      else
+        conn
+      end
+    end
+
+    defp own?(path, link_path), do: Regex.match?(~r/\A#{Regex.escape(link_path)}\/[^\/]+\/?\z/, path)
+
+    # A short link reads no body, so none is read.
+    defp follow(conn, rl, method) do
+      {:ok, request, _} = Runlight.Plug.request(%{conn | method: "GET"}, 0)
+      Runlight.link_handler(rl, %{request | method: method})
     end
   end
 
