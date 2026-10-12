@@ -184,11 +184,49 @@ public sealed partial class SqlStore
         {
             return null;
         }
-        const string Delete = "DELETE FROM rl_settings WHERE \"key\" = ?";
-        long gone = Dialect == "mysql"
-            ? await Db.AffectedAsync(Delete, A(key), cancellationToken).ConfigureAwait(false)
-            : (await Db.AllAsync(Delete + " RETURNING \"key\"", A(key), cancellationToken).ConfigureAwait(false)).Count;
-        return gone == 1 ? value : null;
+        return await SettingChangedAsync("DELETE FROM rl_settings WHERE \"key\" = ?", A(key), cancellationToken).ConfigureAwait(false) == 1 ? value : null;
+    }
+
+    /// <summary>Writes a setting only if it is not there yet. Of two callers at once, only one gets true.</summary>
+    public async Task<bool> AddSettingAsync(string key, string value, CancellationToken cancellationToken = default)
+    {
+        // A MySQL driver may count a row a duplicate key found as written, so MySQL ignores the insert instead.
+        string sql = Dialect == "mysql"
+            ? "INSERT IGNORE INTO rl_settings (\"key\", value) VALUES (?, ?)"
+            : Sql.Upsert(Dialect, "rl_settings", ["\"key\"", "value"], ["\"key\""], []);
+        return await SettingChangedAsync(sql, A(key, value), cancellationToken).ConfigureAwait(false) == 1;
+    }
+
+    /// <summary>Changes a setting only if it still holds <paramref name="from"/>. Of two callers at once, only one gets true.</summary>
+    public async Task<bool> SwapSettingAsync(string key, string from, string to, CancellationToken cancellationToken = default) =>
+        await SettingChangedAsync("UPDATE rl_settings SET value = ? WHERE \"key\" = ? AND value = ?", A(to, key, from), cancellationToken).ConfigureAwait(false) == 1;
+
+    /// <summary>How many settings a statement wrote. SQLite has no lock to lean on across processes, so this is how a write knows it won.</summary>
+    private async Task<long> SettingChangedAsync(string sql, List<object?> args, CancellationToken cancellationToken) =>
+        Dialect == "mysql"
+            ? await Db.AffectedAsync(sql, args, cancellationToken).ConfigureAwait(false)
+            : (await Db.AllAsync(sql + " RETURNING \"key\"", args, cancellationToken).ConfigureAwait(false)).Count;
+
+    /// <summary>
+    /// A setting that is made the first time it is needed, such as a signing key. Of callers at once, the
+    /// first to write wins and every one gets that value.
+    /// </summary>
+    public async Task<string> SettingOrAddAsync(string key, Func<string> make, CancellationToken cancellationToken = default)
+    {
+        for (int tries = 0; tries < 5; tries++)
+        {
+            string? saved = await SettingAsync(key, cancellationToken).ConfigureAwait(false);
+            if (saved != null)
+            {
+                return saved;
+            }
+            string made = make();
+            if (await AddSettingAsync(key, made, cancellationToken).ConfigureAwait(false))
+            {
+                return made;
+            }
+        }
+        throw new InvalidOperationException("Could not save the setting " + key);
     }
 
     public Task SetSettingAsync(string key, string? value, CancellationToken cancellationToken = default) => value == null

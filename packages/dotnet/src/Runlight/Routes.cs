@@ -370,7 +370,7 @@ public sealed class Routes
     /// Answers a read for a site counted by another install by asking that install,
     /// with its token and its own id for the site, and handing back what it says.
     /// </summary>
-    private async Task<Response> PassThroughAsync(JsObject remote, string path, Url url, Request? request, CancellationToken cancellationToken)
+    private async Task<Response> PassThroughAsync(JsObject remote, string path, Url url, Request? request, CancellationToken cancellationToken, long? maxBytes = null)
     {
         var target = new Url(remote.Str("url") + path);
         var query = target.SearchParams;
@@ -398,6 +398,8 @@ public sealed class Routes
                 // A long report or an export is worked out in full before the install sends a byte, so reads get
                 // two minutes.
                 TimeoutMs = write ? 30_000 : 120_000,
+                // An answer this server reads itself, rather than hands on, is read only so far.
+                MaxBytes = maxBytes,
             };
             if (write)
             {
@@ -1090,7 +1092,7 @@ public sealed class Routes
                 {
                     // Only a public address is fetched, whatever the name resolves to now, so the check cannot be pointed
                     // into a private network.
-                    var answer = await Safefetch.PublicFetchAsync("https://" + domain + LinkDomainCheck, new PublicFetchInit { TimeoutMs = 5000 }, _rl.Fetcher, cancellationToken).ConfigureAwait(false);
+                    var answer = await Safefetch.PublicFetchAsync("https://" + domain + LinkDomainCheck, new PublicFetchInit { TimeoutMs = 5000, MaxBytes = 16_384, Truncate = true }, _rl.Fetcher, cancellationToken).ConfigureAwait(false);
                     JsObject? body = null;
                     try
                     {
@@ -1298,14 +1300,8 @@ public sealed class Routes
     private async Task<string> PickKeyAsync(CancellationToken cancellationToken)
     {
         await _rl.InitAsync(cancellationToken).ConfigureAwait(false);
-        string? saved = await Store.SettingAsync("pick-key", cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(saved))
-        {
-            return saved;
-        }
-        string made = Hash.RandomId(32);
-        await Store.SetSettingAsync("pick-key", made, cancellationToken).ConfigureAwait(false);
-        return made;
+        // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        return await Store.SettingOrAddAsync("pick-key", () => Hash.RandomId(32), cancellationToken).ConfigureAwait(false);
     }
 
     private static string Hex(string text) => Convert.ToHexStringLower(Js.Utf8(text));
@@ -1353,14 +1349,8 @@ public sealed class Routes
     private async Task<string> EmbedKeyAsync(CancellationToken cancellationToken)
     {
         await _rl.InitAsync(cancellationToken).ConfigureAwait(false);
-        string? saved = await Store.SettingAsync("embed-key", cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(saved))
-        {
-            return saved;
-        }
-        string made = Hash.RandomId(32);
-        await Store.SetSettingAsync("embed-key", made, cancellationToken).ConfigureAwait(false);
-        return made;
+        // Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        return await Store.SettingOrAddAsync("embed-key", () => Hash.RandomId(32), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>An embed token that still exists, for a site that still does.</summary>
@@ -1883,23 +1873,10 @@ public sealed class Routes
         }
         if (!owner)
         {
-            double limit = await ViewerDailyAsync(cancellationToken).ConfigureAwait(false);
-            string day = "assistant-asked:" + Js.IsoString(now)[..10];
-            var counts = global::Runlight.Json.Parse(await Store.SettingAsync(day, cancellationToken).ConfigureAwait(false) ?? "{}") as JsObject ?? [];
-            double asked = counts.Get(who) is { } n and not Undefined ? Js.Num(n) : 0;
-            if (asked >= limit)
+            var refusal = await CountAskAsync(who, now, cancellationToken).ConfigureAwait(false);
+            if (refusal != null)
             {
-                string said = Js.String(limit);
-                return Coded("Viewers can ask " + said + " questions a day. Ask again tomorrow.", "assistant_daily", 429, new JsObject { ["limit"] = said });
-            }
-            counts[who] = asked + 1;
-            await Store.SetSettingAsync(day, global::Runlight.Json.Stringify(counts), cancellationToken).ConfigureAwait(false);
-            foreach (var entry in await Store.SettingsStartingWithAsync("assistant-asked:", cancellationToken).ConfigureAwait(false))
-            {
-                if (entry.Str("key") != day)
-                {
-                    await Store.SetSettingAsync(entry.Str("key")!, null, cancellationToken).ConfigureAwait(false);
-                }
+                return refusal;
             }
         }
         at.Add(now);
@@ -1915,6 +1892,58 @@ public sealed class Routes
                 _open[who] = _open.GetValueOrDefault(who) - 1;
             }
         });
+    }
+
+    /// <summary>
+    /// Counts a viewer's question in their own row for the day, or answers the daily limit when it is reached.
+    /// The row only ever moves from the count read to the next one, so of questions sent at once, by one viewer
+    /// or by every process on the database, each count is taken once. Null when the question was counted.
+    /// </summary>
+    private async Task<Response?> CountAskAsync(string who, long now, CancellationToken cancellationToken)
+    {
+        double limit = await ViewerDailyAsync(cancellationToken).ConfigureAwait(false);
+        if (limit < 1)
+        {
+            return DailyRefused(limit);
+        }
+        string day = "assistant-asked:" + Js.IsoString(now)[..10] + ":";
+        string key = day + who;
+        for (int tries = 0; tries < 20; tries++)
+        {
+            string? seen = await Store.SettingAsync(key, cancellationToken).ConfigureAwait(false);
+            if (seen == null)
+            {
+                if (!await Store.AddSettingAsync(key, "1", cancellationToken).ConfigureAwait(false))
+                {
+                    continue;
+                }
+                // A viewer's first question of the day clears the days before.
+                foreach (var entry in await Store.SettingsStartingWithAsync("assistant-asked:", cancellationToken).ConfigureAwait(false))
+                {
+                    if (!entry.Str("key")!.StartsWith(day, StringComparison.Ordinal))
+                    {
+                        await Store.SetSettingAsync(entry.Str("key")!, null, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                return null;
+            }
+            double count = Js.Number(seen);
+            if (count >= limit)
+            {
+                return DailyRefused(limit);
+            }
+            if (await Store.SwapSettingAsync(key, seen, Js.String(count + 1), cancellationToken).ConfigureAwait(false))
+            {
+                return null;
+            }
+        }
+        return Coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429);
+    }
+
+    private static Response DailyRefused(double limit)
+    {
+        string said = Js.String(limit);
+        return Coded("Viewers can ask " + said + " questions a day. Ask again tomorrow.", "assistant_daily", 429, new JsObject { ["limit"] = said });
     }
 
     private async Task<Response> TokensApiAsync(Request request, string path, CancellationToken cancellationToken)
@@ -2941,11 +2970,12 @@ public sealed class Routes
                 }
                 rl.ForgetRemoteInfo(id);
             }
-            else if (remote == null && retention is not Undefined)
-            {
-                await rl.SetRetentionAsync(id, retention == null ? null : Js.Number(retention), cancellationToken).ConfigureAwait(false);
-            }
             var patch = new JsObject();
+            // UpdateSiteAsync checks every field, hostnames too, before it changes anything.
+            if (remote == null && retention is not Undefined)
+            {
+                patch["retentionMonths"] = retention == null ? null : Js.Number(retention);
+            }
             if (Defined(body, "name"))
             {
                 patch["name"] = Js.String(body.Get("name"));
@@ -3100,7 +3130,7 @@ public sealed class Routes
         JsObject Unfeed(JsObject live) => shared != null ? live.With(new JsObject { ["recent"] = new List<object?>() }) : live;
         if (connected != null)
         {
-            var answer = await PassThroughAsync(connected, path, url, request, cancellationToken).ConfigureAwait(false);
+            var answer = await PassThroughAsync(connected, path, url, request, cancellationToken, path == "/api/realtime" && shared != null ? 4 * 1024 * 1024 : null).ConfigureAwait(false);
             if (path != "/api/realtime" || shared == null || !answer.Ok)
             {
                 return answer;

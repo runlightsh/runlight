@@ -138,6 +138,9 @@ public static partial class Transports
         _ => "",
     };
 
+    /// <summary>The most of a service's answer that is read: only an error's text is wanted, and the start of it is enough.</summary>
+    private const long MaxErrorBytes = 64 * 1024;
+
     /// <summary>POSTs to a service, with the errors the dashboard shows.</summary>
     private static async Task PostAsync(IFetcher fetcher, string url, JsObject headers, string body, bool explains, CancellationToken cancellationToken)
     {
@@ -150,11 +153,15 @@ public static partial class Transports
         try
         {
             // A webhook can be at any address, so it and each redirect are checked, as for every service.
-            response = await Safefetch.ServiceFetchAsync(url, new FetchInit { Method = "POST", Headers = h, BodyText = body, TimeoutMs = 20_000 }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
+            response = await Safefetch.ServiceFetchAsync(url, new FetchInit { Method = "POST", Headers = h, BodyText = body, TimeoutMs = 20_000, MaxBytes = MaxErrorBytes, Truncate = true }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (MetadataAddressError error)
         {
             throw new MailError(error.Message, "address_refused", new JsObject { ["host"] = error.Host });
+        }
+        catch (RedirectRefusedError error)
+        {
+            throw new MailError(error.Message, "redirect_refused", new JsObject { ["host"] = error.Host, ["to"] = error.To });
         }
         catch (FetchException error)
         {

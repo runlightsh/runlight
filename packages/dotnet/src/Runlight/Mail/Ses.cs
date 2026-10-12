@@ -149,7 +149,7 @@ public static partial class Ses
         Response response;
         try
         {
-            response = await fetcher.FetchAsync(url, new FetchInit { Method = "POST", Headers = headers, BodyText = body, TimeoutMs = 20_000 }, cancellationToken).ConfigureAwait(false);
+            response = await fetcher.FetchAsync(url, new FetchInit { Method = "POST", Headers = headers, BodyText = body, TimeoutMs = 20_000, MaxBytes = 64 * 1024, Truncate = true }, cancellationToken).ConfigureAwait(false);
         }
         catch (FetchException error)
         {
