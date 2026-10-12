@@ -33,7 +33,8 @@ use Runlight\Store\SqlStore;
  * - managedSites: sites are added, changed, and deleted in the dashboard and kept in the database, as the
  *   standalone server does. `site` and `sites` are ignored.
  * - geo: callable(string $ip): ?array{country, region, city}, a location for an IP when the platform sends
- *   no location headers.
+ *   no location headers, or they are not believed: a platform's headers (cf-ipcountry and the like) count only
+ *   with trustProxy on, or on a request built with `platformHeaders` after the caller checked where it came from.
  * - trustProxy: true (default), false, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the
  *   client IP from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then
  *   X-Real-IP, then CF-Connecting-IP. Name one of them to read only that header, such as "cf-connecting-ip"
@@ -830,12 +831,14 @@ final class Runlight
     }
 
     /**
-     * Changes a site's name or timezone from the dashboard. Stored apart from
+     * Changes a site's name, timezone, or retention from the dashboard. Stored apart from
      * the settings in code, which keep being written on every start. A managed
      * site has no settings in code, so its changes, hostnames too, go to its row.
+     * Every field is checked before anything changes, since a new timezone clears the
+     * built days and a shorter retention deletes visits, and pruning starts only once saved.
      * A key left out of `$patch` is left alone, as TS's undefined is.
      *
-     * @param array{name?: mixed, timezone?: mixed, hostnames?: mixed} $patch
+     * @param array{name?: mixed, timezone?: mixed, hostnames?: mixed, retentionMonths?: int|float|null} $patch
      */
     public function updateSite(string $id, array $patch): array
     {
@@ -849,34 +852,57 @@ final class Runlight
         if ($current === null) {
             throw new SettingsError('Unknown site', 'unknown_site');
         }
-        $next = $this->managedSites ? $current : ($this->overrides[$id] ?? []);
+        $name = null;
         if (array_key_exists('name', $patch)) {
             $name = Js::trim(Js::string($patch['name']));
             if ($name === '' || Js::length($name) > 80) {
                 throw new SettingsError('A site name is 1 to 80 characters', 'site_name');
             }
-            $next['name'] = $name;
         }
+        $timezone = null;
         if (array_key_exists('timezone', $patch)) {
             $timezone = Js::string($patch['timezone']);
             if (!Time::isTimezone($timezone)) {
                 throw new SettingsError("Unknown timezone \"$timezone\"", 'unknown_timezone', ['timezone' => $timezone]);
             }
-            $next['timezone'] = $timezone;
-            if ($timezone !== ($this->site($id)['timezone'] ?? null)) {
-                $this->zoneChanged($id, $timezone);
-            }
+        }
+        $hostnames = null;
+        if ($this->managedSites && array_key_exists('hostnames', $patch) && !isset($this->remotes[$id])) {
+            $hostnames = $this->hostnamesFor($patch['hostnames'], $id);
+        }
+        if (array_key_exists('retentionMonths', $patch)) {
+            $this->checkRetention($id, $patch['retentionMonths']);
+        }
+        if ($timezone !== null && $timezone !== ($this->site($id)['timezone'] ?? null)) {
+            $this->zoneChanged($id, $timezone);
         }
         if ($this->managedSites) {
-            if (array_key_exists('hostnames', $patch) && !isset($this->remotes[$id])) {
-                $next['hostnames'] = $this->hostnamesFor($patch['hostnames'], $id);
+            $next = $current;
+            if ($name !== null) {
+                $next['name'] = $name;
+            }
+            if ($timezone !== null) {
+                $next['timezone'] = $timezone;
+            }
+            if ($hostnames !== null) {
+                $next['hostnames'] = $hostnames;
             }
             $this->store->upsertSite($next, $this->now());
             $this->configured = array_map(static fn (array $site): array => $site['id'] === $id ? $next : $site, $this->configured);
-            return $this->site($id);
+        } else {
+            $next = $this->overrides[$id] ?? [];
+            if ($name !== null) {
+                $next['name'] = $name;
+            }
+            if ($timezone !== null) {
+                $next['timezone'] = $timezone;
+            }
+            $this->store->setSiteOverrides($id, $next);
+            $this->overrides[$id] = $next;
         }
-        $this->store->setSiteOverrides($id, $next);
-        $this->overrides[$id] = $next;
+        if (array_key_exists('retentionMonths', $patch)) {
+            $this->setRetention($id, $patch['retentionMonths']);
+        }
         return $this->site($id);
     }
 
@@ -887,11 +913,7 @@ final class Runlight
         return in_array($value, self::RETENTION_MONTHS, true) ? $value : null;
     }
 
-    /**
-     * Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs in
-     * pieces in idle(), after the answer, with tracking going on between them, as TS runs it after answering.
-     */
-    public function setRetention(string $site, int|float|null $months): void
+    private function checkRetention(string $site, int|float|null $months): void
     {
         if ($this->site($site) === null || isset($this->remotes[$site])) {
             throw new SettingsError('Unknown site', 'unknown_site');
@@ -900,6 +922,15 @@ final class Runlight
             $list = implode(', ', self::RETENTION_MONTHS);
             throw new SettingsError("Keep visits for $list months, or forever", 'retention_bad', ['months' => $list]);
         }
+    }
+
+    /**
+     * Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs in
+     * pieces in idle(), after the answer, with tracking going on between them, as TS runs it after answering.
+     */
+    public function setRetention(string $site, int|float|null $months): void
+    {
+        $this->checkRetention($site, $months);
         $this->store->setSetting("retention:$site", $months === null ? null : Json::number($months));
         $this->pruning[] = $site;
     }
@@ -1437,7 +1468,7 @@ final class Runlight
             ],
             $client['screenWidth'] ?? null,
         );
-        $location = Geo::locate($request->headers, $ip, $this->geo);
+        $location = Geo::locate($request->headers, $ip, $this->geo, $this->trustProxy !== false || $request->platformHeaders);
         $this->store->insertSession([
             'id' => $session['id'],
             'site' => $site['id'],

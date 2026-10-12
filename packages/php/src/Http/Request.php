@@ -22,6 +22,12 @@ final class Request
         private readonly string $body = '',
         /** The address the request came from, before any proxy header is read. */
         public readonly string $remoteAddress = '',
+        /**
+         * True when the caller has checked the connection really came from a hosting platform's own addresses,
+         * such as Cloudflare's, so that platform's location headers (cf-ipcountry) can be believed even where
+         * trustProxy is off. Left false, those headers count only when trustProxy allows.
+         */
+        public readonly bool $platformHeaders = false,
     ) {
         $this->method = strtoupper($method);
         $this->headers = new Headers($headers);
@@ -124,8 +130,8 @@ final class Request
     }
 
     /** The same request with other parts, as `new Request(request, init)` makes one. */
-    public function with(?string $url = null, ?string $method = null, ?Headers $headers = null, ?string $body = null): self
+    public function with(?string $url = null, ?string $method = null, ?Headers $headers = null, ?string $body = null, ?bool $platformHeaders = null): self
     {
-        return new self($url ?? $this->url, $method ?? $this->method, $headers ?? $this->headers, $body ?? $this->body, $this->remoteAddress);
+        return new self($url ?? $this->url, $method ?? $this->method, $headers ?? $this->headers, $body ?? $this->body, $this->remoteAddress, $platformHeaders ?? $this->platformHeaders);
     }
 }

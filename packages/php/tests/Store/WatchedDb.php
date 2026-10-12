@@ -52,8 +52,8 @@ final class WatchedDb implements Db
             ($this->before)($sql, $params);
         }
         $inner = $this->inner;
-        if (!$inner instanceof PdoDb) {
-            throw new \LogicException('affected() needs a PdoDb');
+        if (!method_exists($inner, 'affected')) {
+            throw new \LogicException('affected() needs a Db that counts rows');
         }
         return $inner->affected($sql, $params);
     }

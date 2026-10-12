@@ -222,7 +222,39 @@ final class Time
         }
 
         $interval = in_array($input['interval'] ?? null, self::INTERVALS, true) ? $input['interval'] : self::defaultInterval($fromDate, $toDate);
-        return ['from' => self::startOf($fromDate, $timezone), 'to' => self::startOf(self::addDays($toDate, 1), $timezone), 'fromDate' => $fromDate, 'toDate' => $toDate, 'interval' => $interval];
+        $start = self::startOf($fromDate, $timezone);
+        $end = self::startOf(self::addDays($toDate, 1), $timezone);
+        // An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+        // Past 1,000 months there is none.
+        while (self::bucketCount($start, $end, $fromDate, $toDate, $interval) > ($interval === 'hour' ? self::MAX_HOURS : self::MAX_BUCKETS)) {
+            $interval = match ($interval) {
+                'hour' => 'day',
+                'day' => 'week',
+                'week' => 'month',
+                default => null,
+            };
+            if ($interval === null) {
+                return null;
+            }
+        }
+        return ['from' => $start, 'to' => $end, 'fromDate' => $fromDate, 'toDate' => $toDate, 'interval' => $interval];
+    }
+
+    /** How many chart buckets a range has at an interval, the first and last counted even when partial. */
+    private static function bucketCount(int $from, int $to, string $fromDate, string $toDate, string $interval): int
+    {
+        if ($interval === 'hour') {
+            return (int) ceil(($to - $from) / 3_600_000);
+        }
+        if ($interval === 'day') {
+            return self::daysBetween($fromDate, $toDate) + 1;
+        }
+        if ($interval === 'week') {
+            return intdiv(self::daysBetween(self::addDays($fromDate, -self::weekday($fromDate)), $toDate), 7) + 1;
+        }
+        [$fy, $fm] = self::split($fromDate);
+        [$ty, $tm] = self::split($toDate);
+        return ($ty - $fy) * 12 + ($tm - $fm) + 1;
     }
 
     private static function addYears(string $date, int $years): string
@@ -272,7 +304,9 @@ final class Time
     }
 
     /**
-     * Chart buckets covering a range, each starting on a local boundary.
+     * Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the
+     * first and last can be partial. resolveRange picks an interval that fits; a range given here with more
+     * buckets than that, such as a longer comparison, is cut off at a boundary, never merged into its last bucket.
      *
      * @param array{from: int, to: int, fromDate: string, toDate: string, interval: string} $range
      * @return list<array{start: int, end: int}>
@@ -281,7 +315,7 @@ final class Time
     {
         $starts = [];
         if ($range['interval'] === 'hour') {
-            for ($t = $range['from']; $t < $range['to'] && count($starts) < self::MAX_HOURS; $t += 3_600_000) {
+            for ($t = $range['from']; $t < $range['to'] && count($starts) <= self::MAX_HOURS; $t += 3_600_000) {
                 $starts[] = $t;
             }
         } else {
@@ -291,7 +325,7 @@ final class Time
             } elseif ($range['interval'] === 'month') {
                 $date = substr($date, 0, 8) . '01';
             }
-            while (strcmp($date, $range['toDate']) <= 0 && count($starts) < self::MAX_BUCKETS) {
+            while (strcmp($date, $range['toDate']) <= 0 && count($starts) <= self::MAX_BUCKETS) {
                 $starts[] = self::startOf($date, $timezone);
                 $date = match ($range['interval']) {
                     'day' => self::addDays($date, 1),
@@ -300,8 +334,9 @@ final class Time
                 };
             }
         }
+        // One start past the limit was made, so the last bucket kept still ends where the next would begin.
         $out = [];
-        foreach ($starts as $i => $start) {
+        foreach (array_slice($starts, 0, $range['interval'] === 'hour' ? self::MAX_HOURS : self::MAX_BUCKETS, true) as $i => $start) {
             $out[] = ['start' => max($start, $range['from']), 'end' => min($starts[$i + 1] ?? $range['to'], $range['to'])];
         }
         return $out;

@@ -59,6 +59,39 @@ final class IngestTest extends CoreTestCase
         self::assertCount(4, $live['recent'], 'three pageviews and an event');
     }
 
+    /** @return list<mixed> */
+    private static function countries(bool|string $trustProxy, bool $platformHeaders = false): array
+    {
+        $t = new Harness('sqlite', ['trustProxy' => $trustProxy, 'geo' => fn (string $ip): array => ['country' => 'DE', 'region' => 'BE', 'city' => 'Berlin']]);
+        $platform = ['cf-ipcountry' => 'US', 'cf-region-code' => 'CA', 'cf-ipcity' => 'San Francisco', 'x-vercel-ip-country' => 'FR', 'x-nf-geo' => base64_encode('{"country":{"code":"JP"}}')];
+        $i = 0;
+        foreach ($platform as $name => $value) {
+            // A visitor each, so each request opens a visit of its own.
+            $ip = '203.0.113.' . ++$i;
+            $hit = Harness::hit('https://example.com/runlight/e', ['k' => 'pageview', 'u' => "https://example.com/$name"], ['ip' => $ip, 'headers' => [$name => $value]]);
+            $t->rl->collect($platformHeaders ? $hit->with(platformHeaders: true) : $hit, ['ip' => $ip]);
+        }
+        $values = $t->values($t->today(), 'country');
+        sort($values);
+        return $values;
+    }
+
+    public function testAHostingPlatformsLocationHeadersCountOnlyWhenProxyHeadersAreTrusted(): void
+    {
+        self::assertSame(['DE'], self::countries(false), 'without a proxy in front, a client writes them itself, so the lookup answers');
+        self::assertSame(['DE', 'FR', 'JP', 'US'], self::countries(true), 'behind one, they come first, and the lookup answers where they name no country');
+        self::assertSame(['DE', 'FR', 'JP', 'US'], self::countries('cf-connecting-ip'), 'naming a header counts as trusting it');
+    }
+
+    public function testARequestTheCallerCheckedCameFromThePlatformKeepsItsLocationHeadersWithTrustProxyOff(): void
+    {
+        self::assertSame(['DE', 'FR', 'JP', 'US'], self::countries(false, true));
+        $hit = Harness::hit('https://example.com/runlight/e', [], []);
+        self::assertFalse($hit->platformHeaders);
+        self::assertTrue($hit->with(platformHeaders: true)->platformHeaders);
+        self::assertTrue($hit->with(platformHeaders: true)->with(url: 'https://example.com/')->platformHeaders, 'a copy keeps it');
+    }
+
     #[DataProvider('kinds')]
     public function testThirtyIdleMinutesStartANewSessionAndANewDayIsANewVisitor(string $kind): void
     {

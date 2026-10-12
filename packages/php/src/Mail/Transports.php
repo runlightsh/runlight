@@ -12,6 +12,7 @@ use Runlight\Http\SearchParams;
 use Runlight\Http\Url;
 use Runlight\Json;
 use Runlight\MetadataAddressError;
+use Runlight\RedirectRefusedError;
 use Runlight\Safefetch;
 
 /**
@@ -119,9 +120,12 @@ final class Transports
     {
         try {
             // A webhook can be at any address, so it and each redirect are checked, as for every service.
-            $response = Safefetch::serviceFetch($url, ['method' => 'POST', 'headers' => $init['headers'], 'body' => $init['body'], 'timeoutMs' => 20_000], $fetcher);
+            // Read no further than an error could need, so an answer without end never fills memory.
+            $response = Safefetch::serviceFetch($url, ['method' => 'POST', 'headers' => $init['headers'], 'body' => $init['body'], 'timeoutMs' => 20_000, 'maxBytes' => 65_536, 'truncate' => true], $fetcher);
         } catch (MetadataAddressError $error) {
             throw new MailError($error->getMessage(), 'address_refused', ['host' => $error->host]);
+        } catch (RedirectRefusedError $error) {
+            throw new MailError($error->getMessage(), 'redirect_refused', ['host' => $error->host, 'to' => $error->to]);
         } catch (FetchError $error) {
             $host = (new Url($url))->host();
             throw new MailError("Could not reach $host: {$error->getMessage()}", 'mail_unreachable', ['host' => $host, 'detail' => $error->getMessage()]);

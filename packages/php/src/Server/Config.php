@@ -161,27 +161,80 @@ final class Config
         if ($given !== null) {
             return $this->secret = $given;
         }
-        $file = $this->dataDir() . '/secret';
-        $saved = is_file($file) ? trim((string) file_get_contents($file)) : '';
-        if ($saved !== '') {
-            return $this->secret = $saved;
+        return $this->secret = self::secretIn($this->dataDir());
+    }
+
+    /** Shorter than any secret this file has ever been given, so a file caught half written is never used. */
+    private const SHORTEST_SECRET = 32;
+
+    /**
+     * The secret kept in `$dir`, made on first run, readable only by this user. Two servers starting at once on
+     * one folder agree on it: the new secret is written whole to a file of its own, then linked into place, which
+     * refuses to replace a file already there, and the one that loses reads the winner's. A file read empty or
+     * short, such as one an older version was still writing, is read again for a moment, and then refused.
+     */
+    public static function secretIn(string $dir): string
+    {
+        $file = $dir . '/secret';
+        $found = self::wholeSecret($file);
+        if ($found !== null) {
+            return $found;
         }
         $made = bin2hex(random_bytes(32));
-        // Made once: whoever writes the file first wins, and everyone else reads theirs.
-        $handle = @fopen($file, 'x');
+        $temp = $dir . '/.secret-' . getmypid() . '-' . bin2hex(random_bytes(6));
+        $handle = @fopen($temp, 'x');
         if ($handle === false) {
-            usleep(50_000);
-            $saved = is_file($file) ? trim((string) file_get_contents($file)) : '';
-            if ($saved === '') {
-                throw new \RuntimeException("Runlight: could not write $file. Make the data folder writable, or set RUNLIGHT_SECRET.");
-            }
-            return $this->secret = $saved;
+            throw new \RuntimeException("Runlight: could not write $temp. Make the data folder writable, or set RUNLIGHT_SECRET.");
         }
-        // Readable by this user alone before the secret is in it.
-        @chmod($file, 0600);
-        fwrite($handle, "$made\n");
-        fclose($handle);
-        return $this->secret = $made;
+        try {
+            // Readable by this user alone before the secret is in it.
+            @chmod($temp, 0600);
+            fwrite($handle, "$made\n");
+            fclose($handle);
+            // link() refuses to replace a file already there, as rename() would not.
+            if (@link($temp, $file)) {
+                return $made;
+            }
+            if (is_file($file)) {
+                return self::wholeSecret($file) ?? self::refuseSecret($file);
+            }
+            // A file system with no hard links still creates the file only if it is not there; a reader that
+            // catches it before its contents land reads it again.
+            $direct = @fopen($file, 'x');
+            if ($direct === false) {
+                return self::wholeSecret($file) ?? throw new \RuntimeException("Runlight: could not write $file. Make the data folder writable, or set RUNLIGHT_SECRET.");
+            }
+            @chmod($file, 0600);
+            fwrite($direct, "$made\n");
+            fclose($direct);
+            return $made;
+        } finally {
+            @unlink($temp);
+        }
+    }
+
+    /** The secret in a file, waiting up to two seconds for one too short to be whole; null when there is no file. */
+    private static function wholeSecret(string $file): ?string
+    {
+        for ($tries = 0;; $tries++) {
+            clearstatcache(true, $file);
+            if (!is_file($file)) {
+                return null;
+            }
+            $text = trim((string) @file_get_contents($file));
+            if (strlen($text) >= self::SHORTEST_SECRET) {
+                return $text;
+            }
+            if ($tries >= 20) {
+                self::refuseSecret($file);
+            }
+            usleep(100_000);
+        }
+    }
+
+    private static function refuseSecret(string $file): never
+    {
+        throw new \RuntimeException("Runlight: $file holds no whole secret. Delete it to have a new one made, which signs everyone out, or set RUNLIGHT_SECRET.");
     }
 
     /** The dashboard's public address, such as https://stats.example.com, or null. */

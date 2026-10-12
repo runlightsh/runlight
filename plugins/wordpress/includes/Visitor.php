@@ -56,6 +56,27 @@ final class Visitor {
 	 * @param array<string,mixed> $server The request's $_SERVER, unslashed.
 	 */
 	public static function address( array $server ): string {
+		return self::resolve( $server )['address'];
+	}
+
+	/**
+	 * Whether the request came through Cloudflare, by the same check that lets
+	 * its CF-Connecting-IP header name the visitor: the connection is from one
+	 * of Cloudflare's own addresses. Only then are its location headers real.
+	 *
+	 * @param array<string,mixed> $server The request's $_SERVER, unslashed.
+	 */
+	public static function from_cloudflare( array $server ): bool {
+		return self::resolve( $server )['cloudflare'];
+	}
+
+	/**
+	 * The visitor's address, and whether Cloudflare's header was believed for it.
+	 *
+	 * @param array<string,mixed> $server The request's $_SERVER, unslashed.
+	 * @return array{address: string, cloudflare: bool}
+	 */
+	private static function resolve( array $server ): array {
 		$hop     = self::ip( $server['REMOTE_ADDR'] ?? '' );
 		$chain   = isset( $server['HTTP_X_FORWARDED_FOR'] ) ? explode( ',', (string) $server['HTTP_X_FORWARDED_FOR'] ) : array();
 		$address = $hop;
@@ -67,7 +88,8 @@ final class Visitor {
 			}
 			$address = $next;
 		}
-		if ( '' !== $address && self::cloudflare( $address ) ) {
+		$cloudflare = '' !== $address && self::cloudflare( $address );
+		if ( $cloudflare ) {
 			$visitor = self::ip( $server['HTTP_CF_CONNECTING_IP'] ?? '' );
 			if ( '' !== $visitor ) {
 				$address = $visitor;
@@ -82,7 +104,10 @@ final class Visitor {
 		 */
 		$filtered = apply_filters( 'runlight_client_ip', $address, $server );
 		$filtered = is_string( $filtered ) ? self::ip( $filtered ) : '';
-		return '' !== $filtered ? $filtered : $address;
+		return array(
+			'address'    => '' !== $filtered ? $filtered : $address,
+			'cloudflare' => $cloudflare,
+		);
 	}
 
 	/**

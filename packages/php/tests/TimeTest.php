@@ -55,6 +55,46 @@ final class TimeTest extends TestCase
         $this->assertNull(Time::resolveRange(['from' => '2026-02-30', 'to' => '2026-03-01'], 'UTC', $now));
     }
 
+    public function testAnIntervalTooFineForALongRangeMovesUpToOneThatFitsAndNoBucketTakesInTheRest(): void
+    {
+        $now = self::utc(2026, 9, 12, 12);
+        $day = 86_400_000;
+        $hourly = Time::resolveRange(['from' => '2026-08-01', 'to' => '2026-09-09', 'interval' => 'hour'], 'UTC', $now);
+        $this->assertSame('day', $hourly['interval']);
+        $this->assertCount(40, Time::buckets($hourly, 'UTC'));
+        $this->assertSame('hour', Time::resolveRange(['from' => '2026-08-01', 'to' => '2026-08-31', 'interval' => 'hour'], 'UTC', $now)['interval']);
+
+        $daily = Time::resolveRange(['from' => '2018-01-03', 'to' => '2026-10-12', 'interval' => 'day'], 'Europe/London', $now);
+        $this->assertSame('week', $daily['interval']);
+        $weeks = Time::buckets($daily, 'Europe/London');
+        $this->assertSame($daily['from'], $weeks[0]['start']);
+        $this->assertSame($daily['to'], $weeks[count($weeks) - 1]['end'], 'the buckets reach the end of the range');
+        foreach ($weeks as $i => $week) {
+            if ($i > 0) {
+                $this->assertSame($weeks[$i - 1]['end'], $week['start']);
+            }
+            $this->assertLessThanOrEqual(7 * $day + 3_600_000, $week['end'] - $week['start'], "week $i");
+            if ($i > 0 && $i < count($weeks) - 1) {
+                $this->assertGreaterThanOrEqual(7 * $day - 3_600_000, $week['end'] - $week['start']);
+            }
+        }
+
+        $decades = Time::resolveRange(['from' => '1990-01-01', 'to' => '2026-10-12', 'interval' => 'day'], 'UTC', $now);
+        $this->assertSame('month', $decades['interval']);
+        $months = Time::buckets($decades, 'UTC');
+        $this->assertCount(442, $months);
+        foreach ($months as $month) {
+            $this->assertLessThanOrEqual(31 * $day, $month['end'] - $month['start']);
+        }
+        $this->assertNull(Time::resolveRange(['from' => '1900-01-01', 'to' => '2026-10-12'], 'UTC', $now), 'past 1,000 months there is no interval that fits');
+
+        // A comparison longer than its range keeps whole buckets, cut off at a boundary.
+        $longer = ['from' => self::utc(2000, 0, 1), 'fromDate' => '2000-01-01', 'toDate' => '2026-10-12', 'interval' => 'day'] + $decades;
+        $cut = Time::buckets($longer, 'UTC');
+        $this->assertCount(1000, $cut);
+        $this->assertSame($day, $cut[999]['end'] - $cut[999]['start']);
+    }
+
     public function testMonthBucketsStartOnTheFirst(): void
     {
         $range = Time::resolveRange(['from' => '2026-01-15', 'to' => '2026-03-10', 'interval' => 'month'], 'UTC', self::utc(2026, 3, 1));

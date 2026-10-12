@@ -229,17 +229,27 @@ final class Accounts
             if ($step === null) {
                 return false;
             }
-            $this->store->db->run('UPDATE rl_users SET totp_step = ? WHERE id = ?', [$step, $id]);
-            return true;
+            // Only if no check since has used this step or a later one: of two at once, one moves it and the other is refused.
+            return $this->changed('UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)', [$step, $id, $step]) === 1;
         }
-        $hashes = Js::truthy($row['totp_recovery'] ?? null) ? Json::decode((string) $row['totp_recovery'], true) : [];
+        $read = Js::truthy($row['totp_recovery'] ?? null) ? (string) $row['totp_recovery'] : null;
+        $hashes = $read !== null ? Json::decode($read, true) : [];
         $at = array_search(Crypto::recoveryHash($given), $hashes, true);
         if ($at === false) {
             return false;
         }
         array_splice($hashes, (int) $at, 1);
-        $this->store->db->run('UPDATE rl_users SET totp_recovery = ? WHERE id = ?', [Json::encode($hashes), $id]);
-        return true;
+        // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
+        return $this->changed('UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?', [Json::encode($hashes), $id, $read]) === 1;
+    }
+
+    /** How many rows a statement changed. The lock above is not held by every database, so this is how a write knows it won. */
+    private function changed(string $sql, array $params): int
+    {
+        if (method_exists($this->store->db, 'affected')) {
+            return $this->store->db->affected($sql, $params);
+        }
+        return count($this->store->db->all("$sql RETURNING id", $params));
     }
 
     /**

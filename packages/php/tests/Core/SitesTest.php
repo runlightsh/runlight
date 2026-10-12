@@ -133,6 +133,35 @@ final class SitesTest extends CoreTestCase
         self::assertNull($t->rl->retention('default'));
     }
 
+    #[DataProvider('kinds')]
+    public function testASiteChangeRefusedForABadDomainChangesNothingRetentionAndTimezoneIncluded(string $kind): void
+    {
+        $t = new Harness($kind, ['managedSites' => true]);
+        $rl = $t->rl;
+        $rl->init();
+        $rl->addSite(['hostnames' => 'blog.example.com']);
+        $rl->addSite(['hostnames' => 'shop.example.com']);
+        $t->now = self::utc(2025, 10, 1);
+        $t->send(['k' => 'pageview', 'u' => 'https://blog.example.com/'], ['ip' => '203.0.113.1']);
+        $t->now = self::utc(2026, 10, 6, 12);
+        $zone = $rl->store->setting('rollup-zone:blog.example.com');
+        $before = $rl->site('blog.example.com');
+        $visits = fn (): int => $t->stats($t->all('blog.example.com'))['visits'];
+
+        foreach (['not a domain', 'shop.example.com'] as $hostnames) {
+            self::refused(fn () => $rl->updateSite('blog.example.com', ['retentionMonths' => 6, 'timezone' => 'Europe/Paris', 'name' => 'Renamed', 'hostnames' => $hostnames]), $hostnames === 'not a domain' ? 'site_domain_invalid' : 'site_domain_taken');
+            $rl->idle();
+            self::assertNull($rl->retention('blog.example.com'), 'retention is unchanged');
+            self::assertSame($zone, $rl->store->setting('rollup-zone:blog.example.com'), 'the built days are kept');
+            self::assertSame($before, $rl->site('blog.example.com'));
+            self::assertSame(1, $visits(), 'the old visit is still there');
+        }
+
+        $rl->updateSite('blog.example.com', ['retentionMonths' => 6, 'hostnames' => 'blog.example.com']);
+        $rl->idle();
+        self::assertSame(0, $visits(), 'a change that passes prunes once saved');
+    }
+
     public function testRetentionCountsBackCalendarMonthsAsSetUtcMonthDoes(): void
     {
         $t = new Harness('sqlite');
