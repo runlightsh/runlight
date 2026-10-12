@@ -5,9 +5,10 @@ from Node's http module.
 
     application = RunlightMiddleware(application, rl)   # rl.routes() under /runlight, /go/{slug}, link domains
 
-Requests under the routes' base path (default /runlight), `{linkPath}/{slug}` (default /go), and every request
-to a link domain added in Settings are Runlight's; everything else goes on to the app, and a page fetched by a
-known AI agent is recorded on the way (observe=False turns that off). Without an app, anything else is a 404.
+Requests under the routes' base path (default /runlight), `{linkPath}/{slug}` (default /go) for a link that
+exists, and every request to a link domain added in Settings are Runlight's; everything else goes on to the app,
+a slug with no link included, so the app's own 404 page answers it, and a page fetched by a known AI agent is
+recorded on the way (observe=False turns that off). Without an app, anything else is a 404.
 The work a request starts after answering (a retention change's deletions) runs once the answer is sent.
 """
 
@@ -170,6 +171,9 @@ class RunlightMiddleware:
         linked = self.front.link_domain(bare)
         if linked is not None:
             return _After(send(linked, start_response, head), self.runlight.idle)
+        short = self.front.short_link(bare, self.app is not None)
+        if short is not None:
+            return _After(send(short, start_response, head), self.runlight.idle)
         path = urllib.parse.urlsplit(bare.url).path
         if not self.front.owns(method, path):
             self.front.watch(bare)

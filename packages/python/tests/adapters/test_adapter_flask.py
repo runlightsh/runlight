@@ -19,6 +19,11 @@ def flask_app(rl: Any) -> Flask:
     def hello() -> str:
         return APP_PAGE
 
+    # The app has a page under the link path too, which a slug with no link reaches.
+    @app.get("/go/<slug>")
+    def go(slug: str) -> str:
+        return APP_PAGE
+
     runlight.flask.init_app(app, rl, routes_for(rl))
     return app
 

@@ -16,7 +16,7 @@
 
 The middleware answers the dashboard and API under /runlight, short links at /go/{slug}, and every request to a link
 domain added in Settings (which must be in ALLOWED_HOSTS), before Django's URLs, and records page requests from known
-AI agents. The URL is Django's (request.scheme, so SECURE_PROXY_SSL_HEADER applies), and the address is REMOTE_ADDR:
+AI agents. A slug with no link goes on to Django's URLs, so the project's own 404 page answers it. The URL is Django's (request.scheme, so SECURE_PROXY_SSL_HEADER applies), and the address is REMOTE_ADDR:
 Runlight reads proxy headers itself, as its trustProxy option says.
 """
 
@@ -143,6 +143,9 @@ class RunlightMiddleware:
         linked = serving.link_domain(bare)
         if linked is not None:
             return self._finish(serving, linked, head)
+        short = serving.short_link(bare, True)
+        if short is not None:
+            return self._finish(serving, short, head)
         if not serving.owns(request.method, request.path):
             serving.watch(bare)
             return self.get_response(request)
