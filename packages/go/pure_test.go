@@ -151,6 +151,16 @@ func TestPayloads(t *testing.T) {
 func TestQueries(t *testing.T) {
 	f := fixture.PHP(t, "query.json")
 	same(t, "dimensions", Dimensions, js.Dig(f, "dimensions"))
+	// Each dimension's column, in the order the fixture writes them.
+	for name, list := range map[string][][2]string{"eventDimensions": eventDimensions, "sessionDimensions": sessionDimensions} {
+		got := js.NewObject()
+		for _, d := range list {
+			got.Set(d[0], d[1])
+		}
+		if g, w := js.Stringify(got), js.Stringify(js.Dig(f, name)); g != w {
+			t.Errorf("%s:\n got %s\nwant %s", name, g, w)
+		}
+	}
 	if js.Num(js.Dig(f, "maxFilters")) != MaxFilters {
 		t.Errorf("MaxFilters")
 	}
