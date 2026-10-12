@@ -625,3 +625,18 @@ async fn every_scenario_answers_as_the_typescript_sdk_does() {
     println!("conformance: {passed} scenarios pass, {failed} fail");
     assert!(report.is_empty(), "{}", report.join("\n"));
 }
+
+#[test]
+fn the_normalizer_reads_values_as_the_typescript_one_does() {
+    let file = common::fixture("conformance-normalize");
+    let cases = file.as_array().unwrap();
+    assert!(!cases.is_empty());
+    let mut failures = Vec::new();
+    for (i, case) in cases.iter().enumerate() {
+        let got = canonical(&normalize(case.at("input"), ""));
+        if got != canonical(case.at("output")) {
+            failures.push(format!("case {}: {} gave {got}", i + 1, js::stringify(case.at("input"))));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

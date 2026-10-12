@@ -159,7 +159,9 @@ pub(crate) fn coded(error: &str, code: &str, status: u16, params: Option<&[(&str
     coded_with(error, code, status, params, &[])
 }
 
-pub(crate) fn coded_with(
+/// As coded(), with more headers. Public for the tests that replay the TypeScript's answers.
+#[doc(hidden)]
+pub fn coded_with(
     error: &str,
     code: &str,
     status: u16,
