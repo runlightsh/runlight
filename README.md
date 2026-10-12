@@ -52,7 +52,7 @@ Runlight is also available for eight more languages and three CMSs. Each languag
 | --- | --- | --- |
 | PHP | `composer require runlight/runlight` (PHP 8.2 or later) | [PHP](https://runlight.sh/docs/php/) |
 | WordPress | `wp plugin install https://github.com/runlightsh/runlight/releases/latest/download/runlight.zip --activate`, or upload that zip under Plugins, Add New | [WordPress](https://runlight.sh/docs/wordpress/) |
-| Drupal | `composer require drupal/runlight`, then `drush pm:install runlight` (Drupal 10.3 or 11) | [Drupal](https://runlight.sh/docs/drupal/) |
+| Drupal | From [drupal.org](https://www.drupal.org/project/runlight): `composer require drupal/runlight`, then `drush pm:install runlight` (Drupal 10.3 or 11) | [Drupal](https://runlight.sh/docs/drupal/) |
 | Craft CMS | From the [Plugin Store](https://plugins.craftcms.com/runlight), or `composer require runlight/craft`, then `php craft plugin/install runlight` (Craft 5) | [Craft CMS](https://runlight.sh/docs/craft/) |
 | Python | `pip install runlight` (Python 3.11 or later), with the `postgres` or `mysql` extra for those databases | [Python](https://runlight.sh/docs/python/) |
 | Rails | `bundle add runlight`, then `bin/rails generate runlight:install` and `bin/rails db:migrate` (Rails 7.2, 8.0, or 8.1) | [Rails](https://runlight.sh/docs/rails/) |
