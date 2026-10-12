@@ -125,6 +125,20 @@ def check_everything(rl: Runlight, call: Client, passes_through: bool = True, ob
     assert checked.status == 200
     assert checked.json() == {"runlight": True, "domain": LINK_DOMAIN}
     assert call("GET", "/hello", host=LINK_DOMAIN).status == 404
+    # The app's own link path is no link on a link domain, even for a link of its own.
+    for slug in ("x", "sale"):
+        on_domain = call("GET", f"/go/{slug}", host=LINK_DOMAIN)
+        assert on_domain.status == 404
+        assert on_domain.body == b"Not found"
+
+    # A slug with no link is the app's to answer, so its own 404 page shows; with no app, Runlight's 404.
+    for missing in ("/go/missing", "/go/%E0%A4%A"):
+        unknown = call("GET", missing)
+        if passes_through:
+            assert unknown.status == 200, missing
+            assert unknown.body.decode() == APP_PAGE
+        else:
+            assert unknown.status == 404, missing
 
     page = call("GET", "/hello")
     if passes_through:
