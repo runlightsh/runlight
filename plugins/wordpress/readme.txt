@@ -121,6 +121,15 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Changing a site in Runlight's dashboard checks every field before it changes anything, so a change refused for a bad or taken domain no longer shortens how long visits are kept or deletes older ones.
+* A mail service, mail webhook, or AI assistant that redirects to another address is refused before anything is sent there, so its key and the message never leave for a server you didn't choose.
+* Those requests connect to the address Runlight checked, so a name that changes between the check and the connection can't lead them to a cloud metadata address.
+* The AI assistant's limits hold when questions are sent all at once, so a viewer can't go past the daily limit.
+* Behind Cloudflare, countries still come from Cloudflare's headers, now only for requests that came through Cloudflare's own addresses.
+* Answers from AI models, mail services, and link domains are read only up to a sensible size.
+* A chart over a long range with an interval too fine for it moves up to the next interval that fits, instead of lumping the rest of the range into its last point.
+
 = 0.1.2 =
 * Runlight can run inside WordPress. Choose it on the setup screen and the site is counted, with the dashboard in wp-admin and at /runlight on the site, and the numbers in WordPress's database, in tables named after its prefix such as wp_rl_events, or in a SQLite file in uploads. It needs PHP 8.2.
 * Running inside WordPress, Runlight counts each visitor by the address the connection came from, and believes X-Forwarded-For only from a proxy on this server or a private network, and Cloudflare's header only from Cloudflare. The runlight_client_ip filter can change it.
