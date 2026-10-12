@@ -46,7 +46,8 @@ def internal_error() -> Response:
 
 class Front:
     """Decides which requests are Runlight's and answers them: link domains, the app's short-link path, and the
-    routes under their base path. Anything else is the app's, and `owns()` says so before the body is read."""
+    routes under their base path. Anything else is the app's, and `short_link()` and `owns()` say so before the body
+    is read."""
 
     def __init__(self, runlight: Any, routes: Any = None, observe: bool = True) -> None:
         self.runlight = runlight
@@ -61,10 +62,23 @@ class Front:
         """The answer for a link domain, or None for every other host. Needs no body."""
         return self.runlight.link_domain_response(request, {"ip": request.remote_address})
 
+    def short_link(self, request: Request, app_behind: bool) -> Response | None:
+        """The answer for a GET of `{linkPath}/{slug}` on the app's own host: the link's redirect. A slug with no
+        link (or one that is not valid percent-encoding) is the app's to answer when an app is behind, so its own
+        404 page shows, and Runlight's 404 when none is. None for every other request and for one the app answers.
+        Needs no body. Ask link_domain() first, so a link domain answers this path as a 404 of its own."""
+        if request.method != "GET" or not self._link.match(Url(request.url).pathname):
+            return None
+        try:
+            answer = self.runlight.link_handler()(request, {"ip": request.remote_address})
+        except Exception as error:
+            print(f"Runlight: {error!r}", file=sys.stderr)
+            return internal_error()
+        return None if answer.status == 404 and app_behind else answer
+
     def owns(self, method: str, path: str) -> bool:
-        """Whether a request on the app's own host is Runlight's: the short-link path, or under the routes' base."""
-        if method == "GET" and self._link.match(path):
-            return True
+        """Whether a request on the app's own host is Runlight's: under the routes' base. The short-link path is
+        short_link()'s to decide."""
         for base in self.bases():
             if base == "/" or path == base or path.startswith(f"{base}/"):
                 return True
