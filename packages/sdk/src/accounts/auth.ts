@@ -290,13 +290,15 @@ export class Accounts {
    */
   async checkSecondFactor(id: string, code: string, now: number): Promise<boolean> {
     // One check at a time per account, so two sign-ins at once cannot both use the same code.
+    // The database has the last word, since another process, or another Accounts on the same store, does not wait here.
     const before = this.checking.get(id) ?? Promise.resolve();
     const turn = before.then(() => this.checkSecondFactorNow(id, code, now));
-    this.checking.set(id, turn.catch(() => {}));
+    const settled = turn.catch(() => {});
+    this.checking.set(id, settled);
     try {
       return await turn;
     } finally {
-      if (this.checking.get(id) === turn) this.checking.delete(id);
+      if (this.checking.get(id) === settled) this.checking.delete(id);
     }
   }
 
@@ -311,15 +313,22 @@ export class Accounts {
       const secret = await this.unseal(String(row.totp_secret));
       const step = secret ? await matchStep(secret, given.replace(/\s/g, ""), now, row.totp_step === null || row.totp_step === undefined ? -1 : Number(row.totp_step)) : null;
       if (step === null) return false;
-      await this.store.db.run(`UPDATE rl_users SET totp_step = ? WHERE id = ?`, [step, id]);
-      return true;
+      // Only if no check since has used this step or a later one: of two at once, one moves it and the other is refused.
+      return (await this.changed(`UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)`, [step, id, step])) === 1;
     }
-    const hashes = row.totp_recovery ? (JSON.parse(String(row.totp_recovery)) as string[]) : [];
+    const read = row.totp_recovery ? String(row.totp_recovery) : null;
+    const hashes = read ? (JSON.parse(read) as string[]) : [];
     const at = hashes.indexOf(await recoveryHash(given));
     if (at < 0) return false;
     hashes.splice(at, 1);
-    await this.store.db.run(`UPDATE rl_users SET totp_recovery = ? WHERE id = ?`, [JSON.stringify(hashes), id]);
-    return true;
+    // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
+    return (await this.changed(`UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?`, [JSON.stringify(hashes), id, read])) === 1;
+  }
+
+  /** How many rows a statement changed. SQLite and D1 have no lock, so this is how a write knows it won. */
+  private async changed(sql: string, params: unknown[]): Promise<number> {
+    if (this.store.db.affected) return this.store.db.affected(sql, params);
+    return (await this.store.db.all(`${sql} RETURNING id`, params)).length;
   }
 
   /**
