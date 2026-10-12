@@ -1,6 +1,6 @@
 # Runlight
 
-Privacy friendly web analytics that you run yourself.
+Free, open-source, and privacy-friendly web analytics that you run yourself inside the app or CMS you already run.
 
 Runlight counts visitors without cookies and without storing anyone’s IP address, so there is no consent banner to show. Your numbers stay in your own database, and the dashboard is served from your own domain. The tracking script is under 2 KB gzipped.
 
