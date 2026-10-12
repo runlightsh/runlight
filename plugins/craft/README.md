@@ -8,6 +8,8 @@ Counts your site's visitors with [Runlight](https://runlight.sh/): privacy frien
 - Records AI agents such as ChatGPT and Claude that fetch your pages, after the response has been sent.
 - Adds a Runlight item to the Control Panel that shows your dashboard there.
 
+Install it from the [Plugin Store](https://plugins.craftcms.com/runlight) in your Control Panel, or run `composer require runlight/craft` and then `php craft plugin/install runlight`.
+
 Nothing is counted until you choose where Runlight runs. Installing the plugin opens its settings, with two choices.
 
 ## In this Craft site
