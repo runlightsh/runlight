@@ -146,6 +146,7 @@ public sealed class StandaloneTests : ServerTestCase
         Assert.Equal(302, shortLink.Status);
         Assert.Equal("https://blog.example.com/launch", shortLink.Headers.Get("location"));
         Assert.Equal(302, (await server.HandleAsync(Req("/go/launch"))).Status); // every link also answers at /go/:slug on the server itself
+        Assert.Equal(404, (await server.HandleAsync(Req("/go/launch", host: "go.example.com"))).Status); // but not on a link domain, which answers only its own links at its root
 
         var health = await server.HandleAsync(Req("/healthz"));
         Assert.Equal((200, "ok"), (health.Status, health.Text()));

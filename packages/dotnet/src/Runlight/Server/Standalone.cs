@@ -245,8 +245,10 @@ public sealed partial class Standalone : IAsyncDisposable
             await KnownHostsAsync(cancellationToken).ConfigureAwait(false);
             // A domain pointed at this server for short links answers at its root, with links one segment deep. The
             // server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
-            // signed in, so a link domain added on the dashboard's own name can always be removed again.
-            bool linkable = path == Runlight.LinkDomainCheck
+            // signed in, so a link domain added on the dashboard's own name can always be removed again. /go/:slug is
+            // the server's own link path, which a link domain answers as a path with no link (a 404), as every adapter does.
+            bool own = request.Method == "GET" && GoPath().IsMatch(path);
+            bool linkable = path == Runlight.LinkDomainCheck || own
                 || (OneSegment().IsMatch(path) && !ServerPaths.Contains(path) && !(path == "/" && await Web.SignedInAsync(request, cancellationToken).ConfigureAwait(false) != null));
             if (linkable && !(_publicHost != null && HostOf(request) == _publicHost))
             {
@@ -260,7 +262,7 @@ public sealed partial class Standalone : IAsyncDisposable
             {
                 return new Response("ok", 200, new Headers { ["content-type"] = "text/plain", ["cache-control"] = "no-store" });
             }
-            if (request.Method == "GET" && GoPath().IsMatch(path))
+            if (own)
             {
                 return await Runlight.LinkHandler()(request, ip, cancellationToken).ConfigureAwait(false);
             }
