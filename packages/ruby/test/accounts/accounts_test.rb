@@ -211,21 +211,27 @@ class AccountsAccountsTest < Minitest::Test
   end
 
   # Runs the block in several processes at once, each with a store of its own on the file, and gives back
-  # what each returned.
+  # what each returned. A process that raised sends its error back, so the test fails with it.
   def in_processes(path, count)
     readers = count.times.map do
       reader, writer = IO.pipe
       fork do
         reader.close
-        writer.write(Marshal.dump(yield(Runlight::Stores.sqlite(path))))
+        answer = begin
+          [:ok, yield(Runlight::Stores.sqlite(path))]
+        rescue Exception => e
+          [:error, "#{e.class}: #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}"]
+        end
+        writer.write(Marshal.dump(answer))
         writer.close
         exit!(0)
       end
       writer.close
       reader
     end
+    answers = readers.map { |r| r.read.then { |data| data.empty? ? [:error, "the process sent nothing back"] : Marshal.load(data) } }
     Process.waitall
-    readers.map { |r| Marshal.load(r.read) }
+    answers.map { |kind, value| kind == :ok ? value : flunk("A process failed: #{value}") }
   end
 
   def test_a_sign_in_link_opened_at_once_from_several_processes_lets_one_in
