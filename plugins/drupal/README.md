@@ -20,7 +20,7 @@ files folder and `pdo_sqlite`.
 
 ## Installation
 
-Install it with Composer, which brings the Runlight library with it:
+Install it from [drupal.org](https://www.drupal.org/project/runlight) with Composer, which brings the Runlight library with it:
 
 ```sh
 composer require drupal/runlight
