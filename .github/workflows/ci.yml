@@ -166,6 +166,10 @@ jobs:
           tools: composer:v2
       - run: composer validate --strict --no-plugins
         working-directory: plugins/craft
+      # The plugin needs this commit's PHP package, which a release commit
+      # requires before Packagist has it, so it comes from packages/php.
+      - run: composer config repositories.runlight "$(jq -nc --arg v "$(jq -r .version ../../packages/sdk/package.json)" '{type: "path", url: "../../packages/php", options: {symlink: false, versions: {"runlight/runlight": $v}}}')"
+        working-directory: plugins/craft
       - run: composer update --no-interaction --no-progress --prefer-dist --no-plugins
         working-directory: plugins/craft
       - run: php scripts/craft-load.php
