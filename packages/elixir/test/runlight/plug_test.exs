@@ -114,19 +114,53 @@ defmodule Runlight.PlugTest do
     assert tracker.resp_body =~ "sendBeacon"
   end
 
-  defmodule Links do
-    use Plug.Router
-    plug(:match)
-    plug(:dispatch)
-    forward("/", to: Runlight.Plug.Links, init_opts: [instance: Runlight.PlugTest.RL])
+  test "the short link Plug forwarded at the link path answers a link domain first and the app's own link path" do
+    link_domain!()
+    assert redirected?(call(conn(:get, "/go/deal")))
+    # On a link domain the link path is no link, even for that domain's own link.
+    gone = Router.call(conn(:get, "/go/deal") |> on("go.example.org"), Router.init([]))
+    assert {gone.status, gone.resp_body} == {404, "Not found"}
   end
 
-  test "the short link Plug answers a link domain and the app's own link path" do
+  defmodule Middleware do
+    use Plug.Builder
+    plug(Runlight.Plug.Links, instance: Runlight.PlugTest.RL)
+    plug(:app)
+    def app(conn, _), do: send_resp(conn, 200, "the app")
+  end
+
+  defp through(conn), do: Middleware.call(conn, Middleware.init([]))
+
+  test "the short link Plug ahead of the app answers links and leaves everything else, an unknown slug too, to the app" do
     link_domain!()
-    assert redirected?(Links.call(conn(:get, "/deal") |> on("go.example.org"), Links.init([])))
+    assert redirected?(through(conn(:get, "/deal") |> on("go.example.org")))
+    assert through(conn(:get, "/go/deal") |> on("go.example.org")).status == 404
+    assert through(conn(:get, "/nothing") |> on("go.example.org")).status == 404
     # On the app's own host only the link path answers, for every link.
-    assert Links.call(conn(:get, "/deal") |> on("example.com"), Links.init([])).status == 404
-    assert redirected?(Links.call(conn(:get, "/go/deal") |> on("example.com"), Links.init([])))
+    assert redirected?(through(conn(:get, "/go/deal") |> on("example.com")))
+    assert through(conn(:get, "/deal") |> on("example.com")).resp_body == "the app"
+    assert through(conn(:get, "/go/missing") |> on("example.com")).resp_body == "the app"
+    assert through(conn(:get, "/go/%E0%A4%A") |> on("example.com")).resp_body == "the app"
+    assert through(conn(:post, "/go/deal", "name=x") |> on("example.com")).resp_body == "the app"
+  end
+
+  defmodule PhoenixRouter do
+    use Phoenix.Router
+    forward("/go", Runlight.Plug.Links, instance: Runlight.PlugTest.RL)
+  end
+
+  @tag :capture_log
+  test "forwarded from a Phoenix router, a slug with no link is Phoenix's own 404" do
+    link_domain!()
+    phoenix = fn conn -> PhoenixRouter.call(conn, PhoenixRouter.init([])) end
+    assert redirected?(phoenix.(conn(:get, "/go/deal") |> on("example.com")))
+    # The endpoint renders the app's 404 page for it, as for any path no route has.
+    wrapped = assert_raise(Plug.Conn.WrapperError, fn -> phoenix.(conn(:get, "/go/missing") |> on("example.com")) end)
+    assert %Phoenix.Router.NoRouteError{} = error = wrapped.reason
+    assert Plug.Exception.status(error) == 404
+    assert error.router == PhoenixRouter
+    # A link domain is Runlight's to answer, its 404 too.
+    assert phoenix.(conn(:get, "/go/deal") |> on("go.example.org")).status == 404
   end
 
   test "records a pageview the tracker sends" do
