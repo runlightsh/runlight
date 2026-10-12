@@ -58,6 +58,20 @@ module Runlight
 
       private
 
+      # Opens the connection. A name pinned to several addresses is tried address by address, as a connection
+      # by name is, so a host that listens on one of them is reached; only the failure of the last is raised.
+      def connect(http, addresses)
+        tries = addresses.empty? ? [nil] : addresses
+        tries.each_with_index do |address, at|
+          http.ipaddr = address unless address.nil?
+          begin
+            return http.start
+          rescue SystemCallError, SocketError, Net::OpenTimeout
+            raise if at == tries.length - 1
+          end
+        end
+      end
+
       def monotonic
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
@@ -78,11 +92,13 @@ module Runlight
         http = pinned ? Net::HTTP.new(host, port, nil) : Net::HTTP.new(host, port)
         http.use_ssl = https
         # A pin connects to the checked address, with the name kept for the Host header and the certificate.
+        addresses = []
         Array(init["resolve"]).each do |pin|
-          m = pin.to_s.match(/\A(.+):(\d+):\[?([^\],]+)\]?/)
-          next unless m && m[1].casecmp?(host) && m[2].to_i == port
+          lead = "#{host}:#{port}:"
+          next unless pin.to_s.length > lead.length && pin.to_s[0, lead.length].casecmp?(lead)
 
-          http.ipaddr = m[3]
+          addresses = pin.to_s[lead.length..].split(",").map { |address| address.delete_prefix("[").delete_suffix("]") }.reject(&:empty?)
+          http.ipaddr = addresses.first
           break
         end
         # A pin that names another host or port would leave the name to be looked up again: refused, never
@@ -111,8 +127,9 @@ module Runlight
           # Past maxBytes the whole request is left by a throw, which closes the connection: a break would leave
           # only read_body, and Net::HTTP would then read the rest of the body after all.
           catch(:too_long) do
-            http.start do |connection|
-              connection.request(request) do |answer|
+            connect(http, addresses)
+            begin
+              http.request(request) do |answer|
                 status = answer.code.to_i
                 answer.each_capitalized_name { |name| answer_headers[name.downcase] = answer.get_fields(name) }
                 answer.read_body do |chunk|
@@ -126,6 +143,8 @@ module Runlight
                   received << chunk
                 end
               end
+            ensure
+              http.finish if http.started?
             end
           end
         rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout, Timeout::Error

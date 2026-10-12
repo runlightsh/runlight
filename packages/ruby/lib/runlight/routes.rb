@@ -73,11 +73,14 @@ module Runlight
     PATH_DIMENSIONS = %w[page entry exit ai_page].freeze
     # runlight.ts's LINK_DOMAIN_CHECK: the path on every link domain that answers when the domain reaches this Runlight.
     LINK_DOMAIN_CHECK = "/.well-known/runlight-link-domain"
+    # The most read of a link domain's answer to the check, and of an install's live answer for a share or embed.
+    LINK_DOMAIN_MAX_BYTES = 16_384
+    REALTIME_MAX_BYTES = 4 * 1024 * 1024
     # runlight.ts's RETENTION_MONTHS: the choices for how long a site keeps its visits.
     RETENTION_MONTHS = [6, 12, 24, 36, 60].freeze
     private_constant :RULES_PLACEHOLDER, :PICK_TARGET_PLACEHOLDER, :PICK_HOSTS_PLACEHOLDER, :PICK_RETURN_PLACEHOLDER,
                      :PICK_NONCE_PLACEHOLDER, :PICK_RETURN, :PICK_NONCE, :SHARE_ID,
-                     :PATH_DIMENSIONS, :LINK_DOMAIN_CHECK, :RETENTION_MONTHS
+                     :PATH_DIMENSIONS, :LINK_DOMAIN_CHECK, :LINK_DOMAIN_MAX_BYTES, :REALTIME_MAX_BYTES, :RETENTION_MONTHS
 
     DASHBOARD_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
@@ -710,7 +713,7 @@ module Runlight
 
     # Answers a read for a site counted by another install by asking that install,
     # with its token and its own id for the site, and handing back what it says.
-    def pass_through(remote, path, url, request = nil)
+    def pass_through(remote, path, url, request = nil, max_bytes = nil)
       target = Http::Url.new("#{remote["url"]}#{path}")
       query = target.search_params
       url.search_params.each { |key, value| query.append(key.to_s, value) }
@@ -732,6 +735,8 @@ module Runlight
           "timeoutMs" => write ? 30_000 : 120_000,
         }
         init["body"] = request.text if write
+        # One byte more than the most wanted is asked, so an answer past it is seen as such.
+        init.merge!("maxBytes" => max_bytes + 1, "truncate" => true) unless max_bytes.nil?
         answer = Safefetch.owner_fetch(target.href, init, @rl.fetcher, @rl.local_installs)
       rescue StandardError => e
         if e.is_a?(Http::FetchError) && e.timed_out?
@@ -885,9 +890,11 @@ module Runlight
           begin
             # Only a public address is fetched, whatever the name resolves to now, so the check cannot be pointed
             # into a private network.
-            answer = Safefetch.public_fetch("https://#{domain}#{LINK_DOMAIN_CHECK}", { "timeoutMs" => 5000 }, @rl.fetcher)
+            # Read no further than the check's answer could need; one byte more is asked, so a longer one is seen as such.
+            answer = Safefetch.public_fetch("https://#{domain}#{LINK_DOMAIN_CHECK}",
+                                            { "timeoutMs" => 5000, "maxBytes" => LINK_DOMAIN_MAX_BYTES + 1, "truncate" => true }, @rl.fetcher)
             parsed, body = begin
-              Js.parse_json(answer.text)
+              Js.parse_json(Body.read_text_capped(answer, LINK_DOMAIN_MAX_BYTES))
             rescue StandardError
               [false, nil]
             end
@@ -1025,12 +1032,8 @@ module Runlight
     # The key picker tickets are signed with, made on first use and kept in the database for every process.
     def pick_key
       @rl.init
-      saved = store.setting("pick-key")
-      return saved if !saved.nil? && saved != ""
-
-      made = Hashing.random_id(32)
-      store.set_setting("pick-key", made)
-      made
+      # Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+      store.setting_or_add("pick-key") { Hashing.random_id(32) }
     end
 
     # A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked, for half
@@ -1062,12 +1065,8 @@ module Runlight
     # The key embed tickets and sessions are signed with, made on first use and kept in the database for every process.
     def embed_key
       @rl.init
-      saved = store.setting("embed-key")
-      return saved if !saved.nil? && saved != ""
-
-      made = Hashing.random_id(32)
-      store.set_setting("embed-key", made)
-      made
+      # Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+      store.setting_or_add("embed-key") { Hashing.random_id(32) }
     end
 
     # An embed token that still exists, for a site that still does.
@@ -1407,39 +1406,72 @@ module Runlight
     # As in TypeScript, the hour's questions are counted in this process; the day's, in the settings.
     def ask_turn(who, owner)
       now = @rl.now
+      # Taken in one step, before anything slow, so questions sent at once each see the others.
       mine = @lock.synchronize do
-        held = @asked[who] || { "at" => [], "open" => 0 }
+        held = (@asked[who] ||= { "at" => [], "open" => 0 })
         held["at"] = held["at"].select { |at| now - at < 3_600_000 }
-        held
+        if held["at"].length >= ASK_PER_HOUR || held["open"] >= ASK_AT_ONCE
+          nil
+        else
+          held["at"] << now
+          held["open"] += 1
+          held
+        end
       end
-      if mine["at"].length >= ASK_PER_HOUR || mine["open"] >= ASK_AT_ONCE
-        return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429)
-      end
+      return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429) if mine.nil?
 
+      release = -> { @lock.synchronize { mine["open"] -= 1 } }
       unless owner
-        daily = viewer_daily
-        day = "assistant-asked:#{Time.at(now.div(1000)).utc.strftime("%Y-%m-%d")}"
-        counts = Json.decode(store.setting(day) || "{}")
-        if (counts[who] || 0) >= daily
-          return coded("Viewers can ask #{Js.string(daily)} questions a day. Ask again tomorrow.", "assistant_daily", 429, { "limit" => Js.string(daily) })
+        counted = begin
+          count_ask(who, now)
+        rescue StandardError
+          release.call
+          raise
         end
+        unless counted == true
+          release.call
+          @lock.synchronize do
+            at = mine["at"].index(now)
+            mine["at"].delete_at(at) unless at.nil?
+          end
+          return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429) if counted.nil?
 
-        counts[who] = (counts[who] || 0) + 1
-        store.set_setting(day, Json.encode(counts))
-        store.settings_starting_with("assistant-asked:").each do |entry|
-          store.set_setting(entry["key"], nil) if entry["key"] != day
+          return coded("Viewers can ask #{Js.string(counted)} questions a day. Ask again tomorrow.", "assistant_daily", 429, { "limit" => Js.string(counted) })
         end
       end
+      # People who stopped asking are dropped, so the map holds only the last hour's.
       @lock.synchronize do
-        mine["at"] << now
-        mine["open"] += 1
-        @asked[who] = mine
-        # People who stopped asking are dropped, so the map holds only the last hour's.
         if @asked.size > 1000
           @asked.delete_if { |_key, value| value["open"].zero? && value["at"].none? { |at| now - at < 3_600_000 } }
         end
       end
-      -> { @lock.synchronize { mine["open"] -= 1 } }
+      release
+    end
+
+    # Counts a viewer's question in their own row for the day, or gives the daily limit when it is reached. The
+    # row only ever moves from the count read to the next one, so of questions sent at once, by one viewer or by
+    # every process on the database, each count is taken once. True when counted, nil when the row kept changing.
+    def count_ask(who, now)
+      limit = viewer_daily
+      return limit if limit < 1
+
+      day = "assistant-asked:#{Time.at(now.div(1000)).utc.strftime("%Y-%m-%d")}:"
+      key = "#{day}#{who}"
+      20.times do
+        seen = store.setting(key)
+        if seen.nil?
+          next unless store.add_setting(key, "1")
+
+          # A viewer's first question of the day clears the days before.
+          store.settings_starting_with("assistant-asked:").each do |entry|
+            store.set_setting(entry["key"], nil) unless entry["key"].start_with?(day)
+          end
+          return true
+        end
+        return limit if Js.number(seen) >= limit
+        return true if store.swap_setting(key, seen, Js.string(Js.number(seen) + 1))
+      end
+      nil
     end
 
     def tokens_api(request, path)
@@ -2146,10 +2178,10 @@ module Runlight
           return answer unless answer.ok?
 
           rl.forget_remote_info(id)
-        elsif remote.nil? && !retention.equal?(UNDEFINED)
-          rl.set_retention(id, retention.nil? ? nil : Js.number(retention))
         end
+        # update_site checks every field, hostnames too, before it changes anything.
         patch = {}
+        patch["retentionMonths"] = retention.nil? ? nil : Js.number(retention) if remote.nil? && !retention.equal?(UNDEFINED)
         patch["name"] = Js.string(Js.get(body, "name")) if given?(body, "name")
         patch["timezone"] = Js.string(Js.get(body, "timezone")) if given?(body, "timezone")
         patch["hostnames"] = plain(Js.get(body, "hostnames")) if given?(body, "hostnames") && rl.managed_sites
@@ -2245,10 +2277,15 @@ module Runlight
       # each visit, with its time and city, since anyone with the link could watch one person's way through the site.
       unfeed = ->(live) { shared.nil? ? live : live.merge("recent" => []) }
       unless remote.nil?
-        answer = pass_through(remote, path, url, request)
-        return answer if path != "/api/realtime" || shared.nil? || !answer.ok?
+        live_for_share = path == "/api/realtime" && !shared.nil?
+        answer = pass_through(remote, path, url, request, live_for_share ? REALTIME_MAX_BYTES : nil)
+        return answer if !live_for_share || !answer.ok?
 
-        parsed, live = Js.parse_json(answer.text)
+        parsed, live = begin
+          Js.parse_json(Body.read_text_capped(answer, REALTIME_MAX_BYTES))
+        rescue Http::BodyTooLong
+          [false, nil]
+        end
         return json(unfeed.call(live)) if parsed && live.is_a?(Hash)
 
         host = Http::Url.new(remote["url"].to_s).host

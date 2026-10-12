@@ -101,25 +101,7 @@ module Runlight
         given = get("RUNLIGHT_SECRET")
         return @secret = given unless given.nil?
 
-        file = "#{data_dir}/secret"
-        saved = read(file)
-        return @secret = saved if saved != ""
-
-        made = SecureRandom.hex(32)
-        # Made once: whoever writes the file first wins, and everyone else reads theirs.
-        begin
-          File.open(file, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |out| out.write("#{made}\n") }
-        rescue SystemCallError
-          sleep(0.05)
-          saved = read(file)
-          if saved == ""
-            raise RuntimeError, "Runlight: could not write #{file}. Make the data folder writable, or set RUNLIGHT_SECRET."
-          end
-
-          return @secret = saved
-        end
-        File.chmod(0o600, file)
-        @secret = made
+        @secret = secret_in(data_dir)
       end
 
       # The dashboard's public address, such as https://stats.example.com, or nil.
@@ -234,6 +216,69 @@ module Runlight
       end
 
       # A file's text, trimmed unless asked not to, or "" when there is none.
+      # Shorter than any secret this file has ever been given, so a file caught half written is never used.
+      SHORTEST_SECRET = 32
+
+      # The secret kept in `dir`, made on first run, readable only by this user. Servers starting at once on one
+      # folder agree on it: the new secret is written whole to a file of its own, then linked into place, which
+      # refuses to replace a file already there, and the one that loses reads the winner's. A file read empty or
+      # short is read again for a moment, and then refused, never used.
+      def secret_in(dir)
+        file = "#{dir}/secret"
+        found = whole_secret(file)
+        return found unless found.nil?
+
+        made = SecureRandom.hex(32)
+        temp = "#{dir}/.secret-#{Process.pid}-#{SecureRandom.hex(6)}"
+        File.open(temp, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |out| out.write("#{made}\n") }
+        begin
+          File.chmod(0o600, temp)
+          begin
+            File.link(temp, file)
+            made
+          rescue Errno::EEXIST
+            whole_secret(file) || refuse_secret(file)
+          rescue SystemCallError
+            # A file system with no hard links still creates the file only if it is not there; a reader that
+            # catches it before its contents land reads it again.
+            begin
+              File.open(file, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |out| out.write("#{made}\n") }
+              File.chmod(0o600, file)
+              made
+            rescue Errno::EEXIST
+              whole_secret(file) || refuse_secret(file)
+            rescue SystemCallError
+              raise RuntimeError, "Runlight: could not write #{file}. Make the data folder writable, or set RUNLIGHT_SECRET."
+            end
+          end
+        ensure
+          begin
+            File.unlink(temp)
+          rescue SystemCallError
+            # Gone already.
+          end
+        end
+      end
+
+      # The secret in a file, waiting up to two seconds for one too short to be whole; nil when there is no file.
+      def whole_secret(file)
+        tries = 0
+        loop do
+          return nil unless File.exist?(file)
+
+          text = read(file)
+          return text if text.length >= SHORTEST_SECRET
+          refuse_secret(file) if tries >= 20
+
+          tries += 1
+          sleep(0.1)
+        end
+      end
+
+      def refuse_secret(file)
+        raise RuntimeError, "Runlight: #{file} holds no whole secret. Delete it to have a new one made, which signs everyone out, or set RUNLIGHT_SECRET."
+      end
+
       def read(file, strip: true)
         text = File.file?(file) ? File.read(file) : ""
         strip ? text.strip : text

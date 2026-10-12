@@ -138,7 +138,8 @@ module Runlight
       # Checks a six-digit code, or a recovery code, for an account with two-factor on.
       # A code works once: one already used, or older, is refused, and a recovery code is crossed off.
       # One check at a time, so two sign-ins at once cannot both use the same code: TypeScript queues them per
-      # account in its process, and here the database's lock is taken, which holds across processes too.
+      # account in its process, and here the database's lock is taken, which holds across processes too. The
+      # update that uses a code is also conditional, so the database has the last word either way.
       def check_second_factor(id, code, now)
         init
         turn { check_second_factor_now(id, code, now) }
@@ -493,16 +494,17 @@ module Runlight
           step = !secret.nil? && secret != "" ? Crypto.match_step(secret, digits, now, after) : nil
           return false if step.nil?
 
-          @store.db.run("UPDATE rl_users SET totp_step = ? WHERE id = ?", [step, id])
-          return true
+          # Only if no check since has used this step or a later one, whatever took the turn before this one.
+          return @store.db.affected("UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)", [step, id, step]) == 1
         end
-        hashes = Js.truthy?(row["totp_recovery"]) ? Json.decode(row["totp_recovery"].to_s) : []
+        read = Js.truthy?(row["totp_recovery"]) ? row["totp_recovery"].to_s : nil
+        hashes = read.nil? ? [] : Json.decode(read)
         at = hashes.index(Crypto.recovery_hash(given))
         return false if at.nil?
 
         hashes.delete_at(at)
-        @store.db.run("UPDATE rl_users SET totp_recovery = ? WHERE id = ?", [Json.encode(hashes), id])
-        true
+        # Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
+        @store.db.affected("UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?", [Json.encode(hashes), id, read]) == 1
       end
 
       def ticket(kind, user, expires)

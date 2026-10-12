@@ -19,8 +19,10 @@ module Runlight
     COMPARE_MODES = %w[previous year custom off].freeze
 
     MAX_BUCKETS = 1000
-    # A month of hours. Longer hourly ranges are cut off rather than refused.
+    # A month of hours. A longer range is counted by the day instead.
     MAX_HOURS = 744
+    # The next coarser interval, for a range too long for its own.
+    COARSER = { "hour" => "day", "day" => "week", "week" => "month" }.freeze
 
     # Names Intl reads as another zone where TZInfo has no name, or reads it differently.
     ALIASES = {
@@ -47,7 +49,7 @@ module Runlight
     }.freeze
 
     OFFSET = /\A([+\-]|−)([01][0-9]|2[0-3])(?::?([0-5][0-9]))?\z/
-    private_constant :MAX_BUCKETS, :MAX_HOURS, :ALIASES, :OFFSET
+    private_constant :MAX_BUCKETS, :MAX_HOURS, :COARSER, :ALIASES, :OFFSET
 
     # A zone: a TZInfo::Timezone, or the seconds of a fixed offset; false where Intl throws a RangeError.
     @zones = {}
@@ -284,8 +286,26 @@ module Runlight
       end
 
       interval = INTERVALS.include?(input["interval"]) ? input["interval"] : default_interval(from_date, to_date)
-      { "from" => start_of(from_date, timezone), "to" => start_of(add_days(to_date, 1), timezone), "fromDate" => from_date,
-        "toDate" => to_date, "interval" => interval }
+      from_ms = start_of(from_date, timezone)
+      to_ms = start_of(add_days(to_date, 1), timezone)
+      # An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+      # Past 1,000 months there is none.
+      while bucket_count(from_ms, to_ms, from_date, to_date, interval) > (interval == "hour" ? MAX_HOURS : MAX_BUCKETS)
+        interval = COARSER[interval]
+        return nil if interval.nil?
+      end
+      { "from" => from_ms, "to" => to_ms, "fromDate" => from_date, "toDate" => to_date, "interval" => interval }
+    end
+
+    # How many chart buckets a range has at an interval, the first and last counted even when partial.
+    def bucket_count(from_ms, to_ms, from_date, to_date, interval)
+      return (to_ms - from_ms).fdiv(3_600_000).ceil if interval == "hour"
+      return days_between(from_date, to_date) + 1 if interval == "day"
+      return tdiv(days_between(add_days(from_date, -weekday(from_date)), to_date), 7) + 1 if interval == "week"
+
+      fy, fm = split(from_date)
+      ty, tm = split(to_date)
+      ((ty - fy) * 12) + (tm - fm) + 1
     end
 
     def add_years(date, years)
@@ -323,12 +343,15 @@ module Runlight
         "toDate" => to_date, "interval" => range["interval"] }
     end
 
-    # Chart buckets covering a range, each starting on a local boundary.
+    # Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the
+    # first and last can be partial. resolve_range picks an interval that fits; a range given here with more
+    # buckets than that, such as a longer comparison, is cut off at a boundary, never merged into its last bucket.
     def buckets(range, timezone)
       starts = []
+      # One start past the limit, so the last bucket kept still ends where the next would begin.
       if range["interval"] == "hour"
         t = range["from"]
-        while t < range["to"] && starts.length < MAX_HOURS
+        while t < range["to"] && starts.length <= MAX_HOURS
           starts << t
           t += 3_600_000
         end
@@ -339,7 +362,7 @@ module Runlight
         elsif range["interval"] == "month"
           date = "#{date[0, 8]}01"
         end
-        while date <= range["toDate"] && starts.length < MAX_BUCKETS
+        while date <= range["toDate"] && starts.length <= MAX_BUCKETS
           starts << start_of(date, timezone)
           date = case range["interval"]
                  when "day" then add_days(date, 1)
@@ -348,7 +371,7 @@ module Runlight
                  end
         end
       end
-      starts.each_with_index.map do |start, i|
+      starts.first(range["interval"] == "hour" ? MAX_HOURS : MAX_BUCKETS).each_with_index.map do |start, i|
         { "start" => [start, range["from"]].max, "end" => [starts[i + 1] || range["to"], range["to"]].min }
       end
     end

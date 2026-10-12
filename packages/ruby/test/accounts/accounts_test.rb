@@ -193,6 +193,41 @@ class AccountsAccountsTest < Minitest::Test
     end
   end
 
+  # The update that uses a code is conditional, so a check that read the row before another used the code still
+  # does not use it twice, whatever lock the database gives the checks.
+  def test_a_code_is_accepted_once_even_by_checks_that_both_read_it_unused
+    each_kind do |kind|
+      store = store(kind)
+      one = Accounts.new(store, SECRET)
+      other = Accounts.new(store, SECRET)
+      user = one.set_password("jon@example.com", "a long password", NOW)
+      secret = one.start_two_factor(user["id"])
+      recovery = one.confirm_two_factor(user["id"], Crypto.totp(secret, NOW / 30_000), NOW)
+      # Each check reads the row, then waits for the other to have read it too, before either writes.
+      db = store.db
+      db.define_singleton_method(:all) do |sql, params = []|
+        rows = super(sql, params)
+        if sql.include?("totp_secret, totp_recovery, totp_step")
+          sleep 0.05
+        end
+        rows
+      end
+      raw = ->(accounts, code, now) { accounts.send(:check_second_factor_now, user["id"], code, now) }
+
+      3.times do |round|
+        at = NOW + ((round + 1) * 60_000)
+        fresh = Crypto.totp(secret, at / 30_000)
+        both = [one, other].map { |accounts| Thread.new { raw.call(accounts, fresh, at) } }.map(&:value)
+        assert_equal 1, both.count(true), "round #{round}: one of the two is accepted"
+      end
+      recovery.first(2).each do |used|
+        both = [one, other].map { |accounts| Thread.new { raw.call(accounts, used, NOW) } }.map(&:value)
+        assert_equal 1, both.count(true), "a recovery code is crossed off once"
+      end
+      assert_equal 8, one.by_id(user["id"])["recoveryLeft"]
+    end
+  end
+
   def test_an_old_table_gains_roles_and_keeps_one_owner
     store = store("sqlite")
     store.db.run("CREATE TABLE rl_users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, hash TEXT NOT NULL, created_at BIGINT NOT NULL)")

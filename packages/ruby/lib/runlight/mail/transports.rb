@@ -81,20 +81,34 @@ module Runlight
         ""
       end
 
+      # The most of a service's error read, so an answer without end never fills memory. One byte more is asked of
+      # the fetcher, which hands back what it read, so that an answer past the limit is seen as such and read as empty.
+      MAX_ERROR_BYTES = 65_536
+
+      # A service's error text, or none when it runs past MAX_ERROR_BYTES.
+      def error_text(response)
+        Body.read_text_capped(response, MAX_ERROR_BYTES)
+      rescue Http::BodyTooLong
+        ""
+      end
+
       # POSTs to a service, with the errors the dashboard shows. init: "headers" and "body".
       def post(fetcher, url, init, explains = true)
         begin
           # A webhook can be at any address, so it and each redirect are checked, as for every service.
-          response = Safefetch.service_fetch(url, { "method" => "POST", "headers" => init["headers"], "body" => init["body"], "timeoutMs" => 20_000 }, fetcher)
+          response = Safefetch.service_fetch(url, { "method" => "POST", "headers" => init["headers"], "body" => init["body"], "timeoutMs" => 20_000,
+                                                     "maxBytes" => MAX_ERROR_BYTES + 1, "truncate" => true }, fetcher)
         rescue MetadataAddressError => e
           raise MailError.new(e.message, "address_refused", { "host" => e.host })
+        rescue RedirectRefusedError => e
+          raise MailError.new(e.message, "redirect_refused", { "host" => e.host, "to" => e.to })
         rescue Http::FetchError => e
           host = Http::Url.new(url).host
           raise MailError.new("Could not reach #{host}: #{e.message}", "mail_unreachable", { "host" => host, "detail" => e.message })
         end
         return if response.ok?
 
-        message = explains ? service_message(response.text) : ""
+        message = explains ? service_message(error_text(response)) : ""
         host = Http::Url.new(url).host
         raise MailError.new("#{host} answered #{response.status}#{message.empty? ? "" : ": #{message}"}", "mail_refused",
                             { "host" => host, "detail" => "#{response.status}#{message.empty? ? "" : " #{message}"}" })

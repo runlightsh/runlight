@@ -57,8 +57,7 @@ module Runlight
     # The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
     def agents_key(runlight, site, replace = false)
       name = "observe-key:#{site}"
-      saved = replace ? nil : runlight.store.setting(name)
-      return saved if !saved.nil? && saved != ""
+      return runlight.store.setting_or_add(name) { "rlo_#{Hashing.random_id(20)}" } unless replace
 
       key = "rlo_#{Hashing.random_id(20)}"
       runlight.store.set_setting(name, key)
@@ -354,12 +353,8 @@ module Runlight
 
     # The key client ids are signed with, made on first use and kept in the database for every process.
     def client_key(runlight)
-      saved = runlight.store.setting("oauth-key")
-      return saved if !saved.nil? && saved != ""
-
-      made = Hashing.random_id(32)
-      runlight.store.set_setting("oauth-key", made)
-      made
+      # Written only if no other request wrote one first, so every process signs with the same key.
+      runlight.store.setting_or_add("oauth-key") { Hashing.random_id(32) }
     end
 
     # The app a client id names, and where to note that it connected: {"client" => ..., "usedKey" => ...}, or nil.
