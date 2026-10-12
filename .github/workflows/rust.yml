@@ -23,7 +23,7 @@ jobs:
         rust: ["1.88", "1.94", "stable"]
         include:
           - rust: "1.88"
-            mysql: public.ecr.aws/docker/library/mysql:8.0
+            mysql: mirror.gcr.io/library/mysql:8.0
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16

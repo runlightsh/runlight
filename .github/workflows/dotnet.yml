@@ -23,7 +23,7 @@ jobs:
             mysql-health: mysqladmin ping -h 127.0.0.1 -ppw
           - mysql: mirror.gcr.io/library/mariadb:11.4
             mysql-health: healthcheck.sh --connect --innodb_initialized
-          - mysql: public.ecr.aws/docker/library/mysql:8.0
+          - mysql: mirror.gcr.io/library/mysql:8.0
             mysql-health: mysqladmin ping -h 127.0.0.1 -ppw
     services:
       postgres:
