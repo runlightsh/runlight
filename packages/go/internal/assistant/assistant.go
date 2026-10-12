@@ -247,23 +247,32 @@ func refusal(url string, status int, data any) error {
 	return fail(h+": "+detail, "assistant_refused", "host", h, "detail", detail)
 }
 
-// readJSON is answer.json(), or null where it is not JSON.
+// maxAnswerBytes is the most of a model's answer, or its list of models, read; past it the answer counts as unreadable.
+const maxAnswerBytes = 4 * 1024 * 1024
+
+// readJSON is answer.json(), or null where it is not JSON or runs past maxAnswerBytes.
 func readJSON(answer *web.Response) any {
-	data, err := answer.JSON()
+	data, err := answer.JSONWithin(maxAnswerBytes)
 	if err != nil {
 		return nil
 	}
 	return data
 }
 
-// refused is a service at a link-local or cloud metadata address, refused there or at a redirect. One on this
-// computer (Ollama, LM Studio) or a private network is allowed, as the person setting it up means it to be.
+// refused is a service at a link-local or cloud metadata address, refused there or at a redirect, or one
+// that redirected to another origin. One on this computer (Ollama, LM Studio) or a private network is
+// allowed, as the person setting it up means it to be.
 func refused(err error) (*Error, bool) {
 	var m *web.MetadataAddressError
-	if !errors.As(err, &m) {
-		return nil, false
+	if errors.As(err, &m) {
+		return fail(m.Error(), "address_refused", "host", m.Host), true
 	}
-	return fail(m.Error(), "address_refused", "host", m.Host), true
+	// A service that sent the request to another origin, which would have carried the key, and the question with it.
+	var r *web.RedirectRefusedError
+	if errors.As(err, &r) {
+		return fail(r.Error(), "redirect_refused", "host", r.Host, "to", r.To), true
+	}
+	return nil, false
 }
 
 func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Headers, body any, deadline int64, now clock) (any, error) {
@@ -274,10 +283,12 @@ func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Hea
 	all := web.NewHeaders("content-type", "application/json")
 	headers.Each(func(name, value string) { all.Set(name, value) })
 	answer, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{
-		Method:  "POST",
-		Headers: all,
-		Body:    []byte(js.Stringify(body)),
-		Timeout: time.Duration(min(90_000, left)) * time.Millisecond,
+		Method:   "POST",
+		Headers:  all,
+		Body:     []byte(js.Stringify(body)),
+		Timeout:  time.Duration(min(90_000, left)) * time.Millisecond,
+		MaxBytes: maxAnswerBytes,
+		Truncate: true,
 	}, 5)
 	if err != nil {
 		if e, ok := refused(err); ok {
@@ -610,7 +621,7 @@ func ListModels(ctx context.Context, fetcher web.Fetcher, settings Settings) ([]
 	} else if settings.Key != "" {
 		headers.Set("authorization", "Bearer "+settings.Key)
 	}
-	answer, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{Method: "GET", Headers: headers, Timeout: 20 * time.Second}, 5)
+	answer, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{Method: "GET", Headers: headers, Timeout: 20 * time.Second, MaxBytes: maxAnswerBytes, Truncate: true}, 5)
 	if err != nil {
 		if e, ok := refused(err); ok {
 			return nil, e

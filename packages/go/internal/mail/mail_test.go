@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"runlight.sh/go/internal/fixture"
@@ -421,5 +422,50 @@ func TestAWebhookRedirectingToAMetadataAddressIsRefused(t *testing.T) {
 	var e *MailError
 	if !errors.As(err, &e) || e.Code != "address_refused" || e.Message != "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to" || js.Stringify(e.Params) != `{"host":"169.254.169.254"}` {
 		t.Fatalf("%v", err)
+	}
+}
+
+// A mail service that redirects to another origin gets nothing sent there, not the key and not the message.
+func TestAWebhookRedirectingToAnotherOriginIsRefusedBeforeAnythingIsSentThere(t *testing.T) {
+	var reached atomic.Int64
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { reached.Add(1) }))
+	defer elsewhere.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("location", elsewhere.URL+"/hook")
+		w.WriteHeader(307)
+	}))
+	defer server.Close()
+	err := Send(context.Background(), web.HTTPFetcher{}, Config{"service": "webhook", "url": server.URL + "/hook", "secret": "s3cret"}, message)
+	var e *MailError
+	if !errors.As(err, &e) || e.Code != "redirect_refused" || js.Stringify(e.Params) != `{"host":"`+strings.TrimPrefix(server.URL, "http://")+`","to":"`+elsewhere.URL+`"}` {
+		t.Fatalf("%v", err)
+	}
+	if reached.Load() != 0 {
+		t.Errorf("the other origin was reached %d times", reached.Load())
+	}
+}
+
+// An error without end is read only so far.
+func TestAMailServicesErrorWithoutEndIsReadOnlySoFar(t *testing.T) {
+	var written atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(500)
+		chunk := []byte(strings.Repeat("x", 64<<10))
+		for range 1 << 14 {
+			n, err := w.Write(chunk)
+			written.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	err := Send(context.Background(), web.HTTPFetcher{}, Config{"service": "webhook", "url": server.URL + "/hook"}, message)
+	var e *MailError
+	if !errors.As(err, &e) || e.Code != "mail_refused" {
+		t.Fatalf("%v", err)
+	}
+	if written.Load() >= 64<<20 {
+		t.Errorf("%d bytes were sent before it stopped", written.Load())
 	}
 }

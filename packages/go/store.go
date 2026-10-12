@@ -2,6 +2,7 @@ package runlight
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -1311,19 +1312,67 @@ func (s *Store) TakeSetting(ctx context.Context, key string) (string, bool, erro
 	if err != nil || !has {
 		return "", false, err
 	}
-	sql := `DELETE FROM rl_settings WHERE "key" = ?`
-	var n int64
-	if a, ok := as[Affecter](s.db); ok {
-		n, err = a.Affected(ctx, sql, key)
-	} else {
-		var rows []Row
-		rows, err = s.db.All(ctx, sql+` RETURNING "key"`, key)
-		n = int64(len(rows))
-	}
+	n, err := s.settingChanged(ctx, `DELETE FROM rl_settings WHERE "key" = ?`, key)
 	if err != nil || n != 1 {
 		return "", false, err
 	}
 	return value, true, nil
+}
+
+// AddSetting writes a setting only if it is not there yet. Of two callers at
+// once, only one gets true.
+func (s *Store) AddSetting(ctx context.Context, key, value string) (bool, error) {
+	// A driver that counts a row a duplicate key found as written would call both
+	// callers winners, so MySQL ignores the insert instead.
+	sql := upsert(s.dialect(), "rl_settings", []string{`"key"`, "value"}, []string{`"key"`}, nil)
+	if s.dialect() == "mysql" {
+		sql = `INSERT IGNORE INTO rl_settings ("key", value) VALUES (?, ?)`
+	}
+	n, err := s.settingChanged(ctx, sql, key, value)
+	return n == 1, err
+}
+
+// SwapSetting changes a setting only if it still holds from. Of two callers
+// at once, only one gets true.
+func (s *Store) SwapSetting(ctx context.Context, key, from, to string) (bool, error) {
+	n, err := s.settingChanged(ctx, `UPDATE rl_settings SET value = ? WHERE "key" = ? AND value = ?`, to, key, from)
+	return n == 1, err
+}
+
+// SettingOrAdd reads a setting, or writes create() if it is missing (or
+// empty), so every caller at once gets the value the first one wrote.
+func (s *Store) SettingOrAdd(ctx context.Context, key string, create func() string) (string, error) {
+	for range 5 {
+		value, has, err := s.Setting(ctx, key)
+		if err != nil || (has && value != "") {
+			return value, err
+		}
+		fresh := create()
+		var won bool
+		if has {
+			// An empty row is no key, but it is not replaced out from under another caller that already did.
+			won, err = s.SwapSetting(ctx, key, "", fresh)
+		} else {
+			won, err = s.AddSetting(ctx, key, fresh)
+		}
+		if err != nil {
+			return "", err
+		}
+		if won {
+			return fresh, nil
+		}
+	}
+	return "", errors.New("Runlight: could not save " + key)
+}
+
+// settingChanged says how many settings a statement wrote. There may be no
+// lock to lean on, so this is how a write knows it won.
+func (s *Store) settingChanged(ctx context.Context, sql string, params ...any) (int64, error) {
+	if a, ok := as[Affecter](s.db); ok {
+		return a.Affected(ctx, sql, params...)
+	}
+	rows, err := s.db.All(ctx, sql+` RETURNING "key"`, params...)
+	return int64(len(rows)), err
 }
 
 // SetSetting changes an install-wide setting; nil deletes it.

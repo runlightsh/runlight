@@ -156,12 +156,12 @@ func SESSend(ctx context.Context, fetcher web.Fetcher, config Config, m Message,
 	signed.Delete("host")
 	headers := web.NewHeaders()
 	signed.Each(func(k string, v any) { headers.Append(k, js.String(v)) })
-	response, err := fetcher.Fetch(ctx, url.Href(), web.FetchInit{Method: "POST", Headers: headers, Body: []byte(body), Timeout: 20 * time.Second})
+	response, err := fetcher.Fetch(ctx, url.Href(), web.FetchInit{Method: "POST", Headers: headers, Body: []byte(body), Timeout: 20 * time.Second, MaxBytes: maxErrorBytes, Truncate: true})
 	if err != nil {
 		return mailError("Could not reach Amazon SES: "+err.Error(), "mail_unreachable", "host", "Amazon SES", "detail", err.Error())
 	}
 	if !response.OK() {
-		return refused("Amazon SES", response.Status, ServiceMessage(response.Text()))
+		return refused("Amazon SES", response.Status, ServiceMessage(response.TextWithin(maxErrorBytes)))
 	}
 	return nil
 }

@@ -795,16 +795,15 @@ func (rt *Routes) siteWrites(c *call, raw string, u *whatwg.URL) (*Response, err
 			return answer, nil
 		}
 		r.ForgetRemoteInfo(id)
-	} else if !isRemote && hasRetention {
-		var months *float64
+	}
+	// UpdateSite checks every field, hostnames too, before it changes anything.
+	patch := SitePatch{}
+	if !isRemote && hasRetention {
+		patch.HasRetention = true
 		if retention != nil {
-			months = ptr(js.ToNumber(retention))
-		}
-		if err := r.SetRetention(ctx, id, months); err != nil {
-			return siteError(err)
+			patch.Retention = ptr(js.ToNumber(retention))
 		}
 	}
-	patch := SitePatch{}
 	if v, has := body.Get("name"); has {
 		patch.Name = js.String(v)
 	}

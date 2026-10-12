@@ -158,8 +158,17 @@ func forgivingDecode(text string) []byte {
 // Locate is where a request comes from: its platform's headers when they
 // name a country, else the lookup's answer for its address, else nowhere.
 func Locate(headers headerGetter, ip string, lookup GeoLookup) Location {
-	if from := LocationFromHeaders(headers); from != nil && from.Country != "" {
-		return *from
+	return LocateTrusting(headers, ip, lookup, true)
+}
+
+// LocateTrusting is Locate, believing the platform's headers only with
+// trustHeaders, as the address is: without a proxy in front, a client writes
+// them itself.
+func LocateTrusting(headers headerGetter, ip string, lookup GeoLookup, trustHeaders bool) Location {
+	if trustHeaders {
+		if from := LocationFromHeaders(headers); from != nil && from.Country != "" {
+			return *from
+		}
 	}
 	if lookup != nil && ip != "" {
 		found, err := safeLookup(lookup, ip)

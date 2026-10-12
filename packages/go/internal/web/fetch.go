@@ -32,6 +32,10 @@ type FetchInit struct {
 	// the address the connection uses, so a name that answers differently a
 	// moment later gets nowhere.
 	PublicOnly bool
+	// ServiceOnly connects to any address except a link-local or cloud
+	// metadata one, checking the address the connection uses, and never
+	// through a proxy, which would look the name up again itself.
+	ServiceOnly bool
 }
 
 // Fetcher makes outgoing requests, the stand-in for fetch(). Everything that
@@ -95,7 +99,21 @@ var (
 	plainTransport  = &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 50, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second}
 	publicTransport = &http.Transport{ForceAttemptHTTP2: true, MaxIdleConns: 20, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
 		DialContext: (&net.Dialer{Timeout: 15 * time.Second, Control: publicOnly}).DialContext}
+	serviceTransport = &http.Transport{ForceAttemptHTTP2: true, MaxIdleConns: 20, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
+		DialContext: (&net.Dialer{Timeout: 15 * time.Second, Control: noMetadata}).DialContext}
 )
+
+// noMetadata refuses a connection to a link-local or cloud metadata address.
+func noMetadata(network, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	if MetadataAddress(host) {
+		return &MetadataAddressError{host}
+	}
+	return nil
+}
 
 // publicOnly refuses a connection to an address off the public internet.
 func publicOnly(network, address string, _ syscall.RawConn) error {
@@ -137,10 +155,12 @@ func (f HTTPFetcher) Fetch(ctx context.Context, url string, init FetchInit) (*Re
 		req.Header.Add(name, value)
 	})
 	client := f.Client
-	if client == nil || init.PublicOnly {
+	if client == nil || init.PublicOnly || init.ServiceOnly {
 		transport := http.RoundTripper(plainTransport)
 		if init.PublicOnly {
 			transport = publicTransport
+		} else if init.ServiceOnly {
+			transport = serviceTransport
 		}
 		client = &http.Client{Transport: transport}
 	}
@@ -161,6 +181,10 @@ func (f HTTPFetcher) Fetch(ctx context.Context, url string, init FetchInit) (*Re
 		var private *PrivateAddressError
 		if errors.As(err, &private) {
 			return nil, private
+		}
+		var metadata *MetadataAddressError
+		if errors.As(err, &metadata) {
+			return nil, metadata
 		}
 		if ctx.Err() != nil {
 			return nil, &FetchError{Message: "The operation was aborted due to timeout", Timeout: true}
@@ -190,6 +214,7 @@ func (f HTTPFetcher) Fetch(ctx context.Context, url string, init FetchInit) (*Re
 			return nil, BodyTooLong(limit)
 		}
 		b = b[:limit]
+		out.Truncated = true
 	} else if err != nil && !init.Truncate {
 		return nil, readError(ctx, err)
 	}

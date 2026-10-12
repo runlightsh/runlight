@@ -363,7 +363,9 @@ var (
 
 // CheckSecondFactor checks a six-digit code, or a recovery code, for an
 // account with two-factor on. A code works once: one already used, or
-// older, is refused, and a recovery code is crossed off.
+// older, is refused, and a recovery code is crossed off. The database has
+// the last word, since another process, or another AccountStore on the same
+// database, does not wait on this one's lock.
 func (a *AccountStore) CheckSecondFactor(ctx context.Context, id, code string, now int64) (bool, error) {
 	// One check at a time per account, so two sign-ins at once cannot both use the same code.
 	m, _ := a.checking.LoadOrStore(id, &sync.Mutex{})
@@ -392,7 +394,14 @@ func (a *AccountStore) CheckSecondFactor(ctx context.Context, id, code string, n
 		if err != nil || !matched {
 			return false, err
 		}
-		return true, a.store.db.Run(ctx, `UPDATE rl_users SET totp_step = ? WHERE id = ?`, step, id)
+		// Only if no check since has used this step or a later one: of two at once, in this process or
+		// another on the same database, one moves it and the other is refused.
+		n, err := a.store.changed(ctx, `UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)`, step, id, step)
+		return n == 1, err
+	}
+	read := ""
+	if row["totp_recovery"] != nil {
+		read = str(row["totp_recovery"])
 	}
 	hashes := recoveryList(row["totp_recovery"])
 	at := indexOf(hashes, accounts.RecoveryHash(given))
@@ -400,7 +409,9 @@ func (a *AccountStore) CheckSecondFactor(ctx context.Context, id, code string, n
 		return false, nil
 	}
 	hashes = append(hashes[:at], hashes[at+1:]...)
-	return true, a.store.db.Run(ctx, `UPDATE rl_users SET totp_recovery = ? WHERE id = ?`, js.Stringify(hashes), id)
+	// Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
+	n, err := a.store.changed(ctx, `UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?`, js.Stringify(hashes), id, read)
+	return n == 1, err
 }
 
 // PendingFor is a short-lived ticket naming an account whose password

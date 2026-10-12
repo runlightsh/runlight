@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -294,5 +295,56 @@ func TestARedirectToAMetadataAddressIsRefused(t *testing.T) {
 	var e *Error
 	if !errors.As(err, &e) || e.Code != "address_refused" || js.Stringify(e.Params) != `{"host":"169.254.169.254"}` {
 		t.Fatalf("%v", err)
+	}
+}
+
+// A service that redirects to another origin gets nothing sent there, not the key and not the question.
+func TestARedirectToAnotherOriginIsRefusedBeforeAnythingIsSentThere(t *testing.T) {
+	var reached atomic.Int64
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { reached.Add(1) }))
+	defer elsewhere.Close()
+	var asked atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		asked.Add(1)
+		w.Header().Set("location", elsewhere.URL+"/v1/models")
+		w.WriteHeader(307)
+	}))
+	defer server.Close()
+	settings := Settings{Provider: "custom", BaseURL: server.URL + "/v1", Key: "sk-secret", Model: "m"}
+	_, err := ListModels(context.Background(), web.HTTPFetcher{}, settings)
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "redirect_refused" || e.Params.Value("to") != elsewhere.URL || e.Params.Value("host") != strings.TrimPrefix(server.URL, "http://") {
+		t.Fatalf("models: %v", err)
+	}
+	_, err = Chat(context.Background(), web.HTTPFetcher{}, settings, []ChatMessage{{Role: "user", Content: "How many visits?"}}, ChatContext{Site: Site{ID: "s", Name: "S", Timezone: "UTC"}, Today: "2026-10-12", View: "the last 30 days", Language: "en"}, fakeAPI(t, new([]any)), func() int64 { return time.Now().UnixMilli() })
+	if !errors.As(err, &e) || e.Code != "redirect_refused" {
+		t.Fatalf("chat: %v", err)
+	}
+	if reached.Load() != 0 || asked.Load() != 2 {
+		t.Errorf("the other origin was reached %d times and the service %d, want 0 and 2", reached.Load(), asked.Load())
+	}
+}
+
+// An answer without end is read only so far, and counts as unreadable.
+func TestAModelsAnswerWithoutEndIsReadOnlySoFar(t *testing.T) {
+	var written atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chunk := []byte(strings.Repeat(" ", 64<<10))
+		for range 1 << 14 {
+			n, err := w.Write(chunk)
+			written.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	_, err := ListModels(context.Background(), web.HTTPFetcher{}, Settings{Provider: "custom", BaseURL: server.URL + "/v1"})
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("%v", err)
+	}
+	if written.Load() >= 64<<20 {
+		t.Errorf("%d bytes were sent before it stopped", written.Load())
 	}
 }

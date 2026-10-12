@@ -201,6 +201,9 @@ func xmlMessage(reply string) string {
 	}
 }
 
+// maxErrorBytes is the most of a service's error read, so an answer without end never fills memory.
+const maxErrorBytes = 65_536
+
 // post sends to a service, with the errors the dashboard shows. explains is false where the
 // reply must not be shown.
 func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Headers, body string, explains bool) error {
@@ -211,11 +214,15 @@ func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Hea
 	}
 	host := parsed.Host()
 	// A webhook can be at any address, so it and each redirect are checked, as for every service.
-	response, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{Method: "POST", Headers: headers, Body: []byte(body), Timeout: 20 * time.Second}, 5)
+	response, err := web.ServiceFetch(ctx, fetcher, url, web.FetchInit{Method: "POST", Headers: headers, Body: []byte(body), Timeout: 20 * time.Second, MaxBytes: maxErrorBytes, Truncate: true}, 5)
 	if err != nil {
 		var refused *web.MetadataAddressError
 		if errors.As(err, &refused) {
 			return mailError(refused.Error(), "address_refused", "host", refused.Host)
+		}
+		var redirected *web.RedirectRefusedError
+		if errors.As(err, &redirected) {
+			return mailError(redirected.Error(), "redirect_refused", "host", redirected.Host, "to", redirected.To)
 		}
 		return mailError("Could not reach "+host+": "+err.Error(), "mail_unreachable", "host", host, "detail", err.Error())
 	}
@@ -224,7 +231,7 @@ func post(ctx context.Context, fetcher web.Fetcher, url string, headers *web.Hea
 	}
 	message := ""
 	if explains {
-		message = ServiceMessage(response.Text())
+		message = ServiceMessage(response.TextWithin(maxErrorBytes))
 	}
 	return refused(host, response.Status, message)
 }

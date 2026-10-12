@@ -204,7 +204,51 @@ func ResolveRange(input RangeInput, timezone string, now int64, firstDate string
 	if interval != "hour" && interval != "day" && interval != "week" && interval != "month" {
 		interval = defaultInterval(fromDate, toDate)
 	}
-	return &Range{From: StartOf(fromDate, timezone, 0), To: StartOf(AddDays(toDate, 1), timezone, 0), FromDate: fromDate, ToDate: toDate, Interval: interval}
+	start, end := StartOf(fromDate, timezone, 0), StartOf(AddDays(toDate, 1), timezone, 0)
+	// An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+	// Past 1,000 months there is none.
+	for bucketCount(start, end, fromDate, toDate, interval) > bucketLimit(interval) {
+		coarser := coarserInterval(interval)
+		if coarser == "" {
+			return nil
+		}
+		interval = coarser
+	}
+	return &Range{From: start, To: end, FromDate: fromDate, ToDate: toDate, Interval: interval}
+}
+
+func coarserInterval(interval string) string {
+	switch interval {
+	case "hour":
+		return "day"
+	case "day":
+		return "week"
+	case "week":
+		return "month"
+	}
+	return ""
+}
+
+func bucketLimit(interval string) int64 {
+	if interval == "hour" {
+		return maxHours
+	}
+	return maxBuckets
+}
+
+// bucketCount is how many chart buckets a range has at an interval, the first and last counted even when partial.
+func bucketCount(from, to int64, fromDate, toDate, interval string) int64 {
+	switch interval {
+	case "hour":
+		return (to - from + 3_599_999) / 3_600_000
+	case "day":
+		return daysBetween(fromDate, toDate) + 1
+	case "week":
+		return daysBetween(AddDays(fromDate, -((weekday(fromDate)+6)%7)), toDate)/7 + 1
+	}
+	fy, fm, _ := dateFields(fromDate)
+	ty, tm, _ := dateFields(toDate)
+	return (ty-fy)*12 + (tm - fm) + 1
 }
 
 func addYears(date string, years int64) string {
@@ -242,7 +286,7 @@ func CompareRange(r Range, mode, timezone, customFrom, customTo string) *Range {
 
 const (
 	maxBuckets = 1000
-	// maxHours is a month of hours. Longer hourly ranges are cut off rather than refused.
+	// maxHours is a month of hours. A longer range is counted by the day instead.
 	maxHours = 744
 )
 
@@ -253,11 +297,14 @@ func weekday(date string) int64 {
 	return js.Mod(days+4, 7)
 }
 
-// Buckets are the chart buckets covering a range, each starting on a local boundary.
+// Buckets are the chart buckets covering a range, each starting on a local boundary and ending at the next,
+// so only the first and last can be partial. ResolveRange picks an interval that fits; a range given here with
+// more buckets than that, such as a longer comparison, is cut off at a boundary, never merged into its last bucket.
 func Buckets(r Range, timezone string) []Bucket {
 	starts := []int64{}
+	// One start past the limit, so the last bucket kept still ends where the next would begin.
 	if r.Interval == "hour" {
-		for t := r.From; t < r.To && len(starts) < maxHours; t += 3_600_000 {
+		for t := r.From; t < r.To && len(starts) <= maxHours; t += 3_600_000 {
 			starts = append(starts, t)
 		}
 	} else {
@@ -267,7 +314,7 @@ func Buckets(r Range, timezone string) []Bucket {
 		} else if r.Interval == "month" {
 			date = date[:8] + "01"
 		}
-		for date <= r.ToDate && len(starts) < maxBuckets {
+		for date <= r.ToDate && len(starts) <= maxBuckets {
 			starts = append(starts, StartOf(date, timezone, 0))
 			switch r.Interval {
 			case "day":
@@ -279,8 +326,9 @@ func Buckets(r Range, timezone string) []Bucket {
 			}
 		}
 	}
-	out := make([]Bucket, len(starts))
-	for i, start := range starts {
+	kept := starts[:min(len(starts), int(bucketLimit(r.Interval)))]
+	out := make([]Bucket, len(kept))
+	for i, start := range kept {
 		end := r.To
 		if i+1 < len(starts) {
 			end = starts[i+1]
