@@ -126,8 +126,10 @@ def location_from_headers(headers: Headers) -> dict[str, str] | None:
     return None
 
 
-def locate(headers: Headers, ip: str, lookup: GeoLookup | None = None) -> dict[str, str]:
-    from_headers = location_from_headers(headers)
+def locate(headers: Headers, ip: str, lookup: GeoLookup | None = None, trust_headers: bool = True) -> dict[str, str]:
+    """Where a visitor is, from a hosting platform's headers or else the lookup. The headers are believed only with
+    `trust_headers`, as the address is: without a proxy in front, a client writes them itself."""
+    from_headers = location_from_headers(headers) if trust_headers else None
     if from_headers is not None and from_headers["country"]:
         return from_headers
     if lookup is not None and ip:

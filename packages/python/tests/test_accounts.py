@@ -278,6 +278,39 @@ def test_codes_and_links_work_once_across_processes(tmp_path):
             s.close()
 
 
+def test_a_code_is_spent_by_a_conditional_update_even_where_no_lock_holds(tmp_path):
+    # The check run with no turn taken, as on a database whose lock did not reach the other process: the update
+    # itself lets only one of the checks that read the same code spend it.
+    path = str(tmp_path / "runlight.db")
+    stores = [Stores.sqlite(path) for _ in range(2)]
+    stores[0].migrate()
+    both = [Accounts(s, SECRET) for s in stores]
+    user = both[0].set_password("jon@example.com", "a long password", NOW)
+    secret = both[0].start_two_factor(user["id"])
+    recovery = both[0].confirm_two_factor(user["id"], totp(secret, NOW // 30_000), NOW)
+    for a in both:
+        a._init()
+
+    def race(code: str) -> int:
+        start = threading.Barrier(20)
+
+        def one(i: int) -> bool:
+            start.wait()
+            return both[i % 2]._check_second_factor_now(user["id"], code, NOW)
+
+        with ThreadPoolExecutor(20) as pool:
+            return [bool(r) for r in pool.map(one, range(20))].count(True)
+
+    try:
+        assert race(totp(secret, NOW // 30_000 + 1)) == 1
+        assert race(recovery[0]) == 1
+        assert race(recovery[0]) == 0, "a code crossed off is never accepted again"
+        assert both[0].by_id(user["id"])["recoveryLeft"] == 9
+    finally:
+        for s in stores:
+            s.close()
+
+
 def test_an_old_table_gains_roles_and_keeps_one_owner(databases):
     store = fresh(databases, "sqlite")
     store.db.run("CREATE TABLE rl_users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, hash TEXT NOT NULL, created_at BIGINT NOT NULL)")

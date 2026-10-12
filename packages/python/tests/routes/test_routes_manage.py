@@ -222,3 +222,42 @@ def test_a_connected_install_is_on_the_public_internet_unless_code_allows_this_m
     for url in ["https://127.0.0.1/runlight", "https://169.254.169.254/latest", "https://[::1]/runlight", "https://10.0.0.2", "https://localhost/runlight"]:
         assert add(url)["code"] == "unreachable", url
     assert fetcher.urls == [], "nothing is asked of an address off the public internet"
+
+
+def test_a_site_change_refused_for_a_bad_domain_changes_nothing_retention_and_timezone_included() -> None:
+    state = {"now": 1759276800000}
+    rl = runlight({"managedSites": True, "now": lambda: state["now"]})
+    routes = rl.routes({"token": "t"})
+    url = "https://stats.example.com/runlight"
+    auth = {"authorization": "Bearer t", "content-type": "application/json"}
+
+    def send(path: str, method: str = "GET", given: Any = None, headers: Any = None) -> Response:
+        return routes.handle(Request(f"{url}{path}", method, headers or auth, "" if given is None else _js.dumps(given)))
+
+    assert send("/api/sites", "POST", {"hostnames": "blog.example.com"}).status == 201
+    assert send("/api/sites", "POST", {"hostnames": "shop.example.com"}).status == 201
+    send(
+        "/e",
+        "POST",
+        {"k": "pageview", "u": "https://blog.example.com/"},
+        {"user-agent": "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36", "x-forwarded-for": "203.0.113.1"},
+    )
+    state["now"] = 1791288000000
+    zone = rl.store.setting("rollup-zone:blog.example.com")
+
+    def visits() -> Any:
+        return body(send("/api/stats?site=blog.example.com&period=all"))["stats"]["visits"]
+
+    assert visits() == 1
+    for hostnames in ("not a domain", "shop.example.com"):
+        answer = send("/api/sites/blog.example.com", "PATCH", {"retentionMonths": 6, "timezone": "Europe/Paris", "name": "Renamed", "hostnames": hostnames})
+        assert answer.status == 400
+        rl.idle()
+        assert rl.retention("blog.example.com") is None, "retention is unchanged"
+        assert rl.store.setting("rollup-zone:blog.example.com") == zone, "the built days are kept"
+        assert rl.site("blog.example.com") == {"id": "blog.example.com", "name": "blog.example.com", "hostnames": ["blog.example.com"], "timezone": "UTC"}
+        assert visits() == 1, "the old visit is still there"
+
+    assert send("/api/sites/blog.example.com", "PATCH", {"retentionMonths": 6, "hostnames": "blog.example.com"}).status == 200
+    rl.idle()
+    assert visits() == 0, "a change that passes prunes once saved"

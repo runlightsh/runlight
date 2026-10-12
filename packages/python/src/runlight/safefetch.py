@@ -293,21 +293,37 @@ class MetadataAddressError(Exception):
 
 # Headers that describe a body, dropped with it when a redirect turns a request into a GET.
 _BODY_HEADERS = ("content-type", "content-length", "content-encoding", "content-language", "content-location")
-# Credentials, dropped when a redirect leads to another origin.
-_CREDENTIAL_HEADERS = ("authorization", "proxy-authorization", "cookie")
+
+
+class RedirectRefusedError(Exception):
+    """Refused before anything was sent there, because a service's redirect led to another origin."""
+
+    def __init__(self, host: str, to: str) -> None:
+        super().__init__(
+            f"{host} redirected to {to}. Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead"
+        )
+        self.name = "RedirectRefusedError"
+        self.host = host
+        self.to = to
 
 
 def service_fetch(target: str, init: dict[str, Any], fetcher: Fetcher | None = None) -> Response:
     """Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on this
-    computer or a private network, but is never at a link-local or cloud metadata address. The address is checked,
-    and so is every redirect's, up to `redirects` of them (default 5), each followed as fetch follows it: a 303, or a
-    301 or 302 answering a POST, goes on as a GET with no body, and a redirect to another origin goes without the
-    credentials. A redirect past the last one comes back as it is. Raises a MetadataAddressError for an address it
-    refuses.
+    computer or a private network, but is never at a link-local or cloud metadata address. The name is resolved and
+    every address it gives is checked on each hop, and the request is pinned to them (the Fetcher's `resolve`), so a
+    name that answers differently a moment later gets nowhere, and no proxy from the environment looks it up again.
+    A name that cannot be looked up is refused. Redirects are checked the same way, up to `redirects` of them
+    (default 5), each followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no
+    body. Only a redirect on the same origin is followed: the request carries a key, in whatever header the service
+    names it, and a 307 or 308 would carry its body too, an email or a conversation, so a redirect to another
+    origin, https to http among them, is refused before anything is sent there. A redirect past the last one comes
+    back as it is. Raises a MetadataAddressError or a RedirectRefusedError for an address it refuses.
 
     `init` holds method, headers, body, timeoutMs (for every hop together), maxBytes, truncate, redirects, and
     lookup, which stands in for DNS in tests."""
     fetcher = fetcher or UrllibFetcher()
+    names_only = _names_only and not init.get("lookup")
+    resolve: Lookup = init.get("lookup") or _default_lookup
     redirects = 5 if init.get("redirects") is None else int(init["redirects"])
     url = Url(target)
     method = str(init.get("method") or "GET").upper()
@@ -319,9 +335,23 @@ def service_fetch(target: str, init: dict[str, Any], fetcher: Fetcher | None = N
     hop = 0
     while True:
         host = _BRACKETS.sub("", url.hostname)
-        if metadata_host(host, init.get("lookup")):
+        name = re.sub(r"\.+\Z", "", host.lower())
+        if name in METADATA_NAMES or metadata_address(name):
             raise MetadataAddressError(host)
+        pin: list[str] = []
+        if _v4(name) is None and _v6(name) is None and not names_only:
+            # The address checked is the address used: every one the name gives must be allowed, and the
+            # connection is pinned to them. A name that does not resolve gets nowhere.
+            addresses = resolve(name)
+            if not addresses:
+                raise FetchError(f"getaddrinfo ENOTFOUND {host}")
+            if any(metadata_address(address) for address in addresses):
+                raise MetadataAddressError(host)
+            port = url.port or ("443" if url.protocol == "https:" else "80")
+            pin = [f"{host.lower()}:{port}:" + ",".join(f"[{a}]" if ":" in a else a for a in addresses)]
         options: dict[str, Any] = {"method": method, "headers": headers, "redirect": "manual"}
+        if pin:
+            options["resolve"] = pin
         if body is not None:
             options["body"] = body
         if timeout is not None and until is None:
@@ -342,12 +372,15 @@ def service_fetch(target: str, init: dict[str, Any], fetcher: Fetcher | None = N
         following = Url.parse(location, url.href)
         if following is None:
             raise FetchError("Invalid URL")
+        if following.origin != url.origin:
+            there = _BRACKETS.sub("", following.hostname)
+            if metadata_host(there, init.get("lookup")):
+                raise MetadataAddressError(there)
+            raise RedirectRefusedError(url.host, following.origin if following.protocol in ("https:", "http:") else following.protocol)
         if answer.status == 303 or (answer.status in (301, 302) and method == "POST"):
             method = "HEAD" if method == "HEAD" else "GET"
             body = None
             headers = {name: value for name, value in headers.items() if name.lower() not in _BODY_HEADERS}
-        if following.origin != url.origin:
-            headers = {name: value for name, value in headers.items() if name.lower() not in _CREDENTIAL_HEADERS}
         url = following
         hop += 1
 

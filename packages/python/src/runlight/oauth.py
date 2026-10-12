@@ -43,9 +43,8 @@ def agents_key(runlight: Any, site: str, replace: bool = False) -> str:
     """The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
     replaces it."""
     name = f"observe-key:{site}"
-    saved = None if replace else runlight.store.setting(name)
-    if saved:
-        return saved
+    if not replace:
+        return runlight.store.setting_or_add(name, lambda: f"rlo_{random_id(20)}")
     key = f"rlo_{random_id(20)}"
     runlight.store.set_setting(name, key)
     return key
@@ -90,12 +89,8 @@ def _from_base64url(text: str) -> str:
 
 def _client_key(runlight: Any) -> str:
     """The key client ids are signed with, made on first use and kept in the database for every process."""
-    saved = runlight.store.setting("oauth-key")
-    if saved:
-        return saved
-    made = random_id(32)
-    runlight.store.set_setting("oauth-key", made)
-    return made
+    # Written only if no other request wrote one first, so every process signs with the same key.
+    return runlight.store.setting_or_add("oauth-key", lambda: random_id(32))
 
 
 def _client_for(runlight: Any, id: str) -> dict[str, Any] | None:  # noqa: A002

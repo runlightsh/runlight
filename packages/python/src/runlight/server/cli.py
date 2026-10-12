@@ -17,9 +17,7 @@ cli.ts). Settings come from the environment:
 from __future__ import annotations
 
 import io
-import os
 import re
-import secrets
 import signal
 import socket
 import sys
@@ -32,6 +30,7 @@ from typing import IO, Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from ..env import env_value
+from .secret import secret_in
 
 HELP = """Runlight {version}, privacy friendly web analytics for any number of sites.
 
@@ -117,21 +116,7 @@ class Settings:
         if given:
             return given
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        file = self.data_dir / "secret"
-        if file.exists():
-            saved = file.read_text().strip()
-            if saved:
-                return saved
-        made = secrets.token_hex(32)
-        try:
-            # Made once: whoever writes the file first wins, and everyone else reads theirs.
-            fd = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            time.sleep(0.05)
-            return file.read_text().strip()
-        with os.fdopen(fd, "w") as handle:
-            handle.write(f"{made}\n")
-        return made
+        return secret_in(self.data_dir)
 
     def url(self) -> str | None:
         url = env_value("RUNLIGHT_URL")

@@ -34,6 +34,7 @@ from __future__ import annotations
 import hmac as _hmac
 import re
 import sys
+import threading
 import weakref
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -577,6 +578,7 @@ class Routes:
         self.sample_sent: dict[str, int] = {}
         # Each person's questions to the assistant in the last hour, and how many are being answered now.
         self.asked: dict[str, dict[str, Any]] = {}
+        self._asked_lock = threading.Lock()
         # The tracker with click rules inside, rebuilt when goals change, per site.
         self.trackers: dict[str, dict[str, Any]] = {}
 
@@ -850,7 +852,7 @@ class Routes:
                 try:
                     # Only a public address is fetched, whatever the name resolves to now, so the check cannot be
                     # pointed into a private network.
-                    answer = public_fetch(f"https://{domain}{LINK_DOMAIN_CHECK}", {"timeoutMs": 5000, "maxBytes": 65_536, "truncate": True}, rl.fetcher)
+                    answer = public_fetch(f"https://{domain}{LINK_DOMAIN_CHECK}", {"timeoutMs": 5000, "maxBytes": 16_384, "truncate": True}, rl.fetcher)
                     try:
                         ok, found = _js.try_loads(answer.content())
                     except Exception:  # noqa: BLE001
@@ -997,12 +999,8 @@ class Routes:
     def _pick_key(self) -> str:
         """The key picker tickets are signed with, made on first use and kept in the database for every process."""
         self.rl.init()
-        saved = self.rl.store.setting("pick-key")
-        if saved:
-            return saved
-        made = random_id(32)
-        self.rl.store.set_setting("pick-key", made)
-        return made
+        # Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+        return self.rl.store.setting_or_add("pick-key", lambda: random_id(32))
 
     def _pick_ticket(self, origin: str, site: str, back: dict[str, str] | None = None) -> str:
         """A ticket that lets the picker, on `site`'s pages, send its choice to `origin`, the dashboard that asked,
@@ -1041,12 +1039,7 @@ class Routes:
         """The key embed tickets and sessions are signed with, made on first use and kept in the database for every
         process."""
         self.rl.init()
-        saved = self.rl.store.setting("embed-key")
-        if saved:
-            return saved
-        made = random_id(32)
-        self.rl.store.set_setting("embed-key", made)
-        return made
+        return self.rl.store.setting_or_add("embed-key", lambda: random_id(32))
 
     def _embed_token(self, id_: str) -> dict[str, Any] | None:
         """An embed token that still exists, for a site that still does."""
@@ -1385,35 +1378,69 @@ class Routes:
         """Counts a question to the assistant, which spends the owner's AI credit, or refuses it: past thirty an hour
         or two at once for anyone, and past the owner's daily number for a viewer. Returns how to finish."""
         now = self.rl.now()
-        mine = self.asked.get(who) or {"at": [], "open": 0}
-        mine["at"] = [at for at in mine["at"] if now - at < 3_600_000]
-        if len(mine["at"]) >= ASK_PER_HOUR or mine["open"] >= ASK_AT_ONCE:
-            return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429)
+        # The slot is taken in one step, before anything is read from the database, so questions sent at once
+        # each see the others.
+        with self._asked_lock:
+            mine = self.asked.get(who)
+            if mine is None:
+                mine = self.asked[who] = {"at": [], "open": 0}
+            mine["at"] = [at for at in mine["at"] if now - at < 3_600_000]
+            if len(mine["at"]) >= ASK_PER_HOUR or mine["open"] >= ASK_AT_ONCE:
+                return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429)
+            mine["at"].append(now)
+            mine["open"] += 1
+
+        def release() -> None:
+            with self._asked_lock:
+                mine["open"] -= 1
+
         if not owner:
-            store = self.rl.store
-            limit = self._viewer_daily()
-            day = f"assistant-asked:{datetime.fromtimestamp(now / 1000, timezone.utc).strftime('%Y-%m-%d')}"
-            counts = _js.loads(store.setting(day) or "{}")
-            if counts.get(who, 0) >= limit:
-                return coded(f"Viewers can ask {_js.string(limit)} questions a day. Ask again tomorrow.", "assistant_daily", 429, {"limit": _js.string(limit)})
-            counts[who] = counts.get(who, 0) + 1
-            store.set_setting(day, _js.dumps(counts))
-            for entry in store.settings_starting_with("assistant-asked:"):
-                if entry["key"] != day:
-                    store.set_setting(entry["key"], None)
-        mine["at"].append(now)
-        mine["open"] += 1
-        self.asked[who] = mine
+            try:
+                counted = self._count_ask(who, now)
+            except BaseException:
+                release()
+                raise
+            if counted is not True:
+                release()
+                with self._asked_lock:
+                    if now in mine["at"]:
+                        mine["at"].remove(now)
+                if counted is None:
+                    return coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429)
+                return coded(f"Viewers can ask {_js.string(counted)} questions a day. Ask again tomorrow.", "assistant_daily", 429, {"limit": _js.string(counted)})
         # People who stopped asking are dropped, so the map holds only the last hour's.
-        if len(self.asked) > 1000:
-            for key, value in list(self.asked.items()):
-                if not value["open"] and not any(now - at < 3_600_000 for at in value["at"]):
-                    del self.asked[key]
+        with self._asked_lock:
+            if len(self.asked) > 1000:
+                for key, value in list(self.asked.items()):
+                    if not value["open"] and not any(now - at < 3_600_000 for at in value["at"]):
+                        del self.asked[key]
+        return release
 
-        def finish() -> None:
-            mine["open"] -= 1
-
-        return finish
+    def _count_ask(self, who: str, now: int | float) -> Any:
+        """Counts a viewer's question in their own row for the day, or answers the daily limit when it is reached.
+        The row only ever moves from the count read to the next one, so of questions sent at once, by one viewer or
+        by every process on the database, each count is taken once. None when the row kept changing underneath."""
+        store = self.rl.store
+        limit = self._viewer_daily()
+        if limit < 1:
+            return limit
+        day = f"assistant-asked:{datetime.fromtimestamp(now / 1000, timezone.utc).strftime('%Y-%m-%d')}:"
+        key = f"{day}{who}"
+        for _ in range(20):
+            seen = store.setting(key)
+            if seen is None:
+                if not store.add_setting(key, "1"):
+                    continue
+                # A viewer's first question of the day clears the days before.
+                for entry in store.settings_starting_with("assistant-asked:"):
+                    if not entry["key"].startswith(day):
+                        store.set_setting(entry["key"], None)
+                return True
+            if _js.number(seen) >= limit:
+                return limit
+            if store.swap_setting(key, seen, _js.number_text(_js.number(seen) + 1)):
+                return True
+        return None
 
     # API tokens.
 
@@ -2091,9 +2118,10 @@ class Routes:
                 if not answer.ok:
                     return answer
                 rl.forget_remote_info(id_)
-            elif not remote and retention is not _js.UNDEFINED:
-                rl.set_retention(id_, None if retention is None else _js.number(retention))
+            # update_site checks every field, hostnames too, before it changes anything.
             patch: dict[str, Any] = {}
+            if not remote and retention is not _js.UNDEFINED:
+                patch["retentionMonths"] = None if retention is None else _js.number(retention)
             if _defined(body, "name"):
                 patch["name"] = _js.string(body["name"])
             if _defined(body, "timezone"):
@@ -2190,7 +2218,10 @@ class Routes:
             answer = _pass_through(rl, remote, path, url, request)
             if path != "/api/realtime" or not shared or not answer.ok:
                 return answer
-            ok, live = _js.try_loads(answer.text())
+            try:
+                ok, live = _js.try_loads(read_text_capped(answer, 4 * 1024 * 1024))
+            except Exception:  # noqa: BLE001
+                ok, live = False, None
             if ok and isinstance(live, dict):
                 return json(unfeed(live))
             host = Url(remote["url"]).host

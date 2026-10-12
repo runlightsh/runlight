@@ -53,26 +53,37 @@ class Fetcher(Protocol):
     def fetch(self, url: str, init: dict[str, Any] | None = None) -> Response: ...
 
 
-class _PinnedHTTPS(http.client.HTTPSConnection):
-    """An HTTPS connection to a pinned address, with the name kept for the certificate and SNI."""
+def _connect_pinned(addresses: list[str], port: int, timeout: float) -> socket.socket:
+    """A connection to the first pinned address that answers, each tried in turn, as a name with several would be."""
+    error: OSError | None = None
+    for address in addresses:
+        try:
+            return socket.create_connection((address, port), timeout)
+        except OSError as failed:
+            error = failed
+    raise error or OSError("no address to connect to")
 
-    def __init__(self, name: str, address: str, port: int, timeout: float, context: ssl.SSLContext) -> None:
+
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    """An HTTPS connection to pinned addresses, with the name kept for the certificate and SNI."""
+
+    def __init__(self, name: str, addresses: list[str], port: int, timeout: float, context: ssl.SSLContext) -> None:
         super().__init__(name, port, timeout=timeout, context=context)
-        self._address = address
+        self._addresses = addresses
         self._context = context
 
     def connect(self) -> None:
-        sock = socket.create_connection((self._address, self.port), self.timeout)
+        sock = _connect_pinned(self._addresses, self.port, self.timeout)
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
 class _PinnedHTTP(http.client.HTTPConnection):
-    def __init__(self, name: str, address: str, port: int, timeout: float) -> None:
+    def __init__(self, name: str, addresses: list[str], port: int, timeout: float) -> None:
         super().__init__(name, port, timeout=timeout)
-        self._address = address
+        self._addresses = addresses
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._address, self.port), self.timeout)
+        self.sock = _connect_pinned(self._addresses, self.port, self.timeout)
 
 
 class UrllibFetcher:
@@ -141,26 +152,26 @@ class UrllibFetcher:
             raise FetchError("The operation was aborted due to timeout", True)
         port = int(parsed.port or (443 if parsed.protocol == "https:" else 80))
         name = parsed.hostname.strip("[]")
-        address = None
+        addresses: list[str] = []
         for pin in pins:
             host, _, rest = str(pin).partition(":")
             pin_port, _, pinned = rest.partition(":")
             if host.lower() == name.lower() and pin_port == str(port):
-                # A pin may list several addresses ("a,[b]"), as curl's does; the first is the one connected to.
-                address = pinned.split(",")[0].strip("[]")
+                # A pin may list several addresses ("a,[b]"), as curl's does; the first that answers is connected to.
+                addresses = [a.strip().strip("[]") for a in pinned.split(",") if a.strip()]
                 break
         # A request pinned to checked addresses goes nowhere else: one the pins do not cover is refused.
-        if pins and not address:
+        if pins and not addresses:
             raise FetchError(f"fetch failed: {name} is not pinned to an address")
         try:
             if parsed.protocol == "https:":
                 context = ssl.create_default_context()
-                if address is not None:
-                    conn: http.client.HTTPConnection = _PinnedHTTPS(name, address, port, remaining, context)
+                if addresses:
+                    conn: http.client.HTTPConnection = _PinnedHTTPS(name, addresses, port, remaining, context)
                 else:
                     conn = http.client.HTTPSConnection(name, port, timeout=remaining, context=context)
-            elif address is not None:
-                conn = _PinnedHTTP(name, address, port, remaining)
+            elif addresses:
+                conn = _PinnedHTTP(name, addresses, port, remaining)
             else:
                 conn = http.client.HTTPConnection(name, port, timeout=remaining)
             path = (parsed.pathname or "/") + parsed.search
