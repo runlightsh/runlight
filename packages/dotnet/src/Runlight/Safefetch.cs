@@ -428,16 +428,17 @@ public static partial class Safefetch
     /// <summary>Headers that describe a body, dropped with it when a redirect turns a request into a GET.</summary>
     private static readonly string[] BodyHeaders = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
 
-    /// <summary>Credentials, dropped when a redirect leads to another origin.</summary>
-    private static readonly string[] CredentialHeaders = ["authorization", "proxy-authorization", "cookie"];
-
     /// <summary>
     /// Fetches from a service someone set up, such as an AI model's API or a mail webhook, which may well be on
-    /// this computer or a private network, but is never at a link-local or cloud metadata address. The address
-    /// is checked, and so is every redirect's, up to <paramref name="redirects"/> of them, each followed as
-    /// fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body, and a redirect
-    /// to another origin goes without the credentials. A redirect past the last one comes back as it is.
-    /// TimeoutMs is the limit for every hop together.
+    /// this computer or a private network, but is never at a link-local or cloud metadata address. Each hop looks
+    /// the name up, refuses it if any address it gives is link-local or a metadata service, and connects to those
+    /// addresses (the fetcher's Resolve), so the address checked is the address used and no proxy is in between.
+    /// A name that does not resolve is refused. Redirects are followed, up to <paramref name="redirects"/> of them,
+    /// each as fetch follows it: a 303, or a 301 or 302 answering a POST, goes on as a GET with no body. Only a
+    /// redirect on the same origin is followed: the request carries a key, in whatever header the service names
+    /// it, and a 307 or 308 would carry its body too, an email or a conversation, so a redirect to another origin,
+    /// https to http among them, is refused before anything is sent there. A redirect past the last one comes back
+    /// as it is. TimeoutMs is the limit for every hop together.
     /// </summary>
     /// <param name="target">The address.</param>
     /// <param name="init">The request; its Redirect is ignored, since redirects are followed here.</param>
@@ -445,6 +446,7 @@ public static partial class Safefetch
     /// <param name="redirects">How many redirects are followed.</param>
     /// <param name="cancellationToken">Stops the request.</param>
     /// <exception cref="MetadataAddressError">For an address it refuses.</exception>
+    /// <exception cref="RedirectRefusedError">For a redirect to another origin.</exception>
     public static async Task<Response> ServiceFetchAsync(string target, FetchInit init, IFetcher fetcher, int redirects = 5, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(init);
@@ -457,9 +459,35 @@ public static partial class Safefetch
         for (int hop = 0; ; hop++)
         {
             string host = Brackets.Replace(url.Hostname, "");
-            if (await MetadataHostAsync(host, fetcher.LookupAsync).ConfigureAwait(false))
+            var pin = new List<string>();
+            string name = TrailingDots.Replace(Js.Lower(host), "");
+            if (MetadataNames.Contains(name) || MetadataAddress(name))
             {
                 throw new MetadataAddressError(host);
+            }
+            if (V4(name) == null && V6(name) == null)
+            {
+                IReadOnlyList<string> addresses;
+                try
+                {
+                    addresses = await fetcher.LookupAsync(name).ConfigureAwait(false);
+                }
+#pragma warning disable CA1031 // A lookup that fails is a name that does not resolve.
+                catch (Exception)
+#pragma warning restore CA1031
+                {
+                    addresses = [];
+                }
+                if (addresses.Count == 0)
+                {
+                    throw new FetchException("Could not look up " + host);
+                }
+                if (addresses.Any(MetadataAddress))
+                {
+                    throw new MetadataAddressError(host);
+                }
+                string port = url.Port.Length > 0 ? url.Port : url.Protocol == "http:" ? "80" : "443";
+                pin.Add(Js.Lower(host) + ":" + port + ":" + string.Join(',', addresses.Select(a => a.Contains(':', StringComparison.Ordinal) ? "[" + a + "]" : a)));
             }
             long left = init.TimeoutMs - clock.ElapsedMilliseconds;
             if (left <= 0)
@@ -475,6 +503,7 @@ public static partial class Safefetch
                 TimeoutMs = (int)left,
                 MaxBytes = init.MaxBytes,
                 Truncate = init.Truncate,
+                Resolve = pin,
             }, cancellationToken).ConfigureAwait(false);
             string? location = answer.Headers.Get("location");
             if (answer.Status < 300 || answer.Status >= 400 || string.IsNullOrEmpty(location) || hop >= redirects)
@@ -482,20 +511,22 @@ public static partial class Safefetch
                 return answer;
             }
             var next = new Url(location, url.Href);
+            if (next.Origin != url.Origin)
+            {
+                string there = TrailingDots.Replace(Js.Lower(Brackets.Replace(next.Hostname, "")), "");
+                if (await MetadataHostAsync(there, fetcher.LookupAsync).ConfigureAwait(false))
+                {
+                    throw new MetadataAddressError(there);
+                }
+                throw new RedirectRefusedError(url.Host, next.Protocol is "https:" or "http:" ? next.Origin : next.Protocol);
+            }
             if (answer.Status == 303 || ((answer.Status == 301 || answer.Status == 302) && method == "POST"))
             {
                 method = method == "HEAD" ? "HEAD" : "GET";
                 body = null;
-                foreach (string name in BodyHeaders)
+                foreach (string header in BodyHeaders)
                 {
-                    headers.Delete(name);
-                }
-            }
-            if (next.Origin != url.Origin)
-            {
-                foreach (string name in CredentialHeaders)
-                {
-                    headers.Delete(name);
+                    headers.Delete(header);
                 }
             }
             url = next;

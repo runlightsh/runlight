@@ -216,6 +216,8 @@ public sealed class MailCatcher : IFetcher
 {
     public List<JsObject> Mail { get; } = [];
 
+    public Task<IReadOnlyList<string>> LookupAsync(string name) => Task.FromResult<IReadOnlyList<string>>(["93.184.215.14"]);
+
     public Task<Response> FetchAsync(string url, FetchInit? init = null, CancellationToken cancellationToken = default)
     {
         Mail.Add((JsObject)Json.Parse(init?.BodyText ?? "{}")!);

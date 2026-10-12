@@ -24,7 +24,7 @@ public static class Time
 
     private const int MaxBuckets = 1000;
 
-    /// <summary>A month of hours. Longer hourly ranges are cut off rather than refused.</summary>
+    /// <summary>A month of hours. A longer range is counted by the day instead.</summary>
     private const int MaxHours = 744;
 
     /// <summary>Names Intl reads as another zone.</summary>
@@ -348,7 +348,42 @@ public static class Time
             }
         }
         string chosen = interval != null && Array.IndexOf(Intervals, interval) >= 0 ? interval : DefaultInterval(fromDate, toDate);
-        return Range(fromDate, toDate, chosen, timezone);
+        var range = Range(fromDate, toDate, chosen, timezone);
+        // An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+        // Past 1,000 months there is none.
+        long rangeFrom = range.Long("from");
+        long rangeTo = range.Long("to");
+        while (BucketCount(rangeFrom, rangeTo, fromDate, toDate, chosen) > (chosen == "hour" ? MaxHours : MaxBuckets))
+        {
+            string? coarser = chosen switch { "hour" => "day", "day" => "week", "week" => "month", _ => null };
+            if (coarser == null)
+            {
+                return null;
+            }
+            chosen = coarser;
+        }
+        range["interval"] = chosen;
+        return range;
+    }
+
+    /// <summary>How many chart buckets a range has at an interval, the first and last counted even when partial.</summary>
+    private static long BucketCount(long from, long to, string fromDate, string toDate, string interval)
+    {
+        if (interval == "hour")
+        {
+            return (to - from + 3_599_999) / 3_600_000;
+        }
+        if (interval == "day")
+        {
+            return DaysBetween(fromDate, toDate) + 1;
+        }
+        if (interval == "week")
+        {
+            return DaysBetween(AddDays(fromDate, -Weekday(fromDate)), toDate) / 7 + 1;
+        }
+        var (fy, fm, _) = Split(fromDate);
+        var (ty, tm, _) = Split(toDate);
+        return (ty - fy) * 12 + (tm - fm) + 1;
     }
 
     private static JsObject Range(string fromDate, string toDate, string interval, string timezone) => new()
@@ -411,7 +446,12 @@ public static class Time
         return Range(fromDate, toDate, range.Str("interval")!, timezone);
     }
 
-    /// <summary>Chart buckets covering a range, each starting on a local boundary: { start, end }.</summary>
+    /// <summary>
+    /// Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the first
+    /// and last can be partial: { start, end }. <see cref="ResolveRange"/> picks an interval that fits; a range given
+    /// here with more buckets than that, such as a longer comparison, is cut off at a boundary, never merged into
+    /// its last bucket.
+    /// </summary>
     public static List<JsObject> Buckets(JsObject range, string timezone)
     {
         var starts = new List<long>();
@@ -420,7 +460,7 @@ public static class Time
         string interval = range.Str("interval")!;
         if (interval == "hour")
         {
-            for (long t = from; t < to && starts.Count < MaxHours; t += 3_600_000)
+            for (long t = from; t < to && starts.Count <= MaxHours; t += 3_600_000)
             {
                 starts.Add(t);
             }
@@ -437,7 +477,7 @@ public static class Time
             {
                 date = date[..8] + "01";
             }
-            while (string.CompareOrdinal(date, toDate) <= 0 && starts.Count < MaxBuckets)
+            while (string.CompareOrdinal(date, toDate) <= 0 && starts.Count <= MaxBuckets)
             {
                 starts.Add(StartOf(date, timezone));
                 date = interval switch
@@ -448,8 +488,10 @@ public static class Time
                 };
             }
         }
-        var output = new List<JsObject>(starts.Count);
-        for (int i = 0; i < starts.Count; i++)
+        // One start past the limit was made, so the last bucket kept still ends where the next would begin.
+        int kept = Math.Min(starts.Count, interval == "hour" ? MaxHours : MaxBuckets);
+        var output = new List<JsObject>(kept);
+        for (int i = 0; i < kept; i++)
         {
             long next = i + 1 < starts.Count ? starts[i + 1] : to;
             output.Add(new JsObject { ["start"] = Math.Max(starts[i], from), ["end"] = Math.Min(next, to) });

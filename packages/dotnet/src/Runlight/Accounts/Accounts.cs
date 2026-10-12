@@ -212,7 +212,7 @@ public sealed class Accounts
     /// Checks a six-digit code, or a recovery code, for an account with two-factor on. A code works once: one
     /// already used, or older, is refused, and a recovery code is crossed off. One check at a time, so two
     /// sign-ins at once cannot both use the same code: TypeScript queues them per account in its process, and
-    /// here, as in PHP, the database's lock does.
+    /// here, as in PHP, the database's lock does, and the conditional update has the last word across processes.
     /// </summary>
     public async Task<bool> CheckSecondFactorAsync(string id, string code, long now, CancellationToken cancellationToken = default)
     {
@@ -238,9 +238,10 @@ public sealed class Accounts
             {
                 return false;
             }
-            await Db.RunAsync("UPDATE rl_users SET totp_step = ? WHERE id = ?", [step.Value, id], cancellationToken).ConfigureAwait(false);
-            return true;
+            // Only if no check since has used this step or a later one: of two at once, one moves it and the other is refused.
+            return await ChangedAsync("UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)", [step.Value, id, step.Value], cancellationToken).ConfigureAwait(false) == 1;
         }
+        string? read = Js.Truthy(row.Get("totp_recovery")) ? Sql.S(row.Get("totp_recovery")) : null;
         var hashes = RecoveryList(row.Get("totp_recovery"));
         string wanted = Crypto.RecoveryHash(given);
         int at = hashes.FindIndex(h => h is string s && s == wanted);
@@ -249,9 +250,15 @@ public sealed class Accounts
             return false;
         }
         hashes.RemoveAt(at);
-        await Db.RunAsync("UPDATE rl_users SET totp_recovery = ? WHERE id = ?", [Json.Stringify(hashes), id], cancellationToken).ConfigureAwait(false);
-        return true;
+        // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
+        return await ChangedAsync("UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?", [Json.Stringify(hashes), id, read], cancellationToken).ConfigureAwait(false) == 1;
     }
+
+    /// <summary>How many rows a statement changed. SQLite has no lock across processes, so this is how a write knows it won.</summary>
+    private async Task<long> ChangedAsync(string sql, object?[] args, CancellationToken cancellationToken) =>
+        Db.Dialect == "mysql"
+            ? await Db.AffectedAsync(sql, args, cancellationToken).ConfigureAwait(false)
+            : (await Db.AllAsync(sql + " RETURNING id", args, cancellationToken).ConfigureAwait(false)).Count;
 
     /// <summary>
     /// A short-lived ticket naming an account whose password checked out and which still owes a code. Signed

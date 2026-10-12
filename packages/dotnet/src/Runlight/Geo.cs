@@ -162,10 +162,13 @@ public static class Geo
         return output.ToString();
     }
 
-    /// <summary>Where a visitor is: the platform's headers first, then the lookup, else nowhere.</summary>
-    public static JsObject Locate(Headers headers, string ip, Func<string, JsObject?>? lookup = null)
+    /// <summary>
+    /// Where a visitor is: the platform's headers first, then the lookup, else nowhere. The headers are believed
+    /// only with <paramref name="trustHeaders"/>, as the address is: without a proxy in front, a client writes them itself.
+    /// </summary>
+    public static JsObject Locate(Headers headers, string ip, Func<string, JsObject?>? lookup = null, bool trustHeaders = true)
     {
-        var fromHeaders = LocationFromHeaders(headers);
+        var fromHeaders = trustHeaders ? LocationFromHeaders(headers) : null;
         if (fromHeaders != null && fromHeaders.Str("country")!.Length > 0)
         {
             return fromHeaders;

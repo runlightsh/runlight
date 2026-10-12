@@ -989,55 +989,89 @@ public sealed partial class Runlight
     }
 
     /// <summary>
-    /// Changes a site's name or timezone from the dashboard. Stored apart from the settings in code, which
-    /// keep being written on every start. A managed site has no settings in code, so its changes, hostnames
-    /// too, go to its row. A key left out of <paramref name="patch"/> (or Undefined) is left alone.
+    /// Changes a site's name, timezone, or retention from the dashboard. Stored apart from the settings in code,
+    /// which keep being written on every start. A managed site has no settings in code, so its changes, hostnames
+    /// too, go to its row. A key left out of <paramref name="patch"/> (or Undefined) is left alone. Every field is
+    /// checked before anything changes, since a new timezone clears the built days and a shorter retention
+    /// deletes visits, and pruning starts only once the change is saved.
     /// </summary>
     public async Task<JsObject> UpdateSiteAsync(string id, JsObject patch, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(patch);
         await InitAsync(cancellationToken).ConfigureAwait(false);
         var current = _configured.LastOrDefault(site => Id(site) == id) ?? throw new SettingsError("Unknown site", "unknown_site");
-        var next = ManagedSites ? current.Clone() : (_overrides.TryGetValue(id, out var o) ? o.Clone() : new JsObject());
+        string? name = null;
         if (patch.Prop("name") is not Undefined)
         {
-            string name = Js.Trim(Js.String(patch.Get("name")));
+            name = Js.Trim(Js.String(patch.Get("name")));
             if (name.Length == 0 || name.Length > 80)
             {
                 throw new SettingsError("A site name is 1 to 80 characters", "site_name");
             }
-            next["name"] = name;
         }
+        string? timezone = null;
         if (patch.Prop("timezone") is not Undefined)
         {
-            string timezone = Js.String(patch.Get("timezone"));
+            timezone = Js.String(patch.Get("timezone"));
             if (!Time.IsTimezone(timezone))
             {
                 throw new SettingsError("Unknown timezone \"" + timezone + "\"", "unknown_timezone", new JsObject { ["timezone"] = timezone });
             }
-            next["timezone"] = timezone;
-            if (timezone != Site(id)?.Str("timezone"))
-            {
-                await ZoneChangedAsync(id, timezone, cancellationToken).ConfigureAwait(false);
-            }
+        }
+        List<string>? hostnames = ManagedSites && patch.Prop("hostnames") is not Undefined && !_remotes.ContainsKey(id)
+            ? HostnamesFor(patch.Get("hostnames"), id).ToList()
+            : null;
+        bool retains = patch.Prop("retentionMonths") is not Undefined;
+        double? months = retains && patch.Get("retentionMonths") != null ? Js.Number(patch.Get("retentionMonths")) : null;
+        if (retains)
+        {
+            CheckRetention(id, months);
+        }
+        if (timezone != null && timezone != Site(id)?.Str("timezone"))
+        {
+            await ZoneChangedAsync(id, timezone, cancellationToken).ConfigureAwait(false);
         }
         if (ManagedSites)
         {
-            if (patch.Prop("hostnames") is not Undefined && !_remotes.ContainsKey(id))
+            var next = current.Clone();
+            if (name != null)
             {
-                next["hostnames"] = HostnamesFor(patch.Get("hostnames"), id).Cast<object?>().ToList();
+                next["name"] = name;
+            }
+            if (timezone != null)
+            {
+                next["timezone"] = timezone;
+            }
+            if (hostnames != null)
+            {
+                next["hostnames"] = hostnames.Cast<object?>().ToList();
             }
             await Store.UpsertSiteAsync(next, Now(), cancellationToken).ConfigureAwait(false);
             lock (_gate)
             {
                 _configured = _configured.Select(site => Id(site) == id ? next : site).ToList();
             }
-            return Site(id)!;
         }
-        await Store.SetSiteOverridesAsync(id, next, cancellationToken).ConfigureAwait(false);
-        lock (_gate)
+        else
         {
-            _overrides = new Dictionary<string, JsObject>(_overrides, StringComparer.Ordinal) { [id] = next };
+            var next = _overrides.TryGetValue(id, out var o) ? o.Clone() : new JsObject();
+            if (name != null)
+            {
+                next["name"] = name;
+            }
+            if (timezone != null)
+            {
+                next["timezone"] = timezone;
+            }
+            await Store.SetSiteOverridesAsync(id, next, cancellationToken).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _overrides = new Dictionary<string, JsObject>(_overrides, StringComparer.Ordinal) { [id] = next };
+            }
+        }
+        if (retains)
+        {
+            await SetRetentionAsync(id, months, cancellationToken).ConfigureAwait(false);
         }
         return Site(id)!;
     }
@@ -1058,6 +1092,13 @@ public sealed partial class Runlight
     /// </summary>
     public async Task SetRetentionAsync(string site, double? months, CancellationToken cancellationToken = default)
     {
+        CheckRetention(site, months);
+        await Store.SetSettingAsync("retention:" + site, months == null ? null : Json.Number(months.Value), cancellationToken).ConfigureAwait(false);
+        _pruning.Enqueue(site);
+    }
+
+    private void CheckRetention(string site, double? months)
+    {
         if (Site(site) == null || _remotes.ContainsKey(site))
         {
             throw new SettingsError("Unknown site", "unknown_site");
@@ -1067,8 +1108,6 @@ public sealed partial class Runlight
             string list = string.Join(", ", RetentionMonths.Select(Js.Str));
             throw new SettingsError("Keep visits for " + list + " months, or forever", "retention_bad", new JsObject { ["months"] = list });
         }
-        await Store.SetSettingAsync("retention:" + site, months == null ? null : Json.Number(months.Value), cancellationToken).ConfigureAwait(false);
-        _pruning.Enqueue(site);
     }
 
     /// <summary>Queues work for <see cref="IdleAsync"/>, so it runs after the answer is sent, as TypeScript leaves a promise running.</summary>
@@ -1628,7 +1667,7 @@ public sealed partial class Runlight
                     ["platform"] = request.Headers.Get("sec-ch-ua-platform"),
                 },
                 screenWidth);
-            var location = Geo.Locate(request.Headers, address, _geo);
+            var location = Geo.Locate(request.Headers, address, _geo, _trustProxy.On);
             var utm = page.Obj("utm")!;
             var row = new JsObject
             {

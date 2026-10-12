@@ -200,26 +200,59 @@ public sealed partial class Config
         {
             return _secret = given;
         }
-        string file = DataDir() + "/secret";
-        string saved = ReadTrimmed(file);
-        if (saved.Length > 0)
+        return _secret = SecretIn(DataDir());
+    }
+
+    /// <summary>Shorter than any secret this file has ever been given, so a file caught half written is never used.</summary>
+    private const int ShortestSecret = 32;
+
+    /// <summary>
+    /// The secret kept in <paramref name="dataDir"/>, made on first run. Two servers starting at once on one folder
+    /// agree on it: the file is created only if it is not there, so one wins and the rest read the winner's. A file
+    /// read empty or short, such as the winner's before it has finished writing, is read again for a moment, and
+    /// then refused, never used. (A file moved into place would not do: .NET checks that the target is absent and
+    /// then renames, so two servers can both pass the check.)
+    /// </summary>
+    internal static string SecretIn(string dataDir)
+    {
+        string file = dataDir + "/secret";
+        string? found = ReadWholeSecret(file);
+        if (found != null)
         {
-            return _secret = saved;
+            return found;
         }
         string made = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-        // Made once: whoever writes the file first wins, and everyone else reads theirs.
-        if (!WriteNew(file, made + "\n"))
+        if (WriteNew(file, made + "\n"))
         {
-            Thread.Sleep(50);
-            saved = ReadTrimmed(file);
-            if (saved.Length == 0)
-            {
-                throw new InvalidOperationException("Runlight: could not write " + file + ". Make the data folder writable, or set RUNLIGHT_SECRET.");
-            }
-            return _secret = saved;
+            return made;
         }
-        return _secret = made;
+        return ReadWholeSecret(file) ?? throw new InvalidOperationException("Runlight: could not write " + file + ". Make the data folder writable, or set RUNLIGHT_SECRET.");
     }
+
+    /// <summary>The secret in a file, waiting up to two seconds for one too short to be whole; null when there is no file.</summary>
+    private static string? ReadWholeSecret(string file)
+    {
+        for (int tries = 0; ; tries++)
+        {
+            if (!File.Exists(file))
+            {
+                return null;
+            }
+            string text = ReadTrimmed(file);
+            if (text.Length >= ShortestSecret)
+            {
+                return text;
+            }
+            if (tries >= 20)
+            {
+                throw RefusedSecret(file);
+            }
+            Thread.Sleep(100);
+        }
+    }
+
+    private static InvalidOperationException RefusedSecret(string file) =>
+        new(file + " holds no whole secret. Delete it to have a new one made, which signs everyone out, or set RUNLIGHT_SECRET.");
 
     /// <summary>The dashboard's public address, such as https://stats.example.com, or null.</summary>
     public string? Url()

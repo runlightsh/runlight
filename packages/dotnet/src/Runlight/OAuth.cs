@@ -127,10 +127,9 @@ public static class OAuth
     {
         ArgumentNullException.ThrowIfNull(store);
         string name = "observe-key:" + site;
-        string? saved = replace ? null : await store.SettingAsync(name, cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(saved))
+        if (!replace)
         {
-            return saved;
+            return await store.SettingOrAddAsync(name, () => "rlo_" + Hash.RandomId(20), cancellationToken).ConfigureAwait(false);
         }
         string key = "rlo_" + Hash.RandomId(20);
         await store.SetSettingAsync(name, key, cancellationToken).ConfigureAwait(false);
@@ -149,14 +148,8 @@ public static class OAuth
     /// <summary>The key client ids are signed with, made on first use and kept in the database for every process.</summary>
     private static async Task<string> ClientKeyAsync(OAuthContext ctx, CancellationToken cancellationToken)
     {
-        string? saved = await ctx.Store.SettingAsync("oauth-key", cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(saved))
-        {
-            return saved;
-        }
-        string made = Hash.RandomId(32);
-        await ctx.Store.SetSettingAsync("oauth-key", made, cancellationToken).ConfigureAwait(false);
-        return made;
+        // Written only if no other request wrote one first, so every process signs with the same key.
+        return await ctx.Store.SettingOrAddAsync("oauth-key", () => Hash.RandomId(32), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

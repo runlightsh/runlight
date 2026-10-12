@@ -26,6 +26,56 @@ public sealed class TimeTests
     }
 
     [Fact]
+    public void An_interval_too_fine_for_a_long_range_moves_up_to_one_that_fits_and_no_bucket_takes_in_the_rest()
+    {
+        long now = Utc(2026, 9, 12, 12);
+        const long Day = 86_400_000;
+        JsObject? Range(string from, string to, string? interval, string zone) =>
+            Time.ResolveRange(null, from, to, interval, zone, now);
+
+        var hourly = Range("2026-08-01", "2026-09-09", "hour", "UTC")!;
+        Assert.Equal("day", hourly.Str("interval")); // 40 days of hours is too many hours
+        Assert.Equal(40, Time.Buckets(hourly, "UTC").Count);
+        Assert.Equal("hour", Range("2026-08-01", "2026-08-31", "hour", "UTC")!.Str("interval")); // a month of hours still fits
+
+        var daily = Range("2018-01-03", "2026-10-12", "day", "Europe/London")!;
+        Assert.Equal("week", daily.Str("interval"));
+        var weeks = Time.Buckets(daily, "Europe/London");
+        Assert.Equal(daily.Long("from"), weeks[0].Long("start"));
+        Assert.Equal(daily.Long("to"), weeks[^1].Long("end")); // the buckets reach the end of the range
+        for (int i = 0; i < weeks.Count; i++)
+        {
+            long length = weeks[i].Long("end") - weeks[i].Long("start");
+            if (i > 0)
+            {
+                Assert.Equal(weeks[i - 1].Long("end"), weeks[i].Long("start"));
+            }
+            // A week across a clock change is an hour short or long; none is longer than that.
+            Assert.True(length <= (7 * Day) + 3_600_000, "week " + i);
+            if (i > 0 && i < weeks.Count - 1)
+            {
+                Assert.True(length >= (7 * Day) - 3_600_000, "week " + i);
+            }
+        }
+
+        var decades = Range("1990-01-01", "2026-10-12", "day", "UTC")!;
+        Assert.Equal("month", decades.Str("interval"));
+        var months = Time.Buckets(decades, "UTC");
+        Assert.Equal(442, months.Count);
+        Assert.All(months, m => Assert.True(m.Long("end") - m.Long("start") <= 31 * Day));
+        Assert.Null(Range("1900-01-01", "2026-10-12", null, "UTC")); // past 1,000 months there is no interval that fits
+
+        // A comparison longer than its range keeps whole buckets, cut off at a boundary.
+        var longer = decades.Clone();
+        longer["from"] = Utc(2000, 0, 1);
+        longer["fromDate"] = "2000-01-01";
+        longer["interval"] = "day";
+        var cut = Time.Buckets(longer, "UTC");
+        Assert.Equal(1000, cut.Count);
+        Assert.Equal(Day, cut[^1].Long("end") - cut[^1].Long("start"));
+    }
+
+    [Fact]
     public void Every_zone_is_carried_for_systems_without_zoneinfo()
     {
         Assert.DoesNotContain(ZoneNames.All, name => name is not ("UTC" or "Etc/UTC") && Tz.Carried(name) == null);

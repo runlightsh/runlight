@@ -70,11 +70,11 @@ public sealed class Harness
     public long Now { get; set; } = START;
 
     /// <summary>A Runlight on a fresh store of a kind, with the options given.</summary>
-    public static async Task<Harness> CreateAsync(string kind, SiteOptions? site = null, IReadOnlyList<SiteOptions>? sites = null, bool managedSites = false, IFetcher? fetcher = null, string? secret = null, Func<string, JsObject?>? geo = null, double? rateLimit = 120) =>
-        Create(await Databases.FreshAsync(kind), site, sites, managedSites, fetcher, secret, geo, rateLimit);
+    public static async Task<Harness> CreateAsync(string kind, SiteOptions? site = null, IReadOnlyList<SiteOptions>? sites = null, bool managedSites = false, IFetcher? fetcher = null, string? secret = null, Func<string, JsObject?>? geo = null, double? rateLimit = 120, ProxyTrust? trustProxy = null) =>
+        Create(await Databases.FreshAsync(kind), site, sites, managedSites, fetcher, secret, geo, rateLimit, trustProxy);
 
     /// <summary>A Runlight on the store given, with the options given.</summary>
-    public static Harness Create(SqlStore store, SiteOptions? site = null, IReadOnlyList<SiteOptions>? sites = null, bool managedSites = false, IFetcher? fetcher = null, string? secret = null, Func<string, JsObject?>? geo = null, double? rateLimit = 120)
+    public static Harness Create(SqlStore store, SiteOptions? site = null, IReadOnlyList<SiteOptions>? sites = null, bool managedSites = false, IFetcher? fetcher = null, string? secret = null, Func<string, JsObject?>? geo = null, double? rateLimit = 120, ProxyTrust? trustProxy = null)
     {
         var t = new Harness(null!);
         t.Rl = new Runlight(new RunlightOptions
@@ -88,6 +88,7 @@ public sealed class Harness
             Secret = secret,
             Geo = geo,
             RateLimit = rateLimit,
+            TrustProxy = trustProxy,
         });
         return t;
     }

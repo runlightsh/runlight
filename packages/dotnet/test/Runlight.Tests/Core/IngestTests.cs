@@ -241,6 +241,31 @@ public sealed class IngestTests : CoreTestCase
     }
 
     [Fact]
+    public async Task A_hosting_platforms_location_headers_count_only_when_proxy_headers_are_trusted()
+    {
+        async Task<List<string>> Countries(bool trust)
+        {
+            var t = await Harness.CreateAsync("sqlite", geo: _ => new JsObject { ["country"] = "DE", ["region"] = "BE", ["city"] = "Berlin" }, trustProxy: new ProxyTrust(trust, null));
+            var platform = new[]
+            {
+                ("cf-ipcountry", "US"),
+                ("x-vercel-ip-country", "FR"),
+                ("x-nf-geo", Convert.ToBase64String(Js.Utf8("{\"country\":{\"code\":\"JP\"}}"))),
+            };
+            for (int i = 0; i < platform.Length; i++)
+            {
+                // A visitor each, so each request opens a visit of its own.
+                var (name, value) = platform[i];
+                string ip = "203.0.113." + (i + 1);
+                await t.Rl.CollectAsync(Harness.Hit("https://x.com/runlight/e", new JsObject { ["k"] = "pageview", ["u"] = "https://x.com/" + name }, "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36", ip, new Dictionary<string, string> { [name] = value }), ip);
+            }
+            return await t.SortedAsync(await t.TodayAsync(), "country");
+        }
+        Assert.Equal(["DE"], await Countries(false)); // without a proxy in front, a client writes them itself, so the lookup answers
+        Assert.Equal(["FR", "JP", "US"], await Countries(true)); // behind one, they come first
+    }
+
+    [Fact]
     public async Task Tracker_requests_over_the_per_address_limit_are_dropped_until_the_next_minute()
     {
         var t = await Harness.CreateAsync("sqlite", Hosts("example.com"), rateLimit: 3);

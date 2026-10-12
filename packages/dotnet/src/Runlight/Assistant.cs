@@ -180,6 +180,13 @@ public static class Assistant
     private static AssistantError Refused(MetadataAddressError error) =>
         new(error.Message, "address_refused", new JsObject { ["host"] = error.Host });
 
+    /// <summary>A service that sent the request to another origin, which would have carried the key, and the question with it.</summary>
+    private static AssistantError Redirected(RedirectRefusedError error) =>
+        new(error.Message, "redirect_refused", new JsObject { ["host"] = error.Host, ["to"] = error.To });
+
+    /// <summary>The most of a model's answer, or its list of models, that is read. A longer one is cut off and so does not parse.</summary>
+    private const long MaxAnswerBytes = 4 * 1024 * 1024;
+
     private static async Task<object?> PostAsync(IFetcher fetcher, string url, Headers headers, object? body, long deadline, Func<long> now, CancellationToken cancellationToken)
     {
         InTime(deadline, now, cancellationToken);
@@ -199,12 +206,18 @@ public static class Assistant
                 Headers = all,
                 BodyText = Json.Stringify(body),
                 TimeoutMs = (int)Math.Min(90_000, left),
+                MaxBytes = MaxAnswerBytes,
+                Truncate = true,
             }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
             bytes = await answer.BytesAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (MetadataAddressError error)
         {
             throw Refused(error);
+        }
+        catch (RedirectRefusedError error)
+        {
+            throw Redirected(error);
         }
         catch (Exception error)
         {
@@ -526,12 +539,16 @@ public static class Assistant
         byte[] bytes;
         try
         {
-            answer = await Safefetch.ServiceFetchAsync(@base + "/models" + (provider.Protocol == "anthropic" ? "?limit=100" : ""), new FetchInit { Headers = headers, TimeoutMs = 20_000 }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
+            answer = await Safefetch.ServiceFetchAsync(@base + "/models" + (provider.Protocol == "anthropic" ? "?limit=100" : ""), new FetchInit { Headers = headers, TimeoutMs = 20_000, MaxBytes = MaxAnswerBytes, Truncate = true }, fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
             bytes = await answer.BytesAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (MetadataAddressError error)
         {
             throw Refused(error);
+        }
+        catch (RedirectRefusedError error)
+        {
+            throw Redirected(error);
         }
         catch (Exception)
         {
