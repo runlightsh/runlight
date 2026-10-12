@@ -43,7 +43,8 @@ def hello(request: Any) -> HttpResponse:
     return HttpResponse(APP_PAGE, content_type="text/plain")
 
 
-urlpatterns = [path("hello", hello)]
+# The app has a page under the link path too, which a slug with no link reaches.
+urlpatterns = [path("hello", hello), path("go/<str:slug>", lambda request, slug: hello(request))]
 
 
 @pytest.fixture

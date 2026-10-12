@@ -5,9 +5,10 @@ module Runlight
   # in the order the standalone server answers: a link domain added in Settings
   # first (it leaves the dashboard's own paths alone), then `{linkPath}/{slug}`
   # on the app's own domain, then the dashboard and API under the routes' base
-  # path. As middleware, every other request goes on to the app, after AI agent
-  # fetches among them are recorded (observe), which returns at once for
-  # everyone else.
+  # path. As middleware, every other request goes on to the app, a short link
+  # with no link by that name included, so the app's own 404 page answers it,
+  # after AI agent fetches among them are recorded (observe), which returns at
+  # once for everyone else. Alone, Runlight answers those with its own 404.
   #
   #   # config.ru, Runlight alone
   #   run Runlight::RackApp.new(runlight: RL, base_path: "/runlight")
@@ -86,7 +87,13 @@ module Runlight
         linked = core.link_domain_response(request, context)
         return linked unless linked.nil?
       end
-      return core.link_handler.call(request, context) if link
+      if link
+        linked = core.link_handler.call(request, context)
+        # A slug with no link is the app's to answer, so its own 404 page shows.
+        return linked unless @app && linked.status == 404
+
+        own = mine?(path) || Routes.oauth_document?(path)
+      end
       return routes.handle(request) if own
 
       nil

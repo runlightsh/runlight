@@ -116,6 +116,7 @@ class ServerStandaloneTest < Minitest::Test
       assert_equal 302, short.status
       assert_equal "https://blog.example.com/launch", short.headers.get("location")
       assert_equal 302, server.handle(req("/go/launch")).status, "every link also answers at /go/:slug on the server itself"
+      assert_equal 404, server.handle(req("/go/launch", host: "go.example.com")).status, "but not on a link domain, which answers only its own links at its root"
 
       health = server.handle(req("/healthz"))
       assert_equal [200, "ok"], [health.status, health.text]

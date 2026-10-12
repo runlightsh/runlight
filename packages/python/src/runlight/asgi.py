@@ -5,9 +5,10 @@
     app.add_middleware(RunlightMiddleware, runlight=rl)   # Starlette and FastAPI
     application = RunlightMiddleware(application, runlight=rl)   # any ASGI app
 
-Requests under the routes' base path (default /runlight), `{linkPath}/{slug}` (default /go), and every request to
-a link domain added in Settings are Runlight's; everything else goes on to the app, and a page fetched by a known
-AI agent is recorded on the way (observe=False turns that off). Runlight's work is synchronous, like the database
+Requests under the routes' base path (default /runlight), `{linkPath}/{slug}` (default /go) for a link that exists,
+and every request to a link domain added in Settings are Runlight's; everything else goes on to the app, a slug
+with no link included, so the app's own 404 page answers it, and a page fetched by a known AI agent is recorded on
+the way (observe=False turns that off). Runlight's work is synchronous, like the database
 drivers it uses, so each of its requests runs in a worker thread and never holds up the event loop.
 """
 
@@ -156,6 +157,12 @@ class RunlightMiddleware:
             await send_response(send, linked, head)
             await asyncio.to_thread(self.runlight.idle)
             return
+        if method == "GET":
+            short = await asyncio.to_thread(self.front.short_link, bare, self.app is not None)
+            if short is not None:
+                await send_response(send, short, head)
+                await asyncio.to_thread(self.runlight.idle)
+                return
         path = urllib.parse.urlsplit(bare.url).path
         if not self.front.owns(method, path):
             if self.front.observe and method == "GET":
