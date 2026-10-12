@@ -150,4 +150,32 @@ defmodule Runlight.AccountsTest do
     for n <- 1..11, do: Throttle.fail(t, "later #{n}", 15 * 60_000)
     assert keys.() == 11
   end
+
+  test "a code is accepted once, even by two processes", %{rl: rl, acc: acc} do
+    user = Accounts.set_password(acc, "owner@example.com", "a long password", 1)
+    now = 1_791_288_000_000
+    secret = Accounts.start_two_factor(acc, user["id"])
+    codes = Accounts.confirm_two_factor(acc, user["id"], Crypto.totp(secret, div(now, 30_000)), now)
+
+    # Another Accounts on the same database, with no lock in common with the first.
+    other = Accounts.new(Runlight.new(store: rl.store, now: fn -> now end), String.duplicate("s", 64))
+
+    both = fn code, at ->
+      [acc, other]
+      |> Task.async_stream(&Accounts.check_second_factor(&1, user["id"], code, at), timeout: 30_000)
+      |> Enum.map(&elem(&1, 1))
+    end
+
+    for round <- 1..5 do
+      at = now + round * 30_000
+      code = Crypto.totp(secret, div(at, 30_000))
+      assert Enum.count(both.(code, at), & &1) == 1, "TOTP round #{round}"
+    end
+
+    for code <- Enum.take(codes, 3) do
+      assert Enum.count(both.(code, now), & &1) == 1, "recovery code #{code}"
+    end
+
+    assert Accounts.by_id(acc, user["id"])["recoveryLeft"] == 7
+  end
 end

@@ -174,4 +174,144 @@ defmodule Runlight.RoutesTest do
     assert Response.header(plain, "content-security-policy") =~ "frame-ancestors 'none'"
     assert Response.header(plain, "x-frame-options") == "DENY"
   end
+
+  test "a site change refused for a bad domain changes nothing" do
+    rl = rl(managed_sites: true)
+    handle = &Runlight.Routes.handle(Runlight.routes(rl, token: "secret"), &1)
+
+    added =
+      handle.(owner("/runlight/api/sites", "POST", %{name: "Blog", hostnames: ["blog.example.com"], timezone: "UTC"}))
+
+    %{"site" => %{"id" => id}} = body(added)
+
+    other =
+      handle.(owner("/runlight/api/sites", "POST", %{name: "Shop", hostnames: ["shop.example.com"], timezone: "UTC"}))
+
+    assert other.status == 201
+
+    for hostnames <- [["not a domain"], ["shop.example.com"]] do
+      refused =
+        handle.(
+          owner("/runlight/api/sites/#{id}", "PATCH", %{
+            retentionMonths: 12,
+            timezone: "Asia/Tokyo",
+            name: "Not saved",
+            hostnames: hostnames
+          })
+        )
+
+      assert refused.status in [400, 409]
+      Runlight.idle(rl)
+      assert Runlight.retention(rl, id) == nil
+      assert Store.setting(rl.store, "rollup-zone:#{id}") in [nil, ~s({"zone":"UTC","since":0})]
+      site = Runlight.site(rl, id)
+      assert {site["name"], site["timezone"], site["hostnames"]} == {"Blog", "UTC", ["blog.example.com"]}
+    end
+
+    saved = handle.(owner("/runlight/api/sites/#{id}", "PATCH", %{retentionMonths: 12, timezone: "Asia/Tokyo"}))
+    assert saved.status == 200
+    Runlight.idle(rl)
+    assert Runlight.retention(rl, id) == 12
+    assert Runlight.site(rl, id)["timezone"] == "Asia/Tokyo"
+  end
+
+  test "questions sent at once count once each against a viewer's daily number" do
+    now = fn -> 1_791_806_400_000 end
+
+    fetcher = fn _, _ -> {:error, :econnrefused} end
+    first = rl(sites: [[id: "a", name: "A", hostnames: ["a.example.com"]]], now: now, fetcher: fetcher)
+
+    Runlight.save_assistant_settings(
+      first,
+      Runlight.JS.obj(provider: "custom", model: "m", baseUrl: "http://127.0.0.1:9/v1", key: "k")
+    )
+
+    Store.set_setting(first.store, "assistant-viewer-daily", "1")
+
+    handler = fn rl ->
+      routes =
+        Runlight.routes(rl,
+          authorize: fn r -> if Request.header(r, "x-who"), do: "read", else: false end,
+          account_of: fn r -> Request.header(r, "x-who") end
+        )
+
+      &Runlight.Routes.handle(routes, &1)
+    end
+
+    ask = fn handle, who ->
+      handle.(
+        req(
+          "/runlight/api/assistant/chat",
+          "POST",
+          [{"x-who", who}, {"content-type", "application/json"}],
+          Jason.encode!(%{site: "a", messages: [%{role: "user", content: "hi"}]})
+        )
+      )
+    end
+
+    passed = fn answers -> Enum.count(answers, &(&1.status != 429)) end
+    day = "assistant-asked:2026-10-12:"
+
+    # One instance: the second and later questions see the first.
+    one = handler.(first)
+    answers = 1..10 |> Task.async_stream(fn _ -> ask.(one, "viewer-1") end, timeout: 30_000) |> Enum.map(&elem(&1, 1))
+    assert passed.(answers) == 1
+    assert Store.setting(first.store, day <> "viewer-1") == "1"
+
+    # Ten instances on one database, each with its own counts in memory: the database lets one through.
+    handlers =
+      for _ <- 1..10,
+          do:
+            handler.(
+              Runlight.new(
+                store: first.store,
+                sites: [[id: "a", hostnames: ["a.example.com"]]],
+                now: now,
+                fetcher: fetcher
+              )
+            )
+
+    answers =
+      handlers |> Task.async_stream(fn h -> ask.(h, "viewer-2") end, timeout: 30_000) |> Enum.map(&elem(&1, 1))
+
+    assert passed.(answers) == 1
+    assert Store.setting(first.store, day <> "viewer-2") == "1"
+
+    # Two viewers at once each have their own row, and neither write loses the other's.
+    answers =
+      ["viewer-3", "viewer-4"]
+      |> Enum.zip(handlers)
+      |> Task.async_stream(fn {who, h} -> ask.(h, who) end, timeout: 30_000)
+      |> Enum.map(&elem(&1, 1))
+
+    assert passed.(answers) == 2
+    assert Store.setting(first.store, day <> "viewer-3") == "1"
+    assert Store.setting(first.store, day <> "viewer-4") == "1"
+
+    # A refused question gives its slot back, so a viewer at the limit is not locked out of the hour's thirty.
+    for _ <- 1..40, do: assert(ask.(one, "viewer-1").status == 429)
+    assert Store.setting(first.store, day <> "viewer-1") == "1"
+  end
+
+  test "a key made on first use is the same for every request that asks at once" do
+    rl = rl(sites: [[id: "a", hostnames: ["a.example.com"]]])
+
+    for key <- ["oauth-key", "pick-key", "embed-key", "observe-key:a"] do
+      made = fn -> Runlight.Hash.random_id(32) end
+      keys = 1..20 |> Task.async_stream(fn _ -> Store.setting_or_add(rl.store, key, made) end) |> Enum.map(&elem(&1, 1))
+      assert length(Enum.uniq(keys)) == 1
+      assert Store.setting(rl.store, key) == hd(keys)
+    end
+
+    assert Store.add_setting(rl.store, "once", "1")
+    refute Store.add_setting(rl.store, "once", "2")
+    assert Store.setting(rl.store, "once") == "1"
+    refute Store.swap_setting(rl.store, "once", "2", "3")
+    assert Store.swap_setting(rl.store, "once", "1", "2")
+    assert Store.setting(rl.store, "once") == "2"
+
+    agents = 1..20 |> Task.async_stream(fn _ -> Runlight.OAuth.agents_key(rl, "a") end) |> Enum.map(&elem(&1, 1))
+    assert length(Enum.uniq(agents)) == 1
+    assert Runlight.OAuth.agents_key(rl, "a", true) != hd(agents)
+  end
 end

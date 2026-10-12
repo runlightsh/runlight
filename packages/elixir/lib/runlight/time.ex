@@ -11,7 +11,7 @@ defmodule Runlight.Time do
 
   @periods ~w(today yesterday 7d 30d 90d month last_month year 12mo all)
   @max_buckets 1000
-  # A month of hours. Longer hourly ranges are cut off rather than refused.
+  # A month of hours. A longer range is counted by the day instead.
   @max_hours 744
 
   def periods, do: @periods
@@ -143,14 +143,46 @@ defmodule Runlight.Time do
             do: input[:interval],
             else: default_interval(from_date, to_date)
 
-        %{
-          from: start_of(from_date, timezone),
-          to: start_of(add_days(to_date, 1), timezone),
-          from_date: from_date,
-          to_date: to_date,
-          interval: interval
-        }
+        from = start_of(from_date, timezone)
+        to = start_of(add_days(to_date, 1), timezone)
+        # An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+        # Past 1,000 months there is none.
+        case fit_interval(from, to, from_date, to_date, interval) do
+          nil -> nil
+          interval -> %{from: from, to: to, from_date: from_date, to_date: to_date, interval: interval}
+        end
     end
+  end
+
+  defp fit_interval(from, to, from_date, to_date, interval) do
+    limit = if interval == "hour", do: @max_hours, else: @max_buckets
+
+    if bucket_count(from, to, from_date, to_date, interval) <= limit do
+      interval
+    else
+      case interval do
+        "hour" -> fit_interval(from, to, from_date, to_date, "day")
+        "day" -> fit_interval(from, to, from_date, to_date, "week")
+        "week" -> fit_interval(from, to, from_date, to_date, "month")
+        "month" -> nil
+      end
+    end
+  end
+
+  # How many chart buckets a range has at an interval, the first and last counted even when partial.
+  defp bucket_count(from, to, _from_date, _to_date, "hour"), do: JS.ceil((to - from) / 3_600_000)
+  defp bucket_count(_from, _to, from_date, to_date, "day"), do: days_between(from_date, to_date) + 1
+
+  defp bucket_count(_from, _to, from_date, to_date, "week") do
+    {y, m, d} = split(from_date)
+    weekday = rem(JS.utc_weekday(JS.date_utc(y, m - 1, d)) + 6, 7)
+    Integer.floor_div(days_between(add_days(from_date, -weekday), to_date), 7) + 1
+  end
+
+  defp bucket_count(_from, _to, from_date, to_date, "month") do
+    {fy, fm, _} = split(from_date)
+    {ty, tm, _} = split(to_date)
+    (ty - fy) * 12 + (tm - fm) + 1
   end
 
   defp add_years(date, years) do
@@ -201,7 +233,11 @@ defmodule Runlight.Time do
     end
   end
 
-  @doc "Chart buckets covering a range, each starting on a local boundary."
+  @doc """
+  Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the first
+  and last can be partial. resolve_range picks an interval that fits; a range given here with more buckets than
+  that, such as a longer comparison, is cut off at a boundary, never merged into its last bucket.
+  """
   @spec buckets(map(), String.t()) :: [map()]
   def buckets(range, timezone) do
     starts =
@@ -209,7 +245,7 @@ defmodule Runlight.Time do
         range.from
         |> Stream.iterate(&(&1 + 3_600_000))
         |> Stream.take_while(&(&1 < range.to))
-        |> Enum.take(@max_hours)
+        |> Enum.take(@max_hours + 1)
       else
         date = range.from_date
 
@@ -238,15 +274,18 @@ defmodule Runlight.Time do
         date
         |> Stream.iterate(step)
         |> Stream.take_while(&(&1 <= range.to_date))
-        |> Enum.take(@max_buckets)
+        |> Enum.take(@max_buckets + 1)
         |> Enum.map(&start_of(&1, timezone))
       end
 
+    # One start past the limit was taken, so the last bucket kept still ends where the next would begin.
     nexts = tl(starts ++ [nil])
+    kept = if range.interval == "hour", do: @max_hours, else: @max_buckets
 
     Enum.zip_with(starts, nexts, fn start, next ->
       %{start: max(start, range.from), end: min(next || range.to, range.to)}
     end)
+    |> Enum.take(kept)
   end
 
   @doc "The local weekday (Monday is 0) and hour of an instant."

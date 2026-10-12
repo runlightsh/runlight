@@ -214,6 +214,18 @@ defmodule Runlight.Safefetch do
     end
   end
 
+  @doc false
+  # The address to connect to for a service's name, with IPv4 first, unless any address it has is link-local or a
+  # metadata service. A service may be on this computer or a private network. A name that does not resolve is
+  # refused, since the connection could find an address for it a moment later.
+  @spec service_address(String.t()) :: {:ok, String.t()} | {:error, :refused | :nxdomain}
+  def service_address(name) do
+    case lookup(name) do
+      {:ok, list} -> if Enum.any?(list, &metadata_address?/1), do: {:error, :refused}, else: {:ok, hd(list)}
+      :error -> {:error, :nxdomain}
+    end
+  end
+
   defp lookup(name) do
     charlist = String.to_charlist(name)
 
@@ -276,8 +288,6 @@ defmodule Runlight.Safefetch do
 
   # Headers that describe a body, dropped with it when a redirect turns a request into a GET.
   @body_headers ~w(content-type content-length content-encoding content-language content-location)
-  # Credentials, dropped when a redirect leads to another origin.
-  @credential_headers ~w(authorization proxy-authorization cookie)
 
   @doc """
   Fetches from a service someone set up, such as an AI model's API or a mail
@@ -286,10 +296,17 @@ defmodule Runlight.Safefetch do
   (`fn url, opts -> ... end`) and `opts` its options. The address is checked,
   and so is every redirect's, up to `redirects:` of them (default 5), each
   followed as fetch follows it: a 303, or a 301 or 302 answering a POST, goes
-  on as a GET with no body, and a redirect to another origin goes without the
-  credentials. A redirect past the last one comes back as it is. `timeout:`
-  is for all of them together. Answers `{:error, {:address_refused, host}}`
-  for an address it refuses, before anything is asked there.
+  on as a GET with no body. Only a redirect on the same origin is followed:
+  the request carries a key, in whatever header the service names it, and a
+  307 or 308 would carry its body too, an email or a conversation, so a
+  redirect to another origin, https to http among them, is refused before
+  anything is sent there. A redirect past the last one comes back as it is.
+  `timeout:` is for all of them together. Answers
+  `{:error, {:address_refused, host}}` for an address it refuses, and
+  `{:error, {:redirect_refused, host, to}}` for a redirect it will not
+  follow, before anything is asked there. The default fetcher is also told
+  (`service: true`) to connect only to an address it checked, with no proxy
+  between.
   """
   @spec service_fetch((String.t(), keyword() -> {:ok, Response.t()} | {:error, term()}), String.t(), keyword()) ::
           {:ok, Response.t()} | {:error, term()}
@@ -322,7 +339,7 @@ defmodule Runlight.Safefetch do
         sent =
           [method: ask.method, headers: ask.headers] ++
             if(ask.body == nil, do: [], else: [body: ask.body]) ++
-            Keyword.merge(rest, redirect: :manual, timeout: left)
+            Keyword.merge(rest, redirect: :manual, timeout: left, service: true)
 
         with {:ok, answer} <- fetch.(Url.href(url), sent) do
           location = Response.header(answer, "location")
@@ -331,26 +348,33 @@ defmodule Runlight.Safefetch do
           if answer.status < 300 or answer.status >= 400 or next == nil or hop >= Keyword.get(opts, :redirects, 5) do
             {:ok, answer}
           else
-            service_hop(fetch, next, redirected(ask, answer.status, url, next), rest, deadline, opts, hop + 1)
+            if Url.origin(next) != Url.origin(url) do
+              there = String.replace(next.hostname, ~r/^\[|\]$/, "")
+
+              if metadata_host?(there),
+                do: {:error, {:address_refused, there}},
+                else: {:error, {:redirect_refused, Url.host(url), refused_to(next)}}
+            else
+              service_hop(fetch, next, redirected(ask, answer.status), rest, deadline, opts, hop + 1)
+            end
           end
         end
     end
   end
 
-  defp redirected(ask, status, from, to) do
-    ask =
-      if status == 303 or (status in [301, 302] and ask.method == "POST"),
-        do: %{
-          method: if(ask.method == "HEAD", do: "HEAD", else: "GET"),
-          body: nil,
-          headers: Enum.reject(ask.headers, fn {name, _} -> String.downcase(name) in @body_headers end)
-        },
-        else: ask
-
-    if Url.origin(to) != Url.origin(from),
-      do: %{ask | headers: Enum.reject(ask.headers, fn {name, _} -> String.downcase(name) in @credential_headers end)},
+  defp redirected(ask, status) do
+    if status == 303 or (status in [301, 302] and ask.method == "POST"),
+      do: %{
+        method: if(ask.method == "HEAD", do: "HEAD", else: "GET"),
+        body: nil,
+        headers: Enum.reject(ask.headers, fn {name, _} -> String.downcase(name) in @body_headers end)
+      },
       else: ask
   end
+
+  # Where a refused redirect led: its origin, or its scheme when it is not a web address.
+  defp refused_to(%Url{protocol: protocol} = next),
+    do: if(protocol in ["https:", "http:"], do: Url.origin(next), else: protocol)
 
   # An install on this machine: http://localhost or http://127.0.0.1, with any port.
   @local_install ~r/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/

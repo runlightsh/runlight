@@ -58,6 +58,13 @@ defmodule Runlight.Accounts do
   defp db(acc), do: acc.store.db
   defp all(acc, sql, params \\ []), do: Db.all(db(acc), sql, params)
   defp run(acc, sql, params \\ []), do: Db.run(db(acc), sql, params)
+  # How many rows a statement changed. SQLite has no lock, so this is how a write knows it won.
+  defp changed(acc, sql, params) do
+    if dialect(acc) == "mysql",
+      do: Db.affected(db(acc), sql, params),
+      else: length(all(acc, "#{sql} RETURNING id", params))
+  end
+
   defp first(acc, sql, params), do: acc |> all(sql, params) |> List.first()
   defp dialect(acc), do: Db.dialect(db(acc))
 
@@ -239,7 +246,8 @@ defmodule Runlight.Accounts do
   @doc """
   Checks a six-digit code, or a recovery code, for an account with two-factor
   on. A code works once: one already used, or older, is refused, and a
-  recovery code is crossed off. One check at a time per account.
+  recovery code is crossed off. One check at a time per account here, and the
+  database has the last word, since another process does not wait.
   """
   def check_second_factor(acc, id, code, now) do
     State.one_at_a_time(acc.rl.table, {:second_factor, id}, fn -> check_second_factor_now(acc, id, code, now) end)
@@ -263,11 +271,17 @@ defmodule Runlight.Accounts do
         if step == nil do
           false
         else
-          run(acc, "UPDATE rl_users SET totp_step = ? WHERE id = ?", [step, id])
-          true
+          # Only if no check since has used this step or a later one: of two at once, one moves it and the other
+          # is refused.
+          changed(acc, "UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)", [
+            step,
+            id,
+            step
+          ]) == 1
         end
       else
-        hashes = if JS.truthy?(r["totp_recovery"]), do: JS.parse!(JS.string(r["totp_recovery"])), else: []
+        read = if JS.truthy?(r["totp_recovery"]), do: JS.string(r["totp_recovery"])
+        hashes = if read, do: JS.parse!(read), else: []
         hash = recovery_hash(given)
 
         case Enum.find_index(hashes, &(&1 == hash)) do
@@ -275,12 +289,13 @@ defmodule Runlight.Accounts do
             false
 
           at ->
-            run(acc, "UPDATE rl_users SET totp_recovery = ? WHERE id = ?", [
+            # Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not
+            # used twice.
+            changed(acc, "UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?", [
               JS.stringify(List.delete_at(hashes, at)),
-              id
-            ])
-
-            true
+              id,
+              read
+            ]) == 1
         end
       end
     end

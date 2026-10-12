@@ -683,6 +683,7 @@ defmodule Runlight.Routes do
   # The most a connected install's answer may weigh: a report, and an export or a CSV.
   @pass_max_bytes 16 * 1024 * 1024
   @pass_download_max_bytes 256 * 1024 * 1024
+  @pass_realtime_max_bytes 4 * 1024 * 1024
 
   # Answers a read for a site counted by another install by asking that install, with its token and its own id for
   # the site, and handing back what it says.
@@ -712,7 +713,12 @@ defmodule Runlight.Routes do
         # A long report or an export is worked out in full before the install sends a byte, so reads get two minutes.
         timeout: if(write, do: 30_000, else: 120_000),
         # The answer is held whole before it is passed on, so it has a ceiling, an export's the higher.
-        max_bytes: if(download, do: @pass_download_max_bytes, else: @pass_max_bytes)
+        max_bytes:
+          cond do
+            download -> @pass_download_max_bytes
+            path == "/api/realtime" -> @pass_realtime_max_bytes
+            true -> @pass_max_bytes
+          end
       )
 
     case fetched do
@@ -1133,7 +1139,7 @@ defmodule Runlight.Routes do
         # Only a public address is fetched, whatever the name resolves to now.
         case Runlight.Safefetch.public_fetch(rl, "https://#{domain}#{Runlight.link_domain_check()}",
                timeout: 5000,
-               max_bytes: 65_536,
+               max_bytes: 16_384,
                truncate: true
              ) do
           {:ok, answer} ->
@@ -1174,15 +1180,8 @@ defmodule Runlight.Routes do
   defp pick_key(rl) do
     Runlight.init(rl)
 
-    case Store.setting(rl.store, "pick-key") do
-      nil ->
-        made = Hash.random_id(32)
-        Store.set_setting(rl.store, "pick-key", made)
-        made
-
-      saved ->
-        saved
-    end
+    # Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+    Store.setting_or_add(rl.store, "pick-key", fn -> Hash.random_id(32) end)
   end
 
   defp hex(text), do: Base.encode16(text, case: :lower)
@@ -1234,15 +1233,8 @@ defmodule Runlight.Routes do
   defp embed_key(rl) do
     Runlight.init(rl)
 
-    case Store.setting(rl.store, "embed-key") do
-      nil ->
-        made = Hash.random_id(32)
-        Store.set_setting(rl.store, "embed-key", made)
-        made
-
-      saved ->
-        saved
-    end
+    # Written only if no other request wrote one first, so nothing signed with a key that lost goes stale.
+    Store.setting_or_add(rl.store, "embed-key", fn -> Hash.random_id(32) end)
   end
 
   # An embed token that still exists, for a site that still does.
@@ -1747,56 +1739,117 @@ defmodule Runlight.Routes do
     now = Runlight.now(rl)
     key = {:asked, who}
 
-    State.one_at_a_time(rl.table, {:routes, routes.id, key}, fn ->
-      mine = state(routes, key) || %{at: [], open: 0}
-      mine = %{mine | at: Enum.filter(mine.at, &(now - &1 < 3_600_000))}
+    # The slot is taken inside the same turn as the check, before anything else is awaited, so questions
+    # sent at once each see the others.
+    taken =
+      State.one_at_a_time(rl.table, {:routes, routes.id, key}, fn ->
+        mine = state(routes, key) || %{at: [], open: 0}
+        mine = %{mine | at: Enum.filter(mine.at, &(now - &1 < 3_600_000))}
 
-      if length(mine.at) >= @ask_per_hour or mine.open >= @ask_at_once do
-        {:error, coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429)}
-      else
-        refusal =
-          if owner do
-            nil
-          else
-            limit = viewer_daily(rl)
-            day = "assistant-asked:#{JS.iso_day(now)}"
-            counts = JS.parse_or(Store.setting(rl.store, day) || "{}", Object.new())
-            counts = if JS.object?(counts), do: counts, else: Object.new()
-            asked = JS.number(JS.nullish(JS.prop(counts, who), 0))
-
-            if asked >= limit do
-              coded(
-                "Viewers can ask #{JS.string(limit)} questions a day. Ask again tomorrow.",
-                "assistant_daily",
-                429,
-                %{"limit" => JS.string(limit)}
-              )
-            else
-              Store.set_setting(rl.store, day, JS.stringify(Object.put(counts, who, asked + 1)))
-
-              for %{key: k} <- Store.settings_starting_with(rl.store, "assistant-asked:"),
-                  k != day,
-                  do: Store.set_setting(rl.store, k, nil)
-
-              nil
-            end
-          end
-
-        if refusal do
-          {:error, refusal}
+        if length(mine.at) >= @ask_per_hour or mine.open >= @ask_at_once do
+          put_state(routes, key, mine)
+          :soon
         else
           put_state(routes, key, %{at: mine.at ++ [now], open: mine.open + 1})
-
-          {:ok,
-           fn ->
-             State.one_at_a_time(rl.table, {:routes, routes.id, key}, fn ->
-               current = state(routes, key) || %{at: [], open: 1}
-               put_state(routes, key, %{current | open: current.open - 1})
-             end)
-           end}
+          :held
         end
+      end)
+
+    release = fn give_back ->
+      State.one_at_a_time(rl.table, {:routes, routes.id, key}, fn ->
+        current = state(routes, key) || %{at: [], open: 1}
+        current = %{current | open: max(current.open - 1, 0)}
+
+        current =
+          if give_back,
+            do: %{current | at: List.delete(current.at, now)},
+            else: current
+
+        put_state(routes, key, current)
+      end)
+    end
+
+    soon = fn ->
+      coded("You have asked a lot in a short time. Wait a little and ask again.", "assistant_soon", 429)
+    end
+
+    if taken == :soon do
+      {:error, soon.()}
+    else
+      counted =
+        if owner do
+          true
+        else
+          try do
+            count_ask(rl, who, now)
+          rescue
+            error ->
+              release.(true)
+              reraise error, __STACKTRACE__
+          end
+        end
+
+      case counted do
+        true ->
+          {:ok, fn -> release.(false) end}
+
+        nil ->
+          release.(true)
+          {:error, soon.()}
+
+        limit ->
+          release.(true)
+
+          {:error,
+           coded(
+             "Viewers can ask #{JS.string(limit)} questions a day. Ask again tomorrow.",
+             "assistant_daily",
+             429,
+             %{"limit" => JS.string(limit)}
+           )}
       end
-    end)
+    end
+  end
+
+  # Counts a viewer's question in their own row for the day, or answers the daily limit when it is reached. The
+  # row only ever moves from the count read to the next one, so of questions sent at once, by one viewer or by
+  # every process on the database, each count is taken once. Nil when the row kept changing underneath.
+  defp count_ask(rl, who, now) do
+    limit = viewer_daily(rl)
+
+    if limit < 1 do
+      limit
+    else
+      day = "assistant-asked:#{JS.iso_day(now)}:"
+      count_ask(rl, limit, day, day <> who, 20)
+    end
+  end
+
+  defp count_ask(_rl, _limit, _day, _key, 0), do: nil
+
+  defp count_ask(rl, limit, day, key, tries) do
+    case Store.setting(rl.store, key) do
+      nil ->
+        if Store.add_setting(rl.store, key, "1") do
+          # A viewer's first question of the day clears the days before.
+          for %{key: old} <- Store.settings_starting_with(rl.store, "assistant-asked:"),
+              not String.starts_with?(old, day),
+              do: Store.set_setting(rl.store, old, nil)
+
+          true
+        else
+          count_ask(rl, limit, day, key, tries - 1)
+        end
+
+      seen ->
+        count = JS.number(seen)
+
+        cond do
+          count >= limit -> limit
+          Store.swap_setting(rl.store, key, seen, JS.string(count + 1)) -> true
+          true -> count_ask(rl, limit, day, key, tries - 1)
+        end
+    end
   end
 
   ## Tokens
@@ -2896,15 +2949,6 @@ defmodule Runlight.Routes do
                     end
                   end
 
-                remote == nil and retention != :undefined ->
-                  Runlight.set_retention(
-                    rl,
-                    id,
-                    if(retention == nil, do: nil, else: JS.normalize(JS.number(retention)))
-                  )
-
-                  nil
-
                 true ->
                   nil
               end
@@ -2913,6 +2957,18 @@ defmodule Runlight.Routes do
               early
             else
               patch = Object.new()
+
+              # updateSite checks every field, hostnames too, before it changes anything.
+              patch =
+                if remote == nil and retention != :undefined,
+                  do:
+                    Object.put(
+                      patch,
+                      "retentionMonths",
+                      if(retention == nil, do: nil, else: JS.normalize(JS.number(retention)))
+                    ),
+                  else: patch
+
               patch = if name != :undefined, do: Object.put(patch, "name", JS.string(name)), else: patch
               patch = if timezone != :undefined, do: Object.put(patch, "timezone", JS.string(timezone)), else: patch
 

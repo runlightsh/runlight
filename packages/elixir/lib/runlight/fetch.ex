@@ -23,11 +23,15 @@ defmodule Runlight.Fetch do
       (`Runlight.Safefetch` sets it). A fetcher that cannot choose the
       address it connects to may ignore it, as Safefetch checks the name
       just before.
+    * `:service` - true to connect only to an address that is not link-local
+      or a cloud metadata service (`Runlight.Safefetch.service_fetch/3` sets
+      it). A name that does not resolve is refused. A fetcher that cannot
+      choose the address may ignore it, as the name is checked just before.
 
   `httpc/2` is the default, on Erlang's own `:httpc` with certificates
   verified against the system's. A public fetch goes through an `:httpc`
   profile of Runlight's own, which never has a proxy, whatever an app sets on
-  the default profile.
+  the default profile; so does a service fetch.
   """
 
   alias Runlight.Http.Response
@@ -43,9 +47,10 @@ defmodule Runlight.Fetch do
   @spec httpc(String.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
   def httpc(url, opts \\ []) do
     public = Keyword.get(opts, :public, false)
+    service = Keyword.get(opts, :service, false)
 
-    case pin(url, public) do
-      {:ok, target, host, socket_opts} -> httpc(url, target, host, socket_opts, opts, profile(public))
+    case pin(url, if(public, do: :public, else: if(service, do: :service))) do
+      {:ok, target, host, socket_opts} -> httpc(url, target, host, socket_opts, opts, profile(public or service))
       {:error, reason} -> {:error, reason}
     end
   end
@@ -113,9 +118,29 @@ defmodule Runlight.Fetch do
   # connection goes to one of them, so a name that answers differently a moment later gets nowhere. The URL keeps
   # its name for the Host header, SNI, and the certificate check. Socket options make httpc open a connection of
   # its own rather than reuse one another name left open to the same address.
-  defp pin(url, false), do: {:ok, url, nil, []}
+  defp pin(url, nil), do: {:ok, url, nil, []}
 
-  defp pin(url, true) do
+  defp pin(url, :service) do
+    uri = URI.parse(url)
+    host = (uri.host || "") |> String.trim_leading("[") |> String.trim_trailing("]")
+
+    if match?({:ok, _}, :inet.parse_strict_address(String.to_charlist(host))) do
+      {:ok, url, nil, []}
+    else
+      case Safefetch.service_address(host) do
+        {:ok, address} ->
+          {:ok, pinned(uri, host, address), authority(uri, host), [socket_opts: [ipfamily: family(address)]]}
+
+        {:error, :refused} ->
+          {:error, {:address_refused, host}}
+
+        {:error, :nxdomain} ->
+          {:error, :nxdomain}
+      end
+    end
+  end
+
+  defp pin(url, :public) do
     uri = URI.parse(url)
     host = uri.host || ""
     literal = match?({:ok, _}, :inet.parse_strict_address(String.to_charlist(host)))
@@ -130,15 +155,20 @@ defmodule Runlight.Fetch do
       true ->
         case Safefetch.checked_address(host) do
           {:ok, address} ->
-            family = if String.contains?(address, ":"), do: :inet6, else: :inet
-            authority = if uri.port == URI.default_port(uri.scheme || ""), do: host, else: "#{host}:#{uri.port}"
-            {:ok, URI.to_string(%{uri | host: address}), authority, [socket_opts: [ipfamily: family]]}
+            {:ok, pinned(uri, host, address), authority(uri, host), [socket_opts: [ipfamily: family(address)]]}
 
           error ->
             error
         end
     end
   end
+
+  defp family(address), do: if(String.contains?(address, ":"), do: :inet6, else: :inet)
+
+  defp authority(uri, host),
+    do: if(uri.port == URI.default_port(uri.scheme || ""), do: host, else: "#{host}:#{uri.port}")
+
+  defp pinned(uri, _host, address), do: URI.to_string(%{uri | host: address})
 
   # How often an answer httpc keeps to itself is weighed, in milliseconds.
   @weigh_every 50

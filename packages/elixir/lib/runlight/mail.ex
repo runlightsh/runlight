@@ -217,6 +217,13 @@ defmodule Runlight.Mail do
           code: "address_refused",
           params: [{"host", host}]
 
+      {:error, {:redirect_refused, from, to}} ->
+        raise MailError,
+          message:
+            "#{from} redirected to #{to}. Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead",
+          code: "redirect_refused",
+          params: [{"host", from}, {"to", to}]
+
       {:error, reason} ->
         detail = fetch_message(reason)
         host = host_of(url)

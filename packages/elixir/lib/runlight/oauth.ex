@@ -39,15 +39,8 @@ defmodule Runlight.OAuth do
 
   # The key client ids are signed with, made on first use and kept in the database for every process.
   defp client_key(rl) do
-    case Store.setting(rl.store, "oauth-key") do
-      nil ->
-        made = Hash.random_id(32)
-        Store.set_setting(rl.store, "oauth-key", made)
-        made
-
-      saved ->
-        saved
-    end
+    # Written only if no other request wrote one first, so every process signs with the same key.
+    Store.setting_or_add(rl.store, "oauth-key", fn -> Hash.random_id(32) end)
   end
 
   # The app a client id names, and where to note that it connected.
@@ -101,14 +94,13 @@ defmodule Runlight.OAuth do
   @doc "The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it."
   def agents_key(rl, site, replace \\ false) do
     name = "observe-key:#{site}"
-    saved = if replace, do: nil, else: Store.setting(rl.store, name)
 
-    if saved in [nil, ""] do
+    if replace do
       key = "rlo_" <> Hash.random_id(20)
       Store.set_setting(rl.store, name, key)
       key
     else
-      saved
+      Store.setting_or_add(rl.store, name, fn -> "rlo_" <> Hash.random_id(20) end)
     end
   end
 

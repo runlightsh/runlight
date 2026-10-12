@@ -17,7 +17,7 @@ defmodule Runlight.Assistant do
   @deadline_ms 120_000
   @max_tokens 1500
   # The most a provider's answer may weigh; one past it is cut short and reads as unreadable.
-  @max_bytes 16 * 1024 * 1024
+  @max_bytes 4 * 1024 * 1024
 
   @doc "The services the assistant can use, as the setup form lists them."
   def providers do
@@ -121,6 +121,15 @@ defmodule Runlight.Assistant do
       params: [{"host", host}]
   end
 
+  # A service that sent the request to another origin, which would have carried the key, and the question with it.
+  defp redirected(host, to) do
+    raise AssistantError,
+      message:
+        "#{host} redirected to #{to}. Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead",
+      code: "redirect_refused",
+      params: [{"host", host}, {"to", to}]
+  end
+
   defp service_fetch(rl, url, opts), do: Runlight.Safefetch.service_fetch(&Runlight.fetch(rl, &1, &2), url, opts)
 
   defp post(rl, url, headers, body, deadline) do
@@ -137,6 +146,9 @@ defmodule Runlight.Assistant do
          ) do
       {:error, {:address_refused, host}} ->
         refused_address(host)
+
+      {:error, {:redirect_refused, host, to}} ->
+        redirected(host, to)
 
       {:error, :timeout} ->
         host = host_of(url)
@@ -504,6 +516,9 @@ defmodule Runlight.Assistant do
 
         {:error, {:address_refused, refused}} ->
           refused_address(refused)
+
+        {:error, {:redirect_refused, from, to}} ->
+          redirected(from, to)
 
         {:error, _} ->
           raise AssistantError, message: "Could not reach #{host}", code: "unreachable", params: [{"host", host}]
