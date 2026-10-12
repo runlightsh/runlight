@@ -133,14 +133,16 @@ export function createServer(options: ServerOptions): RunlightServer {
     try {
       // A domain pointed at this server for short links answers at its root, with links one segment deep. The
       // server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
-      // signed in, so a link domain added on the dashboard's own name can always be removed again.
-      const linkable = path === LINK_DOMAIN_CHECK || (/^\/[^/]*$/.test(path) && !SERVER_PATHS.has(path) && !(path === "/" && (await web.signedIn(request))));
+      // signed in, so a link domain added on the dashboard's own name can always be removed again. /go/:slug is
+      // the server's own link path, which a link domain answers as a path with no link (a 404), as every adapter does.
+      const own = request.method === "GET" && /^\/go\/[^/]+\/?$/.test(path);
+      const linkable = path === LINK_DOMAIN_CHECK || own || (/^\/[^/]*$/.test(path) && !SERVER_PATHS.has(path) && !(path === "/" && (await web.signedIn(request))));
       if (linkable && !(publicHost && hostOf(request) === publicHost)) {
         const linked = await rl.linkDomainResponse(request, context);
         if (linked) return linked;
       }
       if (path === "/healthz") return new Response("ok", { headers: { "content-type": "text/plain", "cache-control": "no-store" } });
-      if (/^\/go\/[^/]+\/?$/.test(path) && request.method === "GET") return await links(request, context);
+      if (own) return await links(request, context);
       // Everything else, the sign-in pages and People included, is the routes'.
       return await routes.handler(request, context);
     } catch (error) {
