@@ -32,6 +32,11 @@ defmodule Runlight.Collate do
   defp cmp(a, b) when a > b, do: 1
   defp cmp(_, _), do: 0
 
+  # ICU's root order of the printable ASCII characters that are neither digits nor letters, as Node's
+  # localeCompare has them (the Python port holds the same list).
+  @icu_ascii ~c" _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
+  @icu_rank @icu_ascii |> Enum.with_index() |> Map.new()
+
   # Punctuation and spaces sort before digits, and digits before letters, as ICU orders them.
   defp primary(s) do
     s
@@ -43,7 +48,7 @@ defmodule Runlight.Collate do
       cond do
         c in ?a..?z -> 3_000_000 + c
         c in ?0..?9 -> 2_000_000 + c
-        c < 128 -> 1_000_000 + c
+        c < 128 -> 1_000_000 + Map.get(@icu_rank, c, 1000 + c)
         true -> 3_000_000 + c
       end
     end)

@@ -1,8 +1,8 @@
 defmodule Runlight.PureTest do
   @moduledoc """
   The pure modules against the fixtures written from the TypeScript SDK:
-  conformance/url.json and ua.json, and the PHP port's sources, query,
-  payload, time, journeys, zip, goals, geo, and messages fixtures.
+  conformance/url.json and ua.json, and the PHP port's ua, sources, query,
+  payload, time, journeys, zip, goals, geo, messages, and version fixtures.
   """
   use ExUnit.Case, async: true
 
@@ -103,6 +103,47 @@ defmodule Runlight.PureTest do
         assert (agent && JS.obj(name: agent.name, kind: agent.kind)) == c["agent"], ua
       end
     end
+  end
+
+  test "user agents, the wider fixture" do
+    cases = Fixtures.php("ua.json")["cases"]
+    assert length(cases) > 200
+
+    failures =
+      for c <- cases,
+          hints = c["hints"] || Object.new(),
+          client =
+            Ua.parse_client(
+              c["ua"],
+              %{brands: hints["brands"], mobile: hints["mobile"], platform: hints["platform"]},
+              c["screenWidth"]
+            ),
+          agent = Ua.ai_agent(c["ua"]),
+          got =
+            JS.obj(
+              agent: agent && JS.obj(name: agent.name, company: agent.company, kind: agent.kind, token: agent.token),
+              bot: Ua.bot?(c["ua"]),
+              client:
+                JS.obj(
+                  browser: client.browser,
+                  browserVersion: client.browser_version,
+                  os: client.os,
+                  osVersion: client.os_version,
+                  device: client.device
+                )
+            ),
+          want = JS.obj(agent: c["agent"], bot: c["bot"], client: c["client"]),
+          JS.stringify(got) != JS.stringify(want),
+          do: "#{c["ua"]} gave #{JS.stringify(got)}"
+
+    assert Enum.take(failures, 20) == []
+  end
+
+  test "the version, the API's version, and the icon are the TypeScript SDK's" do
+    f = Fixtures.php("version.json")
+    assert Runlight.Assets.version() == f["version"]
+    assert Runlight.Assets.api_version() == f["apiVersion"]
+    assert Runlight.Assets.icon() == f["icon"]
   end
 
   defp source_obj(nil), do: nil
@@ -449,6 +490,33 @@ defmodule Runlight.PureTest do
     end
 
     for c <- f["patterns"], do: assert(Goals.page_pattern(c["input"]) == c["result"], c["input"])
+
+    goal = fn id, fields ->
+      JS.obj(
+        [id: id, site: "s", name: id, kind: "event", match: id] ++
+          fields ++ [valueMode: "none", currency: "USD", createdAt: 5]
+      )
+    end
+
+    sites = [
+      JS.obj(id: "s", name: "S", hostnames: ["www.example.com", "shop.example.com"], timezone: "UTC"),
+      JS.obj(id: "t", name: "T", hostnames: [], timezone: "UTC"),
+      JS.obj(id: "u", name: "U", hostnames: ["u.example"], timezone: "UTC")
+    ]
+
+    goals = [
+      goal.("cccccccccccccccccccccccc", name: "Buy", kind: "click", match: ".buy", clickBy: "selector"),
+      goal.("dddddddddddddddddddddddd",
+        name: "Out",
+        kind: "click",
+        match: "https://x.example/*",
+        clickBy: "link",
+        site: "t"
+      ),
+      goal.("eeeeeeeeeeeeeeeeeeeeeeee", name: "E", site: "u")
+    ]
+
+    assert JS.stringify(Goals.click_rules(sites, goals)) == JS.stringify(f["rules"])
   end
 
   test "locations from headers and lookups" do
@@ -476,6 +544,19 @@ defmodule Runlight.PureTest do
         end
 
       assert canon(loc.(Geo.locate(headers, c["ip"], lookup))) == canon(c["location"]), JS.stringify(c)
+    end
+
+    for db <- f["databases"] do
+      reader = Runlight.Mmdb.new(Base.decode64!(db["base64"]))
+      assert reader.metadata["ip_version"] == db["ipVersion"]
+      assert reader.metadata["record_size"] == db["recordSize"]
+      lookup = Geo.lookup_from(reader)
+
+      for c <- db["records"] do
+        label = "#{db["ipVersion"]}/#{db["recordSize"]} #{c["ip"]}"
+        assert canon(Runlight.Mmdb.get(reader, c["ip"])) == canon(c["record"]), label
+        assert canon(loc.(lookup.(c["ip"]))) == canon(c["location"]), label
+      end
     end
   end
 
