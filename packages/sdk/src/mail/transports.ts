@@ -1,5 +1,6 @@
 import { sesSend } from "./ses.js";
 import { smtpSend } from "./smtp.js";
+import { readTextCapped } from "../body.js";
 import { MetadataAddressError, RedirectRefusedError, serviceFetch } from "../safefetch.js";
 
 export interface Message {
@@ -109,8 +110,10 @@ async function post(url: string, init: { headers: Record<string, string>; body: 
     const host = new URL(url).host;
     throw new MailError(`Could not reach ${host}: ${(error as Error).message}`, "mail_unreachable", { host, detail: (error as Error).message });
   }
+  if (response.ok || !explains) await response.body?.cancel().catch(() => {});
   if (response.ok) return;
-  const message = explains ? serviceMessage(await response.text().catch(() => "")) : "";
+  // Read no further than an error could need, so an answer without end never fills memory.
+  const message = explains ? serviceMessage(await readTextCapped(response, 65_536).catch(() => "")) : "";
   const host = new URL(url).host;
   throw new MailError(`${host} answered ${response.status}${message ? `: ${message}` : ""}`, "mail_refused", { host, detail: `${response.status}${message ? ` ${message}` : ""}` });
 }

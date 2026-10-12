@@ -1,5 +1,6 @@
 import type { MailConfig, Message } from "./transports.js";
 import { MailError, serviceMessage } from "./transports.js";
+import { readTextCapped } from "../body.js";
 
 /**
  * Amazon SES (API v2) with a hand-rolled Signature Version 4, so there is no
@@ -85,8 +86,9 @@ export async function sesSend(config: MailConfig, m: Message, from: string): Pro
   } catch (error) {
     throw new MailError(`Could not reach Amazon SES: ${(error as Error).message}`, "mail_unreachable", { host: "Amazon SES", detail: (error as Error).message });
   }
-  if (!response.ok) {
-    const message = serviceMessage(await response.text().catch(() => ""));
+  if (response.ok) await response.body?.cancel().catch(() => {});
+  else {
+    const message = serviceMessage(await readTextCapped(response, 65_536).catch(() => ""));
     throw new MailError(`Amazon SES answered ${response.status}${message ? `: ${message}` : ""}`, "mail_refused", { host: "Amazon SES", detail: `${response.status}${message ? ` ${message}` : ""}` });
   }
 }

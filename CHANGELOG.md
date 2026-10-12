@@ -13,6 +13,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Fixed
 
 - Changing a site in the dashboard checks every field, its domains included, before it changes anything, so a change refused for a bad or taken domain no longer shortens how long visits are kept, deleting the older ones, or clears the days built in the old timezone. Visits are pruned only once the change is saved.
+- Answers from an AI model's API, its list of models, a mail service's error, a link domain's check, and a connected install's live visitors are read only so far (4 MiB for a model and an install, 64 KiB for an error, 16 KiB for a check), and a body nobody reads is let go, so a service that answers without end cannot fill memory.
 
 ## 0.1.2 - 2026-10-12
 

@@ -9,6 +9,7 @@
  * OpenRouter, Ollama, LM Studio, and most others speak. Plain fetch, no SDKs.
  */
 import { INSTRUCTIONS, TOOLS, callTool, type ApiRead } from "./mcp.js";
+import { readJsonCapped } from "./body.js";
 import { MetadataAddressError, RedirectRefusedError, serviceFetch } from "./safefetch.js";
 
 export interface Provider {
@@ -82,6 +83,9 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
 const TOO_LONG = "That question took too long to answer. Try asking something narrower.";
 
 /** Stops when the question's time is up or the person has left, before more work starts. */
+/** The most of a model's answer, or its list of models, read; past it the answer counts as unreadable. */
+const MAX_ANSWER_BYTES = 4 * 1024 * 1024;
+
 function inTime(deadline: number, signal?: AbortSignal): void {
   if (signal?.aborted) throw new AssistantError("The question was cancelled.", "assistant_cancelled");
   if (Date.now() >= deadline) throw new AssistantError(TOO_LONG, "assistant_slow");
@@ -115,7 +119,7 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
       ? new AssistantError(`Could not reach ${host}: it took too long to answer`, "assistant_timeout", { host })
       : new AssistantError(`Could not reach ${host}: the connection failed`, "unreachable", { host });
   }
-  const data = (await answer.json().catch(() => null)) as Record<string, unknown> | null;
+  const data = (await readJsonCapped(answer, MAX_ANSWER_BYTES).catch(() => null)) as Record<string, unknown> | null;
   if (!answer.ok) {
     // The service's own message, never the request (it carries the key).
     const error = data?.error as { message?: unknown } | string | undefined;
@@ -270,7 +274,7 @@ export async function listModels(settings: Omit<AssistantSettings, "model">): Pr
     if (error instanceof RedirectRefusedError) throw redirected(error);
     throw new AssistantError(`Could not reach ${new URL(base).host}`, "unreachable", { host: new URL(base).host });
   }
-  const data = (await answer.json().catch(() => null)) as { data?: Array<{ id?: unknown; display_name?: unknown; name?: unknown }>; error?: { message?: unknown } | string } | null;
+  const data = (await readJsonCapped(answer, MAX_ANSWER_BYTES).catch(() => null)) as { data?: Array<{ id?: unknown; display_name?: unknown; name?: unknown }>; error?: { message?: unknown } | string } | null;
   if (!answer.ok) {
     const message = typeof data?.error === "string" ? data.error : typeof data?.error?.message === "string" ? data.error.message : "";
     const host = new URL(base).host;
