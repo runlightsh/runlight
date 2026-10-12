@@ -57,6 +57,37 @@ final class Local implements DestructableInterface {
   public const SITE = 'default';
 
   /**
+   * Cloudflare's addresses, from cloudflare.com/ips-v4 and cloudflare.com/ips-v6.
+   *
+   * As of October 2026. Cloudflare rarely changes them. A site behind other
+   * proxies sets them in reverse_proxy_addresses instead.
+   */
+  private const CLOUDFLARE = [
+    '173.245.48.0/20',
+    '103.21.244.0/22',
+    '103.22.200.0/22',
+    '103.31.4.0/22',
+    '141.101.64.0/18',
+    '108.162.192.0/18',
+    '190.93.240.0/20',
+    '188.114.96.0/20',
+    '197.234.240.0/22',
+    '198.41.128.0/17',
+    '162.158.0.0/15',
+    '104.16.0.0/13',
+    '104.24.0.0/14',
+    '172.64.0.0/13',
+    '131.0.72.0/22',
+    '2400:cb00::/32',
+    '2606:4700::/32',
+    '2803:f800::/32',
+    '2405:b500::/32',
+    '2405:8100::/32',
+    '2a06:98c0::/29',
+    '2c0f:f248::/32',
+  ];
+
+  /**
    * Runlight, once made in this request.
    */
   private ?Runlight $runlight = NULL;
@@ -147,7 +178,10 @@ final class Local implements DestructableInterface {
    *
    * The URL is the one the browser asked for, escapes and all, and the
    * visitor's address is the one Drupal works out, which follows its
-   * reverse_proxy settings, since Runlight believes no header itself here.
+   * reverse_proxy settings, since Runlight believes no header itself here. A
+   * hosting platform's location headers, such as Cloudflare's cf-ipcountry,
+   * are believed only when the connection is from one of Cloudflare's own
+   * addresses, or from a reverse proxy Drupal is set to trust.
    *
    * @param \Symfony\Component\HttpFoundation\Request $request
    *   The request Drupal is serving.
@@ -160,7 +194,47 @@ final class Local implements DestructableInterface {
    */
   public static function visitorRequest(SymfonyRequest $request): Request {
     $read = HttpFoundation::request($request);
-    return new Request($read->url, $read->method, $read->headers, $read->text(), (string) $request->getClientIp());
+    $remote = (string) $request->server->get('REMOTE_ADDR', '');
+    $platform = self::fromCloudflare($remote) || $request->isFromTrustedProxy();
+    return (new Request($read->url, $read->method, $read->headers, $read->text(), (string) $request->getClientIp()))->with(platformHeaders: $platform);
+  }
+
+  /**
+   * Whether an address is one of Cloudflare's.
+   *
+   * @param string $address
+   *   The address the connection came from.
+   *
+   * @return bool
+   *   TRUE when it is in one of Cloudflare's ranges.
+   */
+  public static function fromCloudflare(string $address): bool {
+    // An IPv4 address written as IPv6, as some servers give it, is the IPv4
+    // address.
+    if (preg_match('/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i', $address, $mapped)) {
+      $address = $mapped[1];
+    }
+    $bytes = @inet_pton($address);
+    if ($bytes === FALSE) {
+      return FALSE;
+    }
+    foreach (self::CLOUDFLARE as $range) {
+      [$base, $bits] = explode('/', $range);
+      $network = inet_pton($base);
+      if ($network === FALSE || strlen($network) !== strlen($bytes)) {
+        continue;
+      }
+      $bits = (int) $bits;
+      $whole = intdiv($bits, 8);
+      if (substr($bytes, 0, $whole) !== substr($network, 0, $whole)) {
+        continue;
+      }
+      $rest = $bits % 8;
+      if ($rest === 0 || ((ord($bytes[$whole]) ^ ord($network[$whole])) & (0xff << (8 - $rest)) & 0xff) === 0) {
+        return TRUE;
+      }
+    }
+    return FALSE;
   }
 
   /**

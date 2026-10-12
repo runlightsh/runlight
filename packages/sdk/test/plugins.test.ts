@@ -539,6 +539,7 @@ test("the Drupal module counts a visitor by the address Drupal works out, and ta
         public function getContent(bool $stream = false): mixed { $s = fopen("php://memory", "r+"); fwrite($s, "{}"); rewind($s); return $s; }
         public function getRequestUri(): string { return "/runlight/e"; }
         public function getSchemeAndHttpHost(): string { return "https://www.example.com"; }
+        public function isFromTrustedProxy(): bool { return in_array($this->server->get("REMOTE_ADDR"), self::$trusted, true); }
         public function getClientIp(): ?string {
           $remote = $this->server->get("REMOTE_ADDR");
           if (!in_array($remote, self::$trusted, true)) return $remote;
@@ -562,6 +563,10 @@ test("the Drupal module counts a visitor by the address Drupal works out, and ta
       // A proxy Drupal is told about: the address it passes on.
       Request::$trusted = ["10.0.0.2"];
       $out[] = $address(new Request(["x-forwarded-for" => "203.0.113.7"], "10.0.0.2"));
+      // Location headers count from Cloudflare's addresses and from a proxy Drupal trusts, and from no one else.
+      Request::$trusted = ["10.0.0.2"];
+      $platform = static fn (string $remote): bool => Drupal\\runlight\\Local::visitorRequest(new Request(["cf-ipcountry" => "NZ"], $remote))->platformHeaders;
+      $out[] = [$platform("173.245.48.9"), $platform("104.16.1.1"), $platform("::ffff:104.16.1.1"), $platform("2606:4700::1"), $platform("203.0.113.9"), $platform("104.15.255.255"), $platform("2606:4701::1"), $platform("10.0.0.2"), $platform("10.0.0.3")];
       // Changes come only from the site's own pages.
       $same = static fn (string $method, array $headers): bool => Drupal\\runlight\\Local::sameSite(new Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", $method, $headers));
       $out[] = [
@@ -580,6 +585,7 @@ test("the Drupal module counts a visitor by the address Drupal works out, and ta
   assert.deepEqual(JSON.parse(answer), [
     ["203.0.113.9", "203.0.113.9"],
     ["203.0.113.7", "203.0.113.7"],
+    [true, true, true, true, false, false, false, true, false],
     [true, false, false, false, true, true, true],
   ]);
 });
