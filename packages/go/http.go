@@ -199,8 +199,28 @@ func (r *Runlight) LinkDomains(next http.Handler) http.Handler {
 // also answered with a path after it.
 var OAuthDocuments = []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"}
 
-// LinksHTTP answers short links on the app's own domain, at {LinkPath}/{slug}.
-func (r *Runlight) LinksHTTP() http.Handler { return HTTPHandler(r.LinkHandler()) }
+// LinksHTTP answers short links on the app's own domain, at {LinkPath}/{slug},
+// with Runlight's own 404 for a slug no link has. A request on a link domain
+// gets that domain's answer first, so the link path there is a 404 like any
+// other path with no link, wherever the app put LinkDomains.
+func (r *Runlight) LinksHTTP() http.Handler { return r.LinksHTTPOr(nil) }
+
+// LinksHTTPOr is LinksHTTP that hands a slug no link has (or one that is not
+// valid percent-encoding) to notFound, such as the router's not-found
+// handler, so the app's own 404 page answers it. A nil notFound answers
+// Runlight's own 404.
+func (r *Runlight) LinksHTTPOr(notFound http.Handler) http.Handler {
+	links := r.LinkHandler()
+	return r.LinkDomains(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// A short link reads no body, so the request is left as it came for notFound.
+		answer := links(req.Context(), headOf(req))
+		if answer.Status == 404 && notFound != nil {
+			notFound.ServeHTTP(w, req)
+			return
+		}
+		WriteHTTP(w, answer)
+	}))
+}
 
 // observerMax is how many AI agent fetches the Observer records at once.
 const observerMax = 64

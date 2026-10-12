@@ -267,8 +267,10 @@ func (s *Server) Handle(ctx context.Context, request *runlight.Request) *runligh
 	path := request.Parsed().Pathname
 	// A domain pointed at this server for short links answers at its root, with links one segment deep. The
 	// server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
-	// signed in, so a link domain added on the dashboard's own name can always be removed again.
-	linkable := path == runlight.LinkDomainCheck
+	// signed in, so a link domain added on the dashboard's own name can always be removed again. /go/:slug is
+	// the server's own link path, which a link domain answers as a path with no link (a 404), as every adapter does.
+	own := request.Method == "GET" && goLink.MatchString(path)
+	linkable := path == runlight.LinkDomainCheck || own
 	if !linkable && oneSegment.MatchString(path) && !serverPaths[path] {
 		linkable = true
 		if path == "/" {
@@ -290,7 +292,7 @@ func (s *Server) Handle(ctx context.Context, request *runlight.Request) *runligh
 	if path == "/healthz" {
 		return web.NewResponse(200, []byte("ok"), "content-type", "text/plain", "cache-control", "no-store")
 	}
-	if goLink.MatchString(path) && request.Method == "GET" {
+	if own {
 		return s.links(ctx, request)
 	}
 	// Everything else, the sign-in pages and People included, is the routes'.

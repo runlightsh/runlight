@@ -119,6 +119,9 @@ func TestServerSitesTrackingAndShortLinksOnTheirOwnDomains(t *testing.T) {
 	if r := s.do("GET", "/go/launch", "", ""); r.Status != 302 {
 		t.Fatal("every link also answers at /go/:slug on the server itself", r.Status)
 	}
+	if r := s.do("GET", "/go/launch", "go.example.com", ""); r.Status != 404 {
+		t.Fatal("but not on a link domain, which answers only its own links at its root", r.Status)
+	}
 	if r := s.do("GET", "/healthz", "", ""); r.Status != 200 || r.Text() != "ok" {
 		t.Fatal(r.Status)
 	}
