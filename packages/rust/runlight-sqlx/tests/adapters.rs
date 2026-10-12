@@ -117,6 +117,34 @@ async fn the_link_service_answers_a_link_domain() {
 }
 
 #[tokio::test]
+async fn the_link_path_is_no_link_on_a_link_domain_and_an_unknown_slug_is_a_404() {
+    let rl = linked().await;
+    // The service is what the app routes its link path to, so it asks about link domains first.
+    let answer = rl.link_service().oneshot(get("http://go.example.com/go/docs")).await.unwrap();
+    assert_eq!(location(&answer.map(Body::new)), (404, String::new()), "the link path on a link domain");
+    let answer = rl.link_service().oneshot(get("http://example.com/go/docs")).await.unwrap();
+    assert_eq!(location(&answer.map(Body::new)), (302, "https://docs.example.com/start".into()), "the app's own host");
+
+    // In an axum app, as the docs set it up: a matched route cannot hand on to the app's fallback, so
+    // a slug with no link is Runlight's own 404.
+    let routes = rl.routes(options()).unwrap();
+    let app: axum::Router = axum::Router::new()
+        .merge(routes.router())
+        .merge(rl.link_router())
+        .fallback(|| async { (http::StatusCode::NOT_FOUND, "the app's 404") })
+        .layer(axum::middleware::from_fn_with_state(rl.clone(), runlight::adapters::axum_support::middleware));
+    let answer = app.clone().oneshot(get("http://go.example.com/go/docs")).await.unwrap();
+    assert_eq!(location(&answer), (404, String::new()));
+    let answer = app.clone().oneshot(get("http://example.com/go/docs")).await.unwrap();
+    assert_eq!(location(&answer), (302, "https://docs.example.com/start".into()));
+    assert_eq!(
+        text(app.clone().oneshot(get("http://example.com/go/nope")).await.unwrap()).await,
+        (404, "text/plain; charset=utf-8".into(), "Not found".into())
+    );
+    assert_eq!(text(app.oneshot(get("http://example.com/elsewhere")).await.unwrap()).await.2, "the app's 404");
+}
+
+#[tokio::test]
 async fn the_axum_middleware_answers_a_link_domain_before_the_app() {
     let rl = linked().await;
     let routes = rl.routes(options()).unwrap();
