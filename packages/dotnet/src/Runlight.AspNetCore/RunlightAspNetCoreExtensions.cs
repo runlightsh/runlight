@@ -31,14 +31,17 @@ public static class RunlightAspNetCoreExtensions
     /// tracker cannot send a token) and are left out of OpenAPI documents. They allow anonymous requests, so an
     /// app whose fallback policy requires a signed-in user still reaches the tracker, the short links, and the
     /// dashboard's own sign-in; routes left open on purpose (<c>Token = null</c>) take the app's authorization
-    /// policy, apart from the short links. On a <see cref="WebApplication"/> it also adds a middleware, where it
-    /// is called, that answers link domains and records AI agent fetches (<paramref name="observe"/>).
+    /// policy, apart from the short links. It also adds a middleware, where it is called, that answers link
+    /// domains and records AI agent fetches (<paramref name="observe"/>): on a <see cref="WebApplication"/>, or
+    /// inside <c>UseEndpoints</c> on a Startup-style host, where it goes just before the endpoints, after
+    /// whatever the app put between <c>UseRouting</c> and <c>UseEndpoints</c>.
     /// </summary>
     /// <param name="endpoints">The app.</param>
     /// <param name="runlight">The Runlight to serve.</param>
     /// <param name="options">The routes' options, such as BasePath and Token.</param>
     /// <param name="observe">Whether to record the fetches of known AI agents on the app's other pages.</param>
-    /// <exception cref="InvalidOperationException">On a route group, whose prefix the routes would not know of.</exception>
+    /// <exception cref="InvalidOperationException">On a route group, whose prefix the routes would not know of,
+    /// and on an endpoint builder that reaches no pipeline, where link domains could not be answered.</exception>
     public static IEndpointConventionBuilder MapRunlight(this IEndpointRouteBuilder endpoints, RunlightInstance runlight, RoutesOptions? options = null, bool observe = true)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
@@ -68,16 +71,25 @@ public static class RunlightAspNetCoreExtensions
             dashboard.AllowAnonymous();
         }
 
-        IEndpointConventionBuilder links = endpoints.MapGet(runlight.LinkPath + "/{slug}", serve);
+        IEndpointConventionBuilder links = endpoints.MapGet(runlight.LinkPath + "/{slug}", context => FollowAsync(context, runlight));
         links.ExcludeFromDescription();
         links.AllowAnonymous();
 
-        if (endpoints is IApplicationBuilder app)
-        {
-            app.Use(Front(runlight, routes, observe, owns: null));
-        }
+        IApplicationBuilder app = PipelineOf(endpoints)
+            ?? throw new InvalidOperationException("Runlight: MapRunlight cannot reach the app's middleware from here, so short links on a link domain would never answer. Call app.UseRunlight() in place of MapRunlight, or map it on the WebApplication.");
+        app.Use(Front(runlight, routes, observe, link: null, owns: null));
         return new Conventions([.. built, links]);
     }
+
+    /// <summary>
+    /// The pipeline the endpoints sit in, where the middleware for link domains goes. A WebApplication is both;
+    /// inside UseEndpoints on a Startup-style host the builder ASP.NET Core passes is a separate object that keeps
+    /// the app in a public property of its own (since ASP.NET Core 3.0), and its middleware added while
+    /// UseEndpoints runs lands just before the endpoints. Null when neither is there.
+    /// </summary>
+    private static IApplicationBuilder? PipelineOf(IEndpointRouteBuilder endpoints) =>
+        endpoints as IApplicationBuilder
+        ?? endpoints.GetType().GetProperty("ApplicationBuilder", typeof(IApplicationBuilder))?.GetValue(endpoints) as IApplicationBuilder;
 
     /// <summary>
     /// As <see cref="MapRunlight(IEndpointRouteBuilder, RunlightInstance, RoutesOptions?, bool)"/>, with the app's
@@ -91,8 +103,9 @@ public static class RunlightAspNetCoreExtensions
 
     /// <summary>
     /// Runlight as middleware, ahead of whatever follows it: link domains first (they leave the dashboard's own
-    /// paths alone), then short links at <c>{linkPath}/{slug}</c>, then the routes under their base path. Every
-    /// other request goes on to the app, after a page fetched by a known AI agent is recorded
+    /// paths alone), then short links at <c>{linkPath}/{slug}</c> when a link has that name, then the routes under
+    /// their base path. Every other request, a short link nobody has included, goes on to the app, so its own 404
+    /// page answers, after a page fetched by a known AI agent is recorded
     /// (<paramref name="observe"/>). For an app that wants Runlight ahead of its other middleware, or has no
     /// endpoint routing. Middleware carries no endpoint authorization, so routes left open on purpose
     /// (<c>Token = null</c>) sit behind the app's sign-in only when <c>UseAuthentication</c> and
@@ -106,8 +119,38 @@ public static class RunlightAspNetCoreExtensions
         Routes routes = runlight.Routes(options);
         string @base = Routes.NormaliseBase(options.BasePath ?? "/runlight");
         var link = new Regex("^" + Regex.Escape(runlight.LinkPath) + "/[^/]+/?\\z", RegexOptions.CultureInvariant);
-        return app.Use(Front(runlight, routes, observe, (method, path) =>
-            (method == "GET" && link.IsMatch(path)) || @base.Length == 0 || path == @base || path.StartsWith(@base + "/", StringComparison.Ordinal)));
+        return app.Use(Front(runlight, routes, observe, link, (method, path) =>
+            @base.Length == 0 || path == @base || path.StartsWith(@base + "/", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// The short-link endpoint: the link's redirect, or, with no link by that name, a bare 404 as ASP.NET Core
+    /// answers a path it has no endpoint for, so the app's status code pages show their own page.
+    /// </summary>
+    private static async Task FollowAsync(HttpContext context, RunlightInstance runlight)
+    {
+        Response answer;
+        try
+        {
+            Request head = RunlightHttp.HeadOf(context);
+            answer = await runlight.LinkHandler()(head, head.RemoteAddress, context.RequestAborted).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception error)
+        {
+            await Console.Error.WriteLineAsync("Runlight: " + error.Message).ConfigureAwait(false);
+            answer = Routes.Coded("Internal error", "internal", 500);
+        }
+        if (answer.Status == 404)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        context.Response.OnCompleted(runlight.IdleAsync);
+        await RunlightHttp.WriteAsync(context, answer, context.RequestAborted).ConfigureAwait(false);
     }
 
     /// <summary>As <see cref="UseRunlight(IApplicationBuilder, RunlightInstance, RoutesOptions?, bool)"/>, with the app's Runlight singleton.</summary>
@@ -118,10 +161,12 @@ public static class RunlightAspNetCoreExtensions
     }
 
     /// <summary>
-    /// The middleware: a link domain answers whatever the path; a request <paramref name="owns"/> says is
-    /// Runlight's is answered; anything else goes on, with an AI agent's page fetch recorded first.
+    /// The middleware: a link domain answers whatever the path; a GET for <paramref name="link"/> is answered when
+    /// a link has that name; a request <paramref name="owns"/> says is Runlight's is answered; anything else goes
+    /// on, with an AI agent's page fetch recorded first. A short link nobody has goes on to the app too, so its own
+    /// 404 page answers.
     /// </summary>
-    private static Func<HttpContext, RequestDelegate, Task> Front(RunlightInstance runlight, Routes routes, bool observe, Func<string, string, bool>? owns) =>
+    private static Func<HttpContext, RequestDelegate, Task> Front(RunlightInstance runlight, Routes routes, bool observe, Regex? link, Func<string, string, bool>? owns) =>
         async (context, next) =>
         {
             Request head = RunlightHttp.HeadOf(context);
@@ -129,6 +174,11 @@ public static class RunlightAspNetCoreExtensions
             try
             {
                 linked = await runlight.LinkDomainResponseAsync(head, head.RemoteAddress, context.RequestAborted).ConfigureAwait(false);
+                if (linked == null && link != null && head.Method == "GET" && link.IsMatch(new Url(head.Url).Pathname))
+                {
+                    Response followed = await runlight.LinkHandler()(head, head.RemoteAddress, context.RequestAborted).ConfigureAwait(false);
+                    linked = followed.Status == 404 ? null : followed;
+                }
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
