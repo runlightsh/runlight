@@ -17,7 +17,7 @@ import { seal, unseal } from "../packages/sdk/src/mail/secret.ts";
 import { signV4 } from "../packages/sdk/src/mail/ses.ts";
 import { mime, smtpSend } from "../packages/sdk/src/mail/smtp.ts";
 import { send, serviceMessage } from "../packages/sdk/src/mail/transports.ts";
-import { publicAddress } from "../packages/sdk/src/safefetch.ts";
+import { publicAddress, publicFetchThroughGlobal } from "../packages/sdk/src/safefetch.ts";
 
 if (process.env.TZ !== "UTC") throw new Error("Run with TZ=UTC, as the PHP tests run");
 
@@ -61,6 +61,8 @@ const services = [
 ];
 const answers: Array<{ status: number; body: string } | "unreachable"> = [{ status: 200, body: "{}" }];
 const mailCases: unknown[] = [];
+// Every request goes through the stubbed fetch below, never out to the network.
+publicFetchThroughGlobal(true);
 const realFetch = globalThis.fetch;
 async function mailCase(config: Record<string, string>, m: object, answer: { status: number; body: string } | "unreachable") {
   const requests: Recorded[] = [];
