@@ -11,6 +11,7 @@ import { languages, translator } from "../packages/sdk/src/messages.ts";
 import { journeys } from "../packages/sdk/src/journeys.ts";
 import { TOOLS, callTool, mcpResponse } from "../packages/sdk/src/mcp.ts";
 import { AssistantError, acknowledgement, chat, listModels } from "../packages/sdk/src/assistant.ts";
+import { publicFetchThroughGlobal } from "../packages/sdk/src/safefetch.ts";
 
 const dir = new URL("../packages/php/tests/fixtures/", import.meta.url);
 mkdirSync(dir, { recursive: true });
@@ -564,6 +565,8 @@ const scenarios: Scenario[] = [
 ];
 
 const realFetch = globalThis.fetch;
+// The assistant's requests go through the stubbed fetch below, not out to the network.
+publicFetchThroughGlobal(true);
 const assistantRuns: unknown[] = [];
 for (const scenario of scenarios) {
   const requests: unknown[] = [];
