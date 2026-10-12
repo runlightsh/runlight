@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.2
+Stable tag: 0.1.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -121,7 +121,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.1.3 =
 * Changing a site in Runlight's dashboard checks every field before it changes anything, so a change refused for a bad or taken domain no longer shortens how long visits are kept or deletes older ones.
 * A mail service, mail webhook, or AI assistant that redirects to another address is refused before anything is sent there, so its key and the message never leave for a server you didn't choose.
 * Those requests connect to the address Runlight checked, so a name that changes between the check and the connection can't lead them to a cloud metadata address.
