@@ -67,7 +67,7 @@ The WordPress, Drupal, and Craft plugins add the script to your site and report 
 
 ## Privacy
 
-Runlight never sets a cookie and never stores an IP address, a full user agent, or anything else that could identify a person for longer than a day. Visitors are counted with a hash whose random salt changes every day and is then deleted, so it cannot be reversed. Read [how Runlight counts](https://runlight.sh/docs/privacy/) for the details.
+Runlight never sets a cookie and never stores an IP address, a full user agent, or anything else that could identify a person for more than two days. Visitors are counted with a hash whose random salt changes every day and is deleted within four days, so it cannot be reversed. A visitor lasts one day, or until a visit that runs past midnight ends. Read [how Runlight counts](https://runlight.sh/docs/privacy/) for the details.
 
 ## Contributing
 
