@@ -61,6 +61,20 @@ class RackAppTest < Minitest::Test
     assert_includes [301, 302, 307, 308], answer.status
     assert_equal "https://example.org/launch", answer.headers["location"]
     assert_equal "app saw GET /launch ", @app.get("/launch", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI).body
+    # The app's own link path is no link on a link domain, even for a link of its own.
+    on_domain = @app.get("/go/launch", "HTTP_HOST" => "go.example.com", "HTTP_USER_AGENT" => SAFARI)
+    assert_equal [404, "Not found"], [on_domain.status, on_domain.body]
+  end
+
+  def test_a_slug_with_no_link_reaches_the_app_and_alone_is_runlights_404
+    @rl.links.create("default", { "slug" => "launch", "url" => "https://example.org/launch" })
+    ["/go/missing", "/go/%E0"].each do |path|
+      assert_equal "app saw GET #{path} ", @app.get(path, "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI).body, path
+    end
+    alone = Rack::MockRequest.new(Rack::Lint.new(Runlight::RackApp.new(runlight: @rl, base_path: "/runlight", token: TOKEN)))
+    missing = alone.get("/go/missing", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI)
+    assert_equal [404, "Not found"], [missing.status, missing.body]
+    assert_equal 302, alone.get("/go/launch", "HTTP_HOST" => "example.com", "HTTP_USER_AGENT" => SAFARI).status
   end
 
   # A database that cannot be reached, for every statement.
