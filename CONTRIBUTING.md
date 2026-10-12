@@ -29,7 +29,7 @@ npm run check
 
 A few rules hold everywhere:
 
-- Never store an IP address, a full user agent, or any identifier that lasts longer than a day.
+- Never store an IP address or a full user agent. No identifier lasts more than two days: a visitor lasts one day, or until a visit that runs past midnight ends.
 - No em or en dashes anywhere in the repository, including commit messages. `scripts/check-dashes.mjs` checks.
 - Keep commit messages to one short line.
 
