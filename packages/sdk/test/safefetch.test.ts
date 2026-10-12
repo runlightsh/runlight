@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { MetadataAddressError, PrivateAddressError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, resolvesPrivately, serviceFetch } from "../src/safefetch.js";
+import { MetadataAddressError, PrivateAddressError, RedirectRefusedError, installAddress, installFetch, metadataAddress, metadataHost, publicAddress, publicFetch, resolvesPrivately, serviceFetch } from "../src/safefetch.js";
 
 test("link-local and cloud metadata addresses are told apart from loopback and private ones", async () => {
   for (const ip of ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe"]) {
@@ -115,9 +115,10 @@ test("a service's redirects are followed only while each one stays off link-loca
     seen.length = 0;
     await serviceFetch(`${base}/keep`, ask);
     assert.deepEqual(seen[1], { method: "POST", url: "/landed", body: "{}", authorization: "Bearer key", type: "application/json" });
+    // Another origin, even the same computer under another name, is never asked.
     seen.length = 0;
-    await serviceFetch(`${base}/elsewhere`, ask);
-    assert.deepEqual(seen[1], { method: "POST", url: "/landed", body: "{}", authorization: "", type: "application/json" });
+    await assert.rejects(serviceFetch(`${base}/elsewhere`, ask), (error: Error) => error instanceof RedirectRefusedError && (error as RedirectRefusedError).to === `http://localhost:${(server.address() as { port: number }).port}`);
+    assert.equal(seen.length, 1);
     // Past the last redirect, the redirect comes back as it is.
     seen.length = 0;
     assert.equal((await serviceFetch(`${base}/loop`, { redirects: 2 })).status, 302);
@@ -133,5 +134,57 @@ test("a service's redirects are followed only while each one stays off link-loca
     );
   } finally {
     server.close();
+  }
+});
+
+test("a service's redirect to another origin is refused before anything, its key or its body, is sent there", async () => {
+  const real = globalThis.fetch;
+  const asked: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    asked.push({ url: String(input), headers: { ...(init.headers as Record<string, string>) }, body: String(init.body ?? "") });
+    return new Response(null, { status: 307, headers: { location: "http://198.51.100.7/steal" } });
+  }) as typeof fetch;
+  try {
+    const refusedTo = (error: Error & { code?: string; params?: Record<string, string> }) => error.code === "redirect_refused" && error.params?.to === "http://198.51.100.7";
+    // Every header a service names its key in, and a 307 that would keep the body.
+    for (const key of ["authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-postmark-server-token"]) {
+      asked.length = 0;
+      await assert.rejects(serviceFetch("https://93.184.215.14/v1/messages", { method: "POST", headers: { [key]: "secret" }, body: "a conversation" }), RedirectRefusedError);
+      assert.equal(asked.length, 1, `${key}: nothing goes to the other origin`);
+    }
+    // https to http on the same host is another origin too.
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      asked.push({ url: String(input), headers: {}, body: "" });
+      return new Response(null, { status: 308, headers: { location: "http://93.184.215.14/v1/messages" } });
+    }) as typeof fetch;
+    asked.length = 0;
+    await assert.rejects(serviceFetch("https://93.184.215.14/v1/messages", { method: "POST", body: "{}" }), (error: Error) => error instanceof RedirectRefusedError && (error as RedirectRefusedError).to === "http://93.184.215.14");
+    assert.equal(asked.length, 1);
+    globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      asked.push({ url: String(input), headers: { ...(init.headers as Record<string, string>) }, body: String(init.body ?? "") });
+      return new Response(null, { status: 307, headers: { location: "http://198.51.100.7/steal" } });
+    }) as typeof fetch;
+
+    // The assistant, with Anthropic's x-api-key, both listing models and asking a question.
+    const { chat, listModels } = await import("../src/assistant.js");
+    asked.length = 0;
+    await assert.rejects(listModels({ provider: "anthropic", baseUrl: "https://93.184.215.14/v1", key: "sk-ant-secret" }), refusedTo);
+    await assert.rejects(
+      chat({ provider: "anthropic", model: "m", baseUrl: "https://93.184.215.14/v1", key: "sk-ant-secret" }, [{ role: "user", content: "How many visitors?" }], { site: { id: "a", name: "A", timezone: "UTC" }, today: "2026-10-12", view: "today", language: "en" }, async () => new Response("{}")),
+      refusedTo,
+    );
+    assert.deepEqual(asked.map((a) => [a.url, a.headers["x-api-key"]]), [["https://93.184.215.14/v1/models?limit=100", "sk-ant-secret"], ["https://93.184.215.14/v1/messages", "sk-ant-secret"]]);
+
+    // Mail services, with Brevo's api-key and Postmark's server token, and a webhook.
+    const { send, MailError } = await import("../src/mail/transports.js");
+    const message = { to: "me@example.com", from: "reports@example.com", subject: "Hi", html: "<p>Hi</p>", text: "Hi" };
+    const configs: Array<Record<string, string> & { service: string }> = [{ service: "brevo", apiKey: "xkeysib-secret" }, { service: "postmark", serverToken: "pm-secret" }, { service: "webhook", url: "https://93.184.215.14/hook" }];
+    for (const config of configs) {
+      asked.length = 0;
+      await assert.rejects(send(config, message), (error: Error) => error instanceof MailError && refusedTo(error));
+      assert.equal(asked.length, 1, `${config.service}: the email goes nowhere else`);
+    }
+  } finally {
+    globalThis.fetch = real;
   }
 });

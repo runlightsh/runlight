@@ -9,7 +9,7 @@
  * OpenRouter, Ollama, LM Studio, and most others speak. Plain fetch, no SDKs.
  */
 import { INSTRUCTIONS, TOOLS, callTool, type ApiRead } from "./mcp.js";
-import { MetadataAddressError, serviceFetch } from "./safefetch.js";
+import { MetadataAddressError, RedirectRefusedError, serviceFetch } from "./safefetch.js";
 
 export interface Provider {
   id: string;
@@ -93,6 +93,9 @@ function inTime(deadline: number, signal?: AbortSignal): void {
  */
 const refused = (error: MetadataAddressError) => new AssistantError(error.message, "address_refused", { host: error.host });
 
+/** A service that sent the request to another origin, which would have carried the key, and the question with it. */
+const redirected = (error: RedirectRefusedError) => new AssistantError(error.message, "redirect_refused", { host: error.host, to: error.to });
+
 async function post(url: string, headers: Record<string, string>, body: unknown, deadline: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
   inTime(deadline, signal);
   const left = deadline - Date.now();
@@ -106,6 +109,7 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
     });
   } catch (error) {
     if (error instanceof MetadataAddressError) throw refused(error);
+    if (error instanceof RedirectRefusedError) throw redirected(error);
     const host = new URL(url).host;
     throw (error as Error).name === "TimeoutError"
       ? new AssistantError(`Could not reach ${host}: it took too long to answer`, "assistant_timeout", { host })
@@ -263,6 +267,7 @@ export async function listModels(settings: Omit<AssistantSettings, "model">): Pr
     answer = await serviceFetch(`${base}/models${provider.protocol === "anthropic" ? "?limit=100" : ""}`, { headers, signal: AbortSignal.timeout(20_000) });
   } catch (error) {
     if (error instanceof MetadataAddressError) throw refused(error);
+    if (error instanceof RedirectRefusedError) throw redirected(error);
     throw new AssistantError(`Could not reach ${new URL(base).host}`, "unreachable", { host: new URL(base).host });
   }
   const data = (await answer.json().catch(() => null)) as { data?: Array<{ id?: unknown; display_name?: unknown; name?: unknown }>; error?: { message?: unknown } | string } | null;

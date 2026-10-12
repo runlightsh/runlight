@@ -7,6 +7,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Security
 
 - The assistant's limits hold for questions sent at once. A person's place among their two at a time and thirty an hour is taken before anything else is awaited, and a viewer's daily count is a row of their own for the day, moved only from the number read to the next, so a burst of questions, or several processes on one database, can no longer spend the owner's AI credit past the daily number, and two viewers' counts no longer overwrite each other.
+- A service's redirect to another origin is refused, in every language and in the WordPress, Drupal, and Craft plugins, with the code `redirect_refused`, before anything is sent there. Only the `Authorization`, `Proxy-Authorization`, and `Cookie` headers were dropped before, so Anthropic's `x-api-key`, Brevo's `api-key`, and Postmark's `x-postmark-server-token` went on to the new origin, and a 307 or 308 took the email or the conversation with them. A redirect from https to http counts as another origin. A redirect on the same origin is followed as before.
 
 ### Fixed
 
