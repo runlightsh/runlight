@@ -148,9 +148,11 @@ pub fn atob(text: &str) -> Option<Vec<u8>> {
     LENIENT.decode(clean).ok()
 }
 
-/// Where a request came from: the platform's headers, else the lookup.
-pub async fn locate(headers: &Headers, ip: &str, lookup: Option<&SharedGeo>) -> Location {
-    if let Some(found) = location_from_headers(headers)
+/// Where a request came from: the platform's headers, else the lookup. The headers are believed only with
+/// `trust_headers`, as the address is: without a proxy in front, a client writes them itself.
+pub async fn locate(headers: &Headers, ip: &str, lookup: Option<&SharedGeo>, trust_headers: bool) -> Location {
+    if trust_headers
+        && let Some(found) = location_from_headers(headers)
         && !found.country.is_empty()
     {
         return found;

@@ -365,6 +365,45 @@ async fn each_viewer_account_has_its_own_daily_questions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn questions_sent_at_once_count_once_each() {
+    let app = app(false, None).await;
+    let owner = app.owner().await;
+    let ada = app.invited(&owner, "ada@example.com", "viewer").await;
+    let bob = app.invited(&owner, "bob@example.com", "viewer").await;
+    let set = runlight::obj! { "provider" => "anthropic", "model" => "claude", "key" => "sk-test" };
+    assert_eq!(app.routes.handle(json(&owner, "PUT", "/api/assistant", &set)).await.status, 200);
+    let limit = runlight::obj! { "viewerDaily" => 1 };
+    assert_eq!(app.routes.handle(json(&owner, "PUT", "/api/assistant/limits", &limit)).await.status, 200);
+    let ask = runlight::obj! { "messages" => runlight::arr![runlight::obj! { "role" => "user", "content" => "Hi" }] };
+    // Ten questions from one viewer at once: one is let through, and the count is one.
+    let burst = |who: &str, n: usize| {
+        let runs: Vec<_> = (0..n)
+            .map(|_| {
+                let (routes, request) = (app.routes.clone(), json(who, "POST", "/api/assistant/chat", &ask));
+                tokio::spawn(async move { routes.handle(request).await.status })
+            })
+            .collect();
+        async move {
+            let mut let_through = 0;
+            for run in runs {
+                let_through += usize::from(run.await.unwrap() != 429);
+            }
+            let_through
+        }
+    };
+    assert_eq!(burst(&ada, 10).await, 1);
+    let rows = app.rl.store().settings_starting_with("assistant-asked:").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, "1");
+    // Two viewers at once each have their own.
+    let (first, second) = tokio::join!(burst(&ada, 3), burst(&bob, 3));
+    assert_eq!((first, second), (0, 1));
+    let counts: Vec<String> =
+        app.rl.store().settings_starting_with("assistant-asked:").await.unwrap().into_iter().map(|r| r.1).collect();
+    assert_eq!(counts, ["1", "1"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn questions_given_up_on_do_not_count_as_still_asking() {
     let app = app(false, None).await;
     let owner = app.owner().await;

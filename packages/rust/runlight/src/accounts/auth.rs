@@ -613,7 +613,8 @@ impl Accounts {
     /// Checks a six-digit code, or a recovery code, for an account with two-factor on.
     /// A code works once: one already used, or older, is refused, and a recovery code is crossed off.
     pub async fn check_second_factor(&self, id: &str, code: &str, now: i64) -> R<bool> {
-        // One check at a time per account, so two sign-ins at once cannot both use the same code.
+        // One check at a time per account, so two sign-ins at once cannot both use the same code. The
+        // database has the last word, since another process, or another Accounts on the same store, does not wait here.
         let _turn = self.checking.take(id).await;
         self.check_second_factor_now(id, code, now).await
     }
@@ -637,21 +638,31 @@ impl Accounts {
             };
             let after = row.opt_int("totp_step").unwrap_or(-1);
             let Some(step) = match_step(&secret, &digits, now, after)? else { return Ok(false) };
-            self.store.db().run("UPDATE rl_users SET totp_step = ? WHERE id = ?", params![step, id]).await?;
-            return Ok(true);
+            // Only if no check since has used this step or a later one: of two at once, one moves it and the other is refused.
+            let moved = self
+                .store
+                .db()
+                .run(
+                    "UPDATE rl_users SET totp_step = ? WHERE id = ? AND (totp_step IS NULL OR totp_step < ?)",
+                    params![step, id, step],
+                )
+                .await?;
+            return Ok(moved == 1);
         }
         let mut hashes = Self::recovery_of(row)?;
         let wanted = Value::String(recovery_hash(given));
         let Some(at) = hashes.iter().position(|h| *h == wanted) else { return Ok(false) };
         hashes.remove(at);
-        self.store
+        // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
+        let moved = self
+            .store
             .db()
             .run(
-                "UPDATE rl_users SET totp_recovery = ? WHERE id = ?",
-                params![js::stringify(&Value::Array(hashes)), id],
+                "UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?",
+                params![js::stringify(&Value::Array(hashes)), id, row.text("totp_recovery")],
             )
             .await?;
-        Ok(true)
+        Ok(moved == 1)
     }
 
     /// A short-lived ticket naming an account whose password checked out and

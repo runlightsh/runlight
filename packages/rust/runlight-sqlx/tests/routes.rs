@@ -220,3 +220,49 @@ async fn inside_a_cms_the_dashboard_names_it_and_its_own_admin_may_frame_the_who
     assert!(alone.headers.get("content-security-policy").unwrap_or_default().contains("frame-ancestors 'none'"));
     assert_eq!(alone.headers.get("x-frame-options").as_deref(), Some("DENY"));
 }
+
+#[tokio::test]
+async fn a_site_change_refused_for_a_bad_domain_changes_nothing_retention_and_timezone_included() {
+    let now = Arc::new(AtomicI64::new(1_759_276_800_000));
+    let clock = now.clone();
+    let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+    options.managed_sites = true;
+    options.now = Some(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let rl = Runlight::new(options).unwrap();
+    let routes = routes(&rl);
+    let sent = async |method: &str, path: &str, body: &str| routes.handle(call(method, path, body, "secret")).await;
+    for host in ["blog.example.com", "shop.example.com"] {
+        assert_eq!(sent("POST", "/runlight/api/sites", &format!(r#"{{"hostnames":"{host}"}}"#)).await.status, 201);
+    }
+    let pageview = Request::new("POST", format!("{APP}/runlight/e"))
+        .header("user-agent", "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36")
+        .header("x-forwarded-for", "203.0.113.1")
+        .body(r#"{"k":"pageview","u":"https://blog.example.com/"}"#);
+    routes.handle(pageview).await;
+    now.store(1_791_288_000_000, Ordering::SeqCst);
+    let zone = rl.store().setting("rollup-zone:blog.example.com").await.unwrap();
+    let visits = async || {
+        let stats = sent("GET", "/runlight/api/stats?site=blog.example.com&period=all", "").await;
+        stats.json_body().unwrap().get("stats").and_then(|s| s.get("visits")).and_then(Value::as_f64).unwrap()
+    };
+    assert_eq!(visits().await, 1.0);
+    for hostnames in ["not a domain", "shop.example.com"] {
+        let body =
+            format!(r#"{{"retentionMonths":6,"timezone":"Europe/Paris","name":"Renamed","hostnames":"{hostnames}"}}"#);
+        assert_eq!(sent("PATCH", "/runlight/api/sites/blog.example.com", &body).await.status, 400, "{hostnames}");
+        rl.idle().await;
+        assert_eq!(rl.retention("blog.example.com").await.unwrap(), None, "retention is unchanged");
+        assert_eq!(rl.store().setting("rollup-zone:blog.example.com").await.unwrap(), zone, "the built days are kept");
+        let site = rl.site(Some("blog.example.com")).unwrap();
+        assert_eq!((site.name.as_str(), site.timezone.as_str()), ("blog.example.com", "UTC"));
+        assert_eq!(visits().await, 1.0, "the old visit is still there");
+    }
+    let passes = sent(
+        "PATCH",
+        "/runlight/api/sites/blog.example.com",
+        r#"{"retentionMonths":6,"hostnames":"blog.example.com"}"#,
+    );
+    assert_eq!(passes.await.status, 200);
+    rl.idle().await;
+    assert_eq!(visits().await, 0.0, "a change that passes prunes once saved");
+}

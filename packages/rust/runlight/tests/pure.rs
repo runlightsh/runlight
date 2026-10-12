@@ -422,7 +422,8 @@ async fn places_match_the_sdk() {
             })
         });
         let use_lookup = !js::opt_truthy(case.get("noLookup"));
-        let got = geo::locate(&headers_of(case.at("headers")), s(case, "ip"), use_lookup.then_some(&lookup)).await;
+        let got =
+            geo::locate(&headers_of(case.at("headers")), s(case, "ip"), use_lookup.then_some(&lookup), true).await;
         assert_eq!(location_value(&got), *case.at("location"), "{}", case.to_json());
     }
     for db in list(&f, "databases") {
@@ -439,6 +440,79 @@ async fn places_match_the_sdk() {
             assert_eq!(location, *case.at("location"), "{}", s(case, "ip"));
         }
     }
+}
+
+#[tokio::test]
+async fn a_hosting_platforms_location_headers_count_only_when_proxy_headers_are_trusted() {
+    let headers = Headers::from_pairs([("cf-ipcountry".to_string(), "FR".to_string())]);
+    let lookup = geo::geo_fn(|_| {
+        Some(Found { country: Some("CA".into()), region: Some("ON".into()), city: Some("Toronto".into()) })
+    });
+    let trusted = geo::locate(&headers, "203.0.113.5", Some(&lookup), true).await;
+    assert_eq!(trusted.country, "FR");
+    let ignored = geo::locate(&headers, "203.0.113.5", Some(&lookup), false).await;
+    assert_eq!((ignored.country.as_str(), ignored.city.as_str()), ("CA", "Toronto"), "the lookup answers alone");
+    let none = geo::locate(&headers, "203.0.113.5", None, false).await;
+    assert_eq!(none.country, "");
+}
+
+#[test]
+fn an_interval_too_fine_for_its_range_moves_up_instead_of_merging_the_tail() {
+    let now = 1_791_288_000_000;
+    let range = |from: &str, to: &str, interval: &str| {
+        let input = time::RangeInput {
+            from: Some(from.into()),
+            to: Some(to.into()),
+            interval: Some(interval.into()),
+            ..time::RangeInput::default()
+        };
+        time::resolve_range(&input, "UTC", now, None)
+    };
+    // A month of hours fits, 40 days of them become days, and so on up.
+    assert_eq!(range("2026-01-01", "2026-01-31", "hour").unwrap().interval, "hour");
+    let days = range("2026-01-01", "2026-02-09", "hour").unwrap();
+    assert_eq!(days.interval, "day");
+    assert_eq!(time::buckets(&days, "UTC").len(), 40);
+    assert_eq!(range("2026-01-01", "2026-03-01", "day").unwrap().interval, "day");
+    assert_eq!(range("2020-01-01", "2026-01-01", "day").unwrap().interval, "week");
+    assert_eq!(range("2005-01-01", "2026-12-31", "day").unwrap().interval, "month");
+    assert!(
+        range("1900-01-01", "2026-01-01", "month").is_none(),
+        "1,513 months is past the limit, and no interval is coarser"
+    );
+    assert!(range("1950-01-01", "2026-01-01", "month").is_some(), "913 months fit");
+    // Every bucket follows the interval's boundaries: only the first and last can be partial, none is swallowed.
+    for (from, to, interval) in [
+        ("2026-01-01", "2026-12-31", "hour"),
+        ("2020-03-05", "2026-10-12", "hour"),
+        ("2005-01-01", "2026-10-12", "day"),
+    ] {
+        let r = range(from, to, interval).unwrap();
+        let list = time::buckets(&r, "UTC");
+        assert_eq!(list.first().unwrap().start, r.from);
+        assert_eq!(list.last().unwrap().end, r.to, "{from} {to}");
+        for pair in list.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
+        let longest = match r.interval {
+            "hour" => 3_600_000,
+            "day" => 86_400_000,
+            "week" => 7 * 86_400_000,
+            _ => 31 * 86_400_000,
+        };
+        assert!(list.iter().all(|b| b.end - b.start <= longest), "{from} {to}: no bucket swallows the rest");
+    }
+    // A comparison range longer than the main one is cut off at a boundary, not merged into its last bucket.
+    let long = time::Range {
+        from: 1_577_836_800_000,
+        to: 1_767_225_600_000,
+        from_date: "2020-01-01".into(),
+        to_date: "2025-12-31".into(),
+        interval: "day",
+    };
+    let list = time::buckets(&long, "UTC");
+    assert_eq!(list.len(), 1000);
+    assert!(list.iter().all(|b| b.end - b.start == 86_400_000));
 }
 
 #[test]

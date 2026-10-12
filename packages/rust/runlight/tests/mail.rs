@@ -64,11 +64,18 @@ struct Recorder {
     answer: Answer,
     requests: Mutex<Vec<Value>>,
     timeouts: AtomicUsize,
+    /// How much of each answer the request said to read, and whether to stop there rather than fail.
+    caps: Mutex<Vec<(Option<usize>, bool)>>,
 }
 
 impl Recorder {
     fn new(answer: Answer) -> Arc<Recorder> {
-        Arc::new(Recorder { answer, requests: Mutex::new(Vec::new()), timeouts: AtomicUsize::new(0) })
+        Arc::new(Recorder {
+            answer,
+            requests: Mutex::new(Vec::new()),
+            timeouts: AtomicUsize::new(0),
+            caps: Mutex::new(Vec::new()),
+        })
     }
 
     fn requests(&self) -> Vec<Value> {
@@ -84,6 +91,7 @@ impl Fetcher for Recorder {
                 headers.set(k, v);
             }
             self.timeouts.store(init.timeout_ms as usize, Ordering::SeqCst);
+            self.caps.lock().unwrap().push((init.max_bytes, init.truncate));
             self.requests.lock().unwrap().push(obj! {
                 "method" => init.method.as_str(),
                 "url" => url,
@@ -242,6 +250,22 @@ async fn each_service_gets_the_request_it_documents() {
     let signature = s(calls.requests()[0].at("headers"), "x-runlight-signature").to_string();
     assert!(signature.starts_with("sha256=") && signature.len() == 71);
     assert_eq!(signature, format!("sha256={}", runlight::hash::hmac("s", s(&calls.requests()[0], "body"))));
+}
+
+#[tokio::test]
+async fn an_answer_from_a_mail_service_is_read_only_as_far_as_an_error_needs() {
+    let m = message();
+    let configs = [
+        obj! { "service" => "resend", "apiKey" => "re_1" },
+        obj! { "service" => "webhook", "url" => "https://hooks.example.com/mail" },
+        obj! { "service" => "ses", "region" => "us-east-1", "accessKeyId" => "A", "secretAccessKey" => "S" },
+    ];
+    for cfg in configs {
+        let calls = Recorder::new(Answer::Reply(500, "{\"message\":\"Nope\"}".into()));
+        let error = send(&config(cfg.clone()), &m, &shared(&calls), NOW).await.unwrap_err();
+        assert_eq!(error.code, "mail_refused", "{}", cfg.to_json());
+        assert_eq!(*calls.caps.lock().unwrap(), [(Some(65_536), true)], "{}", cfg.to_json());
+    }
 }
 
 #[tokio::test]

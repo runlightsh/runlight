@@ -310,7 +310,9 @@ async fn post(
 ) -> Result<(), MailError> {
     // TypeScript's `new URL(url).host`, which throws a TypeError for a URL that does not parse.
     let host = Url::parse(url).map(|u| u.host()).ok_or_else(|| mail_error("Invalid URL"))?;
-    let mut init = FetchInit::method("POST").body(body).timeout(20_000);
+    // Read no further than an error could need, so an answer without end never fills memory.
+    let mut init = FetchInit::method("POST").body(body).timeout(20_000).max_bytes(65_536);
+    init.truncate = true;
     for (k, v) in headers {
         init = init.header(k, v);
     }
@@ -318,6 +320,9 @@ async fn post(
     let response = service_fetch(&**fetcher, url, init, SERVICE_REDIRECTS, None).await.map_err(|e| match e {
         ServiceFetchError::Metadata(refused) => {
             CodedError::new(refused.to_string(), "address_refused", &[("host", &refused.host)])
+        }
+        ServiceFetchError::Redirect(moved) => {
+            CodedError::new(moved.to_string(), "redirect_refused", &[("host", &moved.host), ("to", &moved.to)])
         }
         ServiceFetchError::Fetch(e) => {
             let detail = e.to_string();

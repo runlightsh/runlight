@@ -107,6 +107,13 @@ impl std::error::Error for FetchError {}
 pub trait Fetcher: Send + Sync {
     /// Sends the request and reads the answer.
     fn fetch<'a>(&'a self, url: &'a str, init: FetchInit) -> BoxFuture<'a, Result<Response, FetchError>>;
+
+    /// Whether the Fetcher connects to the addresses in `FetchInit::resolve` and nowhere else, as the
+    /// default one does. A service's name is looked up and checked, and its request pinned to what was
+    /// checked, only for a Fetcher that says so; any other is given the name, which it looks up itself.
+    fn pins(&self) -> bool {
+        false
+    }
 }
 
 /// A shared Fetcher.
@@ -159,6 +166,10 @@ fn client(manual: bool, resolve: &[(String, u16, Vec<IpAddr>)]) -> Result<reqwes
 
 #[cfg(feature = "transport")]
 impl Fetcher for ReqwestFetcher {
+    fn pins(&self) -> bool {
+        true
+    }
+
     fn fetch<'a>(&'a self, url: &'a str, init: FetchInit) -> BoxFuture<'a, Result<Response, FetchError>> {
         Box::pin(async move {
             let pinned;

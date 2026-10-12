@@ -12,8 +12,8 @@ use runlight::BoxFuture;
 use runlight::http::{FetchError, FetchInit, Fetcher, Headers, Response};
 use runlight::icon::{Icon, fetch_icon, icon_links};
 use runlight::safefetch::{
-    Lookup, PrivateAddressError, PublicFetchError, PublicFetchInit, metadata_address, metadata_host, public_address,
-    public_addresses, public_fetch, resolves_privately,
+    Lookup, MetadataAddressError, PrivateAddressError, PublicFetchError, PublicFetchInit, ServiceFetchError,
+    metadata_address, metadata_host, public_address, public_addresses, public_fetch, resolves_privately, service_fetch,
 };
 
 #[tokio::test]
@@ -563,9 +563,16 @@ async fn a_services_redirects_are_followed_only_while_each_one_stays_off_link_lo
     seen.lock().unwrap().clear();
     fetch("/keep", ask(), SERVICE_REDIRECTS).await.unwrap();
     assert_eq!(seen.lock().unwrap()[1], row("POST", "/landed", "{}", "Bearer key", "application/json"));
+    // A redirect to another origin (here, another name for the same computer) is refused before it is asked.
     seen.lock().unwrap().clear();
-    fetch("/elsewhere", ask(), SERVICE_REDIRECTS).await.unwrap();
-    assert_eq!(seen.lock().unwrap()[1], row("POST", "/landed", "{}", "", "application/json"));
+    match fetch("/elsewhere", ask(), SERVICE_REDIRECTS).await {
+        Err(ServiceFetchError::Redirect(error)) => {
+            assert_eq!(error.host, format!("127.0.0.1:{port}"));
+            assert_eq!(error.to, format!("http://localhost:{port}"));
+        }
+        other => panic!("{:?}", other.map(|r| r.status)),
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1, "nothing was sent to the other origin");
     // Past the last redirect, the redirect comes back as it is.
     seen.lock().unwrap().clear();
     assert_eq!(fetch("/loop", FetchInit::default(), 2).await.unwrap().status, 302);
@@ -605,4 +612,115 @@ async fn a_services_redirects_are_followed_only_while_each_one_stays_off_link_lo
             "169.254.169.254 is a link-local or cloud metadata address, which Runlight never connects to"
         )
     );
+}
+
+/// A Fake that connects only to the addresses it is given, as the default Fetcher does.
+struct Pinning(Arc<Fake>);
+
+impl Fetcher for Pinning {
+    fn fetch<'a>(&'a self, url: &'a str, init: FetchInit) -> BoxFuture<'a, Result<Response, FetchError>> {
+        self.0.fetch(url, init)
+    }
+
+    fn pins(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_services_redirect_to_another_origin_is_refused_with_nothing_sent_there() {
+    let lookup = dns(&[("api.example.com", &["93.184.215.14"]), ("elsewhere.example.com", &["93.184.215.15"])]);
+    let key_headers =
+        ["authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-postmark-server-token"];
+    for (status, to) in [
+        (307, "https://elsewhere.example.com/v1"),
+        (308, "https://elsewhere.example.com/v1"),
+        (302, "https://api.example.com:8443/v1"),
+        (301, "http://api.example.com/v1"),
+        (308, "http://198.51.100.7/v1"),
+        (307, "ftp://api.example.com/v1"),
+    ] {
+        for name in key_headers {
+            let fake = hops(vec![redirect(to, status)]);
+            let init = FetchInit::method("POST").header(name, "secret").body("the whole email").timeout(5_000);
+            let error = service_fetch(&*fake, "https://api.example.com/v1/send", init, 5, Some(&lookup)).await;
+            let Err(ServiceFetchError::Redirect(refused)) = error else { panic!("{status} {to} {name}: {error:?}") };
+            assert_eq!(refused.host, "api.example.com");
+            assert_eq!(fake.urls(), ["https://api.example.com/v1/send"], "{status} {to} {name}: one request only");
+        }
+    }
+    // The message names where it pointed, or the protocol for one that is not http.
+    let fake = hops(vec![redirect("http://198.51.100.7/v1", 307)]);
+    let error = service_fetch(&*fake, "https://api.example.com/v1", FetchInit::default(), 5, Some(&lookup)).await;
+    assert_eq!(
+        error.unwrap_err().to_string(),
+        "api.example.com redirected to http://198.51.100.7. Runlight sends a service's key and request only to the address it was set up with, so set it up with that address instead"
+    );
+    let fake = hops(vec![redirect("ftp://api.example.com/v1", 307)]);
+    let error = service_fetch(&*fake, "https://api.example.com/v1", FetchInit::default(), 5, Some(&lookup)).await;
+    let Err(ServiceFetchError::Redirect(refused)) = error else { panic!("{error:?}") };
+    assert_eq!(refused.to, "ftp:");
+    // A metadata address wins over the redirect refusal, and a redirect on the same origin is followed.
+    let fake = hops(vec![redirect("http://169.254.169.254/latest", 307)]);
+    let error = service_fetch(&*fake, "https://api.example.com/v1", FetchInit::default(), 5, Some(&lookup)).await;
+    assert_eq!(
+        error.unwrap_err(),
+        ServiceFetchError::Metadata(MetadataAddressError { host: "169.254.169.254".into() })
+    );
+    let fake = hops(vec![redirect("/v2/send", 307)]);
+    let init = FetchInit::method("POST").header("x-api-key", "secret").body("{}").timeout(5_000);
+    assert_eq!(
+        service_fetch(&*fake, "https://api.example.com/v1", init, 5, Some(&lookup)).await.unwrap().text(),
+        "end"
+    );
+    assert_eq!(fake.urls(), ["https://api.example.com/v1", "https://api.example.com/v2/send"]);
+    assert_eq!(fake.init(1).headers.get("x-api-key").as_deref(), Some("secret"));
+}
+
+#[tokio::test]
+async fn a_service_is_fetched_from_the_address_its_name_was_checked_at() {
+    let lookup = dns(&[
+        ("local.example.com", &["127.0.0.1"]),
+        ("lan.example.com", &["192.168.1.20", "10.0.0.5"]),
+        ("meta.example.com", &["169.254.169.254"]),
+        ("mixed.example.com", &["93.184.215.14", "fd00:ec2::254"]),
+    ]);
+    let ok = || Fake::new(|_| Ok(Response::new("ok", 200, Headers::new())));
+    // Private and local addresses stay allowed, and the connection is pinned to what was checked.
+    for (url, port, found) in [
+        ("http://local.example.com:11434/v1", 11434, vec!["127.0.0.1"]),
+        ("https://lan.example.com/v1", 443, vec!["192.168.1.20", "10.0.0.5"]),
+        ("http://127.0.0.1/v1", 80, vec!["127.0.0.1"]),
+    ] {
+        let fake = ok();
+        let answer = service_fetch(&Pinning(fake.clone()), url, FetchInit::default(), 5, Some(&lookup)).await;
+        assert_eq!(answer.unwrap().text(), "ok", "{url}");
+        let host = runlight::http::Url::parse(url).unwrap().hostname();
+        let ips: Vec<IpAddr> = found.iter().map(|a| a.parse().unwrap()).collect();
+        assert_eq!(fake.init(0).resolve, vec![(host, port, ips)], "{url}");
+    }
+    // A name with a metadata address among its answers, or none at all, is refused; nothing is sent.
+    for (url, host) in
+        [("https://meta.example.com/v1", "meta.example.com"), ("https://mixed.example.com/v1", "mixed.example.com")]
+    {
+        let fake = ok();
+        let answer = service_fetch(&Pinning(fake.clone()), url, FetchInit::default(), 5, Some(&lookup)).await;
+        assert_eq!(answer.unwrap_err(), ServiceFetchError::Metadata(MetadataAddressError { host: host.into() }));
+        assert!(fake.urls().is_empty(), "{url}");
+    }
+    let fake = ok();
+    let answer =
+        service_fetch(&Pinning(fake.clone()), "https://gone.example.com/v1", FetchInit::default(), 5, Some(&lookup))
+            .await;
+    assert_eq!(
+        answer.unwrap_err(),
+        ServiceFetchError::Fetch(FetchError::Failed("getaddrinfo ENOTFOUND gone.example.com".into())),
+        "a lookup that fails fails closed"
+    );
+    assert!(fake.urls().is_empty());
+    // A Fetcher that cannot pin gets the name as before, checked but not looked up for it.
+    let fake = ok();
+    let answer = service_fetch(&*fake, "https://gone.example.com/v1", FetchInit::default(), 5, Some(&lookup)).await;
+    assert_eq!(answer.unwrap().text(), "ok");
+    assert!(fake.init(0).resolve.is_empty());
 }

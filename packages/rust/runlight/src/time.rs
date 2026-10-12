@@ -25,7 +25,7 @@ pub const PERIODS: [&str; 10] =
 pub const INTERVALS: [&str; 4] = ["hour", "day", "week", "month"];
 
 const MAX_BUCKETS: usize = 1000;
-/// A month of hours. Longer hourly ranges are cut off rather than refused.
+/// A month of hours. A longer range is counted by the day instead.
 const MAX_HOURS: usize = 744;
 
 /// A span of time in a site's timezone.
@@ -309,18 +309,43 @@ pub fn resolve_range(input: &RangeInput, timezone: &str, now: i64, first_date: O
             _ => return None,
         };
     }
-    let interval = INTERVALS
+    let mut interval = INTERVALS
         .iter()
         .find(|i| input.interval.as_deref() == Some(**i))
         .copied()
         .unwrap_or_else(|| default_interval(&from_date, &to_date));
-    Some(Range {
-        from: start_of(&from_date, timezone, 0),
-        to: start_of(&add_days(&to_date, 1), timezone, 0),
-        from_date,
-        to_date,
-        interval,
-    })
+    let from = start_of(&from_date, timezone, 0);
+    let to = start_of(&add_days(&to_date, 1), timezone, 0);
+    // An interval too fine for the range moves up to the next one that fits, and the range says which it is.
+    // Past 1,000 months there is none.
+    while bucket_count(from, to, &from_date, &to_date, interval)
+        > if interval == "hour" { MAX_HOURS } else { MAX_BUCKETS } as i64
+    {
+        interval = match interval {
+            "hour" => "day",
+            "day" => "week",
+            "week" => "month",
+            _ => return None,
+        };
+    }
+    Some(Range { from, to, from_date, to_date, interval })
+}
+
+/// How many chart buckets a range has at an interval, the first and last counted even when partial.
+fn bucket_count(from: i64, to: i64, from_date: &str, to_date: &str, interval: &str) -> i64 {
+    match interval {
+        "hour" => (to - from + 3_599_999).div_euclid(3_600_000),
+        "day" => days_between(from_date, to_date) + 1,
+        "week" => {
+            let weekday = (weekday_of(from_date) + 6) % 7;
+            days_between(&add_days(from_date, -weekday), to_date).div_euclid(7) + 1
+        }
+        _ => {
+            let (fy, fm, _) = ymd(from_date);
+            let (ty, tm, _) = ymd(to_date);
+            (ty - fy) * 12 + (tm - fm) + 1
+        }
+    }
 }
 
 fn add_years(date: &str, years: i64) -> String {
@@ -380,12 +405,16 @@ fn weekday_of(date: &str) -> i64 {
     (date_ms(date).div_euclid(86_400_000) + 4).rem_euclid(7)
 }
 
-/// Chart buckets covering a range, each starting on a local boundary.
+/// Chart buckets covering a range, each starting on a local boundary and ending at the next, so only the
+/// first and last can be partial. `resolve_range` picks an interval that fits; a range given here with more
+/// buckets than that, such as a longer comparison, is cut off at a boundary, never merged into its last bucket.
 pub fn buckets(range: &Range, timezone: &str) -> Vec<Bucket> {
     let mut starts: Vec<i64> = Vec::new();
+    let most = if range.interval == "hour" { MAX_HOURS } else { MAX_BUCKETS };
+    // One start past the limit, so the last bucket kept still ends where the next would begin.
     if range.interval == "hour" {
         let mut t = range.from;
-        while t < range.to && starts.len() < MAX_HOURS {
+        while t < range.to && starts.len() <= MAX_HOURS {
             starts.push(t);
             t += 3_600_000;
         }
@@ -397,7 +426,7 @@ pub fn buckets(range: &Range, timezone: &str) -> Vec<Bucket> {
         } else if range.interval == "month" {
             date = format!("{}01", js::head16(&date, 8));
         }
-        while date <= range.to_date && starts.len() < MAX_BUCKETS {
+        while date <= range.to_date && starts.len() <= MAX_BUCKETS {
             starts.push(start_of(&date, timezone, 0));
             date = match range.interval {
                 "day" => add_days(&date, 1),
@@ -406,7 +435,7 @@ pub fn buckets(range: &Range, timezone: &str) -> Vec<Bucket> {
             };
         }
     }
-    (0..starts.len())
+    (0..starts.len().min(most))
         .map(|i| Bucket {
             start: starts[i].max(range.from),
             end: starts.get(i + 1).copied().unwrap_or(range.to).min(range.to),
