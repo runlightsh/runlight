@@ -102,9 +102,10 @@ module Runlight
     end
 
     # The location of a request: the platform's headers when they name a country, else the lookup's answer
-    # for the address, else nowhere.
-    def locate(headers, ip, lookup = nil)
-      from_headers = location_from_headers(headers)
+    # for the address, else nowhere. The headers are believed only with trust_headers, as the address is: without
+    # a proxy in front, a client writes them itself.
+    def locate(headers, ip, lookup = nil, trust_headers = true)
+      from_headers = trust_headers ? location_from_headers(headers) : nil
       return from_headers if !from_headers.nil? && from_headers["country"] != ""
 
       if !lookup.nil? && ip != ""

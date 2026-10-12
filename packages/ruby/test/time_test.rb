@@ -103,6 +103,40 @@ class TimeTest < Minitest::Test
     assert_equal "2026-03-11T00:00:00.000Z", iso(months[2]["end"])
   end
 
+  def test_an_interval_too_fine_for_a_long_range_moves_up_to_one_that_fits_and_no_bucket_takes_in_the_rest
+    now = utc(2026, 9, 12, 12)
+    day = 86_400_000
+    hourly = Dates.resolve_range({ "from" => "2026-08-01", "to" => "2026-09-09", "interval" => "hour" }, "UTC", now)
+    assert_equal "day", hourly["interval"], "40 days of hours is too many hours"
+    assert_equal 40, Dates.buckets(hourly, "UTC").length
+    assert_equal "hour", Dates.resolve_range({ "from" => "2026-08-01", "to" => "2026-08-31", "interval" => "hour" }, "UTC", now)["interval"], "a month of hours still fits"
+
+    daily = Dates.resolve_range({ "from" => "2018-01-03", "to" => "2026-10-12", "interval" => "day" }, "Europe/London", now)
+    assert_equal "week", daily["interval"]
+    weeks = Dates.buckets(daily, "Europe/London")
+    assert_equal daily["from"], weeks[0]["start"]
+    assert_equal daily["to"], weeks[-1]["end"], "the buckets reach the end of the range"
+    weeks.each_with_index do |week, i|
+      assert_equal weeks[i - 1]["end"], week["start"] if i.positive?
+      # A week across a clock change is an hour short or long; none is longer than that.
+      assert_operator week["end"] - week["start"], :<=, (7 * day) + 3_600_000, "week #{i}"
+      assert_operator week["end"] - week["start"], :>=, (7 * day) - 3_600_000 if i.positive? && i < weeks.length - 1
+    end
+
+    decades = Dates.resolve_range({ "from" => "1990-01-01", "to" => "2026-10-12", "interval" => "day" }, "UTC", now)
+    assert_equal "month", decades["interval"]
+    months = Dates.buckets(decades, "UTC")
+    assert_equal 442, months.length
+    assert(months.all? { |m| m["end"] - m["start"] <= 31 * day })
+    assert_nil Dates.resolve_range({ "from" => "1900-01-01", "to" => "2026-10-12" }, "UTC", now), "past 1,000 months there is no interval that fits"
+
+    # A comparison longer than its range keeps whole buckets, cut off at a boundary.
+    longer = decades.merge("from" => utc(2000, 0, 1), "fromDate" => "2000-01-01", "toDate" => "2026-10-12", "interval" => "day")
+    cut = Dates.buckets(longer, "UTC")
+    assert_equal 1000, cut.length
+    assert_equal day, cut[-1]["end"] - cut[-1]["start"]
+  end
+
   def test_comparison_ranges_previous_a_year_back_custom_and_off
     now = utc(2026, 9, 6, 12)
     week = Dates.resolve_range({ "period" => "7d" }, "UTC", now)

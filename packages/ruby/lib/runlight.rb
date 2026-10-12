@@ -44,6 +44,7 @@ module Runlight
   autoload :Options, "runlight/options"
   autoload :Payload, "runlight/payload"
   autoload :PrivateAddressError, "runlight/private_address_error"
+  autoload :RedirectRefusedError, "runlight/redirect_refused_error"
   autoload :Query, "runlight/query"
   autoload :RackApp, "runlight/rack_app"
   autoload :RateLimit, "runlight/rate_limit"

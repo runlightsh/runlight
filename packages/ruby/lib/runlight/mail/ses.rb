@@ -79,13 +79,14 @@ module Runlight
         })
         headers.delete("host")
         begin
-          response = (fetcher || Http::NetFetcher.new).fetch(url.href, { "method" => "POST", "headers" => headers, "body" => body, "timeoutMs" => 20_000 })
+          response = (fetcher || Http::NetFetcher.new).fetch(url.href, { "method" => "POST", "headers" => headers, "body" => body, "timeoutMs" => 20_000,
+                                                                            "maxBytes" => Transports::MAX_ERROR_BYTES + 1, "truncate" => true })
         rescue Http::FetchError => e
           raise MailError.new("Could not reach Amazon SES: #{e.message}", "mail_unreachable", { "host" => "Amazon SES", "detail" => e.message })
         end
         return if response.ok?
 
-        message = Transports.service_message(response.text)
+        message = Transports.service_message(Transports.error_text(response))
         raise MailError.new("Amazon SES answered #{response.status}#{message.empty? ? "" : ": #{message}"}", "mail_refused",
                             { "host" => "Amazon SES", "detail" => "#{response.status}#{message.empty? ? "" : " #{message}"}" })
       end

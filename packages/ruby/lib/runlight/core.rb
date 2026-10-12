@@ -532,9 +532,11 @@ module Runlight
       nil
     end
 
-    # Changes a site's name or timezone from the dashboard. Stored apart from
+    # Changes a site's name, timezone, or retention from the dashboard. Stored apart from
     # the settings in code, which keep being written on every start. A managed
     # site has no settings in code, so its changes, hostnames too, go to its row.
+    # Every field is checked before anything changes, since a new timezone clears the
+    # built days and a shorter retention deletes visits, and pruning starts only once saved.
     # A key left out of `patch` is left alone, as TS's undefined is.
     def update_site(id, patch)
       patch = Options.normalize(patch)
@@ -549,6 +551,7 @@ module Runlight
 
         nxt["name"] = name
       end
+      timezone = nil
       if given?(patch, "timezone")
         timezone = Js.string(patch["timezone"])
         unless Dates.timezone?(timezone)
@@ -556,16 +559,20 @@ module Runlight
         end
 
         nxt["timezone"] = timezone
-        zone_changed(id, timezone) if timezone != site(id)&.[]("timezone")
       end
+      if @managed_sites && given?(patch, "hostnames") && !@remotes.key?(id)
+        nxt["hostnames"] = hostnames_for(patch["hostnames"], id)
+      end
+      check_retention(id, patch["retentionMonths"]) if given?(patch, "retentionMonths")
+      zone_changed(id, timezone) if !timezone.nil? && timezone != site(id)&.[]("timezone")
       if @managed_sites
-        nxt["hostnames"] = hostnames_for(patch["hostnames"], id) if given?(patch, "hostnames") && !@remotes.key?(id)
         @store.upsert_site(nxt, now)
         @configured = @configured.map { |site| site["id"] == id ? nxt : site }
-        return site(id)
+      else
+        @store.set_site_overrides(id, nxt)
+        @overrides[id] = nxt
       end
-      @store.set_site_overrides(id, nxt)
-      @overrides[id] = nxt
+      set_retention(id, patch["retentionMonths"]) if given?(patch, "retentionMonths")
       site(id)
     end
 
@@ -578,13 +585,7 @@ module Runlight
     # Sets how many months of visits a site keeps. Deleting a long history takes a while, so it runs in
     # pieces in idle(), after the answer, with tracking going on between them, as TS runs it after answering.
     def set_retention(site, months)
-      raise SettingsError.new("Unknown site", "unknown_site") if site(site).nil? || @remotes.key?(site)
-
-      unless months.nil? || (months.is_a?(Numeric) && RETENTION_MONTHS.include?(months))
-        list = RETENTION_MONTHS.join(", ")
-        raise SettingsError.new("Keep visits for #{list} months, or forever", "retention_bad", { "months" => list })
-      end
-
+      check_retention(site, months)
       @store.set_setting("retention:#{site}", months.nil? ? nil : Json.number(months))
       @pruning << site
       nil
@@ -1057,6 +1058,15 @@ module Runlight
     end
 
     # Checks a list of hostnames for a managed site: at least one, each a domain, none taken.
+    def check_retention(site, months)
+      raise SettingsError.new("Unknown site", "unknown_site") if site(site).nil? || @remotes.key?(site)
+
+      unless months.nil? || (months.is_a?(Numeric) && RETENTION_MONTHS.include?(months))
+        list = RETENTION_MONTHS.join(", ")
+        raise SettingsError.new("Keep visits for #{list} months, or forever", "retention_bad", { "months" => list })
+      end
+    end
+
     def hostnames_for(input, except = nil)
       items = input.is_a?(Array) ? input : Js.string(input.nil? ? "" : input).split(/[#{Js::SPACE},]+/)
       hostnames = []
@@ -1362,7 +1372,7 @@ module Runlight
         "mobile" => request.headers.get("sec-ch-ua-mobile"),
         "platform" => request.headers.get("sec-ch-ua-platform"),
       }, client["screenWidth"])
-      location = Geo.locate(request.headers, ip, @geo)
+      location = Geo.locate(request.headers, ip, @geo, Js.truthy?(@trust_proxy))
       row = {
         "id" => session["id"],
         "site" => site["id"],

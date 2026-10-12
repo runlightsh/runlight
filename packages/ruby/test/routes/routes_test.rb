@@ -390,6 +390,87 @@ class RoutesRoutesTest < RoutesTestCase
     assert_nil store.setting("x")
   end
 
+  on_every_database("a site change refused for a bad domain changes nothing, retention and timezone included") do |kind|
+    now = RoutesMake.utc(2025, 10, 1)
+    rl = Runlight::Core.new({ "store" => Databases.fresh(kind), "managedSites" => true, "now" => -> { now } })
+    routes = rl.routes({ "token" => "secret" })
+    send = ->(method, path, body = nil) { routes.handle(RoutesMake.owner("/runlight#{path}", method, body)) }
+    assert_equal 201, send.call("POST", "/api/sites", { "hostnames" => "blog.example.com" }).status
+    assert_equal 201, send.call("POST", "/api/sites", { "hostnames" => "shop.example.com" }).status
+    hit = { "user-agent" => "Mozilla/5.0 (Macintosh) Chrome/129.0.0.0 Safari/537.36", "x-forwarded-for" => "203.0.113.1" }
+    routes.handle(req("/runlight/e", "POST", hit, Json.encode({ "k" => "pageview", "u" => "https://blog.example.com/" })))
+    now = RoutesMake.utc(2026, 10, 6, 12)
+    zone = rl.store.setting("rollup-zone:blog.example.com")
+    visits = -> { RoutesMake.body(send.call("GET", "/api/stats?site=blog.example.com&period=all"))["stats"]["visits"] }
+    patch = ->(body) { send.call("PATCH", "/api/sites/blog.example.com", body) }
+
+    ["not a domain", "shop.example.com"].each do |hostnames|
+      assert_equal 400, patch.call({ "retentionMonths" => 6, "timezone" => "Europe/Paris", "name" => "Renamed", "hostnames" => hostnames }).status
+      rl.idle
+      assert_nil rl.retention("blog.example.com"), "retention is unchanged"
+      assert_equal zone.to_s, rl.store.setting("rollup-zone:blog.example.com").to_s, "the built days are kept"
+      assert_equal({ "id" => "blog.example.com", "name" => "blog.example.com", "hostnames" => ["blog.example.com"], "timezone" => "UTC" }, rl.site("blog.example.com"))
+      assert_equal 1, visits.call, "the old visit is still there"
+    end
+
+    assert_equal 200, patch.call({ "retentionMonths" => 6, "hostnames" => "blog.example.com" }).status
+    rl.idle
+    assert_equal 0, visits.call, "a change that passes prunes once saved"
+  end
+
+  on_every_database("questions sent at once count once each against a viewer's daily number") do |kind|
+    store = Databases.fresh(kind)
+    now = -> { RoutesMake.utc(2026, 10, 12, 12) }
+    made = -> { Runlight::Core.new({ "store" => store, "now" => now, "sites" => [{ "id" => "a", "name" => "A", "hostnames" => ["a.example.com"] }] }) }
+    first = made.call
+    first.init
+    # The model is never reached; a question that gets past the limits fails fast instead.
+    first.save_assistant_settings({ "provider" => "custom", "model" => "m", "baseUrl" => "http://127.0.0.1:9/v1", "key" => "k" })
+    first.store.set_setting("assistant-viewer-daily", "1")
+    routes = lambda do |rl|
+      rl.routes({ "authorize" => ->(r) { r.headers.get("x-who") ? "read" : false }, "accountOf" => ->(r) { r.headers.get("x-who") } })
+    end
+    ask = lambda do |handler, who|
+      body = Json.encode({ "site" => "a", "messages" => [{ "role" => "user", "content" => "hi" }] })
+      handler.handle(req("/runlight/api/assistant/chat", "POST", { "x-who" => who, "content-type" => "application/json" }, body))
+    end
+    passed = ->(answers) { answers.count { |answer| answer.status != 429 } }
+    all_at_once = ->(jobs) { jobs.map { |job| Thread.new(&job) }.map(&:value) }
+    count = ->(who) { first.store.setting("assistant-asked:2026-10-12:#{who}") }
+
+    # One process: the second and later questions see the first before anything slow.
+    handler = routes.call(first)
+    assert_equal 1, passed.call(all_at_once.call(Array.new(10) { -> { ask.call(handler, "viewer-1") } }))
+    assert_equal "1", count.call("viewer-1")
+
+    # Ten handlers on one database, each with its own counts in memory: the database lets one through.
+    handlers = Array.new(10) { routes.call(made.call) }
+    assert_equal 1, passed.call(all_at_once.call(handlers.map { |h| -> { ask.call(h, "viewer-2") } }))
+    assert_equal "1", count.call("viewer-2")
+
+    # Two viewers at once each have their own row, and neither write loses the other's.
+    assert_equal 2, passed.call(all_at_once.call([-> { ask.call(handlers[0], "viewer-3") }, -> { ask.call(handlers[1], "viewer-4") }]))
+    assert_equal "1", count.call("viewer-3")
+    assert_equal "1", count.call("viewer-4")
+  ensure
+    Databases.cleanup
+  end
+
+  on_every_database("a key made on first use is the same for every request that asks at once") do |kind|
+    store = Databases.fresh(kind)
+    store.migrate
+    keys = Array.new(8) { Thread.new { store.setting_or_add("oauth-key") { Runlight::Hashing.random_id(32) } } }.map(&:value)
+    assert_equal 1, keys.uniq.length
+    assert_equal keys.first, store.setting("oauth-key")
+    assert store.add_setting("other", "x")
+    refute store.add_setting("other", "y")
+    assert_equal "x", store.setting("other")
+    assert store.swap_setting("other", "x", "z")
+    refute store.swap_setting("other", "x", "w")
+  ensure
+    Databases.cleanup
+  end
+
   def test_a_cms_plugin_reports_ai_agent_fetches_with_its_own_key_which_reads_nothing
     rl = RoutesMake.runlight({ "site" => { "hostnames" => ["blog.example.com"] } })
     routes = rl.routes({ "token" => "secret", "observeKey" => "agents" })

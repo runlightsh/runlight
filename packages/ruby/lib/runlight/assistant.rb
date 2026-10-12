@@ -91,6 +91,23 @@ module Runlight
       AssistantError.new(error.message, "address_refused", { "host" => error.host })
     end
 
+    # A service that sent the request to another origin, which would have carried the key, and the question with it.
+    def redirected(error)
+      AssistantError.new(error.message, "redirect_refused", { "host" => error.host, "to" => error.to })
+    end
+
+    # The most of a model's answer, or its list of models, read; past it the answer counts as unreadable. One byte
+    # more is asked of the fetcher, which hands back what it read, so that an answer past the limit is seen as such.
+    MAX_ANSWER_BYTES = 4 * 1024 * 1024
+
+    # The answer's JSON, or nil when it is not JSON or runs past MAX_ANSWER_BYTES.
+    def read_answer(answer)
+      parsed, data = Js.parse_json(Body.read_text_capped(answer, MAX_ANSWER_BYTES))
+      parsed ? data : nil
+    rescue Http::BodyTooLong
+      nil
+    end
+
     def post(fetcher, url, headers, body, deadline, now, cancelled)
       in_time(deadline, now, cancelled)
       left = deadline - now.call
@@ -100,17 +117,20 @@ module Runlight
           "headers" => { "content-type" => "application/json" }.merge(headers),
           "body" => Json.encode(body),
           "timeoutMs" => [90_000, left].min,
+          "maxBytes" => MAX_ANSWER_BYTES + 1,
+          "truncate" => true,
         }, fetcher)
       rescue MetadataAddressError => e
         raise refused(e)
+      rescue RedirectRefusedError => e
+        raise redirected(e)
       rescue StandardError => e
         host = Http::Url.new(url).host
         raise AssistantError.new("Could not reach #{host}: it took too long to answer", "assistant_timeout", { "host" => host }) if e.is_a?(Http::FetchError) && e.timed_out?
 
         raise AssistantError.new("Could not reach #{host}: the connection failed", "unreachable", { "host" => host })
       end
-      parsed, data = Js.parse_json(answer.text)
-      data = nil unless parsed
+      data = read_answer(answer)
       unless answer.ok?
         message = service_message(data)
         host = Http::Url.new(url).host
@@ -302,16 +322,17 @@ module Runlight
                 else {}
                 end
       begin
-        answer = Safefetch.service_fetch("#{base}/models#{provider["protocol"] == "anthropic" ? "?limit=100" : ""}", { "headers" => headers, "timeoutMs" => 20_000 },
+        answer = Safefetch.service_fetch("#{base}/models#{provider["protocol"] == "anthropic" ? "?limit=100" : ""}", { "headers" => headers, "timeoutMs" => 20_000, "maxBytes" => MAX_ANSWER_BYTES + 1, "truncate" => true },
                                          fetcher)
       rescue MetadataAddressError => e
         raise refused(e)
+      rescue RedirectRefusedError => e
+        raise redirected(e)
       rescue StandardError
         host = Http::Url.new(base).host
         raise AssistantError.new("Could not reach #{host}", "unreachable", { "host" => host })
       end
-      parsed, data = Js.parse_json(answer.text)
-      data = nil unless parsed
+      data = read_answer(answer)
       unless answer.ok?
         message = service_message(data)
         host = Http::Url.new(base).host

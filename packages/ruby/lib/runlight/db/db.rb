@@ -51,6 +51,9 @@ module Runlight
       # they do not linger in the file's free space. Rails' pragmas setting takes this one only as on or off.
       SECURE_DELETE = "PRAGMA secure_delete = FAST"
 
+      # How long a SQLite connection waits for a lock another one holds, as Connect.sqlite sets it.
+      BUSY_TIMEOUT_MS = 5000
+
       attr_reader :connection_class
 
       # connection_class: an ActiveRecord::Base subclass whose pool to use (ActiveRecord::Base for the app's
@@ -267,7 +270,18 @@ module Runlight
 
         c.execute(dialect == "sqlite" ? SECURE_DELETE : NO_BACKSLASH_ESCAPES_OFF, "Runlight")
         raw = c.instance_variable_get(:@raw_connection)
+        wait_without_the_lock(raw) if dialect == "sqlite"
         @set_up[raw] = true if raw
+      end
+
+      # Rails 7.2 sets SQLite's busy timeout with busy_timeout, which sleeps in C holding Ruby's global lock. A
+      # thread waiting for the file's write lock then stops the thread of the same process that holds it from
+      # ever finishing, so the wait runs out and raises "database is locked". busy_handler_timeout= (sqlite3
+      # 2.x, and what Rails 8 uses) waits the same time but lets other threads run.
+      def wait_without_the_lock(raw)
+        return unless raw.respond_to?(:busy_handler_timeout=)
+
+        raw.busy_handler_timeout = BUSY_TIMEOUT_MS
       end
 
       # A statement on a connection. A connection the server dropped (a restart, a failover, an idle timeout)

@@ -638,13 +638,37 @@ module Runlight
         value = setting(key)
         return nil if value.nil?
 
-        sql = "DELETE FROM rl_settings WHERE \"key\" = ?"
-        gone = if @db.dialect == "mysql" && @db.respond_to?(:affected)
-                 @db.affected(sql, [key])
-               else
-                 @db.all("#{sql} RETURNING \"key\"", [key]).length
-               end
-        gone == 1 ? value : nil
+        setting_changed("DELETE FROM rl_settings WHERE \"key\" = ?", [key]) == 1 ? value : nil
+      end
+
+      # Writes a setting only if it is not there yet. Of two callers at once, only one gets true.
+      def add_setting(key, value)
+        # MySQL counts a row a duplicate key found as written, so it ignores the insert instead.
+        sql = if @db.dialect == "mysql"
+                "INSERT IGNORE INTO rl_settings (\"key\", value) VALUES (?, ?)"
+              else
+                Sql.upsert(@db.dialect, "rl_settings", ['"key"', "value"], ['"key"'], [])
+              end
+        setting_changed(sql, [key, value]) == 1
+      end
+
+      # Changes a setting only if it still holds `from`. Of two callers at once, only one gets true.
+      def swap_setting(key, from, to)
+        setting_changed("UPDATE rl_settings SET value = ? WHERE \"key\" = ? AND value = ?", [to, key, from]) == 1
+      end
+
+      # A setting, or the block's value written as it when there is none yet, such as a signing key made on first
+      # use. Of two callers at once, both get the value written first, so nothing signed with a key that lost is
+      # left invalid. An empty one counts as none.
+      def setting_or_add(key)
+        5.times do
+          saved = setting(key)
+          return saved if !saved.nil? && saved != ""
+
+          value = yield
+          return value if saved.nil? ? add_setting(key, value) : swap_setting(key, saved, value)
+        end
+        raise "Runlight: could not read or write the setting #{key}"
       end
 
       def set_setting(key, value)
@@ -1320,6 +1344,13 @@ module Runlight
       end
 
       private
+
+      # How many settings a statement changed. MySQL has no RETURNING, so it asks the connection how many rows matched.
+      def setting_changed(sql, params)
+        return @db.affected(sql, params) if @db.dialect == "mysql" && @db.respond_to?(:affected)
+
+        @db.all("#{sql} RETURNING \"key\"", params).length
+      end
 
       # SQL for "a visit that started in one of these stretches".
       def within(rest)

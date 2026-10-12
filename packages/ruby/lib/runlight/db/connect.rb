@@ -39,7 +39,7 @@ module Runlight
           owner_and_group(File.dirname(path), 0o770)
         end
         made(path) if file && !File.exist?(path)
-        config = { adapter: "sqlite3", database: memory ? ":memory:" : path, timeout: 5000,
+        config = { adapter: "sqlite3", database: memory ? ":memory:" : path, timeout: Database::BUSY_TIMEOUT_MS,
                    # One connection for a database in memory, which every connection would otherwise make anew.
                    pool: memory ? 1 : 5 }
         Database.new(Pools.make(config), owned: true, dialect: "sqlite")

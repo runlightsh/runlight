@@ -186,6 +186,22 @@ class CoreIngestTest < CoreTestCase
     assert_equal %w[CA-Ontario GB-ENG], t.values(t.today, "region").sort
   end
 
+  def test_a_hosting_platforms_location_headers_count_only_when_proxy_headers_are_trusted
+    countries = lambda do |trust_proxy|
+      t = Harness.new("sqlite", { "trustProxy" => trust_proxy, "geo" => ->(_ip) { { "country" => "DE", "region" => "BE", "city" => "Berlin" } } })
+      netlify = [Json.encode({ "country" => { "code" => "JP" } })].pack("m0")
+      platform = { "cf-ipcountry" => "US", "cf-region-code" => "CA", "cf-ipcity" => "San Francisco", "x-vercel-ip-country" => "FR", "x-nf-geo" => netlify }
+      platform.each_with_index do |(name, value), i|
+        # A visitor each, so each request opens a visit of its own.
+        ip = "203.0.113.#{i + 1}"
+        t.rl.collect(Harness.hit("https://x.com/runlight/e", { "k" => "pageview", "u" => "https://x.com/#{name}" }, { "ip" => ip, "headers" => { name => value } }), { "ip" => ip })
+      end
+      t.values(t.today, "country").sort
+    end
+    assert_equal ["DE"], countries.call(false), "without a proxy in front, a client writes them itself, so the lookup answers"
+    assert_equal %w[DE FR JP US], countries.call(true), "behind one, they come first, and the lookup answers where they name no country"
+  end
+
   def test_tracker_requests_over_the_per_address_limit_are_dropped_until_the_next_minute
     t = Harness.new("sqlite", { "site" => { "hostnames" => ["example.com"] }, "rateLimit" => 3 })
     hit = lambda do |ip, n|

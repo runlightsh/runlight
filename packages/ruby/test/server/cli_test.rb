@@ -54,6 +54,46 @@ class ServerCliTest < Minitest::Test
     File.stat(path).mode & 0o777
   end
 
+  def test_servers_starting_at_once_on_one_folder_agree_on_one_secret_kept_readable_only_by_this_user
+    skip "no fork here" unless Process.respond_to?(:fork)
+
+    configure({ RUNLIGHT_GEO: "off" })
+    readers = Array.new(6) do
+      reader, writer = IO.pipe
+      fork do
+        reader.close
+        writer.write(Config.new(@root).secret)
+        writer.close
+        exit!(0)
+      end
+      writer.close
+      reader
+    end
+    secrets = readers.map(&:read)
+    Process.waitall
+    assert_equal 1, secrets.uniq.length, secrets.join(" ")
+    assert_match(/\A[0-9a-f]{64}\z/, secrets[0])
+    assert_equal secrets[0], Config.new(@root).secret
+    assert_equal 0o600, mode_of("#{@root}/runlight-data/secret")
+    assert_equal ["secret"], Dir.children("#{@root}/runlight-data").reject { |name| name.start_with?("runlight.db") }, "no file made on the way is left behind"
+  end
+
+  def test_a_secret_file_read_empty_or_short_is_waited_for_and_refused_rather_than_used
+    configure({ RUNLIGHT_GEO: "off" })
+    dir = Config.new(@root).data_dir
+    file = "#{dir}/secret"
+    File.write(file, "abc\n")
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(RuntimeError) { Config.new(@root).secret }
+    assert_match(/holds no whole secret/, error.message)
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :>=, 1, "it waited for a writer to finish first"
+    File.write(file, "")
+    assert_raises(RuntimeError) { Config.new(@root).secret }
+    own = "a" * 40
+    File.write(file, "#{own}\n")
+    assert_equal own, Config.new(@root).secret, "one that is whole is kept as it is"
+  end
+
   def test_settings_come_from_config_rb_with_paths_from_the_project_folder
     configure({ "RUNLIGHT_URL" => "https://stats.example.com", "TRUST_PROXY" => "cf-connecting-ip", "RUNLIGHT_GEO" => "off" })
     config = Config.new(@root)

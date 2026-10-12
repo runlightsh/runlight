@@ -224,22 +224,26 @@ module Runlight
 
     # Headers that describe a body, dropped with it when a redirect turns a request into a GET.
     BODY_HEADERS = %w[content-type content-length content-encoding content-language content-location].freeze
-    # Credentials, dropped when a redirect leads to another origin.
-    CREDENTIAL_HEADERS = %w[authorization proxy-authorization cookie].freeze
 
     # Fetches from a service someone set up, such as an AI model's API or a
     # mail webhook, which may well be on this computer or a private network,
     # but is never at a link-local or cloud metadata address. The address is
     # checked, and so is every redirect's, up to "redirects" of them (default
     # 5), each followed as fetch follows it: a 303, or a 301 or 302 answering a
-    # POST, goes on as a GET with no body, and a redirect to another origin goes
-    # without the credentials. A redirect past the last one comes back as it
-    # is. Raises a MetadataAddressError for an address it refuses.
+    # POST, goes on as a GET with no body. Only a redirect on the same origin is
+    # followed: the request carries a key, in whatever header the service names
+    # it, and a 307 or 308 would carry its body too, an email or a conversation, so
+    # a redirect to another origin, https to http among them, is refused before
+    # anything is sent there. A redirect past the last one comes back as it is.
+    # Raises a MetadataAddressError or a RedirectRefusedError for an address it refuses.
     #
     # init: a Hash with optionally "method", "headers" (a Hash), "body", "timeoutMs" (for every hop together),
-    # and "redirects".
+    # "redirects", and "maxBytes" and "truncate" for the fetcher.
     def service_fetch(target, init, fetcher = nil)
       fetcher ||= Http::NetFetcher.new
+      # A fetcher that reaches the network is held to the address checked. One a test or an app supplies is
+      # not, since a made-up host may not resolve anywhere.
+      strict = fetcher.is_a?(Http::NetFetcher)
       redirects = init["redirects"] || 5
       url = Http::Url.parse(target)
       raise Http::FetchError, "Invalid URL" if url.nil?
@@ -251,10 +255,12 @@ module Runlight
       hop = 0
       loop do
         host = url.hostname.sub(/\A\[/, "").sub(/\]\z/, "")
-        raise MetadataAddressError, host if metadata_host?(host)
+        pin = service_pin(url, host, strict)
 
         options = { "method" => method, "headers" => headers, "redirect" => "manual" }
+        options["resolve"] = pin unless pin.nil?
         options["body"] = body unless body.nil?
+        %w[maxBytes truncate].each { |key| options[key] = init[key] unless init[key].nil? }
         unless until_ns.nil?
           # The whole limit for the first hop, and what is left of it for each redirect.
           left = hop.zero? ? init["timeoutMs"] : (until_ns - monotonic).div(1_000_000)
@@ -269,15 +275,48 @@ module Runlight
         following = Http::Url.parse(location, url.href)
         raise Http::FetchError, "Invalid URL" if following.nil?
 
+        if following.origin != url.origin
+          there = following.hostname.sub(/\A\[/, "").sub(/\]\z/, "")
+          raise MetadataAddressError, there if metadata_host?(there)
+
+          raise RedirectRefusedError.new(url.host, %w[http: https:].include?(following.protocol) ? following.origin : following.protocol)
+        end
         if answer.status == 303 || ([301, 302].include?(answer.status) && method == "POST")
           method = "GET" unless method == "HEAD"
           body = nil
           headers = headers.reject { |name, _| BODY_HEADERS.include?(name.to_s.downcase) }
         end
-        headers = headers.reject { |name, _| CREDENTIAL_HEADERS.include?(name.to_s.downcase) } if following.origin != url.origin
         url = following
         hop += 1
       end
+    end
+
+    # The pin for one hop of a service fetch: the name is resolved here, every address it gives is checked, and
+    # the connection is pinned to them (the fetcher's "resolve", which also keeps it off any proxy from the
+    # environment), so a second lookup cannot hand back another. A private or local address is fine, since a
+    # model or a mail relay may be there; a link-local or metadata one is refused. A name that does not resolve
+    # is refused when strict, and let through to the fetcher otherwise.
+    def service_pin(url, host, strict)
+      name = Js.lower(Js.trim(host)).sub(/\.+\z/, "")
+      raise MetadataAddressError, host if METADATA_NAMES.include?(name) || metadata_address?(name)
+
+      literal = !v4(name).nil? || !v6(name).nil?
+      addresses = begin
+        literal ? [name] : Safefetch.resolver.call(name).map(&:to_s)
+      rescue StandardError
+        []
+      end
+      if addresses.empty?
+        raise Http::FetchError, "Could not look up #{host}" if strict
+
+        return nil
+      end
+      raise MetadataAddressError, host if addresses.any? { |address| metadata_address?(address) }
+
+      port = url.port == "" ? { "https:" => "443", "http:" => "80" }[url.protocol] : url.port
+      return nil if port.nil?
+
+      ["#{name}:#{port}:#{addresses.map { |a| a.include?(":") ? "[#{a}]" : a }.join(",")}"]
     end
 
     # An install on this machine: http://localhost or http://127.0.0.1, with any port.
@@ -308,6 +347,6 @@ module Runlight
       Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
     end
 
-    private_class_method :v4, :public_v4?, :v6, :timed_out, :monotonic
+    private_class_method :v4, :public_v4?, :v6, :timed_out, :monotonic, :service_pin
   end
 end
