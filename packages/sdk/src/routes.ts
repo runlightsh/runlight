@@ -18,7 +18,7 @@ import { MailError, SERVICES } from "./mail/transports.js";
 import { languages, translator } from "./messages.js";
 import { fetchIcon } from "./icon.js";
 import { installFetch, publicAddresses, publicFetch, resolvesPrivately } from "./safefetch.js";
-import { readTextCapped } from "./body.js";
+import { readJsonCapped, readTextCapped } from "./body.js";
 import { ImportError, importStep } from "./importers/index.js";
 import { importCsvVisits, importUmamiVisits, umamiWebsites } from "./importers/visits.js";
 import { LinkError } from "./links.js";
@@ -659,7 +659,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
           // Only a public address is fetched, whatever the name resolves to now, so the check cannot be pointed
           // into a private network.
           const answer = await publicFetch(`https://${domain}${LINK_DOMAIN_CHECK}`, { timeoutMs: 5000 });
-          const body = (await answer.json().catch(() => null)) as { runlight?: boolean; domain?: string } | null;
+          const body = (await readJsonCapped(answer, 16_384).catch(() => null)) as { runlight?: boolean; domain?: string } | null;
           if (answer.ok && body?.runlight === true && body.domain === domain) return result("", "");
           return answer.ok ? result("check_not_runlight", "answered, but not from Runlight") : result("check_status", `answered ${answer.status}`, { status: String(answer.status) });
         } catch (error) {
@@ -1816,7 +1816,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (remote) {
       const answer = await passThrough(remote, path, url, request, runlight.localInstalls);
       if (path !== "/api/realtime" || !shared || !answer.ok) return answer;
-      const live = (await answer.json().catch(() => null)) as Record<string, unknown> | null;
+      const live = (await readJsonCapped(answer, 4 * 1024 * 1024).catch(() => null)) as Record<string, unknown> | null;
       return live && typeof live === "object" ? json(unfeed(live)) : coded(`Could not reach ${new URL(remote.url).host}`, "unreachable", 502, { host: new URL(remote.url).host });
     }
 

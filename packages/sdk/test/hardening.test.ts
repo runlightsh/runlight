@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { chat } from "../src/assistant.js";
-import { PrivateAddressError, publicAddress, publicFetch } from "../src/safefetch.js";
+import { PrivateAddressError, publicAddress, publicFetch, publicFetchThroughGlobal } from "../src/safefetch.js";
 import { oneConnection } from "../src/store.js";
 import { postgres } from "../src/stores/postgres.js";
 import { STORES, cleanup, setup } from "./helpers.js";
@@ -193,5 +193,60 @@ test("with trustProxy left at its default, a public address with no proxy header
     assert.match(said[0]!, /trustProxy: false/);
   } finally {
     console.warn = warn;
+  }
+});
+
+/** An answer whose body never ends, and whether whoever read it stopped and let it go. */
+function endless(status: number, headers: Record<string, string> = {}) {
+  const seen = { read: 0, cancelled: false };
+  const chunk = new TextEncoder().encode(`{"x":"${"a".repeat(65_536)}`);
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      seen.read += chunk.byteLength;
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      seen.cancelled = true;
+    },
+  });
+  return { response: new Response(body, { status, headers }), seen };
+}
+
+test("an answer from a model, a mail service, or a link domain is read only so far", async () => {
+  const real = globalThis.fetch;
+  let next = () => endless(200);
+  let last = endless(200).seen;
+  globalThis.fetch = (async () => {
+    const made = next();
+    last = made.seen;
+    return made.response;
+  }) as typeof fetch;
+  try {
+    const { listModels } = await import("../src/assistant.js");
+    const settings = { provider: "anthropic", model: "m", baseUrl: "https://93.184.215.14/v1", key: "k" };
+    await assert.rejects(listModels(settings), /listed no models/);
+    assert.ok(last.cancelled && last.read < 8 * 1024 * 1024, "the list of models");
+    await chat(settings, [{ role: "user", content: "How many visitors?" }], { site: { id: "default", name: "Site", timezone: "UTC" }, today: "2026-10-06", view: "today", language: "en" }, async () => new Response("{}")).catch(() => {});
+    assert.ok(last.cancelled && last.read < 8 * 1024 * 1024, "a model's answer");
+
+    const { send, MailError } = await import("../src/mail/transports.js");
+    const message = { to: "me@example.com", from: "reports@example.com", subject: "Hi", html: "<p>Hi</p>", text: "Hi" };
+    next = () => endless(500);
+    await assert.rejects(send({ service: "webhook", url: "https://93.184.215.14/hook" }, message), (error: Error) => error instanceof MailError && error.code === "mail_refused");
+    assert.ok(last.cancelled && last.read < 1024 * 1024, "a mail service's error");
+    next = () => endless(200);
+    await send({ service: "webhook", url: "https://93.184.215.14/hook" }, message);
+    assert.ok(last.cancelled && last.read < 1024 * 1024, "a body nobody reads is let go");
+
+    const t = setup("sqlite", { site: { hostnames: ["example.com"] } });
+    await t.rl.init();
+    await t.rl.store.addLinkDomain("go.example.net", "default", t.now);
+    publicFetchThroughGlobal(true);
+    const check = await t.get("/api/link-domains/go.example.net/check");
+    assert.equal(check.code, "check_not_runlight");
+    assert.ok(last.cancelled && last.read < 1024 * 1024, "a link domain's check");
+  } finally {
+    globalThis.fetch = real;
+    publicFetchThroughGlobal(false);
   }
 });
