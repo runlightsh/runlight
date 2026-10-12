@@ -24,6 +24,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - Removing a saved mail service in Settings, Email service says why when it fails, and an app's mailer is shown with its sender's name.
 - A broken percent escape in a path, such as `%E0`, answers as an unknown goal, share, site, link domain, or short link (a 404) instead of an internal error.
 - On a link domain, `/go/<name>` is a 404 like any other path with no link of that domain's, in the standalone server of every language that has one too, which redirected it to any site's link of that name.
+- In Laravel and Symfony, the `/go/{slug}` route through `HttpFoundation::handle` raises the framework's own not-found for a short link nobody has, so the app's 404 page answers it, as it does behind `ShortLinks`.
 - .NET: `MapRunlight()` inside `UseEndpoints` on a Startup-style host answers link domains, which it left to the app before. On an endpoint builder that reaches no middleware at all it refuses to start and says to use `UseRunlight()`.
 - Elixir sorts names the way TypeScript does with punctuation in them, such as `a-b` and `a_b`, and reads a whole number past 2^53 in a location database as its decimal text, as the other languages do.
 

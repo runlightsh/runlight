@@ -88,6 +88,27 @@ final class HttpFoundationTest extends TestCase
         $this->assertSame('https://example.org/sale', $go->headers->get('location'));
     }
 
+    public function testAShortLinkNobodyHasIsTheFrameworksNotFoundOnTheAppsOwnHost(): void
+    {
+        $rl = $this->runlight();
+        $routes = $rl->routes(['token' => 'app-token']);
+        $json = ['HTTP_AUTHORIZATION' => 'Bearer app-token', 'CONTENT_TYPE' => 'application/json'];
+        $this->assertSame(201, HttpFoundation::handle($rl, $routes, Request::create('https://example.com/runlight/api/link-domains', 'POST', [], [], [], $json, '{"domain":"t.example.com"}'))->getStatusCode());
+        // Without symfony/http-kernel there is no framework to hand it to, so Runlight answers the 404 itself.
+        if (!class_exists('Symfony\\Component\\HttpKernel\\Exception\\NotFoundHttpException')) {
+            $this->assertSame(404, HttpFoundation::handle($rl, $routes, Request::create('https://example.com/go/missing'))->getStatusCode());
+            eval('namespace Symfony\\Component\\HttpKernel\\Exception; class NotFoundHttpException extends \\RuntimeException {}');
+        }
+        try {
+            HttpFoundation::handle($rl, $routes, Request::create('https://example.com/go/missing'));
+            $this->fail('a short link nobody has is the framework\'s not-found');
+        } catch (\Symfony\Component\HttpKernel\Exception\NotFoundHttpException) {
+            $this->addToAssertionCount(1);
+        }
+        $this->assertSame(404, HttpFoundation::handle($rl, $routes, Request::create('https://t.example.com/go/missing'))->getStatusCode(), 'a link domain answers its own 404');
+        $this->assertSame(404, HttpFoundation::handle($rl, $routes, Request::create('https://example.com/runlight/api/nope', 'GET', [], [], [], ['HTTP_AUTHORIZATION' => 'Bearer app-token']))->getStatusCode(), 'and so does the API');
+    }
+
     public function testShortLinksAnswerLinkDomainsAndTheLinkPathBeforeTheApp(): void
     {
         $rl = $this->runlight();

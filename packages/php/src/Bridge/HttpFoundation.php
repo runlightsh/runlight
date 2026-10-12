@@ -25,9 +25,16 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  */
 final class HttpFoundation
 {
+    /** The not-found exception Laravel and Symfony both turn into the app's own 404 page. */
+    private const NOT_FOUND = 'Symfony\\Component\\HttpKernel\\Exception\\NotFoundHttpException';
+
     /**
      * Answers a request for the routes, a short link at /go/{slug}, or a link domain, as FrontController does,
      * and leaves the work TS does after answering (a retention change's deletions) to run once PHP has sent it.
+     * A short link nobody has, on the app's own host, is the framework's not-found, so the app's own 404 page
+     * answers it, as it does behind ShortLinks. A link domain's paths are Runlight's to answer, a 404 included.
+     *
+     * @throws \RuntimeException the framework's NotFoundHttpException, for a short link nobody has
      */
     public static function handle(Runlight $rl, Routes $routes, SymfonyRequest $request): SymfonyResponse
     {
@@ -38,7 +45,20 @@ final class HttpFoundation
         }
         $answer = FrontController::answer($rl, $routes, $ours);
         register_shutdown_function($rl->idle(...));
+        if ($answer->status === 404 && class_exists(self::NOT_FOUND) && self::unknownShortLink($rl, $ours)) {
+            $notFound = self::NOT_FOUND;
+            throw new $notFound();
+        }
         return self::response($answer);
+    }
+
+    /** Whether the request is a GET for `{linkPath}/{slug}` on a host that is not a link domain. */
+    private static function unknownShortLink(Runlight $rl, Request $ours): bool
+    {
+        $path = (string) parse_url($ours->url, PHP_URL_PATH);
+        return $ours->method === 'GET'
+            && preg_match('#^' . preg_quote($rl->linkPath, '#') . '/[^/]+$#D', $path) === 1
+            && $rl->linkDomainResponse($ours, ['ip' => $ours->remoteAddress]) === null;
     }
 
     /**
