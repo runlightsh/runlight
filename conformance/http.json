@@ -4279,7 +4279,12 @@
                   "visitors": 1
                 }
               ],
-              "sources": [],
+              "sources": [
+                {
+                  "value": "",
+                  "visitors": 1
+                }
+              ],
               "countries": [],
               "minutes": [
                 0,
@@ -8053,6 +8058,10 @@
                 }
               ],
               "sources": [
+                {
+                  "value": "",
+                  "visitors": 4
+                },
                 {
                   "value": "mail",
                   "visitors": 1

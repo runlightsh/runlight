@@ -2394,7 +2394,7 @@ defmodule Runlight.Store do
         store,
         """
         SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session
-               WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.source <> ''
+               WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')
                GROUP BY s.source ORDER BY visitors DESC, s.source#{order} LIMIT 10\
         """,
         [site, since]

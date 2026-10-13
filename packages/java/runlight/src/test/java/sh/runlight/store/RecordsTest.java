@@ -389,7 +389,7 @@ class RecordsTest extends StoreTestCase {
             Json.object("value", "/", "visitors", 1),
             Json.object("value", "/pricing", "visitors", 1)),
         live.get("pages"));
-    assertJson(List.of(Json.object("value", "Google", "visitors", 1)), live.get("sources"));
+    assertJson(List.of(Json.object("value", "", "visitors", 1), Json.object("value", "Google", "visitors", 1)), live.get("sources"));
     assertJson(
         List.of(
             Json.object("value", "GB", "visitors", 1), Json.object("value", "US", "visitors", 1)),

@@ -2,6 +2,16 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- The live visitors modal includes direct traffic in Sources and labels it Direct instead of hiding it. Empty live views explain when there is no recent activity or location data.
+- Account settings scroll as one panel, including two-factor setup, and Journeys scrolls its diagram without moving its controls out of view.
+- The site comparison table supports sorting by each column and shows site favicons. The site switcher includes a live name and domain search when there are more than seven sites.
+- Installation settings explain the optional CMS keys and let you revoke this site's dashboard keys in place. The assistant introduction is shorter, and the element picker explains its tracker requirement and reports blocked pop-ups.
+- Goal values explain fixed amounts and event properties. The fixed amount field preserves decimal entry and requires an amount before saving.
+
 ## 0.1.3 - 2026-10-12
 
 ### Security

@@ -191,7 +191,7 @@ public sealed class RecordsTests : StoreTestCase
         var live = await store.RealtimeAsync("default", NOW);
         Same(2, live.Get("visitors"));
         Same(L(new JsObject { ["value"] = "/", ["visitors"] = 1 }, new JsObject { ["value"] = "/pricing", ["visitors"] = 1 }), live.Get("pages"));
-        Same(L(new JsObject { ["value"] = "Google", ["visitors"] = 1 }), live.Get("sources"));
+        Same(L(new JsObject { ["value"] = "", ["visitors"] = 1 }, new JsObject { ["value"] = "Google", ["visitors"] = 1 }), live.Get("sources"));
         Same(L(new JsObject { ["value"] = "GB", ["visitors"] = 1 }, new JsObject { ["value"] = "US", ["visitors"] = 1 }), live.Get("countries"));
         var minutes = live.Arr("minutes")!;
         Assert.Equal(30, minutes.Count);

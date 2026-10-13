@@ -261,6 +261,7 @@ function Segmented<T extends string>({ value, options, onChange, label: aria }: 
 /** Add or edit a goal. */
 function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null; view: View; onDone: () => void }) {
   const [input, setInput] = useState<GoalInput>(() => (goal ? { ...goal } : { ...blank, currency: localCurrency() }));
+  const [amount, setAmount] = useState(goal?.valueMode === "fixed" ? String(goal.value) : "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [suggest, setSuggest] = useState<string[]>([]);
@@ -305,7 +306,13 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
     // The tab opens at once, while the click still allows it, and goes to the site when the ticket is back. It
     // is cut off from this one first, so nothing on the site can reach or move the dashboard.
     const opened = window.open("about:blank", "_blank");
-    if (opened) opened.opener = null;
+    if (!opened) {
+      pickNonce.current = "";
+      setPicking(false);
+      setError(t("goals.pickBlocked"));
+      return;
+    }
+    opened.opener = null;
     // The ticket names this dashboard's relay page and the nonce, so the picker sends its choice here and nowhere else.
     api
       .pickTicket(site.id, location.origin, `${location.origin}${base}/pick-return`, nonce)
@@ -327,7 +334,8 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
     e.preventDefault();
     setError("");
     setSaving(true);
-    (goal ? api.updateGoal(site.id, goal.id, input) : api.createGoal(site.id, input))
+    const values = { ...input, value: input.valueMode === "fixed" ? Number(amount) : input.value };
+    (goal ? api.updateGoal(site.id, goal.id, values) : api.createGoal(site.id, values))
       .then(onDone)
       .catch((err: Error) => setError(err.message))
       .finally(() => setSaving(false));
@@ -394,6 +402,7 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
         <span class="field-hint">
           {t(input.kind === "event" ? "goals.hint.event" : input.kind === "page" ? "goals.hint.page" : input.clickBy === "link" ? "goals.hint.link" : "goals.hint.selector")}
         </span>
+        {picking ? <span class="field-hint" role="status">{t("goals.pickWaiting")}</span> : null}
       </label>
       <div class="field-row">
         <span class="field-label">{t("goals.valueLabel")}</span>
@@ -407,13 +416,14 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
           ]}
           onChange={(valueMode) => set({ valueMode })}
         />
+        {input.valueMode !== "none" ? <span class="field-hint">{t(input.valueMode === "fixed" ? "goals.value.fixedHint" : "goals.value.propHint")}</span> : null}
       </div>
       {input.valueMode !== "none" ? (
         <div class="value-row">
           {input.valueMode === "fixed" ? (
             <label class="field-row">
               <span class="field-label">{t("goals.amount")}</span>
-              <input class="value" type="number" min="0" step="0.01" value={String(input.value || "")} onInput={(e) => set({ value: Number((e.target as HTMLInputElement).value) })} />
+              <input class="value" type="number" inputmode="decimal" min="0" max="999999999.99" step="0.01" required placeholder="49.99" value={amount} onInput={(e) => setAmount((e.target as HTMLInputElement).value)} />
             </label>
           ) : (
             <label class="field-row">
@@ -434,7 +444,7 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
       {input.valueMode === "prop" ? (
         <div class="code small">
           <pre>
-            <code>{`runlight("${input.kind === "event" && input.match ? input.match : "Purchase"}", { ${input.valueProp || "revenue"}: 49.99 })`}</code>
+            <code>{`runlight(${JSON.stringify(input.match || "Purchase")}, { ${JSON.stringify(input.valueProp || "revenue")}: 49.99 })`}</code>
           </pre>
         </div>
       ) : null}

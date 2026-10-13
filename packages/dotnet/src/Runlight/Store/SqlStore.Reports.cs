@@ -378,7 +378,7 @@ public sealed partial class SqlStore
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         var sources = await Db.AllAsync(
-            "SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.source <> ''\n       GROUP BY s.source ORDER BY visitors DESC, s.source" + TextOrder() + " LIMIT 10",
+            "SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')\n       GROUP BY s.source ORDER BY visitors DESC, s.source" + TextOrder() + " LIMIT 10",
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         long start = (long)Math.Floor(now / 60_000.0) * 60_000 - 29 * 60_000;

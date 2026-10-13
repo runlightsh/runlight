@@ -1,8 +1,9 @@
-import { useEffect, useState } from "preact/hooks";
+import { Avatar } from "./site-avatar.js";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { api, type Site, type Stats, type View } from "./api.js";
 import { count, duration, percent } from "./format.js";
 import { Sheet } from "./links.js";
-import { t } from "./i18n.js";
+import { t, type Key } from "./i18n.js";
 import { Secret } from "./secret.js";
 import { Icon } from "./icons.js";
 import { Chevron, useFlyout } from "./picker.js";
@@ -129,19 +130,37 @@ export function FirstSite({ onAdded }: { onAdded: (site: Site) => void }) {
 /** The site name as a menu: every site, then "Add a site" when sites are managed in the dashboard. */
 export function SiteMenu({ sites, current, canAdd, onPick, onAdd, onAll }: { sites: Site[]; current: Site | undefined; canAdd: boolean; onPick: (id: string) => void; onAdd: () => void; onAll?: () => void }) {
   const { open, setOpen, root } = useFlyout();
+  const [query, setQuery] = useState("");
+  const search = useRef<HTMLInputElement>(null);
+  const searchable = sites.length > 7;
+  const term = query.trim().toLocaleLowerCase();
+  const filtered = searchable && term ? sites.filter((s) => [s.name, ...s.hostnames].some((value) => value.toLocaleLowerCase().includes(term))) : sites;
+  useLayoutEffect(() => {
+    if (open && searchable) search.current?.focus();
+  }, [open, searchable]);
   return (
     <div class="site-menu" ref={root}>
-      <button type="button" class="site-button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <button type="button" class="site-button" aria-haspopup="dialog" aria-expanded={open} onClick={() => {
+        if (!open) setQuery("");
+        setOpen(!open);
+      }}>
         <span class="site-button-name">{current?.name ?? "Runlight"}</span>
         <Chevron />
       </button>
       {open ? (
-        <div class="site-flyout" role="menu" aria-label={t("app.site")}>
-          {sites.map((s) => (
+        <div class="site-flyout" role="dialog" aria-label={t("app.site")} onKeyDown={(e) => {
+          if (e.key === "Escape") root.current?.querySelector<HTMLButtonElement>(".site-button")?.focus();
+          if ((e.key === "ArrowDown" || e.key === "Enter") && e.target === search.current) {
+            e.preventDefault();
+            root.current?.querySelector<HTMLButtonElement>(".site-option:not(.site-add)")?.focus();
+          }
+        }}>
+          {searchable ? <div class="site-search"><input ref={search} type="search" class="value" aria-label={t("sites.search")} placeholder={t("sites.search")} value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></div> : null}
+          {filtered.length === 0 ? <p class="site-no-results" role="status">{t("empty.search", { q: query.trim() })}</p> : null}
+          {filtered.map((s) => (
             <button
               type="button"
-              role="menuitemradio"
-              aria-checked={s.id === current?.id}
+              aria-pressed={s.id === current?.id}
               class={s.id === current?.id ? "site-option on" : "site-option"}
               onClick={() => {
                 setOpen(false);
@@ -160,7 +179,6 @@ export function SiteMenu({ sites, current, canAdd, onPick, onAdd, onAll }: { sit
               <hr />
               <button
                 type="button"
-                role="menuitem"
                 class="site-option site-add"
                 onClick={() => {
                   setOpen(false);
@@ -177,7 +195,6 @@ export function SiteMenu({ sites, current, canAdd, onPick, onAdd, onAll }: { sit
               <hr />
               <button
                 type="button"
-                role="menuitem"
                 class="site-option site-add"
                 onClick={() => {
                   setOpen(false);
@@ -198,6 +215,14 @@ export function SiteMenu({ sites, current, canAdd, onPick, onAdd, onAll }: { sit
 /** Every site side by side for the chosen dates: the six numbers, and a click opens one. */
 export function AllSites({ sites, view, onPick, onClose }: { sites: Site[]; view: View; onPick: (id: string) => void; onClose: () => void }) {
   const [rows, setRows] = useState<Record<string, Stats | null>>({});
+  type SortKey = "name" | "visitors" | "visits" | "pageviews" | "bounceRate" | "visitDuration";
+  const [sort, setSort] = useState<SortKey>("visitors");
+  const [ascending, setAscending] = useState(false);
+  const columns: Array<[SortKey, Key]> = [["name", "sites.name"], ["visitors", "metric.visitors"], ["visits", "metric.visits"], ["pageviews", "metric.pageviews"], ["bounceRate", "metric.bounceRate"], ["visitDuration", "metric.visitDuration"]];
+  const orderBy = (key: SortKey) => {
+    setAscending(key === sort ? !ascending : key === "name");
+    setSort(key);
+  };
   useEffect(() => {
     for (const s of sites) {
       api
@@ -206,19 +231,26 @@ export function AllSites({ sites, view, onPick, onClose }: { sites: Site[]; view
         .catch(() => setRows((all) => ({ ...all, [s.id]: null })));
     }
   }, []);
-  const sorted = [...sites].sort((a, b) => (rows[b.id]?.visitors ?? -1) - (rows[a.id]?.visitors ?? -1));
+  const sorted = [...sites].sort((a, b) => {
+    if (sort === "name") return (ascending ? 1 : -1) * a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+    const av = rows[a.id]?.[sort], bv = rows[b.id]?.[sort];
+    if (av === undefined || bv === undefined) return av === bv ? a.name.localeCompare(b.name) : av === undefined ? 1 : -1;
+    return (ascending ? 1 : -1) * (av - bv) || a.name.localeCompare(b.name);
+  });
   return (
     <Sheet title={t("sites.all")} wide onClose={onClose}>
       <div class="sheet-body all-sites">
         <table class="all-table">
           <thead>
             <tr>
-              <th>{t("sites.name")}</th>
-              <th>{t("metric.visitors")}</th>
-              <th>{t("metric.visits")}</th>
-              <th>{t("metric.pageviews")}</th>
-              <th>{t("metric.bounceRate")}</th>
-              <th>{t("metric.visitDuration")}</th>
+              {columns.map(([key, title]) => (
+                <th aria-sort={sort === key ? ascending ? "ascending" : "descending" : "none"}>
+                  <button type="button" class="sort-heading" onClick={() => orderBy(key)}>
+                    {t(title)}
+                    {sort === key ? <Icon name={ascending ? "arrow-up" : "arrow-down"} /> : null}
+                  </button>
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -228,6 +260,7 @@ export function AllSites({ sites, view, onPick, onClose }: { sites: Site[]; view
                 <tr>
                   <td>
                     <button type="button" class="name" onClick={() => onPick(s.id)}>
+                      <Avatar site={s} />
                       <span class="name-text">{s.name}</span>
                     </button>
                   </td>

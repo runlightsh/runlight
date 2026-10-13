@@ -174,7 +174,7 @@ def test_salts_sessions_and_the_live_view(databases: Any, kind: str) -> None:
     live = s.realtime("default", NOW)
     assert live["visitors"] == 2
     assert live["pages"] == [{"value": "/", "visitors": 1}, {"value": "/pricing", "visitors": 1}]
-    assert live["sources"] == [{"value": "Google", "visitors": 1}]
+    assert live["sources"] == [{"value": "", "visitors": 1}, {"value": "Google", "visitors": 1}]
     assert live["countries"] == [{"value": "GB", "visitors": 1}, {"value": "US", "visitors": 1}]
     assert len(live["minutes"]) == 30
     assert live["minutes"][26] == 2

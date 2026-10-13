@@ -52,13 +52,13 @@ function Now({ title, rows, dimension }: { title: Key; rows: Array<{ value: stri
   return (
     <section class="mini">
       <h3>{t(title)}</h3>
-      {rows.length === 0 ? <Empty size="line" icon="monitor" title={t("live.nobody")} /> : null}
+      {rows.length === 0 ? <Empty size="line" icon="monitor" title={t(dimension === "country" ? "live.noCountries" : dimension === "source" ? "live.noSources" : "live.noPages")} /> : null}
       <ol class="rows">
         {rows.map((r) => (
           <li>
             <span class="bar" style={{ width: `${(r.visitors / top) * 100}%` }} />
             <span class="name">
-              <span class="name-text">{dimension === "country" ? `${flag(r.value)} ${countryName(r.value)}` : label(dimension, r.value)}</span>
+              <span class="name-text">{dimension === "country" ? `${flag(r.value)} ${countryName(r.value)}` : dimension === "source" && !r.value ? t("channel.Direct") : label(dimension, r.value)}</span>
             </span>
             <span class="num">{count(r.visitors)}</span>
           </li>
@@ -121,14 +121,22 @@ export function RealtimeModal({ site, onClose }: { site: string; onClose: () => 
               {rich(new Intl.PluralRules(currentLocale()).select(data.visitors) === "one" ? "live.now_one" : "live.now_other", { n: <strong>{exact(data.visitors)}</strong> })}
               <span class="live-hint">{t("live.nowHint")}</span>
             </p>
-            <Minutes minutes={data.minutes} />
-            <div class="mini-grid three">
-              <Now title="live.pages" rows={data.pages} dimension="path" />
-              <Now title="live.sources" rows={data.sources} dimension="source" />
-              <Now title="live.countries" rows={data.countries} dimension="country" />
-            </div>
-            {/* A share link or an embed gets no feed of single visits, so it shows none rather than a quiet one. */}
-            {shared ? null : <Feed recent={data.recent} />}
+            {data.visitors === 0 && data.recent.length === 0 && data.minutes.every((n) => n === 0) ? (
+              <div class="live-empty">
+                <Empty icon="clock" title={t("live.quietTitle")} hint={t("live.nobody")} />
+              </div>
+            ) : (
+              <>
+                <Minutes minutes={data.minutes} />
+                <div class="mini-grid three">
+                  <Now title="live.pages" rows={data.pages} dimension="path" />
+                  <Now title="live.sources" rows={data.sources} dimension="source" />
+                  <Now title="live.countries" rows={data.countries} dimension="country" />
+                </div>
+                {/* A share link or an embed gets no feed of single visits, so it shows none rather than a quiet one. */}
+                {shared ? null : <Feed recent={data.recent} />}
+              </>
+            )}
           </>
         ) : (
           <p class="empty">{t("common.loading")}</p>

@@ -44,42 +44,44 @@ export function AccountSheet({ me, onClose }: { me: Person; onClose: () => void 
   };
   return (
     <Sheet title={t("account.title")} sub={me.email} onClose={onClose}>
-      <form class="sheet-body link-form" onSubmit={save}>
-        <p class="settings-text">{t(`account.${me.role}` as Key)}</p>
-        <label class="field-row">
-          <span class="field-label">{t("account.current")}</span>
-          <Secret class="value" autoComplete="current-password" required value={current} onInput={(e) => edit(setCurrent, e)} />
-        </label>
-        <label class="field-row">
-          <span class="field-label">{t("account.next")}</span>
-          <Secret class="value" autoComplete="new-password" minLength={10} required value={next} onInput={(e) => edit(setNext, e)} aria-describedby="password-strength" />
-          {next ? (
-            <span class="strength" id="password-strength" data-score={score} aria-live="polite">
-              <span class="strength-bar" aria-hidden="true">
-                {[1, 2, 3, 4].map((n) => (
-                  <span class={score >= n ? "on" : ""} />
-                ))}
+      <div class="sheet-body account-body">
+        <form class="link-form" onSubmit={save}>
+          <p class="settings-text">{t(`account.${me.role}` as Key)}</p>
+          <label class="field-row">
+            <span class="field-label">{t("account.current")}</span>
+            <Secret class="value" autoComplete="current-password" required value={current} onInput={(e) => edit(setCurrent, e)} />
+          </label>
+          <label class="field-row">
+            <span class="field-label">{t("account.next")}</span>
+            <Secret class="value" autoComplete="new-password" minLength={10} required value={next} onInput={(e) => edit(setNext, e)} aria-describedby="password-strength" />
+            {next ? (
+              <span class="strength" id="password-strength" data-score={score} aria-live="polite">
+                <span class="strength-bar" aria-hidden="true">
+                  {[1, 2, 3, 4].map((n) => (
+                    <span class={score >= n ? "on" : ""} />
+                  ))}
+                </span>
+                <span class="strength-label">{t(`account.strength${score}` as Key)}</span>
               </span>
-              <span class="strength-label">{t(`account.strength${score}` as Key)}</span>
-            </span>
-          ) : null}
-          <span class="field-hint">{t("account.nextHint")}</span>
-        </label>
-        <label class="field-row">
-          <span class="field-label">{t("account.again")}</span>
-          <Secret class="value" autoComplete="new-password" required value={again} aria-invalid={mismatch} onInput={(e) => edit(setAgain, e)} />
-          {mismatch ? <span class="field-hint field-bad">{t("account.mismatch")}</span> : null}
-        </label>
-        <div class="settings-actions start">
-          <button type="submit" class="solid" disabled={state === "saving" || !current || next.length < 10 || again !== next}>
-            <Icon name="save" />
-            {t("account.save")}
-          </button>
-          {state === "saved" ? <span class="settings-ok">{t("account.saved")}</span> : null}
-          {error ? <span class="settings-error">{error}</span> : null}
-        </div>
-      </form>
-      <TwoFactor me={me} />
+            ) : null}
+            <span class="field-hint">{t("account.nextHint")}</span>
+          </label>
+          <label class="field-row">
+            <span class="field-label">{t("account.again")}</span>
+            <Secret class="value" autoComplete="new-password" required value={again} aria-invalid={mismatch} onInput={(e) => edit(setAgain, e)} />
+            {mismatch ? <span class="field-hint field-bad">{t("account.mismatch")}</span> : null}
+          </label>
+          <div class="settings-actions start">
+            <button type="submit" class="solid" disabled={state === "saving" || !current || next.length < 10 || again !== next}>
+              <Icon name="save" />
+              {t("account.save")}
+            </button>
+            {state === "saved" ? <span class="settings-ok">{t("account.saved")}</span> : null}
+            {error ? <span class="settings-error">{error}</span> : null}
+          </div>
+        </form>
+        <TwoFactor me={me} />
+      </div>
     </Sheet>
   );
 }
@@ -155,7 +157,7 @@ function TwoFactor({ me }: { me: Person }) {
   };
 
   return (
-    <div class="sheet-body link-form twofactor">
+    <div class="link-form twofactor">
       <div class="field-row">
         <span class="field-label">{t("twofa.title")}</span>
         <span class="field-hint">{on ? tn("twofa.on", left) : t("twofa.off")}</span>

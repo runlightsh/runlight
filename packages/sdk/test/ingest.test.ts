@@ -102,6 +102,16 @@ test("a visit: pageviews, an event, engagement, and the reports that follow", as
   }
 });
 
+test("realtime sources include direct visitors once across pageviews", async () => {
+  const t = setup();
+  await t.send({ k: "pageview", u: "https://example.com/", i: "direct1" });
+  await t.send({ k: "pageview", u: "https://example.com/about", i: "direct2" });
+  const live = await t.get("/api/realtime");
+  assert.deepEqual(live.sources, [{ value: "", visitors: 1 }]);
+  t.advance(6 * MIN);
+  assert.deepEqual((await t.get("/api/realtime")).sources, []);
+});
+
 test("thirty idle minutes start a new session; a new day is a new visitor", async () => {
   const t = setup();
   await t.send({ k: "pageview", u: "https://example.com/", i: "a1" });
