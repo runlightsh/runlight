@@ -500,6 +500,10 @@ function App() {
           sites={sites}
           view={view}
           onClose={() => setAllOpen(false)}
+          onAdd={install.managed && !readOnly ? () => {
+            setAllOpen(false);
+            setAddingSite(true);
+          } : undefined}
           onPick={(id) => {
             setAllOpen(false);
             update({ site: id, filters: [] });
@@ -526,11 +530,16 @@ function App() {
           site={site}
           view={view}
           owner={isOwner}
+          canWrite={!readOnly && !site.remote}
+          canInvite={accounts && (me?.role === "owner" || me?.role === "admin")}
           onSetup={() => {
             setAsking(false);
             openSettings("assistant");
           }}
-          onClose={() => setAsking(false)}
+          onClose={() => {
+            setAsking(false);
+            setView((v) => ({ ...v }));
+          }}
         />
       ) : null}
 

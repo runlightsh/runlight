@@ -15,7 +15,9 @@ import { publicFetchThroughGlobal } from "../packages/sdk/src/safefetch.ts";
 
 const dir = new URL("../packages/php/tests/fixtures/", import.meta.url);
 mkdirSync(dir, { recursive: true });
-const save = (name: string, data: unknown) => writeFileSync(new URL(name, dir), `${JSON.stringify(data)}\n`);
+const save = (name: string, data: unknown) => {
+  if (!process.argv.includes("--assistant-only") || name === "assistant.json") writeFileSync(new URL(name, dir), `${JSON.stringify(data)}\n`);
+};
 
 // A small seeded generator, so the fixtures only change when the TypeScript does.
 let seed = 20261008;
@@ -563,6 +565,22 @@ const scenarios: Scenario[] = [
   { name: "models listed as an object", call: "listModels", settings: { provider: "anthropic", baseUrl: "", key: "k" }, responses: [json({ data: { id: "m" } })] },
   { name: "models list with entries that are not models", call: "listModels", settings: { provider: "openai", baseUrl: "", key: "k" }, responses: [json({ data: [null, 5, "x", [], { id: "m1" }] })] },
 ];
+
+for (const action of [
+  { action: "goal", name: "Signup", kind: "page", match: "/thanks" },
+  { action: "funnel", name: "Checkout", steps: [{ kind: "page", match: "/pricing" }, { kind: "event", match: "Purchase" }] },
+  { action: "invite", email: "alex@example.com", role: "viewer" },
+  { action: "report", email: "owner@example.com", frequency: "weekly", lang: "en" },
+  { action: "share", name: "Client view" },
+  null,
+]) {
+  for (const provider of ["anthropic", "openai"]) scenarios.push({
+    name: `${provider} prepares ${action?.action ?? "invalid"} without a write`,
+    call: "chat", settings: { provider, model: "m", baseUrl: "https://api.example.com/v1", key: "k" },
+    messages: [{ role: "user", content: "Please prepare this for review" }], context,
+    responses: [provider === "anthropic" ? anthropicTool([{ id: "draft", name: "prepare_action", input: action }]) : openaiTool([{ id: "draft", type: "function", function: { name: "prepare_action", arguments: JSON.stringify(action) } }])],
+  });
+}
 
 const realFetch = globalThis.fetch;
 // The assistant's requests go through the stubbed fetch below, not out to the network.

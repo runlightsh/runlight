@@ -391,7 +391,9 @@ public static class Assistant
 
         if (provider.Protocol == "anthropic")
         {
+            var draftTool = Json.Parse(Assets.Text("assistant-action.json"));
             var tools = Mcp.Tools.Select(t => (object?)new JsObject { ["name"] = t.Name, ["description"] = t.Description, ["input_schema"] = t.InputSchema }).ToList();
+            tools.Add(new JsObject { ["name"] = Js.Get(draftTool, "name"), ["description"] = Js.Get(draftTool, "description"), ["input_schema"] = Js.Get(draftTool, "inputSchema") });
             var convo = history.Select(h => (object?)h).ToList();
             var headers = new Headers { ["x-api-key"] = key, ["anthropic-version"] = "2023-06-01" };
             for (int round = 0; round < MaxRounds; round++)
@@ -436,6 +438,7 @@ public static class Assistant
                     object? name = Js.Get(call, "name");
                     name = name is null or Undefined ? "" : name;
                     used.Add(name);
+                    if (Js.String(name) == "prepare_action") { used.RemoveAt(used.Count - 1); return new JsObject { ["reply"] = "", ["tools"] = used, ["action"] = Js.Get(call, "input") }; }
                     var (text, error) = await ToolTextAsync(name, Js.Get(call, "input"), readApi).ConfigureAwait(false);
                     var result = new JsObject { ["type"] = "tool_result", ["tool_use_id"] = Js.Get(call, "id"), ["content"] = text };
                     if (error)
@@ -454,6 +457,8 @@ public static class Assistant
             ["type"] = "function",
             ["function"] = new JsObject { ["name"] = t.Name, ["description"] = t.Description, ["parameters"] = t.InputSchema },
         }).ToList();
+        var actionTool = Json.Parse(Assets.Text("assistant-action.json"));
+        functions.Add(new JsObject { ["type"] = "function", ["function"] = new JsObject { ["name"] = Js.Get(actionTool, "name"), ["description"] = Js.Get(actionTool, "description"), ["parameters"] = Js.Get(actionTool, "inputSchema") } });
         var chat = new List<object?> { new JsObject { ["role"] = "system", ["content"] = System(context) } };
         chat.AddRange(history);
         var bearer = key.Length > 0 ? new Headers { ["authorization"] = "Bearer " + key } : new Headers();
@@ -489,6 +494,7 @@ public static class Assistant
                 {
                     args = new JsObject();
                 }
+                if (Js.String(name) == "prepare_action") { used.RemoveAt(used.Count - 1); return new JsObject { ["reply"] = "", ["tools"] = used, ["action"] = args }; }
                 var (text, _) = await ToolTextAsync(name, args, readApi).ConfigureAwait(false);
                 chat.Add(new JsObject { ["role"] = "tool", ["tool_call_id"] = Js.Get(call, "id"), ["content"] = text });
             }

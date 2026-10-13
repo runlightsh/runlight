@@ -4,6 +4,11 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Added
+
+- Tracking scripts support a synchronous `data-before-send` hook to scrub URLs, referrers, titles, and event properties before sending them. A configured scrubber that is missing, throws, or returns an invalid result sends nothing.
+- The dashboard assistant can prepare goals, funnels, invitations, email reports, and share links. It asks for missing details and presents a draft for confirmation before using your existing permissions to create anything. MCP tools remain read-only.
+
 ### Fixed
 
 - The live visitors modal includes direct traffic in Sources and labels it Direct instead of hiding it. Empty live views explain when there is no recent activity or location data.
@@ -11,6 +16,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - The site comparison table supports sorting by each column and shows site favicons. The site switcher includes a live name and domain search when there are more than seven sites.
 - Installation settings explain the optional CMS keys and let you revoke this site's dashboard keys in place. The assistant introduction is shorter, and the element picker explains its tracker requirement and reports blocked pop-ups.
 - Goal values explain fixed amounts and event properties. The fixed amount field preserves decimal entry and requires an amount before saving.
+- The site switcher keeps keyboard focus outlines visible, and arrow keys navigate every option. Assistant starter questions are more general.
+- The All Sites modal has an Add New Site button beside its heading for people who can add sites.
 
 ## 0.1.3 - 2026-10-12
 

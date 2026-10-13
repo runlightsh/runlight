@@ -150,9 +150,16 @@ export function SiteMenu({ sites, current, canAdd, onPick, onAdd, onAll }: { sit
       {open ? (
         <div class="site-flyout" role="dialog" aria-label={t("app.site")} onKeyDown={(e) => {
           if (e.key === "Escape") root.current?.querySelector<HTMLButtonElement>(".site-button")?.focus();
-          if ((e.key === "ArrowDown" || e.key === "Enter") && e.target === search.current) {
+          const options = Array.from(root.current?.querySelectorAll<HTMLButtonElement>(".site-option") ?? []);
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();
-            root.current?.querySelector<HTMLButtonElement>(".site-option:not(.site-add)")?.focus();
+            const stops: HTMLElement[] = search.current ? [search.current, ...options] : options;
+            const index = stops.indexOf(e.target as HTMLElement);
+            const next = e.key === "ArrowDown" ? (index + 1) % stops.length : (index < 0 ? stops.length - 1 : (index - 1 + stops.length) % stops.length);
+            stops[next]?.focus();
+          } else if (e.key === "Enter" && e.target === search.current) {
+            e.preventDefault();
+            options[0]?.focus();
           }
         }}>
           {searchable ? <div class="site-search"><input ref={search} type="search" class="value" aria-label={t("sites.search")} placeholder={t("sites.search")} value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></div> : null}
@@ -213,7 +220,7 @@ export function SiteMenu({ sites, current, canAdd, onPick, onAdd, onAll }: { sit
 }
 
 /** Every site side by side for the chosen dates: the six numbers, and a click opens one. */
-export function AllSites({ sites, view, onPick, onClose }: { sites: Site[]; view: View; onPick: (id: string) => void; onClose: () => void }) {
+export function AllSites({ sites, view, onPick, onAdd, onClose }: { sites: Site[]; view: View; onPick: (id: string) => void; onAdd?: () => void; onClose: () => void }) {
   const [rows, setRows] = useState<Record<string, Stats | null>>({});
   type SortKey = "name" | "visitors" | "visits" | "pageviews" | "bounceRate" | "visitDuration";
   const [sort, setSort] = useState<SortKey>("visitors");
@@ -238,7 +245,12 @@ export function AllSites({ sites, view, onPick, onClose }: { sites: Site[]; view
     return (ascending ? 1 : -1) * (av - bv) || a.name.localeCompare(b.name);
   });
   return (
-    <Sheet title={t("sites.all")} wide onClose={onClose}>
+    <Sheet title={t("sites.all")} wide onClose={onClose} action={onAdd ? (
+      <button type="button" class="ghost sheet-add-site" onClick={onAdd}>
+        <Icon name="plus" />
+        {t("sites.addNew")}
+      </button>
+    ) : undefined}>
       <div class="sheet-body all-sites">
         <table class="all-table">
           <thead>

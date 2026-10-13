@@ -12,6 +12,7 @@
 //   data-downloads="false" do not record file downloads
 //   data-exclude="/admin/*,/preview/*"  record nothing on these pages
 //   data-manual            no automatic pageviews; call runlight.pageview(url?)
+//   data-before-send="fn"  synchronous window function that scrubs each payload
 //
 // The server swaps the string below for each site's click goals.
 (function () {
@@ -28,6 +29,7 @@
   var site = attr("site");
   var useHash = attr("hash") !== null;
   var manual = attr("manual") !== null;
+  var beforeSend = attr("before-send");
   // A pattern with * as a wildcard, everything else literal.
   var glob = function (p) {
     return new RegExp("^" + p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$");
@@ -68,6 +70,13 @@
     var body = { k: kind, u: pageUrl };
     if (site) body.s = site;
     for (var key in extra) body[key] = extra[key];
+    // A configured scrubber fails closed, including when it has not loaded.
+    if (beforeSend !== null) {
+      try {
+        body = w[beforeSend](body);
+        if (!body || body.constructor !== Object) return;
+      } catch (e) { return; }
+    }
     var json = JSON.stringify(body);
     // A string body goes as text/plain, which needs no CORS preflight.
     if (n.sendBeacon && n.sendBeacon(endpoint, json)) return;
@@ -75,9 +84,9 @@
   };
 
   var randomId = function () {
-    var bytes = new Uint8Array(8);
+    var bytes = new Uint8Array(6);
     (w.crypto || {}).getRandomValues ? crypto.getRandomValues(bytes) : bytes.forEach(function (_, i) { bytes[i] = Math.random() * 256; });
-    return Array.prototype.map.call(bytes, function (b) { return (b + 256).toString(36).slice(-2); }).join("").slice(0, 12);
+    return Array.from(bytes, function (b) { return (b + 256).toString(36).slice(-2); }).join("");
   };
 
   // Engaged time: visible and focused. Sent as a delta on every hide, so

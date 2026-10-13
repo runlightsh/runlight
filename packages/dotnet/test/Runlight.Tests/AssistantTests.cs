@@ -147,7 +147,12 @@ public sealed class AssistantTests
         var messages = new List<JsObject> { new() { ["role"] = "user", ["content"] = "All of it" } };
         var error = await Assert.ThrowsAsync<AssistantError>(() => Assistant.ChatAsync(settings, messages, Context(), slowApi, fetcher, () => clock));
         Assert.Equal("assistant_slow", error.Code);
-        Assert.Equal([90_000, 70_000, 20_000], fetcher.Requests.Select(r => r.TimeoutMs).ToArray());
+        var timeouts = fetcher.Requests.Select(r => r.TimeoutMs).ToArray();
+        Assert.Equal(3, timeouts.Length);
+        // Safe fetch also subtracts real time spent preparing each request.
+        Assert.InRange(timeouts[0], 89_000, 90_000);
+        Assert.InRange(timeouts[1], 69_000, 70_000);
+        Assert.InRange(timeouts[2], 19_000, 20_000);
         Assert.Equal(3, log.Count);
     }
 

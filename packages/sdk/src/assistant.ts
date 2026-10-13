@@ -8,6 +8,7 @@
  * Chat Completions, which OpenAI, Gemini (through its compatible endpoint),
  * OpenRouter, Ollama, LM Studio, and most others speak. Plain fetch, no SDKs.
  */
+import { ACTION_TOOL } from "./assistant-action.js";
 import { INSTRUCTIONS, TOOLS, callTool, type ApiRead } from "./mcp.js";
 import { readJsonCapped } from "./body.js";
 import { MetadataAddressError, RedirectRefusedError, serviceFetch } from "./safefetch.js";
@@ -176,7 +177,7 @@ export async function chat(
   context: ChatContext,
   readApi: ApiRead,
   signal?: AbortSignal,
-): Promise<{ reply: string; tools: string[] }> {
+): Promise<{ reply: string; tools: string[]; action?: unknown }> {
   const provider = PROVIDERS.find((p) => p.id === settings.provider);
   if (!provider) throw new AssistantError("Choose a provider in Settings, AI Assistant", "assistant_provider");
   const base = (settings.baseUrl || provider.baseUrl).replace(/\/+$/, "");
@@ -201,7 +202,7 @@ export async function chat(
   }
 
   if (provider.protocol === "anthropic") {
-    const tools = TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
+    const tools = [...TOOLS, ACTION_TOOL].map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
     const convo: Array<Record<string, unknown>> = history;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const data = await post(`${base}/messages`, { "x-api-key": settings.key, "anthropic-version": "2023-06-01" }, { model, max_tokens: MAX_TOKENS, system: system(context), tools, messages: convo }, deadline, signal);
@@ -216,6 +217,7 @@ export async function chat(
       for (const call of calls) {
         // The deadline covers the reading too, however many tools one answer asks for.
         inTime(deadline, signal);
+        if (call.name === ACTION_TOOL.name) return { reply: "", tools: used, action: call.input };
         used.push(call.name ?? "");
         const out = await toolText(call.name ?? "", call.input, readApi);
         results.push({ type: "tool_result", tool_use_id: call.id, content: out.text, ...(out.error ? { is_error: true } : {}) });
@@ -225,7 +227,7 @@ export async function chat(
     throw new AssistantError("The assistant needed too many steps for that question. Try asking something narrower.", "assistant_steps");
   }
 
-  const tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
+  const tools = [...TOOLS, ACTION_TOOL].map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
   const convo: Array<Record<string, unknown>> = [{ role: "system", content: system(context) }, ...history];
   const headers: Record<string, string> = settings.key ? { authorization: `Bearer ${settings.key}` } : {};
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -246,6 +248,7 @@ export async function chat(
       try {
         args = JSON.parse(call.function.arguments || "{}");
       } catch {}
+      if (call.function.name === ACTION_TOOL.name) return { reply: "", tools: used.filter((name) => name !== ACTION_TOOL.name), action: args };
       const out = await toolText(call.function.name, args, readApi);
       convo.push({ role: "tool", tool_call_id: call.id, content: out.text });
     }

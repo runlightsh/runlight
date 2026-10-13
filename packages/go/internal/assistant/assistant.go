@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"runlight.sh/go/internal/assets"
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/mcp"
 	"runlight.sh/go/internal/web"
@@ -99,8 +100,9 @@ type ChatContext struct {
 // as the model gave it: a string, or nil where it gave none, which JSON
 // writes as null as the TypeScript's undefined is.
 type ChatResult struct {
-	Reply string `json:"reply"`
-	Tools []any  `json:"tools"`
+	Reply  string `json:"reply"`
+	Tools  []any  `json:"tools"`
+	Action *any   `json:"action,omitempty"`
 }
 
 // Model is one model a service offers.
@@ -436,11 +438,13 @@ func Chat(ctx context.Context, fetcher web.Fetcher, settings Settings, messages 
 		convo = append(convo, js.NewObject("role", h.role, "content", h.content))
 	}
 
+	action, _ := js.Parse(assets.AssistantAction)
 	if provider.Protocol == "anthropic" {
 		tools := make([]any, len(mcp.Tools))
 		for i, t := range mcp.Tools {
 			tools[i] = js.NewObject("name", t.Name, "description", t.Description, "input_schema", t.InputSchema)
 		}
+		tools = append(tools, js.NewObject("name", get(action, "name"), "description", get(action, "description"), "input_schema", get(action, "inputSchema")))
 		headers := web.NewHeaders("x-api-key", settings.Key, "anthropic-version", "2023-06-01")
 		for round := 0; round < maxRounds; round++ {
 			body := js.NewObject("model", model, "max_tokens", maxTokens, "system", system(chatContext), "tools", tools, "messages", convo)
@@ -487,6 +491,10 @@ func Chat(ctx context.Context, fetcher web.Fetcher, settings Settings, messages 
 					name = ""
 				}
 				used = append(used, name)
+				if name == "prepare_action" {
+					draft := get(call, "input")
+					return &ChatResult{Reply: "", Tools: used[:len(used)-1], Action: &draft}, nil
+				}
 				out := toolText(ctx, name, get(call, "input"), readAPI)
 				result := js.NewObject("type", "tool_result", "tool_use_id", get(call, "id"), "content", out.text)
 				if out.error {
@@ -503,6 +511,7 @@ func Chat(ctx context.Context, fetcher web.Fetcher, settings Settings, messages 
 	for i, t := range mcp.Tools {
 		tools[i] = js.NewObject("type", "function", "function", js.NewObject("name", t.Name, "description", t.Description, "parameters", t.InputSchema))
 	}
+	tools = append(tools, js.NewObject("type", "function", "function", js.NewObject("name", get(action, "name"), "description", get(action, "description"), "parameters", get(action, "inputSchema"))))
 	convo = append([]any{js.NewObject("role", "system", "content", system(chatContext))}, convo...)
 	headers := web.NewHeaders()
 	if settings.Key != "" {
@@ -555,6 +564,9 @@ func Chat(ctx context.Context, fetcher web.Fetcher, settings Settings, messages 
 				if parsed, err := js.Parse(js.String(text)); err == nil {
 					args = parsed
 				}
+			}
+			if name == "prepare_action" {
+				return &ChatResult{Reply: "", Tools: used[:len(used)-1], Action: &args}, nil
 			}
 			out := toolText(ctx, name, args, readAPI)
 			convo = append(convo, js.NewObject("role", "tool", "tool_call_id", get(call, "id"), "content", out.text))

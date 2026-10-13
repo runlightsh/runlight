@@ -1,3 +1,5 @@
+import { actionDraft, type ChatAction } from "./assistant-action.js";
+import { ActionCard } from "./assistant-action-card.js";
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, type AssistantProvider, type AssistantState, type Site, type View } from "./api.js";
@@ -13,6 +15,7 @@ interface Message {
   content: string;
   /** How many reports the assistant read for this answer. */
   checked?: number;
+  action?: ChatAction;
   error?: boolean;
 }
 
@@ -81,7 +84,7 @@ function Reply({ text }: { text: string }) {
 const SUGGESTIONS = ["assistant.ask1", "assistant.ask2", "assistant.ask3", "assistant.ask4"] as const;
 
 /** The chat drawer, opened from the robot button beside Filter. */
-export function AssistantDrawer({ site, view, owner, onSetup, onClose }: { site: Site; view: View; owner: boolean; onSetup: () => void; onClose: () => void }) {
+export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetup, onClose }: { site: Site; view: View; owner: boolean; canWrite: boolean; canInvite: boolean; onSetup: () => void; onClose: () => void }) {
   const key = `runlight_assistant:${site.id}`;
   const dialog = useRef<HTMLDivElement>(null);
   useDialogFocus(dialog);
@@ -91,7 +94,7 @@ export function AssistantDrawer({ site, view, owner, onSetup, onClose }: { site:
       const saved = JSON.parse(sessionStorage.getItem(key) ?? "[]") as Message[];
       // A question left without its answer (the drawer closed while it was asked) is dropped, not asked twice.
       while (saved.length && saved[saved.length - 1]!.role === "user") saved.pop();
-      return saved;
+      return saved.map((m) => m.action?.status === "saving" ? { ...m, action: { ...m.action, status: "failed" as const, result: t("assistant.action.unknown") } } : m);
     } catch {
       return [];
     }
@@ -99,6 +102,8 @@ export function AssistantDrawer({ site, view, owner, onSetup, onClose }: { site:
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const list = useRef<HTMLDivElement>(null);
+  const confirming = useRef(false);
+  const [acting, setActing] = useState(false);
   // Bumped by New chat, so an answer to a question from before it is not put back.
   const chat = useRef(0);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -125,17 +130,59 @@ export function AssistantDrawer({ site, view, owner, onSetup, onClose }: { site:
 
   const ask = (question: string) => {
     const text = question.trim();
-    if (!text || busy) return;
-    const next: Message[] = [...messages, { role: "user", content: text }];
+    if (!text || busy || confirming.current) return;
+    const next: Message[] = [...messages.map((m) => m.action?.status === "pending" ? { ...m, action: { ...m.action, status: "cancelled" as const } } : m), { role: "user", content: text }];
     setMessages(next);
     setDraft("");
     setBusy(true);
     const asked = chat.current;
     api
-      .ask(site.id, next.filter((m) => !m.error).map(({ role, content }) => ({ role, content })), describeView(view), currentLocale())
-      .then((r) => asked === chat.current && setMessages([...next, { role: "assistant", content: r.reply || t("assistant.empty"), checked: r.tools.length }]))
+      .ask(site.id, next.filter((m) => !m.error).map(({ role, content, action }) => ({ role, content: content + (action ? `\nDraft: ${JSON.stringify(action.draft)}. Status: ${action.status}.` : "") })), describeView(view), currentLocale())
+      .then((r) => {
+        if (asked !== chat.current) return;
+        const draft = actionDraft(r.action);
+        setMessages([...next, { role: "assistant", content: draft ? t("assistant.action.ready") : r.action ? t("assistant.action.incomplete") : r.reply || t("assistant.empty"), checked: r.tools.length, ...(draft ? { action: { draft, status: "pending" as const } } : {}) }]);
+      })
       .catch((err: Error) => asked === chat.current && setMessages([...next, { role: "assistant", content: err.message, error: true }]))
       .finally(() => asked === chat.current && setBusy(false));
+  };
+
+  const updateAction = (index: number, action: ChatAction) => {
+    setMessages((all) => {
+      const next = all.map((m, i) => i === index ? { ...m, action } : m);
+      try { sessionStorage.setItem(key, JSON.stringify(next.slice(-40))); } catch {}
+      return next;
+    });
+  };
+  const confirm = async (index: number) => {
+    const action = messages[index]?.action;
+    if (!action || action.status !== "pending" || confirming.current || !(action.draft.action === "invite" ? canInvite : canWrite)) return;
+    confirming.current = true;
+    setActing(true);
+    updateAction(index, { ...action, status: "saving" });
+    let result = t("assistant.action.done");
+    let link: string | undefined;
+    try {
+      const d = action.draft;
+      if (d.action === "goal") await api.createGoal(site.id, d.input);
+      if (d.action === "funnel") await api.saveFunnel(site.id, null, d.input);
+      if (d.action === "report") await api.addReport(site.id, d.input);
+      if (d.action === "share") {
+        const r = await api.createShare(site.id, d.input.name);
+        link = new URL(r.share.path, location.origin).href;
+      }
+      if (d.action === "invite") {
+        const r = await api.addPerson(d.input.email, d.input.role);
+        result = t(r.emailed ? "assistant.action.invited" : "assistant.action.inviteManual");
+        link = r.link;
+      }
+      updateAction(index, { ...action, status: "done", result, link });
+    } catch (err) {
+      updateAction(index, { ...action, status: "failed", result: `${err instanceof Error ? err.message : String(err)} ${t("assistant.action.unknown")}` });
+    } finally {
+      confirming.current = false;
+      setActing(false);
+    }
   };
 
   return (
@@ -148,6 +195,7 @@ export function AssistantDrawer({ site, view, owner, onSetup, onClose }: { site:
               <button
                 type="button"
                 class="copy inline"
+                disabled={acting}
                 onClick={() => {
                   chat.current++;
                   setBusy(false);
@@ -195,9 +243,10 @@ export function AssistantDrawer({ site, view, owner, onSetup, onClose }: { site:
               </div>
             </div>
           ) : (
-            messages.map((m) => (
+            messages.map((m, index) => (
               <div class={`message ${m.role}${m.error ? " error" : ""}`}>
                 {m.role === "user" ? <p>{m.content}</p> : <Reply text={m.content} />}
+                {m.action ? <ActionCard action={m.action} site={site.name} allowed={m.action.draft.action === "invite" ? canInvite : canWrite} disabled={busy || acting} onConfirm={() => void confirm(index)} onCancel={() => updateAction(index, { ...m.action!, status: "cancelled" })} /> : null}
                 {m.checked ? <span class="message-meta">{tn("assistant.checked", m.checked)}</span> : null}
               </div>
             ))

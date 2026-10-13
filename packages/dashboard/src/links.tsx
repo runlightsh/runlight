@@ -46,7 +46,7 @@ function Copy({ text, small }: { text: string; small?: boolean }) {
 }
 
 /** Modal frame shared by the link dialogs: Escape and the backdrop close it. */
-export function Sheet({ title, sub, wide, onClose, children }: { title: string; sub?: string; wide?: boolean; onClose: () => void; children: ComponentChildren }) {
+export function Sheet({ title, sub, wide, action, onClose, children }: { title: string; sub?: string; wide?: boolean; action?: ComponentChildren; onClose: () => void; children: ComponentChildren }) {
   const dialog = useRef<HTMLDivElement>(null);
   useDialogFocus(dialog);
   useEffect(() => {
@@ -62,9 +62,14 @@ export function Sheet({ title, sub, wide, onClose, children }: { title: string; 
     <div class="scrim center" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div class={wide ? "list-sheet wide link-sheet" : "list-sheet link-sheet small"} role="dialog" aria-modal="true" aria-label={title} ref={dialog}>
         <header class="drawer-head">
-          <h2>
-            {title} {sub ? <span class="sheet-sub">{sub}</span> : null}
-          </h2>
+          {action ? (
+            <div class="sheet-heading-actions">
+              <h2>{title} {sub ? <span class="sheet-sub">{sub}</span> : null}</h2>
+              {action}
+            </div>
+          ) : (
+            <h2>{title} {sub ? <span class="sheet-sub">{sub}</span> : null}</h2>
+          )}
           <button type="button" class="remove" aria-label={t("common.close")} onClick={onClose}>
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M4 4l8 8M12 4l-8 8" />

@@ -13,7 +13,7 @@ Runlight counts visitors without cookies and without storing anyone’s IP addre
 - AI agents such as ChatGPT and Claude counted when they read your pages.
 - Short links on your own domains, with their clicks counted.
 - Weekly or monthly email reports, and a read-only dashboard you can share by link.
-- An assistant in the dashboard, and an MCP server for AI apps, that answer questions about your numbers.
+- An assistant that answers questions about your numbers and prepares goals, funnels, email reports, share links, and member invitations for you to review and confirm in chat. The MCP server for AI apps remains read-only.
 - Imports of your history from Umami or a CSV file, and of short links from Bitly, Dub, Rebrandly, and Short.io.
 
 ## Get started

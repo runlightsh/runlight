@@ -16,6 +16,8 @@ the context (what the person is looking at, so "this week" and "this page" mean 
 from __future__ import annotations
 
 import re
+import json
+from pathlib import Path
 import time
 import unicodedata
 from collections.abc import Callable
@@ -298,7 +300,7 @@ def chat(
             history.append({"role": m.get("role"), "content": content})
 
     if provider["protocol"] == "anthropic":
-        tools = [{"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in TOOLS]
+        tools = [{"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in [*TOOLS, json.loads((Path(__file__).parent / "assets" / "assistant-action.json").read_text())]]
         convo: list[Any] = history
         for _ in range(MAX_ROUNDS):
             data = _post(
@@ -331,6 +333,8 @@ def chat(
                 name = _js.get(call, "name")
                 name = "" if name is None or name is _js.UNDEFINED else name
                 used.append(name)
+                if name == "prepare_action":
+                    return {"reply": "", "tools": used[:-1], "action": _js.get(call, "input")}
                 out = _tool_text(name, _js.get(call, "input"), read_api)
                 result: dict[str, Any] = {"type": "tool_result", "tool_use_id": _js.get(call, "id"), "content": out["text"]}
                 if out["error"]:
@@ -339,7 +343,7 @@ def chat(
             convo.append({"role": "user", "content": results})
         raise AssistantError("The assistant needed too many steps for that question. Try asking something narrower.", "assistant_steps")
 
-    tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}} for t in TOOLS]
+    tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}} for t in [*TOOLS, json.loads((Path(__file__).parent / "assets" / "assistant-action.json").read_text())]]
     convo = [{"role": "system", "content": _system(context)}, *history]
     headers = {"authorization": f"Bearer {key}"} if key else {}
     for _ in range(MAX_ROUNDS):
@@ -365,6 +369,8 @@ def chat(
                 args = _js.loads(_js.string(given) if _js.truthy(given) else "{}")
             except (ValueError, RecursionError):
                 args = {}
+            if name == "prepare_action":
+                return {"reply": "", "tools": used[:-1], "action": args}
             out = _tool_text(name, args, read_api)
             convo.append({"role": "tool", "tool_call_id": _js.get(call, "id"), "content": out["text"]})
     raise AssistantError("The assistant needed too many steps for that question. Try asking something narrower.", "assistant_steps")

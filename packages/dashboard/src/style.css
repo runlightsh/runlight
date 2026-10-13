@@ -1668,6 +1668,23 @@ body.locked {
   letter-spacing: -0.02em;
 }
 
+.sheet-heading-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.sheet-add-site {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .remove {
   display: grid;
   place-items: center;
@@ -4005,7 +4022,7 @@ button.live:hover {
   fill: #22c55e;
 }
 
-/* Settings, API and AI: a new token, shown once, with how to connect it. */
+/* Settings, MCP & API: a new token, shown once, with how to connect it. */
 .token-made {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -5246,7 +5263,13 @@ a.ghost {
   top: -6px;
   z-index: 1;
   padding: 6px 4px 10px;
+  margin-bottom: 4px;
   background: var(--card);
+}
+
+.site-flyout:has(.site-search) {
+  scroll-padding-top: 64px;
+  scroll-padding-bottom: 4px;
 }
 
 .site-search .value {
@@ -5267,4 +5290,42 @@ a.ghost {
 .list-sheet:has(.live-empty) {
   height: auto;
   max-height: calc(82 * var(--vh));
+}
+
+.assistant-action {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--sunk);
+}
+
+.assistant-action h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.assistant-action dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.assistant-action dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.assistant-action dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.assistant-action p,
+.assistant-action .settings-actions {
+  margin-top: 12px;
+}
+
+.assistant-action .settings-actions {
+  flex-wrap: wrap;
 }
