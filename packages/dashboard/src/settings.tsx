@@ -1,6 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, api, base, cms, download, install, type Person, type Site, type View } from "./api.js";
+import { accounts, api, base, cms, download, install, type ApiToken, type Person, type Site, type View } from "./api.js";
 import { People } from "./account.js";
 import { AssistantSettings } from "./assistant.js";
 import { EmailReports, EmailService } from "./email.js";
@@ -17,6 +17,7 @@ import { Sharing } from "./sharing.js";
 import { Tokens } from "./tokens.js";
 import { setTheme, themeChoice, type ThemeChoice } from "./theme.js";
 import { useDialogFocus } from "./focus.js";
+import { day } from "./format.js";
 
 export type Section = "general" | "install" | "goals" | "funnels" | "email" | "mail" | "sharing" | "api" | "links" | "import" | "people" | "data" | "assistant";
 const SECTIONS: Array<[Section, Key]> = [
@@ -417,8 +418,8 @@ function PluginSetting({ label, hint, children }: { label: string; hint: string;
   return (
     <div class="field-row">
       <span class="field-label">{label}</span>
-      {children}
       <span class="field-hint">{hint}</span>
+      {children}
     </div>
   );
 }
@@ -431,8 +432,13 @@ function PluginSetting({ label, hint, children }: { label: string; hint: string;
 function PluginSettings({ site }: { site: Site }) {
   const [agentsKey, setAgentsKey] = useState("");
   const [dashboardKey, setDashboardKey] = useState("");
+  const [madeId, setMadeId] = useState("");
+  const [dashboardKeys, setDashboardKeys] = useState<ApiToken[]>([]);
+  const [making, setMaking] = useState(false);
   const [error, setError] = useState("");
+  const loadKeys = () => api.tokens().then((r) => setDashboardKeys(r.tokens.filter((token) => token.site === site.id && token.scope === "embed")));
   useEffect(() => {
+    void loadKeys().catch((e: Error) => setError(e.message));
     api
       .observeKey(site.id)
       .then((r) => setAgentsKey(r.key))
@@ -443,14 +449,29 @@ function PluginSettings({ site }: { site: Site }) {
       .newObserveKey(site.id)
       .then((r) => setAgentsKey(r.key))
       .catch((e: Error) => setError(e.message));
-  const make = () =>
-    api
+  const make = () => {
+    setMaking(true);
+    return api
       .createToken(t("plugin.dashboardKeyName"), site.id, "embed")
       .then((r) => {
         setError("");
         setDashboardKey(r.secret);
+        setMadeId(r.token.id);
+        return loadKeys();
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setMaking(false));
+  };
+  const revoke = (id: string) => {
+    setError("");
+    void api.deleteToken(id).then(() => {
+      if (madeId === id) {
+        setMadeId("");
+        setDashboardKey("");
+      }
+      return loadKeys();
+    }).catch((e: Error) => setError(e.message));
+  };
   return (
     <div class="settings-group">
       <p class="settings-text">
@@ -462,30 +483,48 @@ function PluginSettings({ site }: { site: Site }) {
       </PluginSetting>
       <PluginSetting label={t("plugin.site")} hint={t("plugin.siteHint")}>
         <Code>{site.id}</Code>
+        <p class="field-hint plugin-keys-note">{t("plugin.keysHint")}</p>
       </PluginSetting>
-      <PluginSetting label={t("plugin.agentsKey")} hint={t("plugin.agentsKeyHint")}>
-        {agentsKey ? <Code>{agentsKey}</Code> : null}
-        <div class="settings-actions start">
-          <button type="button" class="ghost" onClick={() => void replace()}>
-            <Icon name="refresh" />
-            {t("plugin.replace")}
-          </button>
-        </div>
-      </PluginSetting>
-      <PluginSetting label={t("plugin.dashboardKey")} hint={t("plugin.dashboardKeyHint")}>
-        {dashboardKey ? (
-          <>
-            <p class="settings-text">{t("tokens.once")}</p>
-            <Code>{dashboardKey}</Code>
-          </>
-        ) : null}
-        <div class="settings-actions start">
-          <button type="button" class="ghost" onClick={() => void make()}>
-            <Icon name="key" />
-            {t(dashboardKey ? "plugin.another" : "plugin.make")}
-          </button>
-        </div>
-      </PluginSetting>
+      <div class="plugin-keys">
+        <PluginSetting label={t("plugin.agentsKey")} hint={t("plugin.agentsKeyHint")}>
+          {agentsKey ? <Code>{agentsKey}</Code> : null}
+          <div class="settings-actions start">
+            <button type="button" class="ghost" onClick={() => void replace()}>
+              <Icon name="refresh" />
+              {t("plugin.replace")}
+            </button>
+          </div>
+        </PluginSetting>
+        <PluginSetting label={t("plugin.dashboardKey")} hint={t("plugin.dashboardKeyHint")}>
+          {dashboardKey ? (
+            <>
+              <p class="settings-text">{t("tokens.once")}</p>
+              <Code>{dashboardKey}</Code>
+            </>
+          ) : null}
+          {dashboardKeys.length ? (
+            <ul class="domain-list share-list">
+              {dashboardKeys.map((token) => (
+                <li key={token.id}>
+                  <div class="domain-main">
+                    <span class="share-name">{token.name}</span>
+                    <span class="share-meta">{`rl_…${token.hint}`} · {t("links.createdOn", { date: day(new Date(token.createdAt).toISOString().slice(0, 10)) })}</span>
+                  </div>
+                  <div class="domain-actions">
+                    <DeleteButton name={token.name} label={t("plugin.revoke")} onDelete={() => revoke(token.id)} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <div class="settings-actions start">
+            <button type="button" class="ghost" disabled={making} onClick={() => void make()}>
+              <Icon name="key" />
+              {t(dashboardKeys.length ? "plugin.another" : "plugin.make")}
+            </button>
+          </div>
+        </PluginSetting>
+      </div>
       {error ? <span class="settings-error">{error}</span> : null}
     </div>
   );

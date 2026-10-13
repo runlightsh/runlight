@@ -153,7 +153,7 @@ class StoreRecordsTest < StoreTestCase
     live = store.realtime("default", NOW)
     assert_equal 2, live["visitors"]
     assert_equal [{ "value" => "/", "visitors" => 1 }, { "value" => "/pricing", "visitors" => 1 }], live["pages"]
-    assert_equal [{ "value" => "Google", "visitors" => 1 }], live["sources"]
+    assert_equal [{ "value" => "", "visitors" => 1 }, { "value" => "Google", "visitors" => 1 }], live["sources"]
     assert_equal [{ "value" => "GB", "visitors" => 1 }, { "value" => "US", "visitors" => 1 }], live["countries"]
     assert_equal 30, live["minutes"].length
     assert_equal 2, live["minutes"][26]

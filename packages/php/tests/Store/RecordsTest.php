@@ -211,7 +211,7 @@ final class RecordsTest extends StoreTestCase
         $live = $store->realtime('default', self::NOW);
         $this->assertSame(2, $live['visitors']);
         $this->assertSame([['value' => '/', 'visitors' => 1], ['value' => '/pricing', 'visitors' => 1]], $live['pages']);
-        $this->assertSame([['value' => 'Google', 'visitors' => 1]], $live['sources']);
+        $this->assertSame([['value' => '', 'visitors' => 1], ['value' => 'Google', 'visitors' => 1]], $live['sources']);
         $this->assertSame([['value' => 'GB', 'visitors' => 1], ['value' => 'US', 'visitors' => 1]], $live['countries']);
         $this->assertCount(30, $live['minutes']);
         $this->assertSame(2, $live['minutes'][26]);

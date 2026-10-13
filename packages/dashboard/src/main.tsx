@@ -1,3 +1,4 @@
+import { Avatar } from "./site-avatar.js";
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, install, onEmbedExpired, share, shared, viewParams, type Person, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
@@ -105,21 +106,6 @@ function Delta({ now, before, lowerIsBetter, compared }: { now: number; before: 
     <span class={`delta ${flat ? "flat" : good ? "up" : "down"}`} title={t("delta.title")}>
       {flat ? t("delta.none") : `${c > 0 ? "↑" : "↓"} ${Math.abs(Math.round(c * 100))}%`}
     </span>
-  );
-}
-
-function Avatar({ site }: { site: Site }) {
-  // Remembers which site's icon failed. A failure cached by the browser can fire
-  // before any effect runs, so resetting a flag in an effect would lose it.
-  const [failedFor, setFailedFor] = useState<string | null>(null);
-  const failed = failedFor === site.id;
-  const letter = (site.name.replace(/^www\./, "")[0] ?? "R").toUpperCase();
-  return failed ? (
-    <span class="avatar letter" aria-hidden="true">
-      {letter}
-    </span>
-  ) : (
-    <img class="avatar" src={`${base}/api/icon?site=${encodeURIComponent(site.id)}`} alt="" width={40} height={40} onError={() => setFailedFor(site.id)} />
   );
 }
 

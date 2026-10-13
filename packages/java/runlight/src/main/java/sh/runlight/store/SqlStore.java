@@ -2832,7 +2832,7 @@ public final class SqlStore implements AutoCloseable {
     List<Map<String, Object>> sources =
         db.all(
             "SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n"
-                + "       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.source <> ''\n"
+                + "       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')\n"
                 + "       GROUP BY s.source ORDER BY visitors DESC, s.source"
                 + textOrder()
                 + " LIMIT 10",

@@ -2363,7 +2363,7 @@ func (s *Store) Realtime(ctx context.Context, site string, now int64) (Realtime,
 		return Realtime{}, err
 	}
 	sources, err := s.db.All(ctx, `SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session
-       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.source <> ''
+       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')
        GROUP BY s.source ORDER BY visitors DESC, s.source`+s.textOrder()+` LIMIT 10`, site, since)
 	if err != nil {
 		return Realtime{}, err

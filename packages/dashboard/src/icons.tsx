@@ -1,5 +1,7 @@
 /** Small line icons for buttons, drawn on a 16px grid in the dashboard's stroke style. */
 const PATHS = {
+  "arrow-up": "M8 13V3M4 7l4-4 4 4",
+  "arrow-down": "M8 3v10M4 9l4 4 4-4",
   plus: "M8 3.5v9M3.5 8h9",
   key: "M10.3 2.5a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4zM8 7.9l-5.5 5.6M4.2 11.8l1.6 1.6M5.8 10.2l1.4 1.4",
   copy: "M5.5 5.5V3.8c0-.7.6-1.3 1.3-1.3h5.4c.7 0 1.3.6 1.3 1.3v5.4c0 .7-.6 1.3-1.3 1.3h-1.7M3.8 5.5h5.4c.7 0 1.3.6 1.3 1.3v5.4c0 .7-.6 1.3-1.3 1.3H3.8c-.7 0-1.3-.6-1.3-1.3V6.8c0-.7.6-1.3 1.3-1.3z",

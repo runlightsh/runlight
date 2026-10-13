@@ -4759,6 +4759,8 @@ a.ghost {
 
 /* Journeys: a column per step, page boxes, and the flows between them drawn behind. */
 .journeys {
+  min-width: 0;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -4766,7 +4768,7 @@ a.ghost {
 
 .journey-controls {
   display: grid;
-  grid-template-columns: 140px 1fr 1fr;
+  grid-template-columns: 140px minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -4780,11 +4782,15 @@ a.ghost {
 }
 
 .journey-scroll {
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 0;
   overflow-x: auto;
   padding-bottom: 6px;
 }
 
 .journey-grid {
+  width: 100%;
   position: relative;
   display: grid;
   gap: 36px;
@@ -4942,7 +4948,13 @@ a.ghost {
 }
 
 /* Two-factor sign-in in the Account sheet. */
+.account-body > .link-form {
+  padding-bottom: 0;
+}
+
 .twofactor {
+  margin-top: 20px;
+  padding-top: 20px;
   border-top: 1px solid var(--line);
 }
 
@@ -5170,4 +5182,89 @@ a.ghost {
   .actions .picker {
     flex-basis: 100%;
   }
+}
+
+/* Site comparison headings sort the rows without moving the columns. */
+.all-table .sort-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.all-table .sort-heading:hover {
+  color: var(--ink);
+}
+
+.all-table .sort-heading svg {
+  width: 12px;
+  height: 12px;
+}
+
+.all-table .avatar {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  font-size: 12px;
+  border-radius: 5px;
+}
+
+.all-table .name {
+  gap: 10px;
+}
+
+.live-empty {
+  padding: 32px 0;
+}
+
+.journey-controls .field-row, .journey-controls .value {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.plugin-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.plugin-keys-note {
+  margin: 2px 0 0;
+}
+
+
+.site-search {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  padding: 6px 4px 10px;
+  background: var(--card);
+}
+
+.site-search .value {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.site-no-results {
+  padding: 8px 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+
+.list-sheet:has(.live-empty) {
+  height: auto;
+  max-height: calc(82 * var(--vh));
 }
