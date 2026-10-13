@@ -201,12 +201,19 @@ pub struct ChatAnswer {
     pub reply: String,
     /// The tools used, in order.
     pub tools: Vec<Value>,
+    /// A creation draft for the dashboard to validate and confirm, never executed by the model.
+    pub action: Option<Value>,
 }
 
 impl ChatAnswer {
     /// `{ reply, tools }`.
     pub fn to_value(&self) -> Value {
-        obj! { "reply" => self.reply.clone(), "tools" => Value::Array(self.tools.clone()) }
+        let mut out =
+            js::Object::new().with("reply", self.reply.clone()).with("tools", Value::Array(self.tools.clone()));
+        if let Some(action) = &self.action {
+            out.set("action", action.clone());
+        }
+        Value::Object(out)
     }
 }
 
@@ -530,7 +537,7 @@ pub async fn chat(
     // "Thanks!" needs no model, no tools, and certainly not the last answer again.
     let last = messages.last().map_or("", |m| m.content.as_str());
     if let Some(thanks) = acknowledgement(last, &context.language) {
-        return Ok(ChatAnswer { reply: thanks.to_string(), tools: Vec::new() });
+        return Ok(ChatAnswer { reply: thanks.to_string(), tools: Vec::new(), action: None });
     }
     let deadline = now() + DEADLINE_MS;
     // The last twenty turns, starting with a question (Anthropic refuses a history that opens with an answer),
@@ -553,13 +560,15 @@ pub async fn chat(
     let history: Vec<Value> =
         history.into_iter().map(|(role, content)| obj! { "role" => role, "content" => content }).collect();
 
+    let action_tool = js::parse(include_str!("../assets/assistant-action.json")).expect("assistant action JSON");
     if provider.protocol == "anthropic" {
-        let tools: Vec<Value> = TOOLS
+        let mut tools: Vec<Value> = TOOLS
             .iter()
             .map(
                 |t| obj! { "name" => t.name, "description" => t.description, "input_schema" => t.input_schema.clone() },
             )
             .collect();
+        tools.push(obj! { "name" => action_tool.get("name").unwrap().clone(), "description" => action_tool.get("description").unwrap().clone(), "input_schema" => action_tool.get("inputSchema").unwrap().clone() });
         let headers = [("x-api-key", settings.key.as_str()), ("anthropic-version", "2023-06-01")];
         let mut convo = history;
         for _ in 0..MAX_ROUNDS {
@@ -584,7 +593,7 @@ pub async fn chat(
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                     .map(|b| js::str_or_empty(b.get("text")))
                     .collect();
-                return Ok(ChatAnswer { reply: js::trim(&texts.join("\n")).to_string(), tools: used });
+                return Ok(ChatAnswer { reply: js::trim(&texts.join("\n")).to_string(), tools: used, action: None });
             }
             let mut results = Vec::new();
             for call in &calls {
@@ -594,6 +603,13 @@ pub async fn chat(
                     None | Some(Value::Null) => Value::from(""),
                     Some(n) => n.clone(),
                 };
+                if name == Value::from("prepare_action") {
+                    return Ok(ChatAnswer {
+                        reply: String::new(),
+                        tools: used,
+                        action: Some(call.get("input").cloned().unwrap_or(Value::Null)),
+                    });
+                }
                 used.push(name.clone());
                 let (text, error) = tool_text(Some(&name), call.get("input").unwrap_or(&Value::Null), read_api).await;
                 let mut result = js::Object::new().with("type", "tool_result");
@@ -612,7 +628,7 @@ pub async fn chat(
         return Err(AssistantError::new(TOO_MANY_STEPS, "assistant_steps", &[]).into());
     }
 
-    let tools: Vec<Value> = TOOLS
+    let mut tools: Vec<Value> = TOOLS
         .iter()
         .map(|t| {
             obj! {
@@ -621,6 +637,7 @@ pub async fn chat(
             }
         })
         .collect();
+    tools.push(obj! { "type" => "function", "function" => obj! { "name" => action_tool.get("name").unwrap().clone(), "description" => action_tool.get("description").unwrap().clone(), "parameters" => action_tool.get("inputSchema").unwrap().clone() } });
     let mut convo = vec![obj! { "role" => "system", "content" => system(context) }];
     convo.extend(history);
     let auth = format!("Bearer {}", settings.key);
@@ -647,7 +664,11 @@ pub async fn chat(
             _ => false,
         };
         if !any {
-            return Ok(ChatAnswer { reply: js::trim(&js::str_or_empty(content)).to_string(), tools: used });
+            return Ok(ChatAnswer {
+                reply: js::trim(&js::str_or_empty(content)).to_string(),
+                tools: used,
+                action: None,
+            });
         }
         let calls = match tool_calls {
             Some(Value::Array(a))
@@ -670,6 +691,10 @@ pub async fn chat(
             let given = function.and_then(|f| f.get("arguments"));
             let text = if js::opt_truthy(given) { js::js_string(given.expect("arguments")) } else { "{}".to_string() };
             let args = js::parse(&text).unwrap_or_else(|_| obj! {});
+            if name == Some(&Value::from("prepare_action")) {
+                used.pop();
+                return Ok(ChatAnswer { reply: String::new(), tools: used, action: Some(args) });
+            }
             let (text, _) = tool_text(name, &args, read_api).await;
             let mut out = js::Object::new().with("role", "tool");
             if let Some(id) = call.get("id") {

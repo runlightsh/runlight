@@ -10,6 +10,8 @@ import (
 )
 
 var (
+	//go:embed assistant-action.json
+	AssistantAction string
 	//go:embed dashboard.js
 	DashboardJS string
 	//go:embed dashboard.css

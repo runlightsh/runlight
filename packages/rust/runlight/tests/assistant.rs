@@ -112,7 +112,7 @@ fn error_value(failure: &AssistantFailure) -> Value {
 async fn scenarios_send_the_same_requests_and_answer_the_same() {
     let f = fixture("assistant");
     let scenarios = list(&f, "scenarios");
-    assert_eq!(scenarios.len(), 48);
+    assert_eq!(scenarios.len(), 60);
     for scenario in scenarios {
         let name = s(scenario, "name");
         let queue = list(scenario, "responses")

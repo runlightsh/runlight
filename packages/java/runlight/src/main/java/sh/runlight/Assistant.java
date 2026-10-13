@@ -418,11 +418,20 @@ public final class Assistant {
 
     if (provider.get("protocol").equals("anthropic")) {
       List<Object> tools = new ArrayList<>();
+      Map<String, Object> actionTool = Js.map(Json.parse(Version.asset("assistant-action.json")));
       for (Mcp.Tool t : Mcp.TOOLS) {
         tools.add(
             Json.object(
                 "name", t.name(), "description", t.description(), "input_schema", t.inputSchema()));
       }
+      tools.add(
+          Json.object(
+              "name",
+              actionTool.get("name"),
+              "description",
+              actionTool.get("description"),
+              "input_schema",
+              actionTool.get("inputSchema")));
       List<Object> convo = history;
       Headers headers = Headers.of("x-api-key", key, "anthropic-version", "2023-06-01");
       for (int round = 0; round < MAX_ROUNDS; round++) {
@@ -478,6 +487,10 @@ public final class Assistant {
             name = "";
           }
           used.add(name);
+          if ("prepare_action".equals(name)) {
+            used.remove(used.size() - 1);
+            return Json.object("reply", "", "tools", used, "action", Js.get(call, "input"));
+          }
           ToolText out = toolText(name, Js.get(call, "input"), readApi);
           Map<String, Object> result =
               Json.object(
@@ -493,6 +506,7 @@ public final class Assistant {
     }
 
     List<Object> tools = new ArrayList<>();
+    Map<String, Object> actionTool = Js.map(Json.parse(Version.asset("assistant-action.json")));
     for (Mcp.Tool t : Mcp.TOOLS) {
       tools.add(
           Json.object(
@@ -507,6 +521,18 @@ public final class Assistant {
                   "parameters",
                   t.inputSchema())));
     }
+    tools.add(
+        Json.object(
+            "type",
+            "function",
+            "function",
+            Json.object(
+                "name",
+                actionTool.get("name"),
+                "description",
+                actionTool.get("description"),
+                "parameters",
+                actionTool.get("inputSchema"))));
     List<Object> convo = new ArrayList<>();
     convo.add(Json.object("role", "system", "content", system(context)));
     convo.addAll(history);
@@ -557,6 +583,10 @@ public final class Assistant {
         Object given = Js.get(function, "arguments");
         Json.Parsed parsed = Json.tryParse(Js.truthy(given) ? Js.string(given) : "{}");
         Object args = parsed.ok() ? parsed.value() : new LinkedHashMap<String, Object>();
+        if ("prepare_action".equals(name)) {
+          used.remove(used.size() - 1);
+          return Json.object("reply", "", "tools", used, "action", args);
+        }
         ToolText out = toolText(name, args, readApi);
         convo.add(
             Json.object("role", "tool", "tool_call_id", Js.get(call, "id"), "content", out.text()));

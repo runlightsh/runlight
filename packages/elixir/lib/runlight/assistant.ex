@@ -336,8 +336,13 @@ defmodule Runlight.Assistant do
         code: "assistant_steps"
       )
 
+  defp assistant_tools do
+    action = Runlight.Assets.assistant_action()
+    Mcp.tools() ++ [%{name: JS.prop(action, "name"), description: JS.prop(action, "description"), input_schema: JS.prop(action, "inputSchema")}]
+  end
+
   defp anthropic(rl, settings, base, model, convo, context, read_api, deadline) do
-    tools = Enum.map(Mcp.tools(), &JS.obj(name: &1.name, description: &1.description, input_schema: &1.input_schema))
+    tools = Enum.map(assistant_tools(), &JS.obj(name: &1.name, description: &1.description, input_schema: &1.input_schema))
 
     result =
       Enum.reduce_while(1..@max_rounds, {convo, []}, fn _, {convo, used} ->
@@ -375,6 +380,7 @@ defmodule Runlight.Assistant do
               # The deadline covers the reading too, however many tools one answer asks for.
               in_time(deadline)
               name = JS.string(JS.nullish(JS.prop(call, "name"), ""))
+              if name == "prepare_action", do: throw({:assistant_draft, JS.prop(call, "input"), used})
               out = tool_text(name, JS.prop(call, "input"), read_api)
               result = JS.obj(type: "tool_result", tool_use_id: JS.prop(call, "id"), content: out.text)
               result = if out.error, do: Object.put(result, "is_error", true), else: result
@@ -389,12 +395,14 @@ defmodule Runlight.Assistant do
       {:done, answer} -> answer
       _ -> steps_error()
     end
+  catch
+    {:assistant_draft, action, used} -> JS.obj(reply: "", tools: used, action: action)
   end
 
   defp openai(rl, settings, provider, base, model, history, context, read_api, deadline) do
     tools =
       Enum.map(
-        Mcp.tools(),
+        assistant_tools(),
         &JS.obj(
           type: "function",
           function: JS.obj(name: &1.name, description: &1.description, parameters: &1.input_schema)
@@ -466,6 +474,7 @@ defmodule Runlight.Assistant do
               name = JS.prop(function, "name")
               raw = JS.prop(function, "arguments")
               args = JS.parse_or(if(JS.truthy?(raw), do: JS.string(raw), else: "{}"), Object.new())
+              if name == "prepare_action", do: throw({:assistant_draft, args, used})
               out = tool_text(name, args, read_api)
               {convo ++ [JS.obj(role: "tool", tool_call_id: JS.prop(call, "id"), content: out.text)], used ++ [name]}
             end)
@@ -478,6 +487,8 @@ defmodule Runlight.Assistant do
       {:done, answer} -> answer
       _ -> steps_error()
     end
+  catch
+    {:assistant_draft, action, used} -> JS.obj(reply: "", tools: used, action: action)
   end
 
   @doc """

@@ -203,7 +203,7 @@ module Runlight
       end
 
       if provider["protocol"] == "anthropic"
-        tools = Mcp.tools.map { |t| { "name" => t["name"], "description" => t["description"], "input_schema" => t["inputSchema"] } }
+        tools = (Mcp.tools + [Json.decode(File.read(File.expand_path("../../assets/assistant-action.json", __dir__)))]).map { |t| { "name" => t["name"], "description" => t["description"], "input_schema" => t["inputSchema"] } }
         convo = history.dup
         MAX_ROUNDS.times do
           data = post(
@@ -238,6 +238,7 @@ module Runlight
             name = Js.get(call, "name")
             name = "" if name.nil? || name.equal?(UNDEFINED)
             used << name
+            return { "reply" => "", "tools" => used[0...-1], "action" => Js.get(call, "input") } if name == "prepare_action"
             out = tool_text(name, Js.get(call, "input"), read_api)
             result = { "type" => "tool_result", "tool_use_id" => Js.get(call, "id"), "content" => out["text"] }
             result["is_error"] = true if out["error"]
@@ -248,7 +249,7 @@ module Runlight
         raise AssistantError.new("The assistant needed too many steps for that question. Try asking something narrower.", "assistant_steps")
       end
 
-      tools = Mcp.tools.map { |t| { "type" => "function", "function" => { "name" => t["name"], "description" => t["description"], "parameters" => t["inputSchema"] } } }
+      tools = (Mcp.tools + [Json.decode(File.read(File.expand_path("../../assets/assistant-action.json", __dir__)))]).map { |t| { "type" => "function", "function" => { "name" => t["name"], "description" => t["description"], "parameters" => t["inputSchema"] } } }
       convo = [{ "role" => "system", "content" => system_prompt(context) }, *history]
       headers = key == "" ? {} : { "authorization" => "Bearer #{key}" }
       MAX_ROUNDS.times do
@@ -274,6 +275,7 @@ module Runlight
           given = Js.get(function, "arguments")
           parsed, args = Js.parse_json(Js.truthy?(given) ? Js.string(given) : "{}")
           args = {} unless parsed
+          return { "reply" => "", "tools" => used[0...-1], "action" => args } if name == "prepare_action"
           out = tool_text(name, args, read_api)
           convo << { "role" => "tool", "tool_call_id" => Js.get(call, "id"), "content" => out["text"] }
         end

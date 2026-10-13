@@ -463,7 +463,7 @@ export const api = {
   saveAssistantLimit: (viewerDaily: number) => send<{ viewerDaily: number }>("PUT", "assistant/limits", { viewerDaily }),
   assistantModels: (input: { provider: string; baseUrl: string; key: string }) => send<{ models: Array<{ id: string; name: string }> }>("POST", "assistant/models", input),
   ask: (site: string, messages: Array<{ role: "user" | "assistant"; content: string }>, view: string, language: string) =>
-    send<{ reply: string; tools: string[] }>("POST", "assistant/chat", { site, messages, view, language }),
+    send<{ reply: string; tools: string[]; action?: unknown }>("POST", "assistant/chat", { site, messages, view, language }),
   saveMail: (input: Record<string, string>) => send<{ ok: true }>("PUT", "mail", input),
   removeMail: () => del("mail"),
   testMail: (to: string, lang: string) => send<{ ok: true }>("POST", "mail/test", { to, lang }),

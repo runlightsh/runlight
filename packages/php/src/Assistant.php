@@ -283,7 +283,7 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
         }
 
         if ($provider['protocol'] === 'anthropic') {
-            $tools = array_map(static fn (array $t): array => ['name' => $t['name'], 'description' => $t['description'], 'input_schema' => $t['inputSchema']], Mcp::tools());
+            $tools = array_map(static fn (array $t): array => ['name' => $t['name'], 'description' => $t['description'], 'input_schema' => $t['inputSchema']], [...Mcp::tools(), Json::decode((string) file_get_contents(__DIR__ . '/../assets/assistant-action.json'), true)]);
             $convo = $history;
             for ($round = 0; $round < self::MAX_ROUNDS; $round++) {
                 $data = self::post(
@@ -321,6 +321,7 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
                     $name = Js::get($call, 'name');
                     $name = $name === null || $name instanceof Undefined ? '' : $name;
                     $used[] = $name;
+                    if ($name === 'prepare_action') { array_pop($used); return ['reply' => '', 'tools' => $used, 'action' => Js::get($call, 'input')]; }
                     $out = self::toolText($name, Js::get($call, 'input'), $readApi);
                     $result = ['type' => 'tool_result', 'tool_use_id' => Js::get($call, 'id'), 'content' => $out['text']];
                     if ($out['error']) {
@@ -333,7 +334,7 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
             throw new AssistantError('The assistant needed too many steps for that question. Try asking something narrower.', 'assistant_steps');
         }
 
-        $tools = array_map(static fn (array $t): array => ['type' => 'function', 'function' => ['name' => $t['name'], 'description' => $t['description'], 'parameters' => $t['inputSchema']]], Mcp::tools());
+        $tools = array_map(static fn (array $t): array => ['type' => 'function', 'function' => ['name' => $t['name'], 'description' => $t['description'], 'parameters' => $t['inputSchema']]], [...Mcp::tools(), Json::decode((string) file_get_contents(__DIR__ . '/../assets/assistant-action.json'), true)]);
         $convo = [['role' => 'system', 'content' => self::system($context)], ...$history];
         $headers = $key !== '' ? ['authorization' => "Bearer $key"] : [];
         for ($round = 0; $round < self::MAX_ROUNDS; $round++) {
@@ -361,6 +362,7 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
                 if (!$parsed) {
                     $args = Json::object();
                 }
+                if ($name === 'prepare_action') { array_pop($used); return ['reply' => '', 'tools' => $used, 'action' => $args]; }
                 $out = self::toolText($name, $args, $readApi);
                 $convo[] = ['role' => 'tool', 'tool_call_id' => Js::get($call, 'id'), 'content' => $out['text']];
             }
