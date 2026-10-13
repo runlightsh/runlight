@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## 0.1.4 - 2026-10-13
+
+### Changed
+- Released with Runlight 0.1.4.
+
 ## 0.1.3 - 2026-10-12
 
 ### Security

@@ -338,11 +338,20 @@ defmodule Runlight.Assistant do
 
   defp assistant_tools do
     action = Runlight.Assets.assistant_action()
-    Mcp.tools() ++ [%{name: JS.prop(action, "name"), description: JS.prop(action, "description"), input_schema: JS.prop(action, "inputSchema")}]
+
+    Mcp.tools() ++
+      [
+        %{
+          name: JS.prop(action, "name"),
+          description: JS.prop(action, "description"),
+          input_schema: JS.prop(action, "inputSchema")
+        }
+      ]
   end
 
   defp anthropic(rl, settings, base, model, convo, context, read_api, deadline) do
-    tools = Enum.map(assistant_tools(), &JS.obj(name: &1.name, description: &1.description, input_schema: &1.input_schema))
+    tools =
+      Enum.map(assistant_tools(), &JS.obj(name: &1.name, description: &1.description, input_schema: &1.input_schema))
 
     result =
       Enum.reduce_while(1..@max_rounds, {convo, []}, fn _, {convo, used} ->

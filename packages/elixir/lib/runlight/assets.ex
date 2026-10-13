@@ -8,7 +8,8 @@ defmodule Runlight.Assets do
 
   @dir Path.expand("../../priv/assets", __DIR__)
 
-  for name <- ~w(assistant-action.json dashboard.js dashboard.css world.json tracker.js picker.js pick-return.js locales.json build.json) do
+  for name <-
+        ~w(assistant-action.json dashboard.js dashboard.css world.json tracker.js picker.js pick-return.js locales.json build.json) do
     @external_resource Path.join(@dir, name)
   end
 
