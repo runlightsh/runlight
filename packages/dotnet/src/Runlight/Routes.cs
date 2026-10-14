@@ -211,6 +211,7 @@ public sealed class Routes
                 FirstAccount = !string.IsNullOrEmpty(token) ? FirstAccount.Token(token) : (openSetup ? FirstAccount.Open : FirstAccount.Locked),
                 Forgot = "https://runlight.sh/docs/configuration/#accounts",
                 Home = home != null ? () => home : null,
+                SiteExists = async (site, ct) => { await runlight.InitAsync(ct).ConfigureAwait(false); return runlight.Site(site) != null; },
                 MailSettings = ct => runlight.MailSettingsAsync(ct),
                 SendMail = (m, ct) => runlight.SendMailAsync(m, ct),
                 ClientIp = runlight.ClientIp,
@@ -764,12 +765,16 @@ public sealed class Routes
     /// Whether this request acts as the owner: true, false, "read" (someone signed in who may only read, such as a
     /// viewer), or "unconfigured".
     /// </summary>
+    private async Task<JsObject?> SessionScopeAsync(Request request, CancellationToken cancellationToken) => _web != null ? await _web.SignedInAsync(request, cancellationToken).ConfigureAwait(false) : null;
+
     private async Task<object> CanReadAsync(Request request, CancellationToken cancellationToken)
     {
         if (_managed.TryGetValue(request, out _))
         {
             return true;
         }
+        var scoped = await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false);
+        if (scoped?.Str("site") != null && new Url(request.Url).Pathname.Contains("/oauth/", StringComparison.Ordinal)) return false;
         var authorize = _options.Authorize;
         if (authorize != null || _web != null)
         {
@@ -1629,7 +1634,7 @@ public sealed class Routes
                     ["to"] = to,
                     ["subject"] = t.T("email.test.subject"),
                     ["text"] = t.T("email.test.body", new JsObject { ["service"] = name }),
-                    ["html"] = "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
+                    ["html"] = "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
                 }, cancellationToken).ConfigureAwait(false);
                 return JsonResponse(new JsObject { ["ok"] = true });
             }
@@ -2056,6 +2061,23 @@ public sealed class Routes
     {
         var rl = _rl;
         string method = request.Method;
+        {
+            var scopedAccount = await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false);
+            if (scopedAccount?.Str("site") is string allowedSite)
+            {
+                await rl.InitAsync(cancellationToken).ConfigureAwait(false);
+                if (rl.Site(allowedSite) == null) return Coded("Unknown site", "unknown_site", 404);
+                string? requestedSite = url.SearchParams.Get("site");
+                var sitePath = Regex.Match(path, "^/api/sites/([^/]+)$");
+                if ((requestedSite != null && requestedSite != allowedSite) || (sitePath.Success && DecodePart(sitePath.Groups[1].Value) != allowedSite)) return Coded("Unknown site", "unknown_site", 404);
+                bool read = method == "GET" && SharedPath(path);
+                bool assistant = (path == "/api/assistant" && method == "GET") || (path == "/api/assistant/chat" && method == "POST");
+                bool manage = scopedAccount.Str("role") == "member" && ManagePath(method, path);
+                if (!read && !assistant && !manage) return Coded("Your account only has access to its assigned site", "site_access", 403);
+                if (path == "/api/assistant/chat" && (!Json.TryParse(request.Text(), out var input) || input is not JsObject body || body.Str("site") != allowedSite)) return Coded("Unknown site", "unknown_site", 404);
+                url = new Url(url.Href); var query = url.SearchParams; query.Set("site", allowedSite); url.SetSearchParams(query);
+            }
+        }
         // An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
         if (request.Headers.Get(EmbedHeader) != null && !(method == "GET" && SharedPath(path)))
         {
@@ -2700,6 +2722,11 @@ public sealed class Routes
             {
                 return Coded("Unknown site", "unknown_site", 404);
             }
+            if (_web != null && await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false) != null)
+            {
+                var refused = await _web.ConfirmPasswordAsync(request, cancellationToken).ConfigureAwait(false);
+                if (refused != null) return refused;
+            }
             try
             {
                 await rl.DeleteSiteAsync(id, cancellationToken).ConfigureAwait(false);
@@ -3016,7 +3043,8 @@ public sealed class Routes
         string? shareId = request.Headers.Get(ShareHeader);
         JsObject? shared = null;
         // The one site a share or a site's API token may read; null for every site.
-        string? only = null;
+        var scoped = await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false);
+        string? only = scoped?.Str("site");
         if (shareId != null)
         {
             shared = ShareId.IsMatch(shareId) ? await store.ShareByIdAsync(shareId, cancellationToken).ConfigureAwait(false) : null;
@@ -3054,7 +3082,7 @@ public sealed class Routes
                 {
                     return Coded("API tokens can only read", "token_read_only", 403);
                 }
-                only = reader.Str("site") is { Length: > 0 } s ? s : null;
+                only = scoped?.Str("site") ?? (reader.Str("site") is { Length: > 0 } s ? s : null);
             }
         }
 
@@ -3096,7 +3124,7 @@ public sealed class Routes
                 sites.Add(row);
             }
             // A share never learns how the install is run.
-            return JsonResponse(shared != null ? new JsObject { ["sites"] = sites } : new JsObject { ["sites"] = sites, ["managed"] = rl.ManagedSites });
+            return JsonResponse(shared != null ? new JsObject { ["sites"] = sites } : new JsObject { ["sites"] = sites, ["managed"] = scoped?.Str("site") == null && rl.ManagedSites });
         }
 
         JsObject? found;

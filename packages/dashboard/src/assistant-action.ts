@@ -15,7 +15,7 @@ export function actionDraft(raw: unknown): ActionDraft | null {
   const name = text("name", 80);
   const email = text("email", 254);
   if (r.action === "share") return name ? { action: "share", input: { name } } : null;
-  if (r.action === "invite") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && (r.role === "admin" || r.role === "member" || r.role === "viewer") ? { action: "invite", input: { email, role: r.role } } : null;
+  if (r.action === "invite") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && (r.role === "member" || r.role === "viewer") ? { action: "invite", input: { email, role: r.role } } : null;
   if (r.action === "report") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && (r.frequency === "weekly" || r.frequency === "monthly") && ["en", "fr", "de", "es", "pt"].includes(String(r.lang)) ? { action: "report", input: { email, frequency: r.frequency, lang: String(r.lang) } } : null;
   if (r.action === "funnel") {
     if (!name || !Array.isArray(r.steps) || r.steps.length < 2 || r.steps.length > 8) return null;

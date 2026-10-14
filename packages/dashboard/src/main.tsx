@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import { Avatar } from "./site-avatar.js";
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
@@ -590,7 +591,7 @@ function App() {
             timezone={stats.range.timezone}
           />
         ) : (
-          <div class="chart" />
+          <div class="chart"><Loading chart /></div>
         )}
       </section>
 
@@ -605,7 +606,7 @@ function App() {
         {/* The last row, Links wide and Conversions narrow, so the zigzag of the rows above carries on. A viewer
             reads the links without changing them, and a share never shows them. */}
         {site && !shared && !elsewhere ? <LinksPanel view={view} site={site.id} readOnly={readOnly} /> : null}
-        {site ? <ConversionsPanel view={view} readOnly={readOnly || elsewhere} onAdd={() => openSettings("goals")} /> : null}
+        {site ? <ConversionsPanel view={view} readOnly={readOnly || elsewhere} onAdd={(section) => openSettings(section)} /> : null}
       </div>
 
       <footer class="foot">

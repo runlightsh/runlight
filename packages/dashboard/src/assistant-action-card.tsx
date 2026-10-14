@@ -4,7 +4,7 @@ import { Icon } from "./icons.js";
 
 export function ActionCard({ action, site, allowed, disabled, onConfirm, onCancel }: { action: ChatAction; site: string; allowed: boolean; disabled: boolean; onConfirm: () => void; onCancel: () => void }) {
   const d = action.draft;
-  const fields: Array<[string, string]> = [[t("app.site"), d.action === "invite" ? t("assistant.action.allSites") : site]];
+  const fields: Array<[string, string]> = [[t("app.site"), site]];
   if ("name" in d.input) fields.push([t("goals.name"), d.input.name]);
   if (d.action === "goal") {
     fields.push([t("goals.counts"), t(`goals.kind.${d.input.kind}` as Key)], [t(d.input.kind === "event" ? "goals.match.event" : d.input.kind === "page" ? "goals.match.page" : d.input.clickBy === "link" ? "goals.match.link" : "goals.match.selector"), d.input.match]);

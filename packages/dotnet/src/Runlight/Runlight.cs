@@ -2032,14 +2032,7 @@ public sealed partial class Runlight
         await Accounts.Throttle.SweepAsync(Store, Now(), cancellationToken).ConfigureAwait(false);
         // Every site's retention covers any one site's that is still waiting.
         _pruning.Clear();
-        try
-        {
-            await ApplyRetentionAsync(null, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception error) when (error is not OperationCanceledException)
-        {
-            await Console.Error.WriteLineAsync("Runlight: could not apply retention " + error.Message).ConfigureAwait(false);
-        }
+        await ApplyRetentionAsync(null, cancellationToken).ConfigureAwait(false);
         if (Now() - _optimizedAt >= 86_400_000)
         {
             _optimizedAt = Now();

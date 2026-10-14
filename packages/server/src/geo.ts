@@ -49,6 +49,8 @@ export class Geo {
   private reader: Reader<Record> | null = null;
   private loaded = "";
   private fetching: Promise<void> | null = null;
+  /** The release actually available for lookups, for monitoring download failures and stale data. */
+  get release(): string { return this.loaded; }
   readonly lookup: GeoLookup = (ip) => (this.reader ? lookupFrom(this.reader)(ip) : null);
 
   constructor(

@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import { useEffect, useState } from "preact/hooks";
 import { api, type View } from "./api.js";
 import { count } from "./format.js";
@@ -61,7 +62,7 @@ export function EventProps({ view, event, onClose }: { view: View; event: string
             </div>
           </>
         ) : null}
-        {!answer && !error ? <p class="empty">{t("common.loading")}</p> : null}
+        {!answer && !error ? <Loading /> : null}
       </div>
     </Sheet>
   );

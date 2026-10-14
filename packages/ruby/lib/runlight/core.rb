@@ -1451,11 +1451,7 @@ module Runlight
       Accounts::Throttle.sweep(@store, now)
       # Every site's retention covers any one site's that is still waiting.
       @pruning = []
-      begin
-        apply_retention
-      rescue StandardError => e
-        warn("Runlight: could not apply retention #{e.message}")
-      end
+      apply_retention
       if now - @optimized_at >= 86_400_000
         @optimized_at = now
         @store.optimize

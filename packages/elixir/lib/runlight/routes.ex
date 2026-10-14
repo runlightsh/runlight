@@ -464,8 +464,21 @@ defmodule Runlight.Routes do
 
   # Whether this request acts as the owner: true, "read" for someone signed in who may only read, false, or
   # "unconfigured".
+  defp session_scope(routes, request) do
+    if routes.web != nil,
+      do: Runlight.Accounts.Web.signed_in(routes.web, request)
+  end
+
+  defp scope_site(routes, request) do
+    user = session_scope(routes, request)
+    user && user["site"]
+  end
+
   defp can_read(routes, request) do
     cond do
+      scope_site(routes, request) != nil and String.contains?(request.url, "/oauth/") ->
+        false
+
       managed(request) != nil ->
         true
 
@@ -1500,7 +1513,7 @@ defmodule Runlight.Routes do
                 subject: Messages.t(lang, "email.test.subject"),
                 text: text,
                 html:
-                  ~s(<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">#{escape_html(text)}</p>)
+                  ~s(<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">#{escape_html(text)}</p>)
               })
 
               json(JS.obj(ok: true))
@@ -1949,6 +1962,47 @@ defmodule Runlight.Routes do
 
   @doc false
   def api(routes, request, path, url) do
+    user = session_scope(routes, request)
+
+    if user && user["site"] != nil do
+      Runlight.init(routes.rl)
+      site = user["site"]
+      asked = param(url, "site")
+      site_path = Regex.run(~r{\A/api/sites/([^/]+)\z}, path)
+      read = request.method == "GET" and shared_path?(path)
+
+      assistant =
+        (path == "/api/assistant" and request.method == "GET") or
+          (path == "/api/assistant/chat" and request.method == "POST")
+
+      manage = user["role"] == "member" and manage_path?(request.method, path)
+
+      chat_site =
+        case Request.json(request) do
+          {:ok, %Object{} = body} -> body["site"]
+          _ -> nil
+        end
+
+      cond do
+        Runlight.site(routes.rl, site) == nil or (asked != nil and asked != site) or
+            (site_path != nil and JS.decode_uri_component(Enum.at(site_path, 1)) != site) ->
+          coded("Unknown site", "unknown_site", 404)
+
+        not (read or assistant or manage) ->
+          coded("Your account only has access to its assigned site", "site_access", 403)
+
+        path == "/api/assistant/chat" and chat_site != site ->
+          coded("Unknown site", "unknown_site", 404)
+
+        true ->
+          api_allowed(routes, request, path, with_param(url, "site", site))
+      end
+    else
+      api_allowed(routes, request, path, url)
+    end
+  end
+
+  defp api_allowed(routes, request, path, url) do
     rl = routes.rl
     method = request.method
     given_bearer = bearer(request)
@@ -2498,21 +2552,28 @@ defmodule Runlight.Routes do
             coded("Unknown site", "unknown_site", 404)
 
           true ->
-            try do
-              Runlight.delete_site(rl, id)
-              json(JS.obj(ok: true))
-            rescue
-              error ->
-                cond do
-                  Errors.range?(error) and Exception.message(error) == "Unknown site" ->
-                    coded("Unknown site", "unknown_site", 404)
+            with nil <-
+                   if(routes.web != nil and session_scope(routes, request) != nil,
+                     do: Runlight.Accounts.Web.confirm_password(routes.web, request)
+                   ) do
+              try do
+                Runlight.delete_site(rl, id)
+                json(JS.obj(ok: true))
+              rescue
+                error ->
+                  cond do
+                    Errors.range?(error) and Exception.message(error) == "Unknown site" ->
+                      coded("Unknown site", "unknown_site", 404)
 
-                  Errors.range?(error) ->
-                    refused(error, "site_invalid")
+                    Errors.range?(error) ->
+                      refused(error, "site_invalid")
 
-                  true ->
-                    reraise error, __STACKTRACE__
-                end
+                    true ->
+                      reraise error, __STACKTRACE__
+                  end
+              end
+            else
+              response -> response
             end
         end
 
@@ -3059,8 +3120,11 @@ defmodule Runlight.Routes do
       end
 
     case gate do
-      {:error, response} -> response
-      {:ok, shared, only} -> reads(routes, request, path, url, shared, only)
+      {:error, response} ->
+        response
+
+      {:ok, shared, only} ->
+        reads(routes, request, path, url, shared, if(shared, do: only, else: scope_site(routes, request) || only))
     end
   end
 
@@ -3137,7 +3201,12 @@ defmodule Runlight.Routes do
         end)
 
       # A share never learns how the install is run.
-      json(if(shared, do: JS.obj(sites: sites), else: JS.obj(sites: sites, managed: rl.managed_sites)))
+      json(
+        if(shared,
+          do: JS.obj(sites: sites),
+          else: JS.obj(sites: sites, managed: scope_site(routes, request) == nil and rl.managed_sites)
+        )
+      )
     else
       site =
         cond do

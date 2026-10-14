@@ -12,6 +12,37 @@ impl Routes {
     pub(crate) async fn api(&self, request: &Request, path: &str, url: &mut Url, call: &Call) -> R {
         let rl = self.rl().clone();
         let method = request.method.as_str();
+        let scoped_account = self.session_scope(request).await?;
+        if let Some(user) = &scoped_account
+            && let Some(site) = &user.site
+        {
+            rl.init().await?;
+            if rl.site(Some(site)).is_none() {
+                return Ok(coded("Unknown site", "unknown_site", 404, None));
+            }
+            let params = url.search_params();
+            let site_path = path.strip_prefix("/api/sites/").filter(|s| !s.contains('/'));
+            if params.get("site").is_some_and(|s| s != site)
+                || site_path.is_some_and(|s| crate::sources::decode_uri_component(s).as_deref() != Some(site))
+            {
+                return Ok(coded("Unknown site", "unknown_site", 404, None));
+            }
+            let read = method == "GET" && shared_path(path);
+            let assistant =
+                (path == "/api/assistant" && method == "GET") || (path == "/api/assistant/chat" && method == "POST");
+            let manage = user.role == crate::accounts::Role::Member && manage_path(method, path);
+            if !read && !assistant && !manage {
+                return Ok(coded("Your account only has access to its assigned site", "site_access", 403, None));
+            }
+            if path == "/api/assistant/chat"
+                && !request.json().is_ok_and(|body| body.get("site") == Some(&Value::String(site.clone())))
+            {
+                return Ok(coded("Unknown site", "unknown_site", 404, None));
+            }
+            let mut params = url.search_params();
+            params.set("site", site);
+            url.set_search_params(&params);
+        }
         // An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
         if request.headers.get(EMBED_HEADER).is_some() && !(method == "GET" && shared_path(path)) {
             return Ok(coded("Not available on a shared dashboard", "share_not_available", 403, None));
@@ -492,6 +523,12 @@ impl Routes {
             let Some(id) = crate::sources::decode_uri_component(raw) else {
                 return Ok(coded("Unknown site", "unknown_site", 404, None));
             };
+            if let Some(web) = &self.0.web
+                && self.session_scope(request).await?.is_some()
+                && let Some(refused) = web.confirm_password(request).await?
+            {
+                return Ok(refused);
+            }
             return Ok(match rl.delete_site(&id).await {
                 Ok(()) => json(&obj! { "ok" => true }, 200, &[]),
                 Err(Error::Settings(e)) if e.message == "Unknown site" => coded(&e.message, "unknown_site", 404, None),
@@ -522,7 +559,7 @@ impl Routes {
         let share_id = request.headers.get(SHARE_HEADER);
         let mut shared: Option<ShareRow> = None;
         // The one site a share or a site's API token may read; None for every site.
-        let mut only: Option<String> = None;
+        let mut only: Option<String> = scoped_account.as_ref().and_then(|u| u.site.clone());
         if let Some(share_id) = share_id {
             shared = if test(js_re!(r"^[a-f0-9]{32}$"), &share_id) {
                 rl.store().share_by_id(&share_id).await?
@@ -556,14 +593,23 @@ impl Routes {
                     if !shared_path(path) {
                         return Ok(coded("API tokens can only read", "token_read_only", 403, None));
                     }
-                    only = (!t.site.is_empty()).then(|| t.site.clone());
+                    only = scoped_account
+                        .as_ref()
+                        .and_then(|u| u.site.clone())
+                        .or_else(|| (!t.site.is_empty()).then(|| t.site.clone()));
                 }
                 Reader::Owner => {}
             }
         }
 
         if path == "/api/sites" {
-            return self.sites_list(only.as_deref(), shared.is_some()).await;
+            return self
+                .sites_list(
+                    only.as_deref(),
+                    shared.is_some(),
+                    scoped_account.as_ref().is_some_and(|u| u.site.is_some()),
+                )
+                .await;
         }
 
         let site = if let Some(share) = &shared {
@@ -977,7 +1023,7 @@ impl Routes {
     }
 
     /// The sites a reader may see, with their last visit and retention.
-    async fn sites_list(&self, only: Option<&str>, shared: bool) -> R {
+    async fn sites_list(&self, only: Option<&str>, shared: bool, scoped: bool) -> R {
         let rl = self.rl();
         let visible: Vec<crate::store::SiteRow> =
             rl.sites().into_iter().filter(|s| only.is_none_or(|o| s.id == o)).collect();
@@ -1027,7 +1073,7 @@ impl Routes {
             &if shared {
                 obj! { "sites" => Value::Array(sites) }
             } else {
-                obj! { "sites" => Value::Array(sites), "managed" => rl.managed_sites() }
+                obj! { "sites" => Value::Array(sites), "managed" => !scoped && rl.managed_sites() }
             },
             200,
             &[],

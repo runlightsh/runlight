@@ -106,6 +106,10 @@ final class Accounts
             $db->run(
                 'CREATE TABLE IF NOT EXISTS rl_invites (id ' . $str(100) . ' PRIMARY KEY, email ' . $str(320) . ' NOT NULL UNIQUE, role ' . $str(20) . ' NOT NULL, code_hash ' . $str(128) . ' NOT NULL UNIQUE, invited_by ' . $str(100) . " NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)$table",
             );
+            foreach (['rl_users', 'rl_invites'] as $name) {
+                $fields = $db->dialect() === 'sqlite' ? $db->all("PRAGMA table_info($name)") : $db->all("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = " . ($my ? 'DATABASE()' : 'current_schema()'), [$name]);
+                if (!in_array('site', array_column($fields, 'name'), true)) $db->run("ALTER TABLE $name ADD COLUMN site TEXT");
+            }
             // A server has one owner. One from before, with several, keeps the first and the rest become admins,
             // who can still do everything but remove the owner. Invites to join as an owner become invites as an admin.
             $owners = $db->all("SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id");
@@ -126,6 +130,7 @@ final class Accounts
             'email' => (string) $r['email'],
             'hash' => (string) $r['hash'],
             'role' => self::roleFrom($r['role'] ?? null),
+            ...(isset($r['site']) ? ['site' => (string) $r['site']] : []),
             'createdAt' => Js::number($r['created_at']),
             'twoFactor' => Js::truthy($r['totp_secret'] ?? null),
             'recoveryLeft' => count($recovery),
@@ -394,6 +399,7 @@ final class Accounts
             if ($user['role'] === 'owner') {
                 throw new AccountError('Only the owner can change their own role, by handing ownership to an admin', 'owner_protected');
             }
+            if (isset($user['site']) && $role === 'admin') throw new AccountError('An admin needs access to all sites', 'role_scope');
             if ($role === 'owner') {
                 throw new AccountError('Ownership is handed over by the owner', 'owner_hand_over');
             }
@@ -431,7 +437,7 @@ final class Accounts
             if ($next === null) {
                 throw new AccountError('Unknown account', 'unknown_account');
             }
-            if ($next['role'] !== 'admin') {
+            if (isset($next['site']) || $next['role'] !== 'admin') {
                 throw new AccountError('Make them an admin first', 'owner_needs_admin');
             }
             $this->store->db->run("UPDATE rl_users SET role = 'owner' WHERE id = ?", [$to]);
@@ -464,9 +470,10 @@ final class Accounts
      *
      * @return User
      */
-    public function setPassword(string $email, string $password, int $now, ?string $role = null): array
+    public function setPassword(string $email, string $password, int $now, ?string $role = null, ?string $site = null): array
     {
         $this->init();
+        if ($site !== null && ($site === '' || !in_array($role, ['member', 'viewer'], true))) throw new AccountError('Choose member or viewer for one site', 'role_scope');
         $address = Js::lower(Js::trim($email));
         if (!preg_match(self::EMAIL, $address)) {
             throw new AccountError('Enter an email address', 'email_invalid');
@@ -491,8 +498,9 @@ final class Accounts
             'createdAt' => $now,
             'twoFactor' => false,
             'recoveryLeft' => 0,
+            ...($site !== null ? ['site' => $site] : []),
         ];
-        $this->store->db->run('INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)', [$user['id'], $user['email'], $user['hash'], $user['role'], $user['createdAt']]);
+        $this->store->db->run('INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)', [$user['id'], $user['email'], $user['hash'], $user['role'], $user['createdAt'], $site]);
         return $user;
     }
 
@@ -503,6 +511,7 @@ final class Accounts
             'id' => (string) $r['id'],
             'email' => (string) $r['email'],
             'role' => self::roleFrom($r['role'] ?? null),
+            ...(isset($r['site']) ? ['site' => (string) $r['site']] : []),
             'invitedBy' => (string) $r['invited_by'],
             'createdAt' => Js::number($r['created_at']),
             'expiresAt' => Js::number($r['expires_at']),
@@ -527,14 +536,14 @@ final class Accounts
      *
      * @return array{invite: Invite, code: string}
      */
-    public function invite(string $email, string $role, string $invitedBy, int $now): array
+    public function invite(string $email, string $role, string $invitedBy, int $now, ?string $site = null): array
     {
         $this->init();
-        return $this->turn(fn (): array => $this->inviteNow($email, $role, $invitedBy, $now));
+        return $this->turn(fn (): array => $this->inviteNow($email, $role, $invitedBy, $now, $site));
     }
 
     /** @return array{invite: Invite, code: string} */
-    private function inviteNow(string $email, string $role, string $invitedBy, int $now): array
+    private function inviteNow(string $email, string $role, string $invitedBy, int $now, ?string $site = null): array
     {
         $address = Js::lower(Js::trim($email));
         if (!preg_match(self::EMAIL, $address)) {
@@ -544,9 +553,10 @@ final class Accounts
             throw new AccountError("$address already has an account", 'account_exists', ['email' => $address]);
         }
         $code = Crypto::base64url(Crypto::randomBytes(24));
-        $invite = ['id' => Crypto::hex(Crypto::randomBytes(12)), 'email' => $address, 'role' => $role, 'invitedBy' => $invitedBy, 'createdAt' => $now, 'expiresAt' => $now + self::INVITE_MS];
+        if ($site !== null && ($site === '' || !in_array($role, ['member', 'viewer'], true))) throw new AccountError('Choose member or viewer for one site', 'role_scope');
+        $invite = [...($site !== null ? ['site' => $site] : []), 'id' => Crypto::hex(Crypto::randomBytes(12)), 'email' => $address, 'role' => $role, 'invitedBy' => $invitedBy, 'createdAt' => $now, 'expiresAt' => $now + self::INVITE_MS];
         $this->store->db->run('DELETE FROM rl_invites WHERE email = ?', [$address]);
-        $this->store->db->run('INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+        $this->store->db->run('INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
             $invite['id'],
             $invite['email'],
             $invite['role'],
@@ -554,6 +564,7 @@ final class Accounts
             $invite['invitedBy'],
             $invite['createdAt'],
             $invite['expiresAt'],
+            $site,
         ]);
         return ['invite' => $invite, 'code' => $code];
     }
@@ -603,14 +614,14 @@ final class Accounts
                 throw $gone();
             }
             $sender = $this->byEmail($invite['invitedBy']);
-            if ($sender === null || !self::mayInvite($sender['role'])) {
+            if ($sender === null || isset($sender['site']) || !self::mayInvite($sender['role'])) {
                 $this->store->db->run('DELETE FROM rl_invites WHERE id = ?', [$invite['id']]);
                 throw $gone();
             }
             if ($this->byEmail($invite['email']) !== null) {
                 throw new AccountError("{$invite['email']} already has an account", 'account_exists', ['email' => $invite['email']]);
             }
-            $user = $this->setPassword($invite['email'], $password, $now, $invite['role']);
+            $user = $this->setPassword($invite['email'], $password, $now, $invite['role'], $invite['site'] ?? null);
             $this->store->db->run('DELETE FROM rl_invites WHERE id = ?', [$invite['id']]);
             return $user;
         });

@@ -222,6 +222,7 @@ defmodule Runlight.Accounts.Web do
         twoFactor: u["twoFactor"],
         recoveryLeft: u["recoveryLeft"]
       )
+      |> Accounts.with_site(u["site"])
 
   defp invite_view(i),
     do:
@@ -233,6 +234,7 @@ defmodule Runlight.Accounts.Web do
         createdAt: i["createdAt"],
         expiresAt: i["expiresAt"]
       )
+      |> Accounts.with_site(i["site"])
 
   # A JSON body by its media type, which a cross-site form cannot send.
   defp body(request) do
@@ -273,7 +275,7 @@ defmodule Runlight.Accounts.Web do
     origin = home_origin(web) || Url.origin(Url.new(request.url))
     link = "#{origin}#{web.base}/invite?code=#{code}"
     host = Url.host(Url.new(origin))
-    what = Pages.role_text(invite["role"])
+    what = Pages.role_text(invite["role"], invite["site"])
 
     if Runlight.mail_settings(web.rl) == nil do
       [link: link, emailed: false]
@@ -285,7 +287,7 @@ defmodule Runlight.Accounts.Web do
           text:
             "#{invite["invitedBy"]} invited you to the Runlight at #{host} as #{what}.\n\nChoose a password to join:\n#{link}\n\nThe link works for seven days.\n",
           html:
-            ~s(<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p>#{esc(invite["invitedBy"])} invited you to the Runlight at #{esc(host)} as #{what}.</p><p><a href="#{esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>)
+            ~s(<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p>#{esc(invite["invitedBy"])} invited you to the Runlight at #{esc(host)} as #{esc(what)}.</p><p><a href="#{esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>)
         })
 
         [link: link, emailed: true]
@@ -330,7 +332,7 @@ defmodule Runlight.Accounts.Web do
           text:
             "Someone, most likely you, signed in to Runlight at #{host} with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n#{link}\n\nIf this was not you, change your password, since someone knows it.\n",
           html:
-            ~s(<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p>Someone, most likely you, signed in to Runlight at #{esc(host)} with your password while your account was held up by too many failed tries.</p><p><a href="#{esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>)
+            ~s(<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p>Someone, most likely you, signed in to Runlight at #{esc(host)} with your password while your account was held up by too many failed tries.</p><p><a href="#{esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>)
         })
 
         true
@@ -643,7 +645,13 @@ defmodule Runlight.Accounts.Web do
 
           invite ->
             html(
-              Pages.invite_page(base, %{code: code, email: invite["email"], role: invite["role"], host: Url.host(url)})
+              Pages.invite_page(base, %{
+                code: code,
+                email: invite["email"],
+                role: invite["role"],
+                site: invite["site"],
+                host: Url.host(url)
+              })
             )
         end
 
@@ -662,6 +670,7 @@ defmodule Runlight.Accounts.Web do
                   code: code,
                   email: invite["email"],
                   role: invite["role"],
+                  site: invite["site"],
                   host: Url.host(url),
                   error: error
                 }),
@@ -707,34 +716,49 @@ defmodule Runlight.Accounts.Web do
     end
   end
 
+  defp recheck(web, user, input, name, {message, code}) do
+    cond do
+      not Throttle.take(web.throttles.rechecks, user["id"], now(web)) ->
+        coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429)
+
+      true ->
+        password = input |> JS.prop(name) |> JS.nullish("") |> JS.string()
+
+        try do
+          if Accounts.sign_in(web.accounts, user["email"], password) == nil do
+            coded(message, code, 400)
+          else
+            Throttle.forgive(web.throttles.rechecks, user["id"])
+            nil
+          end
+        rescue
+          error in AccountError ->
+            if error.code == "busy",
+              do: coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503),
+              else: reraise(error, __STACKTRACE__)
+        end
+    end
+  end
+
+  def confirm_password(web, request) do
+    case signed_in(web, request) do
+      nil ->
+        coded("Sign in first", "sign_in", 401)
+
+      user ->
+        case body(request) do
+          nil -> coded("Send JSON", "send_json", 415)
+          input -> recheck(web, user, input, "password", {"Your password is not right", "password_wrong"})
+        end
+    end
+  end
+
   defp api_for(web, request, path, user) do
     acc = web.accounts
     method = request.method
     type = (Request.header(request, "content-type") || "") |> String.split(";") |> hd() |> JS.trim() |> JS.lower()
 
-    recheck = fn input, name, {message, code} ->
-      cond do
-        not Throttle.take(web.throttles.rechecks, user["id"], now(web)) ->
-          coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429)
-
-        true ->
-          password = input |> JS.prop(name) |> JS.nullish("") |> JS.string()
-
-          try do
-            if Accounts.sign_in(acc, user["email"], password) == nil do
-              coded(message, code, 400)
-            else
-              Throttle.forgive(web.throttles.rechecks, user["id"])
-              nil
-            end
-          rescue
-            error in AccountError ->
-              if error.code == "busy",
-                do: coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503),
-                else: reraise(error, __STACKTRACE__)
-          end
-      end
-    end
+    recheck = fn input, name, wrong -> recheck(web, user, input, name, wrong) end
 
     reset = Regex.run(~r/\A\/api\/people\/([a-f0-9]{24})\/2fa\z/, path)
     hand_over = Regex.run(~r/\A\/api\/people\/([a-f0-9]{24})\/owner\z/, path)
@@ -785,7 +809,7 @@ defmodule Runlight.Accounts.Web do
           input -> two_factor(web, request, user, input, String.replace_prefix(path, "/api/account/2fa", ""), recheck)
         end
 
-      user["role"] not in ["owner", "admin"] ->
+      user["site"] != nil or user["role"] not in ["owner", "admin"] ->
         coded("Only the owner or an admin can manage people", "people_owner", 403)
 
       # The owner or an admin can turn off someone else's two-factor, though never the owner's.
@@ -866,6 +890,8 @@ defmodule Runlight.Accounts.Web do
             coded("Send JSON", "send_json", 415)
 
           input ->
+            Runlight.init(web.rl)
+            site = if input["allSites"] == true, do: nil, else: input["site"]
             role = role_of(JS.prop(input, "role"))
             email = input |> JS.prop("email") |> JS.nullish("") |> JS.string() |> JS.trim() |> JS.lower()
 
@@ -873,12 +899,18 @@ defmodule Runlight.Accounts.Web do
               role == nil ->
                 coded("Pick admin, member, or viewer", "role_needed", 400)
 
+              input["allSites"] != true and (not is_binary(site) or site == "") ->
+                coded("Choose a site or explicitly invite to all sites", "invite_site", 400)
+
+              site != nil and Runlight.site(web.rl, site) == nil ->
+                coded("Unknown site", "unknown_site", 404)
+
               Accounts.by_email(acc, email) != nil ->
                 coded("#{email} already has an account", "account_exists", 409, email: email)
 
               true ->
                 try do
-                  %{invite: invite, code: code} = Accounts.invite(acc, email, role, user["email"], now(web))
+                  %{invite: invite, code: code} = Accounts.invite(acc, email, role, user["email"], now(web), site)
                   reply(JS.obj([invite: invite_view(invite)] ++ send_invite(web, request, invite, code)), 201)
                 rescue
                   error in AccountError -> coded(error.message, error.code, 400, error.params)
@@ -898,7 +930,9 @@ defmodule Runlight.Accounts.Web do
 
           old ->
             # A new link replaces the old one, which stops working.
-            %{invite: invite, code: code} = Accounts.invite(acc, old["email"], old["role"], user["email"], now(web))
+            %{invite: invite, code: code} =
+              Accounts.invite(acc, old["email"], old["role"], user["email"], now(web), old["site"])
+
             reply(JS.obj([invite: invite_view(invite)] ++ send_invite(web, request, invite, code)))
         end
 
@@ -1042,7 +1076,7 @@ defmodule Runlight.Accounts.Web do
         false
 
       user ->
-        if user["role"] == "viewer" do
+        if user["site"] != nil or user["role"] == "viewer" do
           false
         else
           Store.set_setting(web.rl.store, "#{@made_by}#{token["id"]}", by)

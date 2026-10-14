@@ -22,6 +22,14 @@ The owner invites other people as admins, members, or viewers, and everyone can 
 
 The [server guide](https://runlight.sh/docs/server/) covers its settings, Postgres, MySQL, and running it behind a proxy.
 
+Browser favicons, Apple touch icons, and a web manifest are served by the installation itself. Add the dashboard to your phone's home screen to use the Runlight icon. If an existing shortcut shows older artwork, remove that shortcut and add it again after updating the server.
+
+## Monitor scheduled work
+
+Set `CRONWATCH_MAIL_TO` to your alert recipient after configuring Runlight's mail service. CronWatch uses the same sender and credentials. It records maintenance and automatic location-data checks on their existing five-minute schedule, stores history in `DATA_DIR/cronwatch.db`, and checks for missed or stuck runs every minute. Owners and administrators can open `/cronwatch` after signing in. No separate CronWatch token is needed.
+
+Failed email reports, unavailable or stale location data, slow runs, and unexpected metric changes can send alerts. Zero emails sent is normal when no reports are due, and location checks can succeed without downloading anything. Keep the CronWatch database with your persistent data. This optional SQLite configuration is for a single standalone server, not multiple replicas. It does not monitor an entire server outage while its process is stopped.
+
 ## License
 
 Runlight is MIT licensed.

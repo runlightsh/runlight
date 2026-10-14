@@ -1,6 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { accounts, api, base, cms, download, install, type ApiToken, type Person, type Site, type View } from "./api.js";
+import { accounts, api, base, signOut, cms, download, install, type ApiToken, type Person, type Site, type View } from "./api.js";
+import { Secret } from "./secret.js";
 import { People } from "./account.js";
 import { AssistantSettings } from "./assistant.js";
 import { EmailReports, EmailService } from "./email.js";
@@ -157,7 +158,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-function General({ site, admin, onSaved, onLanguage, onDeleted }: { site: Site; admin: boolean; onSaved: (site: Site) => void; onLanguage: (code: string) => void; onDeleted: (id: string) => void }) {
+function General({ site, admin, requirePassword, onSaved, onLanguage, onDeleted }: { site: Site; admin: boolean; requirePassword: boolean; onSaved: (site: Site) => void; onLanguage: (code: string) => void; onDeleted: (id: string) => void }) {
   const [name, setName] = useState(site.name);
   const [hostnames, setHostnames] = useState(site.hostnames.join(", "));
   const [timezone, setTimezone] = useState(site.timezone);
@@ -251,24 +252,50 @@ function General({ site, admin, onSaved, onLanguage, onDeleted }: { site: Site; 
             <span class="field-label">{t(site.remote ? "sites.disconnect" : "sites.delete")}</span>
             <span class="field-hint">{t(site.remote ? "sites.disconnectHint" : "sites.deleteHint")}</span>
             <div>
-              <DeleteButton
-                name={site.name}
-                {...(site.remote
-                  ? { label: t("sites.disconnectButton"), confirm: t("sites.confirmDisconnect"), hint: t("sites.disconnectName", { name: site.name }), icon: "unlink" as const }
-                  : {})}
-                onDelete={() =>
-                  void api
-                    .deleteSite(site.id)
-                    .then(() => onDeleted(site.id))
-                    .catch((err: Error) => setError(err.message))
-                }
-              />
+              <DeleteSite site={site} requirePassword={requirePassword} onDeleted={onDeleted} />
             </div>
           </div>
         </div>
       ) : null}
     </>
   );
+}
+
+function DeleteSite({ site, requirePassword, onDeleted }: { site: Site; requirePassword: boolean; onDeleted: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const label = t(site.remote ? "sites.disconnectButton" : "sites.delete");
+  if (!open) return <button type="button" class="copy inline danger" onClick={() => setOpen(true)}><Icon name={site.remote ? "unlink" : "trash"} />{label}</button>;
+  const submit = async (event: Event) => {
+    event.preventDefault();
+    if (busy || !confirmed || (requirePassword && !password)) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.deleteSite(site.id, requirePassword ? password : undefined);
+      onDeleted(site.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setPassword("");
+      setBusy(false);
+    }
+  };
+  return <form class="settings-group" onSubmit={submit}>
+    <p class="settings-text">{t(site.remote ? "sites.disconnectName" : "app.confirmDelete", { name: site.name })}</p>
+    {requirePassword ? <label class="field-row">
+      <span class="field-label">{t("twofa.password")}</span>
+      <Secret class="value" autoComplete="current-password" required value={password} disabled={busy} onInput={(event) => setPassword((event.target as HTMLInputElement).value)} />
+    </label> : null}
+    <label class="invite-scope"><input type="checkbox" required checked={confirmed} disabled={busy} onChange={(event) => setConfirmed((event.target as HTMLInputElement).checked)} />{t(site.remote ? "sites.confirmDisconnect" : "sites.deleteAcknowledge")}</label>
+    {error ? <p class="settings-error" role="alert">{error}</p> : null}
+    <div class="settings-actions start">
+      <button class="solid danger" type="submit" disabled={busy || !confirmed || (requirePassword && !password)}><Icon name={site.remote ? "unlink" : "trash"} />{t(busy ? "sites.deleting" : site.remote ? "sites.disconnectButton" : "sites.delete")}</button>
+      <button class="ghost" type="button" disabled={busy} onClick={() => { setOpen(false); setPassword(""); setConfirmed(false); setError(""); }}>{t("common.cancel")}</button>
+    </div>
+  </form>;
 }
 
 const RETENTION = [6, 12, 24, 36, 60];
@@ -902,7 +929,10 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
     <div class="scrim center" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div class="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" ref={panel}>
         <nav class="settings-nav" aria-label={t("settings.title")}>
-          <h2 id="settings-title">{t("settings.title")}</h2>
+          <div class="settings-heading">
+            <h2 id="settings-title">{t("settings.title")}</h2>
+            {signOut ? <a class="settings-sign-out" href={signOut} aria-label={t("app.signOut")} title={t("app.signOut")}><Icon name="signOut" /></a> : null}
+          </div>
           <p class="settings-site">{site.name}</p>
           {sections.map(([id, label]) => (
             <button type="button" class={section === id ? "settings-tab on" : "settings-tab"} aria-current={section === id ? "page" : undefined} onClick={() => setSection(id)}>
@@ -922,7 +952,7 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
           </header>
           <div class="settings-content">
             {section === "general" ? (
-              <General site={site} admin={admin} onSaved={onSaved} onLanguage={onLanguage} onDeleted={onDeleted} />
+              <General site={site} admin={admin} requirePassword={Boolean(me)} onSaved={onSaved} onLanguage={onLanguage} onDeleted={onDeleted} />
             ) : section === "install" ? (
               <Install site={site} sites={sites} />
             ) : section === "goals" ? (
@@ -936,7 +966,7 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
             ) : section === "sharing" ? (
               <Sharing site={site} />
             ) : section === "people" && me ? (
-              <People me={me} onDemoted={onDemoted} />
+              <People me={me} site={site} onDemoted={onDemoted} />
             ) : section === "api" ? (
               <Tokens sites={sites} />
             ) : section === "links" ? (

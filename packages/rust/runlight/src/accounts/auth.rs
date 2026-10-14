@@ -138,6 +138,8 @@ fn role_of(row: &Row, name: &str) -> Role {
 /// Someone who may sign in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct User {
+    /// The one allowed site, or every site when absent.
+    pub site: Option<String>,
     /// The account's id.
     pub id: String,
     /// The email address, trimmed and in lower case.
@@ -157,7 +159,7 @@ pub struct User {
 impl User {
     /// The user as the TypeScript's object, its keys in order.
     pub fn to_value(&self) -> Value {
-        obj! {
+        let mut value = obj! {
             "id" => self.id.as_str(),
             "email" => self.email.as_str(),
             "hash" => self.hash.as_str(),
@@ -165,13 +167,19 @@ impl User {
             "createdAt" => self.created_at,
             "twoFactor" => self.two_factor,
             "recoveryLeft" => self.recovery_left,
+        };
+        if let (Some(site), Value::Object(object)) = (&self.site, &mut value) {
+            object.set("site", site.as_str());
         }
+        value
     }
 }
 
 /// Someone asked to join, until they choose a password. Only a hash of the link's code is kept.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invite {
+    /// The one allowed site, or every site when absent.
+    pub site: Option<String>,
     /// The invite's id.
     pub id: String,
     /// Who it is for, trimmed and in lower case.
@@ -189,14 +197,18 @@ pub struct Invite {
 impl Invite {
     /// The invite as the TypeScript's object, its keys in order.
     pub fn to_value(&self) -> Value {
-        obj! {
+        let mut value = obj! {
             "id" => self.id.as_str(),
             "email" => self.email.as_str(),
             "role" => self.role.as_str(),
             "invitedBy" => self.invited_by.as_str(),
             "createdAt" => self.created_at,
             "expiresAt" => self.expires_at,
+        };
+        if let (Some(site), Value::Object(object)) = (&self.site, &mut value) {
+            object.set("site", site.as_str());
         }
+        value
     }
 }
 
@@ -504,6 +516,17 @@ impl Accounts {
             params![],
         )
         .await?;
+        for name in ["rl_users", "rl_invites"] {
+            let fields = if db.dialect() == Dialect::Sqlite {
+                db.all(&format!("PRAGMA table_info({name})"), params![]).await?
+            } else {
+                let schema = if my { "DATABASE()" } else { "current_schema()" };
+                db.all(&format!("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = {schema}"), params![name]).await?
+            };
+            if !fields.iter().any(|row| row.text("name") == "site") {
+                db.run(&format!("ALTER TABLE {name} ADD COLUMN site TEXT"), params![]).await?;
+            }
+        }
         // A server has one owner. One from before, with several, keeps the first and the rest become admins,
         // who can still do everything but remove the owner. Invites to join as an owner become invites as an admin.
         let owners = db.all("SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id", params![]).await?;
@@ -525,6 +548,7 @@ impl Accounts {
 
     fn row(r: &Row) -> R<User> {
         Ok(User {
+            site: if r.is_null("site") { None } else { Some(r.text("site")) },
             id: r.text("id"),
             email: r.text("email"),
             hash: r.text("hash"),
@@ -785,6 +809,9 @@ impl Accounts {
                 )
                 .into());
             }
+            if user.site.is_some() && role == Role::Admin {
+                return Err(AccountError::new("An admin needs access to all sites", "role_scope", &[]).into());
+            }
             if role == Role::Owner {
                 return Err(AccountError::new("Ownership is handed over by the owner", "owner_hand_over", &[]).into());
             }
@@ -811,7 +838,7 @@ impl Accounts {
             let Some(next) = next else {
                 return Err(AccountError::new("Unknown account", "unknown_account", &[]).into());
             };
-            if next.role != Role::Admin {
+            if next.site.is_some() || next.role != Role::Admin {
                 return Err(AccountError::new("Make them an admin first", "owner_needs_admin", &[]).into());
             }
             self.store.db().run("UPDATE rl_users SET role = 'owner' WHERE id = ?", params![to]).await?;
@@ -843,7 +870,21 @@ impl Accounts {
     /// Makes an account, or sets a new password on an existing one. A new account is the owner when it is the first,
     /// and otherwise an admin unless a role is given, since a server has one owner.
     pub async fn set_password(&self, email: &str, password: &str, now: i64, role: Option<Role>) -> R<User> {
+        self.set_password_scoped(email, password, now, role, None).await
+    }
+
+    async fn set_password_scoped(
+        &self,
+        email: &str,
+        password: &str,
+        now: i64,
+        role: Option<Role>,
+        site: Option<&str>,
+    ) -> R<User> {
         self.init().await?;
+        if site.is_some_and(|s| s.is_empty() || !matches!(role, Some(Role::Member | Role::Viewer))) {
+            return Err(AccountError::new("Choose member or viewer for one site", "role_scope", &[]).into());
+        }
         let address = js::trim(email).to_lowercase();
         if !is_email(&address) {
             return Err(AccountError::new("Enter an email address", "email_invalid", &[]).into());
@@ -865,6 +906,7 @@ impl Accounts {
         let first = self.count().await? == 0;
         let given = role.unwrap_or(if first { Role::Owner } else { Role::Admin });
         let user = User {
+            site: site.map(str::to_owned),
             id: hex(&random_bytes(12)),
             email: address,
             hash,
@@ -876,8 +918,8 @@ impl Accounts {
         self.store
             .db()
             .run(
-                "INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-                params![&user.id, &user.email, &user.hash, user.role.as_str(), user.created_at],
+                "INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)",
+                params![&user.id, &user.email, &user.hash, user.role.as_str(), user.created_at, site],
             )
             .await?;
         Ok(user)
@@ -885,6 +927,7 @@ impl Accounts {
 
     fn invite_row(r: &Row) -> Invite {
         Invite {
+            site: if r.is_null("site") { None } else { Some(r.text("site")) },
             id: r.text("id"),
             email: r.text("email"),
             role: role_of(r, "role"),
@@ -905,11 +948,33 @@ impl Accounts {
     /// Invites someone to join with a role, and returns the code for their link.
     /// Asking again replaces the earlier invite, so only the newest link works.
     pub async fn invite(&self, email: &str, role: Role, invited_by: &str, now: i64) -> R<NewInvite> {
-        self.init().await?;
-        self.turn(|| self.invite_now(email, role, invited_by, now)).await
+        self.invite_scoped(email, role, invited_by, now, None).await
     }
 
-    async fn invite_now(&self, email: &str, role: Role, invited_by: &str, now: i64) -> R<NewInvite> {
+    /// Invites a member or viewer to one site, or to every site when absent.
+    pub async fn invite_scoped(
+        &self,
+        email: &str,
+        role: Role,
+        invited_by: &str,
+        now: i64,
+        site: Option<&str>,
+    ) -> R<NewInvite> {
+        if site.is_some_and(|s| s.is_empty() || !matches!(role, Role::Member | Role::Viewer)) {
+            return Err(AccountError::new("Choose member or viewer for one site", "role_scope", &[]).into());
+        }
+        self.init().await?;
+        self.turn(|| self.invite_now(email, role, invited_by, now, site)).await
+    }
+
+    async fn invite_now(
+        &self,
+        email: &str,
+        role: Role,
+        invited_by: &str,
+        now: i64,
+        site: Option<&str>,
+    ) -> R<NewInvite> {
         let address = js::trim(email).to_lowercase();
         if !is_email(&address) {
             return Err(AccountError::new("Enter an email address", "email_invalid", &[]).into());
@@ -924,6 +989,7 @@ impl Accounts {
         }
         let code = base64url(&random_bytes(24));
         let invite = Invite {
+            site: site.map(str::to_owned),
             id: hex(&random_bytes(12)),
             email: address,
             role,
@@ -935,7 +1001,7 @@ impl Accounts {
         self.store
             .db()
             .run(
-                "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     &invite.id,
                     &invite.email,
@@ -943,7 +1009,8 @@ impl Accounts {
                     code_hash(&code),
                     &invite.invited_by,
                     invite.created_at,
-                    invite.expires_at
+                    invite.expires_at,
+                    site
                 ],
             )
             .await?;
@@ -983,7 +1050,7 @@ impl Accounts {
             };
             let Some(invite) = self.invite_by_code(code, now).await? else { return Err(gone().into()) };
             let sender = self.by_email(&invite.invited_by).await?;
-            if !sender.is_some_and(|s| s.role.may_invite()) {
+            if !sender.is_some_and(|s| s.site.is_none() && s.role.may_invite()) {
                 self.store.db().run("DELETE FROM rl_invites WHERE id = ?", params![&invite.id]).await?;
                 return Err(gone().into());
             }
@@ -995,7 +1062,9 @@ impl Accounts {
                 )
                 .into());
             }
-            let user = self.set_password(&invite.email, password, now, Some(invite.role)).await?;
+            let user = self
+                .set_password_scoped(&invite.email, password, now, Some(invite.role), invite.site.as_deref())
+                .await?;
             self.store.db().run("DELETE FROM rl_invites WHERE id = ?", params![&invite.id]).await?;
             Ok(user)
         })

@@ -64,7 +64,7 @@ public sealed class RoutesAccountsTests : RoutesTestCase
         Assert.Equal("owner", Obj(await Json(owner, "GET", "/api/account")).Obj("account")!.Str("role"));
 
         // The owner invites a member, who joins with their own password.
-        var sent = Obj(await Json(owner, "POST", "/api/people", new JsObject { ["email"] = "mo@example.com", ["role"] = "member" }));
+        var sent = Obj(await Json(owner, "POST", "/api/people", new JsObject { ["allSites"] = true, ["email"] = "mo@example.com", ["role"] = "member" }));
         Assert.False(sent.Bool("emailed")); // no mail service here, so the link is for passing on
         Assert.True(sent.Has("emailed"));
         var link = new Url(sent.Str("link")!);

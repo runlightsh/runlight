@@ -99,6 +99,44 @@ func (rt *Routes) embedAPI(c *call) (*Response, error) {
 func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 	ctx, request := c.ctx, c.req
 	r := rt.r
+	scoped, err := rt.sessionScope(c)
+	if err != nil {
+		return nil, err
+	}
+	if scoped != nil && scoped.Site != "" {
+		if err := r.Init(ctx); err != nil {
+			return nil, err
+		}
+		site := scoped.Site
+		if _, ok := r.Site(site); !ok {
+			return Coded("Unknown site", "unknown_site", 404, nil), nil
+		}
+		asked, has := queryValue(u, "site")
+		if has && asked != site {
+			return Coded("Unknown site", "unknown_site", 404, nil), nil
+		}
+		if match := siteOnePath.FindStringSubmatch(path); match != nil {
+			if id, ok := decodeURIComponent(match[1]); !ok || id != site {
+				return Coded("Unknown site", "unknown_site", 404, nil), nil
+			}
+		}
+		read := request.Method == "GET" && sharedPath(path)
+		assistant := (path == "/api/assistant" && request.Method == "GET") || (path == "/api/assistant/chat" && request.Method == "POST")
+		manage := scoped.Role == "member" && ManagePath(request.Method, path)
+		if !read && !assistant && !manage {
+			return Coded("Your account only has access to its assigned site", "site_access", 403, nil), nil
+		}
+		if path == "/api/assistant/chat" {
+			body, err := request.JSON()
+			if err != nil || js.Obj(body).Value("site") != site {
+				return Coded("Unknown site", "unknown_site", 404, nil), nil
+			}
+		}
+		u = u.Clone()
+		q := u.SearchParams()
+		q.Set("site", site)
+		u.SetSearchParams(q)
+	}
 	// An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
 	if _, has := request.Header.Lookup(embedHeader); has && !(request.Method == "GET" && sharedPath(path)) {
 		return Coded("Not available on a shared dashboard", "share_not_available", 403, nil), nil
@@ -734,6 +772,15 @@ func (rt *Routes) siteWrites(c *call, raw string, u *whatwg.URL) (*Response, err
 		if !decoded {
 			return Coded("Unknown site", "unknown_site", 404, nil), nil
 		}
+		user, err := rt.sessionScope(c)
+		if err != nil {
+			return nil, err
+		}
+		if rt.web != nil && user != nil {
+			if refused, err := rt.web.ConfirmPassword(ctx, request); refused != nil || err != nil {
+				return refused, err
+			}
+		}
 		if err := r.DeleteSite(ctx, id); err != nil {
 			return siteError(err)
 		}
@@ -844,7 +891,14 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 	// A shared dashboard sees exactly what its visitors see, even for someone signed in.
 	var shared *ShareRow
 	// The one site a share or a site's API token may read; "" for every site.
+	scoped, err := rt.sessionScope(c)
+	if err != nil {
+		return nil, err
+	}
 	only := ""
+	if scoped != nil {
+		only = scoped.Site
+	}
 	if shareIDValue, has := request.Header.Lookup(shareHeader); has {
 		if shareID.MatchString(shareIDValue) {
 			var err error
@@ -882,7 +936,9 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 			if !sharedPath(path) {
 				return Coded("API tokens can only read", "token_read_only", 403, nil), nil
 			}
-			only = access.token.Site
+			if scoped == nil || scoped.Site == "" {
+				only = access.token.Site
+			}
 		}
 	}
 
@@ -942,7 +998,7 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		if shared != nil {
 			return jsonAnswer(js.NewObject("sites", sites), 200), nil
 		}
-		return jsonAnswer(js.NewObject("sites", sites, "managed", r.ManagedSites), 200), nil
+		return jsonAnswer(js.NewObject("sites", sites, "managed", (scoped == nil || scoped.Site == "") && r.ManagedSites), 200), nil
 	}
 
 	var site SiteRow

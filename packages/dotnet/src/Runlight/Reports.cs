@@ -256,7 +256,7 @@ public static class Reports
         var u = Url.Parse(dashboard);
         string where = u != null ? u.Host + (u.Pathname.EndsWith('/') ? u.Pathname[..^1] : u.Pathname) : dashboard;
         string at = T("email.at", new JsObject { ["where"] = where });
-        string mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\">";
+        string mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\">";
 
         string footer = T("email.footer", new JsObject { ["frequency"] = T(monthly ? "email.monthly" : "email.weekly"), ["site"] = siteName });
         string atLine = Esc(T("email.at", new JsObject { ["where"] = "\0" }));

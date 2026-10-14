@@ -696,6 +696,11 @@ final class Routes
     }
 
     /** Whether this request acts as the owner. "read" is someone signed in who may only read, such as a viewer. */
+    private function sessionScope(Request $request): ?array
+    {
+        return $this->web !== null ? $this->web->signedIn($request) : null;
+    }
+
     private function canRead(Request $request): bool|string
     {
         if (isset($this->managed[$request])) {
@@ -708,6 +713,8 @@ final class Routes
             if ($authorize === null && $this->token !== null && $this->token !== '' && $given !== '' && self::constantTimeEqual($given, $this->token)) {
                 return true;
             }
+            $scoped = $this->sessionScope($request);
+            if (isset($scoped['site']) && str_starts_with(substr((new Url($request->url))->pathname, strlen($this->base)), '/oauth/')) return false;
             $answer = $authorize !== null ? $authorize($request) : $this->web->access($request);
             // A member changes things like an owner, apart from the few controls adminOnly() names.
             if ($answer === 'member') {
@@ -1426,7 +1433,7 @@ final class Routes
                     'to' => $to,
                     'subject' => $t('email.test.subject'),
                     'text' => $t('email.test.body', ['service' => $name]),
-                    'html' => '<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
+                    'html' => '<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
                 ]);
                 return self::json(['ok' => true]);
             }
@@ -1742,6 +1749,27 @@ final class Routes
     {
         $rl = $this->rl;
         $method = $request->method;
+        $scoped = $this->sessionScope($request);
+        if (isset($scoped['site'])) {
+            $rl->init();
+            $site = $scoped['site'];
+            if ($rl->site($site) === null) return self::coded('Unknown site', 'unknown_site', 404);
+            $asked = $url->searchParams()->get('site');
+            $sitePath = preg_match('~^/api/sites/([^/]+)$~', $path, $match) ? $match : null;
+            if (($asked !== null && $asked !== $site) || ($sitePath && self::decodePart($sitePath[1]) !== $site)) return self::coded('Unknown site', 'unknown_site', 404);
+            $read = $method === 'GET' && self::sharedPath($path);
+            $assistant = ($path === '/api/assistant' && $method === 'GET') || ($path === '/api/assistant/chat' && $method === 'POST');
+            $manage = $scoped['role'] === 'member' && self::managePath($method, $path);
+            if (!$read && !$assistant && !$manage) return self::coded('Your account only has access to its assigned site', 'site_access', 403);
+            if ($path === '/api/assistant/chat') {
+                $body = json_decode($request->text(), true);
+                if (!is_array($body) || ($body['site'] ?? null) !== $site) return self::coded('Unknown site', 'unknown_site', 404);
+            }
+            $url = new Url($url->href());
+            $query = $url->searchParams();
+            $query->set('site', $site);
+            $url->setSearchParams($query);
+        }
         // An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
         if ($request->headers->get(self::EMBED_HEADER) !== null && !($method === 'GET' && self::sharedPath($path))) {
             return self::coded('Not available on a shared dashboard', 'share_not_available', 403);
@@ -2254,6 +2282,10 @@ final class Routes
             if ($id === null) {
                 return self::coded('Unknown site', 'unknown_site', 404);
             }
+            if ($this->web !== null && $this->sessionScope($request) !== null) {
+                $refused = $this->web->confirmPassword($request);
+                if ($refused !== null) return $refused;
+            }
             try {
                 $rl->deleteSite($id);
                 return self::json(['ok' => true]);
@@ -2516,7 +2548,8 @@ final class Routes
         $shareId = $request->headers->get(self::SHARE_HEADER);
         $shared = null;
         // The one site a share or a site's API token may read; null for every site.
-        $only = null;
+        $scoped = $this->sessionScope($request);
+        $only = $scoped['site'] ?? null;
         if ($shareId !== null) {
             $shared = preg_match(self::SHARE_ID, $shareId) ? $store->shareById($shareId) : null;
             if ($shared === null) {
@@ -2543,7 +2576,7 @@ final class Routes
                 if (!self::sharedPath($path)) {
                     return self::coded('API tokens can only read', 'token_read_only', 403);
                 }
-                $only = $access['site'] !== '' ? $access['site'] : null;
+                $only = $scoped['site'] ?? ($access['site'] !== '' ? $access['site'] : null);
             }
         }
 
@@ -2578,7 +2611,7 @@ final class Routes
                 $sites[] = $row;
             }
             // A share never learns how the install is run.
-            return self::json($shared !== null ? ['sites' => $sites] : ['sites' => $sites, 'managed' => $rl->managedSites]);
+            return self::json($shared !== null ? ['sites' => $sites] : ['sites' => $sites, 'managed' => !isset($scoped['site']) && $rl->managedSites]);
         }
 
         $site = $shared !== null ? $rl->site($shared['site']) : ($only !== null ? $rl->site($params->get('site') ?? $only) : $this->querySite($url));

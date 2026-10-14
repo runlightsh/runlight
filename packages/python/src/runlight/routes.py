@@ -625,6 +625,9 @@ class Routes:
             or (bool(re.fullmatch(r"/api/sites/[^/]+", path)) and method == "DELETE")
         )
 
+    def _session_scope(self, request: Request) -> Any:
+        return self.web.signed_in(request) if self.web else None
+
     def _can_read(self, request: Request) -> bool | str:
         """Whether this request acts as the owner. "read" is someone signed in who may only read, such as a viewer."""
         if request in self.managed:
@@ -635,6 +638,9 @@ class Routes:
             given = bearer(request)
             if authorize is None and self.token and given and _constant_time_equal(given, self.token):
                 return True
+            scoped = self._session_scope(request)
+            if scoped and scoped.get("site") is not None and Url(request.url).pathname[len(self.base):].startswith("/oauth/"):
+                return False
             answer = authorize(request) if authorize is not None else self.web.access(request)
             # A member changes things like an owner, apart from the few controls _admin_only() names.
             if answer == "member":
@@ -1226,7 +1232,7 @@ class Routes:
                         "to": to,
                         "subject": t("email.test.subject"),
                         "text": t("email.test.body", {"service": name}),
-                        "html": f'<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
+                        "html": f'<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
                     }
                 )
                 return json({"ok": True})
@@ -1507,6 +1513,29 @@ class Routes:
     def _api(self, request: Request, path: str, url: Url) -> Response:
         rl = self.rl
         method = request.method
+        scoped = self._session_scope(request)
+        if scoped and scoped.get("site") is not None:
+            rl.init()
+            site = scoped["site"]
+            if not rl.site(site):
+                return coded("Unknown site", "unknown_site", 404)
+            asked = url.search_params.get("site")
+            site_path = re.fullmatch(r"/api/sites/([^/]+)", path)
+            if (asked is not None and asked != site) or (site_path and _decode_part(site_path.group(1)) != site):
+                return coded("Unknown site", "unknown_site", 404)
+            read = method == "GET" and _shared_path(path)
+            assistant = (path == "/api/assistant" and method == "GET") or (path == "/api/assistant/chat" and method == "POST")
+            manage = scoped["role"] == "member" and manage_path(method, path)
+            if not read and not assistant and not manage:
+                return coded("Your account only has access to its assigned site", "site_access", 403)
+            if path == "/api/assistant/chat":
+                ok, body = _js.try_loads(request.body())
+                if not ok or not isinstance(body, dict) or body.get("site") != site:
+                    return coded("Unknown site", "unknown_site", 404)
+            url = url.copy()
+            query = url.search_params
+            query.set("site", site)
+            url.set_search_params(query)
         # An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
         if request.headers.get(EMBED_HEADER) is not None and not (method == "GET" and _shared_path(path)):
             return coded("Not available on a shared dashboard", "share_not_available", 403)
@@ -1935,6 +1964,10 @@ class Routes:
             id_ = _decode_part(site_match.group(1))
             if id_ is None:
                 return coded("Unknown site", "unknown_site", 404)
+            if self.web is not None and self._session_scope(request) is not None:
+                refused = self.web.confirm_password(request)
+                if refused is not None:
+                    return refused
             try:
                 rl.delete_site(id_)
                 return json({"ok": True})
@@ -2146,7 +2179,8 @@ class Routes:
         share_id = request.headers.get(SHARE_HEADER)
         shared = None
         # The one site a share or a site's API token may read; None for every site.
-        only = None
+        scoped = self._session_scope(request)
+        only = scoped.get("site") if scoped else None
         if share_id is not None:
             shared = store.share_by_id(share_id) if _SHARE_ID.match(share_id) else None
             if not shared:
@@ -2168,7 +2202,7 @@ class Routes:
             if access is not True:
                 if not _shared_path(path):
                     return coded("API tokens can only read", "token_read_only", 403)
-                only = access["site"] or None
+                only = scoped.get("site") if scoped and scoped.get("site") is not None else access["site"] or None
 
         if path == "/api/sites":
             visible = [s for s in rl.sites if s["id"] == only] if only else rl.sites
@@ -2193,7 +2227,7 @@ class Routes:
                     row["connection"] = _field(rl.remote_info(site["id"]), "connection")
                 sites.append(row)
             # A share never learns how the install is run.
-            return json({"sites": sites} if shared else {"sites": sites, "managed": rl.managed_sites})
+            return json({"sites": sites} if shared else {"sites": sites, "managed": not (scoped and scoped.get("site") is not None) and rl.managed_sites})
 
         if shared:
             site = rl.site(shared["site"])

@@ -189,7 +189,7 @@ final class WebTest extends TestCase
     {
         $web = $this->web();
         $owner = $this->owner($web);
-        $sent = self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'Mo@Example.com', 'role' => 'member']));
+        $sent = self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'Mo@Example.com', 'role' => 'member']));
         $this->assertSame(201, $sent->status);
         $body = Json::decode($sent->text(), true);
         $this->assertSame(['invite', 'link', 'emailed'], array_keys($body));
@@ -201,11 +201,11 @@ final class WebTest extends TestCase
         $this->assertStringContainsString('as a member', self::handle($web, self::req("/invite?code=$code"))->text());
         $this->assertSame(410, self::handle($web, self::req('/invite?code=nope'))->status);
 
-        $this->assertSame(409, self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'jon@example.com', 'role' => 'admin']))->status);
-        $noRole = self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'x@example.com', 'role' => 'owner']));
+        $this->assertSame(409, self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'jon@example.com', 'role' => 'admin']))->status);
+        $noRole = self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'x@example.com', 'role' => 'owner']));
         $this->assertSame('{"error":"Pick admin, member, or viewer","code":"role_needed"}', $noRole->text());
         $this->assertSame('nosniff', $noRole->headers->get('x-content-type-options'));
-        $badEmail = self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'nobody', 'role' => 'admin']));
+        $badEmail = self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'nobody', 'role' => 'admin']));
         $this->assertSame('{"error":"Enter an email address","code":"email_invalid","params":{}}', $badEmail->text());
         $form = self::handle($web, self::req('/api/people', 'POST', ['cookie' => $owner, 'content-type' => 'text/plain'], '{}'));
         $this->assertSame(415, $form->status, 'a write must be JSON');
@@ -240,7 +240,7 @@ final class WebTest extends TestCase
         $this->assertSame('remove_self', Json::decode(self::handle($web, self::json($owner, 'DELETE', "/api/people/{$jon['id']}"))->text(), true)['code']);
 
         // Invites listed, resent, and cancelled.
-        self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'zed@example.com', 'role' => 'viewer']));
+        self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'zed@example.com', 'role' => 'viewer']));
         $people = Json::decode(self::handle($web, self::json($owner, 'GET', '/api/people'))->text(), true);
         $this->assertEqualsCanonicalizing(['jon@example.com', 'mo@example.com'], array_column($people['people'], 'email'));
         $this->assertSame(['zed@example.com'], array_column($people['invites'], 'email'));
@@ -261,20 +261,20 @@ final class WebTest extends TestCase
         $web = $this->web(['token' => 'app-token'], 'https://stats.example.com');
         $owner = $this->owner($web);
         $this->rl->mail = ['service' => 'smtp', 'from' => 'runlight@example.com'];
-        $body = Json::decode(self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'mo@example.com', 'role' => 'viewer']))->text(), true);
+        $body = Json::decode(self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'mo@example.com', 'role' => 'viewer']))->text(), true);
         $this->assertTrue($body['emailed']);
         $this->assertStringStartsWith('https://stats.example.com/runlight/invite?code=', $body['link'], 'the install\'s own address, never the request\'s Host');
         $this->assertSame('jon@example.com invited you to Runlight', $this->rl->sent[0]['subject']);
         $this->assertSame("jon@example.com invited you to the Runlight at stats.example.com as a viewer, who can read every site's stats.\n\nChoose a password to join:\n{$body['link']}\n\nThe link works for seven days.\n", $this->rl->sent[0]['text']);
 
         $this->rl->mailFails = new MailError('The server refused the password', 'mail_auth', ['host' => 'smtp.example.com']);
-        $failed = self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'ada@example.com', 'role' => 'admin']));
+        $failed = self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'ada@example.com', 'role' => 'admin']));
         $body = Json::decode($failed->text());
         $this->assertSame(['invite', 'link', 'emailed', 'mailError', 'mailCode', 'mailParams'], array_keys(get_object_vars($body)));
         $this->assertSame('mail_auth', $body->mailCode);
         $this->assertSame(['host' => 'smtp.example.com'], (array) $body->mailParams);
         $this->rl->mailFails = new \RuntimeException('Something else');
-        $other = Json::decode(self::handle($web, self::json($owner, 'POST', '/api/people', ['email' => 'zed@example.com', 'role' => 'admin']))->text(), true);
+        $other = Json::decode(self::handle($web, self::json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'zed@example.com', 'role' => 'admin']))->text(), true);
         $this->assertSame(['invite', 'link', 'emailed', 'mailError'], array_keys($other), 'an error without a code of its own has none here');
     }
 

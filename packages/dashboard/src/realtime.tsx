@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import { useEffect, useState } from "preact/hooks";
 import { api, shared, type Realtime } from "./api.js";
 import { count, countryName, exact, flag } from "./format.js";
@@ -139,7 +140,7 @@ export function RealtimeModal({ site, onClose }: { site: string; onClose: () => 
             )}
           </>
         ) : (
-          <p class="empty">{t("common.loading")}</p>
+          <Loading />
         )}
       </div>
     </Sheet>

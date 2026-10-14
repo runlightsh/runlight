@@ -1761,11 +1761,7 @@ final class Runlight
         Throttle::sweep($this->store, $this->now());
         // Every site's retention covers any one site's that is still waiting.
         $this->pruning = [];
-        try {
-            $this->applyRetention();
-        } catch (\Throwable $error) {
-            Log::write('Runlight: could not apply retention ' . $error->getMessage());
-        }
+        $this->applyRetention();
         if ($this->now() - $this->optimizedAt >= 86_400_000) {
             $this->optimizedAt = $this->now();
             $this->store->optimize();

@@ -222,6 +222,7 @@ module Runlight
           if user["role"] == "owner"
             raise AccountError.new("Only the owner can change their own role, by handing ownership to an admin", "owner_protected")
           end
+          raise AccountError.new("An admin needs access to all sites", "role_scope") if !user["site"].nil? && role == "admin"
           raise AccountError.new("Ownership is handed over by the owner", "owner_hand_over") if role == "owner"
 
           @store.db.run("UPDATE rl_users SET role = ? WHERE id = ?", [role, id])
@@ -240,7 +241,7 @@ module Runlight
           nxt = find(to)
           raise AccountError.new("Only the owner can hand over ownership", "owner_hand_over") if owner.nil? || owner["role"] != "owner"
           raise AccountError.new("Unknown account", "unknown_account") if nxt.nil?
-          raise AccountError.new("Make them an admin first", "owner_needs_admin") if nxt["role"] != "admin"
+          raise AccountError.new("Make them an admin first", "owner_needs_admin") if !nxt["site"].nil? || nxt["role"] != "admin"
 
           @store.db.run("UPDATE rl_users SET role = 'owner' WHERE id = ?", [to])
           @store.db.run("UPDATE rl_users SET role = 'admin' WHERE id = ?", [from])
@@ -266,8 +267,9 @@ module Runlight
 
       # Makes an account, or sets a new password on an existing one. A new account is the owner when it is the first,
       # and otherwise an admin unless a role is given, since a server has one owner.
-      def set_password(email, password, now, role = nil)
+      def set_password(email, password, now, role = nil, site = nil)
         init
+        raise AccountError.new("Choose member or viewer for one site", "role_scope") if !site.nil? && (site.empty? || !%w[member viewer].include?(role))
         address = Js.lower(Js.trim(email))
         raise AccountError.new("Enter an email address", "email_invalid") unless address.match?(EMAIL)
         if Js.length(password) < MIN_PASSWORD
@@ -291,9 +293,10 @@ module Runlight
           "createdAt" => now,
           "twoFactor" => false,
           "recoveryLeft" => 0,
+          **(site.nil? ? {} : { "site" => site }),
         }
-        @store.db.run("INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-                      [user["id"], user["email"], user["hash"], user["role"], user["createdAt"]])
+        @store.db.run("INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)",
+                      [user["id"], user["email"], user["hash"], user["role"], user["createdAt"], site])
         user
       end
 
@@ -306,9 +309,9 @@ module Runlight
 
       # Invites someone to join with a role, and returns {"invite" => ..., "code" => ...}, the code for their link.
       # Asking again replaces the earlier invite, so only the newest link works.
-      def invite(email, role, invited_by, now)
+      def invite(email, role, invited_by, now, site = nil)
         init
-        turn { invite_now(email, role, invited_by, now) }
+        turn { invite_now(email, role, invited_by, now, site) }
       end
 
       # The invite a link's code belongs to, while it still works.
@@ -337,7 +340,7 @@ module Runlight
           next nil if invite.nil?
 
           sender = by_email(invite["invitedBy"])
-          if sender.nil? || !self.class.may_invite?(sender["role"])
+          if sender.nil? || !sender["site"].nil? || !self.class.may_invite?(sender["role"])
             # Left without raising, since an error inside a turn on SQLite would roll this back.
             @store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
             next nil
@@ -346,7 +349,7 @@ module Runlight
             raise AccountError.new("#{invite["email"]} already has an account", "account_exists", { "email" => invite["email"] })
           end
 
-          made = set_password(invite["email"], password, now, invite["role"])
+          made = set_password(invite["email"], password, now, invite["role"], invite["site"])
           @store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
           made
         end
@@ -451,6 +454,10 @@ module Runlight
             "CREATE TABLE IF NOT EXISTS rl_invites (id #{str.call(100)} PRIMARY KEY, email #{str.call(320)} NOT NULL UNIQUE, role #{str.call(20)} NOT NULL, " \
             "code_hash #{str.call(128)} NOT NULL UNIQUE, invited_by #{str.call(100)} NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)#{table}",
           )
+          %w[rl_users rl_invites].each do |name|
+            fields = db.dialect == "sqlite" ? db.all("PRAGMA table_info(#{name})") : db.all("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = #{my ? 'DATABASE()' : 'current_schema()'}", [name])
+            db.run("ALTER TABLE #{name} ADD COLUMN site TEXT") unless fields.any? { |c| c["name"] == "site" }
+          end
           # A server has one owner. One from before, with several, keeps the first and the rest become admins,
           # who can still do everything but remove the owner. Invites to join as an owner become invites as an admin.
           owners = db.all("SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id")
@@ -467,6 +474,7 @@ module Runlight
           "email" => r["email"].to_s,
           "hash" => r["hash"].to_s,
           "role" => self.class.role_from(r["role"]),
+          **(r["site"].nil? ? {} : { "site" => r["site"].to_s }),
           "createdAt" => Js.number(r["created_at"]),
           "twoFactor" => Js.truthy?(r["totp_secret"]),
           "recoveryLeft" => recovery.length,
@@ -534,22 +542,24 @@ module Runlight
           "id" => r["id"].to_s,
           "email" => r["email"].to_s,
           "role" => self.class.role_from(r["role"]),
+          **(r["site"].nil? ? {} : { "site" => r["site"].to_s }),
           "invitedBy" => r["invited_by"].to_s,
           "createdAt" => Js.number(r["created_at"]),
           "expiresAt" => Js.number(r["expires_at"]),
         }
       end
 
-      def invite_now(email, role, invited_by, now)
+      def invite_now(email, role, invited_by, now, site = nil)
+        raise AccountError.new("Choose member or viewer for one site", "role_scope") if !site.nil? && (site.empty? || !%w[member viewer].include?(role))
         address = Js.lower(Js.trim(email))
         raise AccountError.new("Enter an email address", "email_invalid") unless address.match?(EMAIL)
         raise AccountError.new("#{address} already has an account", "account_exists", { "email" => address }) unless by_email(address).nil?
 
         code = Crypto.base64url(Crypto.random_bytes(24))
-        invite = { "id" => Crypto.hex(Crypto.random_bytes(12)), "email" => address, "role" => role, "invitedBy" => invited_by, "createdAt" => now,
+        invite = { **(site.nil? ? {} : { "site" => site }), "id" => Crypto.hex(Crypto.random_bytes(12)), "email" => address, "role" => role, "invitedBy" => invited_by, "createdAt" => now,
                    "expiresAt" => now + INVITE_MS }
         @store.db.run("DELETE FROM rl_invites WHERE email = ?", [address])
-        @store.db.run("INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        @store.db.run("INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
           invite["id"],
           invite["email"],
           invite["role"],
@@ -557,6 +567,7 @@ module Runlight
           invite["invitedBy"],
           invite["createdAt"],
           invite["expiresAt"],
+          site,
         ])
         { "invite" => invite, "code" => code }
       end

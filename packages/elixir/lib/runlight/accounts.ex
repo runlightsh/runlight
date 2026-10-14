@@ -136,6 +136,20 @@ defmodule Runlight.Accounts do
       "CREATE TABLE IF NOT EXISTS rl_invites (id #{str.(100)} PRIMARY KEY, email #{str.(320)} NOT NULL UNIQUE, role #{str.(20)} NOT NULL, code_hash #{str.(128)} NOT NULL UNIQUE, invited_by #{str.(100)} NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)#{table}"
     )
 
+    for name <- ["rl_users", "rl_invites"] do
+      fields =
+        if dialect(acc) == "sqlite",
+          do: all(acc, "PRAGMA table_info(#{name})"),
+          else:
+            all(
+              acc,
+              "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = #{if my, do: "DATABASE()", else: "current_schema()"}",
+              [name]
+            )
+
+      unless Enum.any?(fields, &(&1["name"] == "site")), do: run(acc, "ALTER TABLE #{name} ADD COLUMN site TEXT")
+    end
+
     # A server has one owner. One from before, with several, keeps the first and the rest become admins. Invites to
     # join as an owner become invites as an admin.
     owners = all(acc, "SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id")
@@ -145,6 +159,9 @@ defmodule Runlight.Accounts do
 
     run(acc, "UPDATE rl_invites SET role = 'admin' WHERE role = 'owner'")
   end
+
+  def with_site(value, nil), do: value
+  def with_site(value, site), do: Object.put(value, "site", site)
 
   defp row(r) do
     recovery =
@@ -162,6 +179,7 @@ defmodule Runlight.Accounts do
       twoFactor: JS.truthy?(r["totp_secret"]),
       recoveryLeft: length(recovery)
     )
+    |> with_site(r["site"])
   end
 
   # Two-factor: TOTP as authenticator apps expect it (RFC 6238): SHA-1, six digits, 30 seconds.
@@ -414,6 +432,7 @@ defmodule Runlight.Accounts do
       if user["role"] == "owner",
         do: refuse("Only the owner can change their own role, by handing ownership to an admin", "owner_protected")
 
+      if user["site"] != nil and role == "admin", do: refuse("An admin needs access to all sites", "role_scope")
       if role == "owner", do: refuse("Ownership is handed over by the owner", "owner_hand_over")
       run(acc, "UPDATE rl_users SET role = ? WHERE id = ?", [role, id])
       # Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
@@ -435,7 +454,7 @@ defmodule Runlight.Accounts do
         do: refuse("Only the owner can hand over ownership", "owner_hand_over")
 
       if next == nil, do: refuse("Unknown account", "unknown_account")
-      if next["role"] != "admin", do: refuse("Make them an admin first", "owner_needs_admin")
+      if next["site"] != nil or next["role"] != "admin", do: refuse("Make them an admin first", "owner_needs_admin")
       run(acc, "UPDATE rl_users SET role = 'owner' WHERE id = ?", [to])
       run(acc, "UPDATE rl_users SET role = 'admin' WHERE id = ?", [from])
       :ok
@@ -461,8 +480,12 @@ defmodule Runlight.Accounts do
   is the owner when it is the first, and otherwise an admin unless a role is
   given, since a server has one owner.
   """
-  def set_password(acc, email, password, now, role \\ nil) do
+  def set_password(acc, email, password, now, role \\ nil, site \\ nil) do
     init(acc)
+
+    if site != nil and (site == "" or role not in ["member", "viewer"]),
+      do: refuse("Choose member or viewer for one site", "role_scope")
+
     address = email |> JS.trim() |> JS.lower()
     unless Runlight.email?(address), do: refuse("Enter an email address", "email_invalid")
 
@@ -492,15 +515,16 @@ defmodule Runlight.Accounts do
             recoveryLeft: 0
           )
 
-        run(acc, "INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)", [
+        run(acc, "INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)", [
           user["id"],
           user["email"],
           user["hash"],
           user["role"],
-          user["createdAt"]
+          user["createdAt"],
+          site
         ])
 
-        user
+        with_site(user, site)
     end
   end
 
@@ -513,6 +537,7 @@ defmodule Runlight.Accounts do
       createdAt: JS.number(r["created_at"]),
       expiresAt: JS.number(r["expires_at"])
     )
+    |> with_site(r["site"])
   end
 
   @doc "Invites that still work, newest first. Expired ones are cleared on the way."
@@ -526,7 +551,10 @@ defmodule Runlight.Accounts do
   Invites someone to join with a role, and returns the invite and the code for
   their link. Asking again replaces the earlier invite.
   """
-  def invite(acc, email, role, invited_by, now) do
+  def invite(acc, email, role, invited_by, now, site \\ nil) do
+    if site != nil and (site == "" or role not in ["member", "viewer"]),
+      do: refuse("Choose member or viewer for one site", "role_scope")
+
     init(acc)
 
     turn(acc, fn ->
@@ -549,7 +577,7 @@ defmodule Runlight.Accounts do
 
       run(
         acc,
-        "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
           invite["id"],
           invite["email"],
@@ -557,11 +585,12 @@ defmodule Runlight.Accounts do
           code_hash(code),
           invite["invitedBy"],
           invite["createdAt"],
-          invite["expiresAt"]
+          invite["expiresAt"],
+          site
         ]
       )
 
-      %{invite: invite, code: code}
+      %{invite: with_site(invite, site), code: code}
     end)
   end
 
@@ -597,7 +626,7 @@ defmodule Runlight.Accounts do
       invite = invite_by_code(acc, code, now) || invite_gone()
       sender = by_email(acc, invite["invitedBy"])
 
-      if sender == nil or not may_invite?(sender["role"]) do
+      if sender == nil or sender["site"] != nil or not may_invite?(sender["role"]) do
         run(acc, "DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
         invite_gone()
       end
@@ -605,7 +634,7 @@ defmodule Runlight.Accounts do
       if by_email(acc, invite["email"]),
         do: refuse("#{invite["email"]} already has an account", "account_exists", email: invite["email"])
 
-      user = set_password(acc, invite["email"], password, now, invite["role"])
+      user = set_password(acc, invite["email"], password, now, invite["role"], invite["site"])
       run(acc, "DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
       user
     end)

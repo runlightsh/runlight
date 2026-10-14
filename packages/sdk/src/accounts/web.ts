@@ -34,6 +34,7 @@ export interface AccountsWeb {
   accountOf(request: Request): Promise<string | null>;
   tokenMade(token: TokenRow, by: string): Promise<boolean>;
   hasAccount(): Promise<boolean>;
+  confirmPassword(request: Request): Promise<Response | null>;
   /** Answers an account page or API request at a path under the base, or null for anything else. */
   handle(request: Request, path: string, context?: RequestContext): Promise<Response | null>;
 }
@@ -152,8 +153,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   const redirect = (location: string, extra: Record<string, string> = {}) => new Response(null, { status: 303, headers: { location, "cache-control": "no-store", ...extra } });
   const reply = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra } });
-  const person = (u: User) => ({ id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, twoFactor: u.twoFactor, recoveryLeft: u.recoveryLeft });
-  const inviteView = (i: Invite) => ({ id: i.id, email: i.email, role: i.role, invitedBy: i.invitedBy, createdAt: i.createdAt, expiresAt: i.expiresAt });
+  const person = (u: User) => ({ id: u.id, email: u.email, role: u.role, ...(u.site === undefined ? {} : { site: u.site }), createdAt: u.createdAt, twoFactor: u.twoFactor, recoveryLeft: u.recoveryLeft });
+  const inviteView = (i: Invite) => ({ id: i.id, email: i.email, role: i.role, ...(i.site === undefined ? {} : { site: i.site }), invitedBy: i.invitedBy, createdAt: i.createdAt, expiresAt: i.expiresAt });
   /** A JSON body by its media type, which a cross-site form cannot send. */
   const body = async (request: Request): Promise<Record<string, unknown> | null> => {
     if ((request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase() !== "application/json") return null;
@@ -179,14 +180,14 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     const origin = (await options.home?.()) ?? new URL(request.url).origin;
     const link = `${origin}${base}/invite?code=${code}`;
     const host = new URL(origin).host;
-    const what = roleText(invite.role);
+    const what = roleText(invite.role, invite.site);
     if (!(await rl.mailSettings())) return { link, emailed: false };
     try {
       await rl.sendMail({
         to: invite.email,
         subject: `${invite.invitedBy} invited you to Runlight`,
         text: `${invite.invitedBy} invited you to the Runlight at ${host} as ${what}.\n\nChoose a password to join:\n${link}\n\nThe link works for seven days.\n`,
-        html: `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px">${EMAIL_LOGO}<p>${esc(invite.invitedBy)} invited you to the Runlight at ${esc(host)} as ${what}.</p><p><a href="${esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>`,
+        html: `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px">${EMAIL_LOGO}<p>${esc(invite.invitedBy)} invited you to the Runlight at ${esc(host)} as ${esc(what)}.</p><p><a href="${esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>`,
       });
       return { link, emailed: true };
     } catch (error) {
@@ -332,14 +333,14 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (method === "GET") {
         const code = url.searchParams.get("code") ?? "";
         const invite = await accounts.inviteByCode(code, now());
-        return invite ? html(invitePage(base, { code, email: invite.email, role: invite.role, host: url.host })) : html(inviteGonePage(base), 410);
+        return invite ? html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host })) : html(inviteGonePage(base), 410);
       }
       if (method === "POST") {
         const form = new URLSearchParams(await request.text());
         const code = form.get("code") ?? "";
         const invite = await accounts.inviteByCode(code, now());
         if (!invite) return html(inviteGonePage(base), 410);
-        const again = (error: string) => html(invitePage(base, { code, email: invite.email, role: invite.role, host: url.host, error }), 400);
+        const again = (error: string) => html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host, error }), 400);
         if ((form.get("password") ?? "") !== (form.get("again") ?? "")) return again("The two passwords are not the same.");
         try {
           const user = await accounts.acceptInvite(code, form.get("password") ?? "", now());
@@ -355,15 +356,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     return null;
   }
 
-  /** Your own account, and for the owner and admins, everyone else's. */
-  async function api(request: Request, path: string): Promise<Response> {
-    const user = await signedIn(request);
-    if (!user) return coded("Sign in first", "sign_in", 401);
-    // Writes must be JSON, which a form on another page cannot send, even those with no body.
-    const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-    if (request.method === "POST" && type !== "application/json") return coded("Send JSON", "send_json", 415);
-    if (path === "/api/account" && request.method === "GET") return reply({ account: person(user) });
-    const recheck = async (input: Record<string, unknown>, field: string, wrong: [string, string]): Promise<Response | null> => {
+  async function recheck(user: User, input: Record<string, unknown>, field: string, wrong: [string, string]): Promise<Response | null> {
       if (!(await rechecks.take(user.id, now()))) return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429);
       const right = await accounts.signIn(user.email, String(input[field] ?? "")).catch((error) => {
         if (error instanceof AccountError && error.code === "busy") return "busy" as const;
@@ -373,11 +366,20 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (!right) return coded(wrong[0], wrong[1], 400);
       await rechecks.forgive(user.id);
       return null;
-    };
+  }
+
+  /** Your own account, and for the owner and admins, everyone else's. */
+  async function api(request: Request, path: string): Promise<Response> {
+    const user = await signedIn(request);
+    if (!user) return coded("Sign in first", "sign_in", 401);
+    // Writes must be JSON, which a form on another page cannot send, even those with no body.
+    const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    if (request.method === "POST" && type !== "application/json") return coded("Send JSON", "send_json", 415);
+    if (path === "/api/account" && request.method === "GET") return reply({ account: person(user) });
     if (path === "/api/account/password" && request.method === "POST") {
       const input = await body(request);
       if (!input) return coded("Send JSON", "send_json", 415);
-      const refused = await recheck(input, "current", ["Your current password is not right", "password_current_wrong"]);
+      const refused = await recheck(user, input, "current", ["Your current password is not right", "password_current_wrong"]);
       if (refused) return refused;
       try {
         const updated = await accounts.setPassword(user.email, String(input.next ?? ""), now());
@@ -407,7 +409,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
         const updated = (await accounts.byId(user.id))!;
         return reply({ recovery: codes }, 200, { "set-cookie": sessionCookie(request, await accounts.sessionFor(updated, now()), SESSION_MS / 1000) });
       }
-      const refused = await recheck(input, "password", ["Your password is not right", "password_wrong"]);
+      const refused = await recheck(user, input, "password", ["Your password is not right", "password_wrong"]);
       if (refused) return refused;
       if (action === "/start") {
         await confirmTries.clear(user.id);
@@ -426,7 +428,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       }
       return coded("Not found", "not_found", 404);
     }
-    if (user.role !== "owner" && user.role !== "admin") return coded("Only the owner or an admin can manage people", "people_owner", 403);
+    if (user.site !== undefined || (user.role !== "owner" && user.role !== "admin")) return coded("Only the owner or an admin can manage people", "people_owner", 403);
     // The owner or an admin can turn off someone else's two-factor, for a coworker who lost both phone and recovery
     // codes, though never the owner's. It asks for their password like every other two-factor change, and their own
     // goes through Account.
@@ -435,7 +437,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (reset[1] === user.id) return coded("Turn off your own two-factor sign-in under Account", "twofactor_self", 400);
       const input = await body(request);
       if (!input) return coded("Send JSON", "send_json", 415);
-      const refused = await recheck(input, "password", ["Your password is not right", "password_wrong"]);
+      const refused = await recheck(user, input, "password", ["Your password is not right", "password_wrong"]);
       if (refused) return refused;
       const target = await accounts.byId(reset[1]!);
       if (!target) return coded("Unknown account", "unknown_account", 404);
@@ -449,7 +451,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (user.role !== "owner") return coded("Only the owner can hand over ownership", "owner_hand_over", 403);
       const input = await body(request);
       if (!input) return coded("Send JSON", "send_json", 415);
-      const refused = await recheck(input, "password", ["Your password is not right", "password_wrong"]);
+      const refused = await recheck(user, input, "password", ["Your password is not right", "password_wrong"]);
       if (refused) return refused;
       try {
         await accounts.handOver(user.id, handOver[1]!);
@@ -472,7 +474,11 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       const email = String(input.email ?? "").trim().toLowerCase();
       if (await accounts.byEmail(email)) return coded(`${email} already has an account`, "account_exists", 409, { email });
       try {
-        const { invite, code } = await accounts.invite(email, role, user.email, now());
+        await rl.init();
+        const site = input.allSites === true ? undefined : typeof input.site === "string" ? input.site : undefined;
+        if (input.allSites !== true && !site) return coded("Choose a site or explicitly invite to all sites", "invite_site", 400);
+        if (site !== undefined && !rl.site(site)) return coded("Unknown site", "unknown_site", 404);
+        const { invite, code } = await accounts.invite(email, role, user.email, now(), site);
         return reply({ invite: inviteView(invite), ...(await sendInvite(request, invite, code)) }, 201);
       } catch (error) {
         if (error instanceof AccountError) return coded(error.message, error.code, 400, error.params);
@@ -487,7 +493,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       const old = (await accounts.invites(now())).find((i) => i.id === inviteMatch[1]);
       if (!old) return coded("Unknown invite", "unknown_invite", 404);
       // A new link replaces the old one, which stops working.
-      const { invite, code } = await accounts.invite(old.email, old.role, user.email, now());
+      const { invite, code } = await accounts.invite(old.email, old.role, user.email, now(), old.site);
       return reply({ invite: inviteView(invite), ...(await sendInvite(request, invite, code)) });
     }
     const match = /^\/api\/people\/([a-f0-9]{24})$/.exec(path);
@@ -520,6 +526,13 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     accounts,
     signedIn,
     hasAccount,
+    async confirmPassword(request) {
+      const user = await signedIn(request);
+      if (!user) return coded("Sign in first", "sign_in", 401);
+      const input = await body(request);
+      if (!input) return coded("Send JSON", "send_json", 415);
+      return recheck(user, input, "password", ["Your password is not right", "password_wrong"]);
+    },
     async access(request) {
       const user = await signedIn(request);
       if (!user) return false;
@@ -529,8 +542,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     accountOf: async (request) => (await signedIn(request))?.id ?? null,
     // A viewer makes no tokens; someone removed or made a viewer since allowing an app gets none for it.
     async tokenMade(token, by) {
-      const role = (await accounts.byId(by))?.role;
-      if (!role || role === "viewer") return false;
+      const user = await accounts.byId(by);
+      if (!user || user.site !== undefined || user.role === "viewer") return false;
       await store.setSetting(`${MADE_BY}${token.id}`, by);
       return true;
     },

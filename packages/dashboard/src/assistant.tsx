@@ -172,7 +172,7 @@ export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetu
         link = new URL(r.share.path, location.origin).href;
       }
       if (d.action === "invite") {
-        const r = await api.addPerson(d.input.email, d.input.role);
+        const r = await api.addPerson(d.input.email, d.input.role, site.id);
         result = t(r.emailed ? "assistant.action.invited" : "assistant.action.inviteManual");
         link = r.link;
       }

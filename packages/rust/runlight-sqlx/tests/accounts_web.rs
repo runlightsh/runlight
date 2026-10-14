@@ -239,7 +239,7 @@ async fn invites_are_emailed_and_a_failed_email_says_why() {
             &owner,
             "POST",
             "/api/people",
-            &runlight::obj! { "email" => "ada@example.com", "role" => "member" },
+            &runlight::obj! { "allSites" => true, "email" => "ada@example.com", "role" => "member" },
         ))
         .await;
     assert_eq!(made.status, 201);
@@ -257,7 +257,7 @@ async fn invites_are_emailed_and_a_failed_email_says_why() {
             &owner,
             "POST",
             "/api/people",
-            &runlight::obj! { "email" => "bo@example.com", "role" => "viewer" },
+            &runlight::obj! { "allSites" => true, "email" => "bo@example.com", "role" => "viewer" },
         ))
         .await;
     let body = failed.json_body().unwrap();
@@ -279,7 +279,7 @@ async fn tokens_made_by_someone_go_when_they_do() {
             &owner,
             "POST",
             "/api/people",
-            &runlight::obj! { "email" => "ada@example.com", "role" => "member" },
+            &runlight::obj! { "allSites" => true, "email" => "ada@example.com", "role" => "member" },
         ))
         .await;
     let link = js::str_or_empty(made.json_body().unwrap().get("link"));
@@ -331,7 +331,12 @@ impl App {
     async fn invited(&self, owner: &str, email: &str, role: &str) -> String {
         let made = self
             .routes
-            .handle(json(owner, "POST", "/api/people", &runlight::obj! { "email" => email, "role" => role }))
+            .handle(json(
+                owner,
+                "POST",
+                "/api/people",
+                &runlight::obj! { "allSites" => true, "email" => email, "role" => role },
+            ))
             .await;
         let link = js::str_or_empty(made.json_body().unwrap().get("link"));
         let code = Url::parse(&link).unwrap().search_params().get("code").unwrap().to_string();

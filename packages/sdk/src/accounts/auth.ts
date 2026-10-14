@@ -42,6 +42,8 @@ const roleFrom = (value: unknown): Role => (ROLES.includes(value as Role) ? (val
 const mayInvite = (role: Role) => role === "owner" || role === "admin";
 
 export interface User {
+  /** Absent for install-wide access; otherwise only this site. */
+  site?: string;
   id: string;
   email: string;
   hash: string;
@@ -123,6 +125,8 @@ export const INVITE_MS = 7 * 86_400_000;
 
 /** Someone asked to join, until they choose a password. Only a hash of the link's code is kept. */
 export interface Invite {
+  /** Absent for install-wide access; otherwise only this site. */
+  site?: string;
   id: string;
   email: string;
   role: Role;
@@ -205,6 +209,12 @@ export class Accounts {
       await this.store.db.run(
         `CREATE TABLE IF NOT EXISTS rl_invites (id ${str(100)} PRIMARY KEY, email ${str(320)} NOT NULL UNIQUE, role ${str(20)} NOT NULL, code_hash ${str(128)} NOT NULL UNIQUE, invited_by ${str(100)} NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)${table}`,
       );
+      for (const name of ["rl_users", "rl_invites"]) {
+        const fields = this.store.db.dialect === "sqlite"
+          ? await this.store.db.all(`PRAGMA table_info(${name})`)
+          : await this.store.db.all(`SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = ${my ? "DATABASE()" : "current_schema()"}`, [name]);
+        if (!fields.some((c) => c.name === "site")) await this.store.db.run(`ALTER TABLE ${name} ADD COLUMN site TEXT`);
+      }
       // A server has one owner. One from before, with several, keeps the first and the rest become admins,
       // who can still do everything but remove the owner. Invites to join as an owner become invites as an admin.
       const owners = await this.store.db.all(`SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id`);
@@ -225,6 +235,7 @@ export class Accounts {
       email: String(r.email),
       hash: String(r.hash),
       role: roleFrom(r.role),
+      ...(r.site == null ? {} : { site: String(r.site) }),
       createdAt: Number(r.created_at),
       twoFactor: Boolean(r.totp_secret),
       recoveryLeft: recovery.length,
@@ -421,6 +432,7 @@ export class Accounts {
       const user = (await this.list()).find((u) => u.id === id);
       if (!user) throw new AccountError("Unknown account", "unknown_account");
       if (user.role === "owner") throw new AccountError("Only the owner can change their own role, by handing ownership to an admin", "owner_protected");
+      if (user.site !== undefined && role === "admin") throw new AccountError("An admin needs access to all sites", "role_scope");
       if (role === "owner") throw new AccountError("Ownership is handed over by the owner", "owner_hand_over");
       await this.store.db.run(`UPDATE rl_users SET role = ? WHERE id = ?`, [role, id]);
       // Someone who may no longer invite takes back the invites they sent, so nobody joins on their word.
@@ -438,7 +450,7 @@ export class Accounts {
       const next = users.find((u) => u.id === to);
       if (!owner || owner.role !== "owner") throw new AccountError("Only the owner can hand over ownership", "owner_hand_over");
       if (!next) throw new AccountError("Unknown account", "unknown_account");
-      if (next.role !== "admin") throw new AccountError("Make them an admin first", "owner_needs_admin");
+      if (next.site !== undefined || next.role !== "admin") throw new AccountError("Make them an admin first", "owner_needs_admin");
       await this.store.db.run(`UPDATE rl_users SET role = 'owner' WHERE id = ?`, [to]);
       await this.store.db.run(`UPDATE rl_users SET role = 'admin' WHERE id = ?`, [from]);
     });
@@ -462,8 +474,9 @@ export class Accounts {
    * Makes an account, or sets a new password on an existing one. A new account is the owner when it is the first,
    * and otherwise an admin unless a role is given, since a server has one owner.
    */
-  async setPassword(email: string, password: string, now: number, role?: Role): Promise<User> {
+  async setPassword(email: string, password: string, now: number, role?: Role, site?: string): Promise<User> {
     await this.init();
+    if (site !== undefined && (!site || (role !== "member" && role !== "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
     const address = email.trim().toLowerCase();
     if (!EMAIL.test(address)) throw new AccountError("Enter an email address", "email_invalid");
     if (password.length < MIN_PASSWORD) throw new AccountError(`Use a password of at least ${MIN_PASSWORD} characters`, "password_short", { min: String(MIN_PASSWORD) });
@@ -475,13 +488,13 @@ export class Accounts {
     }
     const first = (await this.count()) === 0;
     const given = role ?? (first ? "owner" : "admin");
-    const user: User = { id: hex(randomBytes(12)), email: address, hash, role: given === "owner" && !first ? "admin" : given, createdAt: now, twoFactor: false, recoveryLeft: 0 };
-    await this.store.db.run(`INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)`, [user.id, user.email, user.hash, user.role, user.createdAt]);
+    const user: User = { ...(site === undefined ? {} : { site }), id: hex(randomBytes(12)), email: address, hash, role: given === "owner" && !first ? "admin" : given, createdAt: now, twoFactor: false, recoveryLeft: 0 };
+    await this.store.db.run(`INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)`, [user.id, user.email, user.hash, user.role, user.createdAt, site ?? null]);
     return user;
   }
 
   private inviteRow(r: Record<string, unknown>): Invite {
-    return { id: String(r.id), email: String(r.email), role: roleFrom(r.role), invitedBy: String(r.invited_by), createdAt: Number(r.created_at), expiresAt: Number(r.expires_at) };
+    return { ...(r.site == null ? {} : { site: String(r.site) }), id: String(r.id), email: String(r.email), role: roleFrom(r.role), invitedBy: String(r.invited_by), createdAt: Number(r.created_at), expiresAt: Number(r.expires_at) };
   }
 
   /** Invites that still work, newest first. Expired ones are cleared on the way. */
@@ -495,19 +508,20 @@ export class Accounts {
    * Invites someone to join with a role, and returns the code for their link.
    * Asking again replaces the earlier invite, so only the newest link works.
    */
-  async invite(email: string, role: Role, invitedBy: string, now: number): Promise<{ invite: Invite; code: string }> {
+  async invite(email: string, role: Role, invitedBy: string, now: number, site?: string): Promise<{ invite: Invite; code: string }> {
     await this.init();
-    return this.turn(() => this.inviteNow(email, role, invitedBy, now));
+    return this.turn(() => this.inviteNow(email, role, invitedBy, now, site));
   }
 
-  private async inviteNow(email: string, role: Role, invitedBy: string, now: number): Promise<{ invite: Invite; code: string }> {
+  private async inviteNow(email: string, role: Role, invitedBy: string, now: number, site?: string): Promise<{ invite: Invite; code: string }> {
+    if (site !== undefined && (!site || (role !== "member" && role !== "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
     const address = email.trim().toLowerCase();
     if (!EMAIL.test(address)) throw new AccountError("Enter an email address", "email_invalid");
     if (await this.byEmail(address)) throw new AccountError(`${address} already has an account`, "account_exists", { email: address });
     const code = base64url(randomBytes(24));
-    const invite: Invite = { id: hex(randomBytes(12)), email: address, role, invitedBy, createdAt: now, expiresAt: now + INVITE_MS };
+    const invite: Invite = { ...(site === undefined ? {} : { site }), id: hex(randomBytes(12)), email: address, role, invitedBy, createdAt: now, expiresAt: now + INVITE_MS };
     await this.store.db.run(`DELETE FROM rl_invites WHERE email = ?`, [address]);
-    await this.store.db.run(`INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [
+    await this.store.db.run(`INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
       invite.id,
       invite.email,
       invite.role,
@@ -515,6 +529,7 @@ export class Accounts {
       invite.invitedBy,
       invite.createdAt,
       invite.expiresAt,
+      site ?? null,
     ]);
     return { invite, code };
   }
@@ -546,12 +561,12 @@ export class Accounts {
       const gone = () => new AccountError("This invite has expired or was already used. Ask for a new one.", "invite_gone");
       if (!invite) throw gone();
       const sender = await this.byEmail(invite.invitedBy);
-      if (!sender || !mayInvite(sender.role)) {
+      if (!sender || sender.site !== undefined || !mayInvite(sender.role)) {
         await this.store.db.run(`DELETE FROM rl_invites WHERE id = ?`, [invite.id]);
         throw gone();
       }
       if (await this.byEmail(invite.email)) throw new AccountError(`${invite.email} already has an account`, "account_exists", { email: invite.email });
-      const user = await this.setPassword(invite.email, password, now, invite.role);
+      const user = await this.setPassword(invite.email, password, now, invite.role, invite.site);
       await this.store.db.run(`DELETE FROM rl_invites WHERE id = ?`, [invite.id]);
       return user;
     });

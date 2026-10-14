@@ -94,11 +94,11 @@ def _reply(body: Any, status: int = 200, extra: Mapping[str, str] | None = None)
 
 
 def _person(u: dict[str, Any]) -> dict[str, Any]:
-    return {"id": u["id"], "email": u["email"], "role": u["role"], "createdAt": u["createdAt"], "twoFactor": u["twoFactor"], "recoveryLeft": u["recoveryLeft"]}
+    return {**({"site": u["site"]} if u.get("site") is not None else {}), "id": u["id"], "email": u["email"], "role": u["role"], "createdAt": u["createdAt"], "twoFactor": u["twoFactor"], "recoveryLeft": u["recoveryLeft"]}
 
 
 def _invite_view(i: dict[str, Any]) -> dict[str, Any]:
-    return {"id": i["id"], "email": i["email"], "role": i["role"], "invitedBy": i["invitedBy"], "createdAt": i["createdAt"], "expiresAt": i["expiresAt"]}
+    return {**({"site": i["site"]} if i.get("site") is not None else {}), "id": i["id"], "email": i["email"], "role": i["role"], "invitedBy": i["invitedBy"], "createdAt": i["createdAt"], "expiresAt": i["expiresAt"]}
 
 
 def _media_type(request: Request) -> str:
@@ -242,7 +242,7 @@ class AccountsWeb:
             origin = Url(request.url).origin
         link = f"{origin}{self.base}/invite?code={code}"
         host = Url(origin).host
-        what = role_text(invite["role"])
+        what = role_text(invite["role"], invite.get("site"))
         if not self.rl.mail_settings():
             return {"link": link, "emailed": False}
         try:
@@ -250,7 +250,7 @@ class AccountsWeb:
                 "to": invite["email"],
                 "subject": f"{invite['invitedBy']} invited you to Runlight",
                 "text": f"{invite['invitedBy']} invited you to the Runlight at {host} as {what}.\n\nChoose a password to join:\n{link}\n\nThe link works for seven days.\n",
-                "html": f"""<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p>{_esc(invite['invitedBy'])} invited you to the Runlight at {_esc(host)} as {what}.</p><p><a href="{_esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>""",
+                "html": f"""<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p>{_esc(invite['invitedBy'])} invited you to the Runlight at {_esc(host)} as {_esc(what)}.</p><p><a href="{_esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>""",
             })  # fmt: skip
             return {"link": link, "emailed": True}
         except Exception as error:  # noqa: BLE001
@@ -282,7 +282,7 @@ class AccountsWeb:
             "to": user["email"],
             "subject": "Sign in to Runlight",
             "text": f"Someone, most likely you, signed in to Runlight at {host} with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n{link}\n\nIf this was not you, change your password, since someone knows it.\n",
-            "html": f"""<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p>Someone, most likely you, signed in to Runlight at {_esc(host)} with your password while your account was held up by too many failed tries.</p><p><a href="{_esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>""",
+            "html": f"""<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p>Someone, most likely you, signed in to Runlight at {_esc(host)} with your password while your account was held up by too many failed tries.</p><p><a href="{_esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>""",
         })  # fmt: skip
         return True
 
@@ -387,7 +387,7 @@ class AccountsWeb:
                 invite = self.accounts.invite_by_code(code, self.now())
                 if invite is None:
                     return _html(invite_gone_page(base), 410)
-                return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "host": url.host}))
+                return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host}))
             if method == "POST":
                 form = SearchParams(request.text())
                 code = form.get("code") or ""
@@ -396,7 +396,7 @@ class AccountsWeb:
                     return _html(invite_gone_page(base), 410)
 
                 def again_page(error: str) -> Response:
-                    return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "host": url.host, "error": error}), 400)
+                    return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host, "error": error}), 400)
 
                 if (form.get("password") or "") != (form.get("again") or ""):
                     return again_page("The two passwords are not the same.")
@@ -465,6 +465,29 @@ class AccountsWeb:
                 return _html(login({"error": error.message, "email": email}), 503, {"retry-after": "5"})
             raise
 
+    def _recheck(self, user: Mapping[str, Any], input: Mapping[str, Any], field: str, wrong: tuple[str, str]) -> Response | None:  # noqa: A002
+        if not self.rechecks.take(user["id"], self.now()):
+            return _coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429)
+        try:
+            right = self.accounts.sign_in(user["email"], _field(input, field))
+        except AccountError as error:
+            if error.code == "busy":
+                return _coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503)
+            raise
+        if right is None:
+            return _coded(wrong[0], wrong[1], 400)
+        self.rechecks.forgive(user["id"])
+        return None
+
+    def confirm_password(self, request: Request) -> Response | None:
+        user = self.signed_in(request)
+        if user is None:
+            return _coded("Sign in first", "sign_in", 401)
+        input = _body(request)
+        if input is None:
+            return _coded("Send JSON", "send_json", 415)
+        return self._recheck(user, input, "password", ("Your password is not right", "password_wrong"))
+
     def _api(self, request: Request, path: str) -> Response:
         """Your own account, and for the owner and admins, everyone else's."""
         user = self.signed_in(request)
@@ -478,25 +501,11 @@ class AccountsWeb:
         if path == "/api/account" and method == "GET":
             return _reply({"account": _person(user)})
 
-        def recheck(input: Mapping[str, Any], field: str, wrong: tuple[str, str]) -> Response | None:  # noqa: A002
-            if not self.rechecks.take(user["id"], now):
-                return _coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429)
-            try:
-                right = self.accounts.sign_in(user["email"], _field(input, field))
-            except AccountError as error:
-                if error.code == "busy":
-                    return _coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503)
-                raise
-            if right is None:
-                return _coded(wrong[0], wrong[1], 400)
-            self.rechecks.forgive(user["id"])
-            return None
-
         if path == "/api/account/password" and method == "POST":
             input = _body(request)  # noqa: A001
             if input is None:
                 return _coded("Send JSON", "send_json", 415)
-            refused = recheck(input, "current", ("Your current password is not right", "password_current_wrong"))
+            refused = self._recheck(user, input, "current", ("Your current password is not right", "password_current_wrong"))
             if refused is not None:
                 return refused
             try:
@@ -524,7 +533,7 @@ class AccountsWeb:
                 # Turning it on signs out every other browser; this one gets a new session.
                 updated = self.accounts.by_id(user["id"])
                 return _reply({"recovery": codes}, 200, self._fresh(request, updated))
-            refused = recheck(input, "password", ("Your password is not right", "password_wrong"))
+            refused = self._recheck(user, input, "password", ("Your password is not right", "password_wrong"))
             if refused is not None:
                 return refused
             if action == "/start":
@@ -541,7 +550,7 @@ class AccountsWeb:
                 updated = self.accounts.by_id(user["id"])
                 return _reply({"ok": True}, 200, self._fresh(request, updated))
             return _coded("Not found", "not_found", 404)
-        if user["role"] not in ("owner", "admin"):
+        if user.get("site") is not None or user["role"] not in ("owner", "admin"):
             return _coded("Only the owner or an admin can manage people", "people_owner", 403)
         # The owner or an admin can turn off someone else's two-factor, for a coworker who lost both phone and
         # recovery codes, though never the owner's. It asks for their password like every other two-factor change,
@@ -553,7 +562,7 @@ class AccountsWeb:
             input = _body(request)  # noqa: A001
             if input is None:
                 return _coded("Send JSON", "send_json", 415)
-            refused = recheck(input, "password", ("Your password is not right", "password_wrong"))
+            refused = self._recheck(user, input, "password", ("Your password is not right", "password_wrong"))
             if refused is not None:
                 return refused
             target = self.accounts.by_id(reset.group(1))
@@ -571,7 +580,7 @@ class AccountsWeb:
             input = _body(request)  # noqa: A001
             if input is None:
                 return _coded("Send JSON", "send_json", 415)
-            refused = recheck(input, "password", ("Your password is not right", "password_wrong"))
+            refused = self._recheck(user, input, "password", ("Your password is not right", "password_wrong"))
             if refused is not None:
                 return refused
             try:
@@ -592,7 +601,13 @@ class AccountsWeb:
             if self.accounts.by_email(email) is not None:
                 return _coded(f"{email} already has an account", "account_exists", 409, {"email": email})
             try:
-                made = self.accounts.invite(email, role, user["email"], now)
+                self.rl.init()
+                site = None if input.get("allSites") is True else input.get("site")
+                if input.get("allSites") is not True and (not isinstance(site, str) or not site):
+                    return _coded("Choose a site or explicitly invite to all sites", "invite_site", 400)
+                if site is not None and not self.rl.site(site):
+                    return _coded("Unknown site", "unknown_site", 404)
+                made = self.accounts.invite(email, role, user["email"], now, site)
                 return _reply({"invite": _invite_view(made["invite"]), **self._send_invite(request, made["invite"], made["code"])}, 201)
             except AccountError as error:
                 return _coded(error.message, error.code, 400, error.params)
@@ -604,7 +619,7 @@ class AccountsWeb:
             if old is None:
                 return _coded("Unknown invite", "unknown_invite", 404)
             # A new link replaces the old one, which stops working.
-            made = self.accounts.invite(old["email"], old["role"], user["email"], now)
+            made = self.accounts.invite(old["email"], old["role"], user["email"], now, old.get("site"))
             return _reply({"invite": _invite_view(made["invite"]), **self._send_invite(request, made["invite"], made["code"])})
         match = _PERSON.match(path)
         if match and method in ("PATCH", "DELETE"):
@@ -649,7 +664,7 @@ class AccountsWeb:
         """Notes who made a token. A viewer makes no tokens; someone removed or made a viewer since allowing an app
         gets none for it, and False takes the token back."""
         user = self.accounts.by_id(by)
-        if user is None or user["role"] == "viewer":
+        if user is None or user.get("site") is not None or user["role"] == "viewer":
             return False
         self.store.set_setting(f"{MADE_BY}{token['id']}", by)
         return True

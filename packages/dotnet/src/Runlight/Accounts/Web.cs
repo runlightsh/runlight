@@ -43,6 +43,7 @@ public sealed class FirstAccount
 /// </summary>
 public sealed class WebOptions
 {
+    public Func<string, CancellationToken, Task<bool>> SiteExists { get; init; } = (_, _) => Task.FromResult(false);
     public required SqlStore Store { get; init; }
 
     public required string Secret { get; init; }
@@ -298,7 +299,7 @@ public sealed class Web
         return new Response(Json.Stringify(body), status, headers);
     }
 
-    private static JsObject Person(JsObject u) => new()
+    private static JsObject Person(JsObject u) => Accounts.WithSite(new JsObject()
     {
         ["id"] = u.Get("id"),
         ["email"] = u.Get("email"),
@@ -306,9 +307,9 @@ public sealed class Web
         ["createdAt"] = u.Get("createdAt"),
         ["twoFactor"] = u.Get("twoFactor"),
         ["recoveryLeft"] = u.Get("recoveryLeft"),
-    };
+    }, u.Str("site"));
 
-    private static JsObject InviteView(JsObject i) => new()
+    private static JsObject InviteView(JsObject i) => Accounts.WithSite(new JsObject()
     {
         ["id"] = i.Get("id"),
         ["email"] = i.Get("email"),
@@ -316,7 +317,7 @@ public sealed class Web
         ["invitedBy"] = i.Get("invitedBy"),
         ["createdAt"] = i.Get("createdAt"),
         ["expiresAt"] = i.Get("expiresAt"),
-    };
+    }, i.Str("site"));
 
     private static List<object?> People(IEnumerable<JsObject> users) => [.. users.Select(u => (object?)Person(u))];
 
@@ -368,7 +369,7 @@ public sealed class Web
         string origin = HomeOrigin() ?? new Url(request.Url).Origin;
         string link = origin + _base + "/invite?code=" + code;
         string host = new Url(origin).Host;
-        string what = Pages.RoleText(invite.Str("role")!);
+        string what = Pages.RoleText(invite.Str("role")!, invite.Str("site"));
         string invitedBy = invite.Str("invitedBy")!;
         var answer = new JsObject { ["invite"] = InviteView(invite), ["link"] = link };
         if (!await HasMailAsync(cancellationToken).ConfigureAwait(false))
@@ -384,7 +385,7 @@ public sealed class Web
                     ["to"] = invite.Str("email"),
                     ["subject"] = invitedBy + " invited you to Runlight",
                     ["text"] = invitedBy + " invited you to the Runlight at " + host + " as " + what + ".\n\nChoose a password to join:\n" + link + "\n\nThe link works for seven days.\n",
-                    ["html"] = "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>" + Esc(invitedBy) + " invited you to the Runlight at " + Esc(host) + " as " + what + ".</p><p><a href=\"" + Esc(link) + "\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Choose a password and join</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>",
+                    ["html"] = "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>" + Esc(invitedBy) + " invited you to the Runlight at " + Esc(host) + " as " + Esc(what) + ".</p><p><a href=\"" + Esc(link) + "\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Choose a password and join</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>",
                 },
                 cancellationToken).ConfigureAwait(false);
             answer.Set("emailed", true);
@@ -466,7 +467,7 @@ public sealed class Web
                 ["to"] = user.Str("email"),
                 ["subject"] = "Sign in to Runlight",
                 ["text"] = "Someone, most likely you, signed in to Runlight at " + host + " with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n" + link + "\n\nIf this was not you, change your password, since someone knows it.\n",
-                ["html"] = "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>Someone, most likely you, signed in to Runlight at " + Esc(host) + " with your password while your account was held up by too many failed tries.</p><p><a href=\"" + Esc(link) + "\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Sign in</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>",
+                ["html"] = "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>Someone, most likely you, signed in to Runlight at " + Esc(host) + " with your password while your account was held up by too many failed tries.</p><p><a href=\"" + Esc(link) + "\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Sign in</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>",
             },
             cancellationToken).ConfigureAwait(false);
         return true;
@@ -611,7 +612,7 @@ public sealed class Web
                 string code = query.Get("code") ?? "";
                 var invite = await Accounts.InviteByCodeAsync(code, Now(), cancellationToken).ConfigureAwait(false);
                 return invite != null
-                    ? Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host))
+                    ? Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, site: invite.Str("site")))
                     : Html(Pages.InviteGonePage(b), 410);
             }
             if (method == "POST")
@@ -623,7 +624,7 @@ public sealed class Web
                 {
                     return Html(Pages.InviteGonePage(b), 410);
                 }
-                Response Again(string error) => Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, error), 400);
+                Response Again(string error) => Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, error, invite.Str("site")), 400);
                 if ((form.Get("password") ?? "") != (form.Get("again") ?? ""))
                 {
                     return Again("The two passwords are not the same.");
@@ -734,6 +735,40 @@ public sealed class Web
         }
     }
 
+    private async Task<Response?> RecheckAsync(JsObject user, JsObject input, string field, string wrong, string wrongCode, CancellationToken cancellationToken)
+    {
+        var userId = user.Str("id")!;
+        var now = Now();
+        if (!await _rechecks.TakeAsync(userId, now, cancellationToken).ConfigureAwait(false))
+        {
+            return Coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429);
+        }
+        JsObject? right;
+        try
+        {
+            right = await Accounts.SignInAsync(user.Str("email")!, Field(input, field), cancellationToken).ConfigureAwait(false);
+        }
+        catch (AccountError error) when (error.Code == "busy")
+        {
+            return Coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503);
+        }
+        if (right == null)
+        {
+            return Coded(wrong, wrongCode, 400);
+        }
+        await _rechecks.ForgiveAsync(userId, now, cancellationToken).ConfigureAwait(false);
+        return null;
+    }
+
+    public async Task<Response?> ConfirmPasswordAsync(Request request, CancellationToken cancellationToken)
+    {
+        var user = await SignedInAsync(request, cancellationToken).ConfigureAwait(false);
+        if (user == null) return Coded("Sign in first", "sign_in", 401);
+        var input = Body(request);
+        if (input == null) return Coded("Send JSON", "send_json", 415);
+        return await RecheckAsync(user, input, "password", "Your password is not right", "password_wrong", cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Your own account, and for the owner and admins, everyone else's.</summary>
     private async Task<Response> ApiAsync(Request request, string path, CancellationToken cancellationToken)
     {
@@ -755,28 +790,6 @@ public sealed class Web
         {
             return Reply(new JsObject { ["account"] = Person(user) });
         }
-        async Task<Response?> RecheckAsync(JsObject input, string field, string wrong, string wrongCode)
-        {
-            if (!await _rechecks.TakeAsync(userId, now, cancellationToken).ConfigureAwait(false))
-            {
-                return Coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429);
-            }
-            JsObject? right;
-            try
-            {
-                right = await Accounts.SignInAsync(user.Str("email")!, Field(input, field), cancellationToken).ConfigureAwait(false);
-            }
-            catch (AccountError error) when (error.Code == "busy")
-            {
-                return Coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503);
-            }
-            if (right == null)
-            {
-                return Coded(wrong, wrongCode, 400);
-            }
-            await _rechecks.ForgiveAsync(userId, now, cancellationToken).ConfigureAwait(false);
-            return null;
-        }
         string Fresh(JsObject updated) => SessionCookie(request, Accounts.SessionFor(updated, now), Accounts.SessionMs / 1000);
         if (path == "/api/account/password" && method == "POST")
         {
@@ -785,7 +798,7 @@ public sealed class Web
             {
                 return Coded("Send JSON", "send_json", 415);
             }
-            var refused = await RecheckAsync(input, "current", "Your current password is not right", "password_current_wrong").ConfigureAwait(false);
+            var refused = await RecheckAsync(user, input, "current", "Your current password is not right", "password_current_wrong", cancellationToken).ConfigureAwait(false);
             if (refused != null)
             {
                 return refused;
@@ -830,7 +843,7 @@ public sealed class Web
                 var updated = (await Accounts.ByIdAsync(userId, cancellationToken).ConfigureAwait(false))!;
                 return Reply(new JsObject { ["recovery"] = codes.Select(c => (object?)c).ToList() }, 200, Fresh(updated));
             }
-            var refused = await RecheckAsync(input, "password", "Your password is not right", "password_wrong").ConfigureAwait(false);
+            var refused = await RecheckAsync(user, input, "password", "Your password is not right", "password_wrong", cancellationToken).ConfigureAwait(false);
             if (refused != null)
             {
                 return refused;
@@ -859,7 +872,7 @@ public sealed class Web
             }
             return Coded("Not found", "not_found", 404);
         }
-        if (role != "owner" && role != "admin")
+        if (user.Str("site") != null || (role != "owner" && role != "admin"))
         {
             return Coded("Only the owner or an admin can manage people", "people_owner", 403);
         }
@@ -879,7 +892,7 @@ public sealed class Web
             {
                 return Coded("Send JSON", "send_json", 415);
             }
-            var refused = await RecheckAsync(input, "password", "Your password is not right", "password_wrong").ConfigureAwait(false);
+            var refused = await RecheckAsync(user, input, "password", "Your password is not right", "password_wrong", cancellationToken).ConfigureAwait(false);
             if (refused != null)
             {
                 return refused;
@@ -909,7 +922,7 @@ public sealed class Web
             {
                 return Coded("Send JSON", "send_json", 415);
             }
-            var refused = await RecheckAsync(input, "password", "Your password is not right", "password_wrong").ConfigureAwait(false);
+            var refused = await RecheckAsync(user, input, "password", "Your password is not right", "password_wrong", cancellationToken).ConfigureAwait(false);
             if (refused != null)
             {
                 return refused;
@@ -954,7 +967,10 @@ public sealed class Web
             }
             try
             {
-                var (invite, code) = await Accounts.InviteAsync(email, asRole, user.Str("email")!, now, cancellationToken).ConfigureAwait(false);
+                string? site = Js.Get(input, "allSites") is true ? null : input.Str("site");
+                if (Js.Get(input, "allSites") is not true && string.IsNullOrEmpty(site)) return Coded("Choose a site or explicitly invite to all sites", "invite_site", 400);
+                if (site != null && !await _o.SiteExists(site, cancellationToken).ConfigureAwait(false)) return Coded("Unknown site", "unknown_site", 404);
+                var (invite, code) = await Accounts.InviteAsync(email, asRole, user.Str("email")!, now, cancellationToken, site).ConfigureAwait(false);
                 return Reply(await SendInviteAsync(request, invite, code, cancellationToken).ConfigureAwait(false), 201);
             }
             catch (AccountError error)
@@ -981,7 +997,7 @@ public sealed class Web
                     return Coded("Unknown invite", "unknown_invite", 404);
                 }
                 // A new link replaces the old one, which stops working.
-                var (invite, code) = await Accounts.InviteAsync(old.Str("email")!, old.Str("role")!, user.Str("email")!, now, cancellationToken).ConfigureAwait(false);
+                var (invite, code) = await Accounts.InviteAsync(old.Str("email")!, old.Str("role")!, user.Str("email")!, now, cancellationToken, old.Str("site")).ConfigureAwait(false);
                 return Reply(await SendInviteAsync(request, invite, code, cancellationToken).ConfigureAwait(false));
             }
         }

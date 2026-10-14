@@ -247,11 +247,19 @@ func accountCoded(message, code string, status int, p *js.Object) *Response {
 }
 
 func person(u User) *js.Object {
-	return js.NewObject("id", u.ID, "email", u.Email, "role", u.Role, "createdAt", u.CreatedAt, "twoFactor", u.TwoFactor, "recoveryLeft", u.RecoveryLeft)
+	out := js.NewObject("id", u.ID, "email", u.Email, "role", u.Role, "createdAt", u.CreatedAt, "twoFactor", u.TwoFactor, "recoveryLeft", u.RecoveryLeft)
+	if u.Site != "" {
+		out.Set("site", u.Site)
+	}
+	return out
 }
 
 func inviteView(i Invite) *js.Object {
-	return js.NewObject("id", i.ID, "email", i.Email, "role", i.Role, "invitedBy", i.InvitedBy, "createdAt", i.CreatedAt, "expiresAt", i.ExpiresAt)
+	out := js.NewObject("id", i.ID, "email", i.Email, "role", i.Role, "invitedBy", i.InvitedBy, "createdAt", i.CreatedAt, "expiresAt", i.ExpiresAt)
+	if i.Site != "" {
+		out.Set("site", i.Site)
+	}
+	return out
 }
 
 // jsonBody is a JSON body by its media type, which a cross-site form cannot send; nil for anything else.
@@ -305,7 +313,7 @@ func (w *AccountsWeb) sendInvite(ctx context.Context, request *Request, invite I
 	}
 	link := origin + w.o.Base + "/invite?code=" + code
 	host := whatwg.MustParse(origin).Host()
-	what := accounts.RoleText(invite.Role)
+	what := accounts.RoleText(invite.Role, invite.Site)
 	settings, err := w.r.MailSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -317,7 +325,7 @@ func (w *AccountsWeb) sendInvite(ctx context.Context, request *Request, invite I
 		To:      invite.Email,
 		Subject: invite.InvitedBy + " invited you to Runlight",
 		Text:    invite.InvitedBy + " invited you to the Runlight at " + host + " as " + what + ".\n\nChoose a password to join:\n" + link + "\n\nThe link works for seven days.\n",
-		HTML:    `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p>` + escapeHTML(invite.InvitedBy) + ` invited you to the Runlight at ` + escapeHTML(host) + ` as ` + what + `.</p><p><a href="` + escapeHTML(link) + `" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>`,
+		HTML:    `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p>` + escapeHTML(invite.InvitedBy) + ` invited you to the Runlight at ` + escapeHTML(host) + ` as ` + escapeHTML(what) + `.</p><p><a href="` + escapeHTML(link) + `" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>`,
 	})
 	if err != nil {
 		// The mail service's code and its details too, so the dashboard can say what went wrong in its own language.
@@ -363,7 +371,7 @@ func (w *AccountsWeb) sendLink(ctx context.Context, user User, next string) erro
 		To:      user.Email,
 		Subject: "Sign in to Runlight",
 		Text:    "Someone, most likely you, signed in to Runlight at " + host + " with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n" + link + "\n\nIf this was not you, change your password, since someone knows it.\n",
-		HTML:    `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p>Someone, most likely you, signed in to Runlight at ` + escapeHTML(host) + ` with your password while your account was held up by too many failed tries.</p><p><a href="` + escapeHTML(link) + `" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>`,
+		HTML:    `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p>Someone, most likely you, signed in to Runlight at ` + escapeHTML(host) + ` with your password while your account was held up by too many failed tries.</p><p><a href="` + escapeHTML(link) + `" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>`,
 	})
 }
 
@@ -520,7 +528,7 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			if invite == nil {
 				return html(accounts.InviteGonePage(base), 410), nil
 			}
-			return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Host: u.Host()}), 200), nil
+			return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host()}), 200), nil
 		}
 		if method == "POST" {
 			form := formOf(request)
@@ -533,7 +541,7 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 				return html(accounts.InviteGonePage(base), 410), nil
 			}
 			again := func(message string) *Response {
-				return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Host: u.Host(), Error: message}), 400)
+				return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host(), Error: message}), 400)
 			}
 			if form.Value("password") != form.Value("again") {
 				return again("The two passwords are not the same."), nil
@@ -681,6 +689,43 @@ func asAccountError(err error, target **AccountError) bool {
 	return false
 }
 
+func (w *AccountsWeb) recheck(ctx context.Context, user *User, input *js.Object, key, message, code string) (*Response, error) {
+	if !w.rechecks.Take(user.ID, w.now()) {
+		return accountCoded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429, nil), nil
+	}
+	ok, err := w.Accounts.SignIn(ctx, user.Email, field(input, key))
+	if err != nil {
+		var ae *AccountError
+		if asAccountError(err, &ae) && ae.Code == "busy" {
+			return accountCoded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503, nil), nil
+		}
+		return nil, err
+	}
+	if ok == nil {
+		return accountCoded(message, code, 400, nil), nil
+	}
+	w.rechecks.Forgive(user.ID)
+	return nil, nil
+}
+
+func (w *AccountsWeb) ConfirmPassword(ctx context.Context, request *Request) (*Response, error) {
+	user, err := w.SignedIn(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return accountCoded("Sign in first", "sign_in", 401, nil), nil
+	}
+	if !isJSON(request) {
+		return accountCoded("Send JSON", "send_json", 415, nil), nil
+	}
+	input := jsonBody(request)
+	if input == nil {
+		return accountCoded("Send JSON", "send_json", 415, nil), nil
+	}
+	return w.recheck(ctx, user, input, "password", "Your password is not right", "password_wrong")
+}
+
 // api answers your own account, and for the owner and admins, everyone else's.
 func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*Response, error) {
 	user, err := w.SignedIn(ctx, request)
@@ -697,30 +742,12 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 	if path == "/api/account" && request.Method == "GET" {
 		return reply(js.NewObject("account", person(*user)), 200), nil
 	}
-	recheck := func(input *js.Object, key, message, code string) (*Response, error) {
-		if !w.rechecks.Take(user.ID, w.now()) {
-			return accountCoded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429, nil), nil
-		}
-		ok, err := w.Accounts.SignIn(ctx, user.Email, field(input, key))
-		if err != nil {
-			var ae *AccountError
-			if asAccountError(err, &ae) && ae.Code == "busy" {
-				return accountCoded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503, nil), nil
-			}
-			return nil, err
-		}
-		if ok == nil {
-			return accountCoded(message, code, 400, nil), nil
-		}
-		w.rechecks.Forgive(user.ID)
-		return nil, nil
-	}
 	if path == "/api/account/password" && request.Method == "POST" {
 		input := jsonBody(request)
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
-		if refused, err := recheck(input, "current", "Your current password is not right", "password_current_wrong"); refused != nil || err != nil {
+		if refused, err := w.recheck(ctx, user, input, "current", "Your current password is not right", "password_current_wrong"); refused != nil || err != nil {
 			return refused, err
 		}
 		updated, err := w.Accounts.SetPassword(ctx, user.Email, field(input, "next"), w.now(), "")
@@ -769,7 +796,7 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 			}
 			return reply(js.NewObject("recovery", codes), 200, "set-cookie", cookie), nil
 		}
-		if refused, err := recheck(input, "password", "Your password is not right", "password_wrong"); refused != nil || err != nil {
+		if refused, err := w.recheck(ctx, user, input, "password", "Your password is not right", "password_wrong"); refused != nil || err != nil {
 			return refused, err
 		}
 		switch action {
@@ -806,7 +833,7 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		}
 		return accountCoded("Not found", "not_found", 404, nil), nil
 	}
-	if user.Role != "owner" && user.Role != "admin" {
+	if user.Site != "" || (user.Role != "owner" && user.Role != "admin") {
 		return accountCoded("Only the owner or an admin can manage people", "people_owner", 403, nil), nil
 	}
 	// The owner or an admin can turn off someone else's two-factor, for a coworker who lost both phone and
@@ -819,7 +846,7 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
-		if refused, err := recheck(input, "password", "Your password is not right", "password_wrong"); refused != nil || err != nil {
+		if refused, err := w.recheck(ctx, user, input, "password", "Your password is not right", "password_wrong"); refused != nil || err != nil {
 			return refused, err
 		}
 		target, err := w.Accounts.ByID(ctx, m[1])
@@ -846,7 +873,7 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
-		if refused, err := recheck(input, "password", "Your password is not right", "password_wrong"); refused != nil || err != nil {
+		if refused, err := w.recheck(ctx, user, input, "password", "Your password is not right", "password_wrong"); refused != nil || err != nil {
 			return refused, err
 		}
 		if err := w.Accounts.HandOver(ctx, user.ID, m[1]); err != nil {
@@ -885,7 +912,21 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		if existing != nil {
 			return accountCoded(email+" already has an account", "account_exists", 409, params("email", email)), nil
 		}
-		invite, code, err := w.Accounts.InviteSomeone(ctx, email, role, user.Email, w.now())
+		if err := w.r.Init(ctx); err != nil {
+			return nil, err
+		}
+		var sites []string
+		if input.Value("allSites") != true {
+			site, ok := input.Value("site").(string)
+			if !ok || site == "" {
+				return accountCoded("Choose a site or explicitly invite to all sites", "invite_site", 400, nil), nil
+			}
+			if _, ok := w.r.Site(site); !ok {
+				return accountCoded("Unknown site", "unknown_site", 404, nil), nil
+			}
+			sites = []string{site}
+		}
+		invite, code, err := w.Accounts.InviteSomeone(ctx, email, role, user.Email, w.now(), sites...)
 		if err != nil {
 			return accountErrorAnswer(err, 400)
 		}
@@ -922,7 +963,11 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 			return accountCoded("Unknown invite", "unknown_invite", 404, nil), nil
 		}
 		// A new link replaces the old one, which stops working.
-		invite, code, err := w.Accounts.InviteSomeone(ctx, old.Email, old.Role, user.Email, w.now())
+		var sites []string
+		if old.Site != "" {
+			sites = []string{old.Site}
+		}
+		invite, code, err := w.Accounts.InviteSomeone(ctx, old.Email, old.Role, user.Email, w.now(), sites...)
 		if err != nil {
 			return nil, err
 		}
@@ -1035,7 +1080,7 @@ func (w *AccountsWeb) AccountOf(ctx context.Context, request *Request) string {
 // removed or made a viewer since allowing an app gets none for it.
 func (w *AccountsWeb) TokenMade(ctx context.Context, token TokenRow, by string) bool {
 	user, err := w.Accounts.ByID(ctx, by)
-	if err != nil || user == nil || user.Role == "viewer" {
+	if err != nil || user == nil || user.Site != "" || user.Role == "viewer" {
 		return false
 	}
 	return w.r.Store.SetSetting(ctx, madeBy+token.ID, &by) == nil

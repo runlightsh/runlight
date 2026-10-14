@@ -173,7 +173,7 @@ class AccountsWebTest < Minitest::Test
   def test_invites_people_and_roles
     web = web()
     owner = owner(web)
-    sent = handle(web, json(owner, "POST", "/api/people", { "email" => "Mo@Example.com", "role" => "member" }))
+    sent = handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "Mo@Example.com", "role" => "member" }))
     assert_equal 201, sent.status
     body = Json.decode(sent.text)
     assert_equal %w[invite link emailed], body.keys
@@ -185,11 +185,11 @@ class AccountsWebTest < Minitest::Test
     assert_includes handle(web, req("/invite?code=#{code}")).text, "as a member"
     assert_equal 410, handle(web, req("/invite?code=nope")).status
 
-    assert_equal 409, handle(web, json(owner, "POST", "/api/people", { "email" => "jon@example.com", "role" => "admin" })).status
-    no_role = handle(web, json(owner, "POST", "/api/people", { "email" => "x@example.com", "role" => "owner" }))
+    assert_equal 409, handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "jon@example.com", "role" => "admin" })).status
+    no_role = handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "x@example.com", "role" => "owner" }))
     assert_equal '{"error":"Pick admin, member, or viewer","code":"role_needed"}', no_role.text
     assert_equal "nosniff", no_role.headers.get("x-content-type-options")
-    bad_email = handle(web, json(owner, "POST", "/api/people", { "email" => "nobody", "role" => "admin" }))
+    bad_email = handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "nobody", "role" => "admin" }))
     assert_equal '{"error":"Enter an email address","code":"email_invalid","params":{}}', bad_email.text
     plain = handle(web, req("/api/people", "POST", { "cookie" => owner, "content-type" => "text/plain" }, "{}"))
     assert_equal 415, plain.status, "a write must be JSON"
@@ -226,7 +226,7 @@ class AccountsWebTest < Minitest::Test
     assert_equal "remove_self", Json.decode(handle(web, json(owner, "DELETE", "/api/people/#{jon["id"]}")).text)["code"]
 
     # Invites listed, resent, and cancelled.
-    handle(web, json(owner, "POST", "/api/people", { "email" => "zed@example.com", "role" => "viewer" }))
+    handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "zed@example.com", "role" => "viewer" }))
     people = Json.decode(handle(web, json(owner, "GET", "/api/people")).text)
     assert_equal ["jon@example.com", "mo@example.com"].sort, people["people"].map { |p| p["email"] }.sort
     assert_equal ["zed@example.com"], people["invites"].map { |i| i["email"] }
@@ -246,7 +246,7 @@ class AccountsWebTest < Minitest::Test
     web = web({ "token" => "app-token" }, "https://stats.example.com")
     owner = owner(web)
     @rl.mail = { "service" => "smtp", "from" => "runlight@example.com" }
-    body = Json.decode(handle(web, json(owner, "POST", "/api/people", { "email" => "mo@example.com", "role" => "viewer" })).text)
+    body = Json.decode(handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "mo@example.com", "role" => "viewer" })).text)
     assert body["emailed"]
     assert body["link"].start_with?("https://stats.example.com/runlight/invite?code="), "the install's own address, never the request's Host"
     assert_equal "jon@example.com invited you to Runlight", @rl.sent[0]["subject"]
@@ -254,13 +254,13 @@ class AccountsWebTest < Minitest::Test
                  "#{body["link"]}\n\nThe link works for seven days.\n", @rl.sent[0]["text"]
 
     @rl.mail_fails = Runlight::Mail::MailError.new("The server refused the password", "mail_auth", { "host" => "smtp.example.com" })
-    failed = handle(web, json(owner, "POST", "/api/people", { "email" => "ada@example.com", "role" => "admin" }))
+    failed = handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "ada@example.com", "role" => "admin" }))
     body = Json.decode(failed.text)
     assert_equal %w[invite link emailed mailError mailCode mailParams], body.keys
     assert_equal "mail_auth", body["mailCode"]
     assert_equal({ "host" => "smtp.example.com" }, body["mailParams"])
     @rl.mail_fails = RuntimeError.new("Something else")
-    other = Json.decode(handle(web, json(owner, "POST", "/api/people", { "email" => "zed@example.com", "role" => "admin" })).text)
+    other = Json.decode(handle(web, json(owner, "POST", "/api/people", { "allSites" => true, "email" => "zed@example.com", "role" => "admin" })).text)
     assert_equal %w[invite link emailed mailError], other.keys, "an error without a code of its own has none here"
   end
 

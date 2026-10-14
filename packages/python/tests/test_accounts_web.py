@@ -38,6 +38,9 @@ class StandIn:
         self.mail: dict[str, Any] | None = None
         self.mail_fails: Exception | None = None
 
+    def init(self) -> None:
+        pass
+
     def mail_settings(self) -> dict[str, Any] | None:
         return self.mail
 
@@ -233,7 +236,7 @@ def test_signing_in_and_out_never_leaves_the_app(h):
 def test_invites_people_and_roles(h):
     web = h.web()
     signed = owner(web)
-    sent = handle(web, json_req(signed, "POST", "/api/people", {"email": "Mo@Example.com", "role": "member"}))
+    sent = handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "Mo@Example.com", "role": "member"}))
     assert sent.status == 201
     body = _js.loads(sent.text())
     assert list(body) == ["invite", "link", "emailed"]
@@ -245,11 +248,11 @@ def test_invites_people_and_roles(h):
     assert "as a member" in handle(web, req(f"/invite?code={code}")).text()
     assert handle(web, req("/invite?code=nope")).status == 410
 
-    assert handle(web, json_req(signed, "POST", "/api/people", {"email": "jon@example.com", "role": "admin"})).status == 409
-    no_role = handle(web, json_req(signed, "POST", "/api/people", {"email": "x@example.com", "role": "owner"}))
+    assert handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "jon@example.com", "role": "admin"})).status == 409
+    no_role = handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "x@example.com", "role": "owner"}))
     assert no_role.text() == '{"error":"Pick admin, member, or viewer","code":"role_needed"}'
     assert no_role.headers.get("x-content-type-options") == "nosniff"
-    bad_email = handle(web, json_req(signed, "POST", "/api/people", {"email": "nobody", "role": "admin"}))
+    bad_email = handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "nobody", "role": "admin"}))
     assert bad_email.text() == '{"error":"Enter an email address","code":"email_invalid","params":{}}'
     plain = handle(web, req("/api/people", "POST", {"cookie": signed, "content-type": "text/plain"}, "{}"))
     assert plain.status == 415, "a write must be JSON"
@@ -285,7 +288,7 @@ def test_invites_people_and_roles(h):
     assert _js.loads(handle(web, json_req(signed, "DELETE", f"/api/people/{jon['id']}")).text())["code"] == "remove_self"
 
     # Invites listed, resent, and cancelled.
-    handle(web, json_req(signed, "POST", "/api/people", {"email": "zed@example.com", "role": "viewer"}))
+    handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "zed@example.com", "role": "viewer"}))
     people = _js.loads(handle(web, json_req(signed, "GET", "/api/people")).text())
     assert sorted(p["email"] for p in people["people"]) == ["jon@example.com", "mo@example.com"]
     assert [i["email"] for i in people["invites"]] == ["zed@example.com"]
@@ -305,7 +308,7 @@ def test_invites_are_emailed_when_there_is_a_mail_service(h):
     web = h.web({"token": "app-token"}, "https://stats.example.com")
     signed = owner(web)
     h.rl.mail = {"service": "smtp", "from": "runlight@example.com"}
-    body = _js.loads(handle(web, json_req(signed, "POST", "/api/people", {"email": "mo@example.com", "role": "viewer"})).text())
+    body = _js.loads(handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "mo@example.com", "role": "viewer"})).text())
     assert body["emailed"] is True
     assert body["link"].startswith("https://stats.example.com/runlight/invite?code="), "the install's own address, never the request's Host"
     assert h.rl.sent[0]["subject"] == "jon@example.com invited you to Runlight"
@@ -315,12 +318,12 @@ def test_invites_are_emailed_when_there_is_a_mail_service(h):
     )
 
     h.rl.mail_fails = MailError("The server refused the password", "mail_auth", {"host": "smtp.example.com"})
-    failed = _js.loads(handle(web, json_req(signed, "POST", "/api/people", {"email": "ada@example.com", "role": "admin"})).text())
+    failed = _js.loads(handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "ada@example.com", "role": "admin"})).text())
     assert list(failed) == ["invite", "link", "emailed", "mailError", "mailCode", "mailParams"]
     assert failed["mailCode"] == "mail_auth"
     assert failed["mailParams"] == {"host": "smtp.example.com"}
     h.rl.mail_fails = RuntimeError("Something else")
-    other = _js.loads(handle(web, json_req(signed, "POST", "/api/people", {"email": "zed@example.com", "role": "admin"})).text())
+    other = _js.loads(handle(web, json_req(signed, "POST", "/api/people", {"allSites": True, "email": "zed@example.com", "role": "admin"})).text())
     assert list(other) == ["invite", "link", "emailed", "mailError"], "an error without a code of its own has none here"
     assert other["mailError"] == "Something else"
 

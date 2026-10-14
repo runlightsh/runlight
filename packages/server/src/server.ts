@@ -4,6 +4,7 @@
  * answered on any domain pointed at it.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { ICON_PATHS, iconResponse, withAppIcons } from "./icons.js";
 import { DOMAIN_NAME, LINK_DOMAIN_CHECK, accountsWeb, coded, hostName, runlight, setupCode as newSetupCode, type Accounts, type Runlight, type RequestContext, type SqlStore, type GeoLookup } from "@runlight/sdk";
 
 export interface ServerOptions {
@@ -24,6 +25,8 @@ export interface ServerOptions {
   /** Credit DB-IP in the dashboard, when its free data supplies locations. */
   geoCredit?: boolean;
   now?: () => number;
+  /** Optional operational dashboard, served only to an unrestricted owner or admin. */
+  monitoring?: Handler;
 }
 
 export type Handler = (request: Request, context?: RequestContext) => Promise<Response>;
@@ -131,20 +134,30 @@ export function createServer(options: ServerOptions): RunlightServer {
     const url = new URL(request.url);
     const path = url.pathname;
     try {
+      if (options.monitoring && (path === "/cronwatch" || path.startsWith("/cronwatch/"))) {
+        const user = await web.signedIn(request);
+        if (!user) return request.method === "GET"
+          ? new Response(null, { status: 303, headers: { location: `/login?next=${encodeURIComponent(path + url.search)}`, "cache-control": "no-store" } })
+          : coded("Sign in first", "sign_in", 401);
+        if (user.site !== undefined || (user.role !== "owner" && user.role !== "admin")) return coded("Only owners and administrators can view monitoring", "admin_only", 403);
+        return options.monitoring(request, context);
+      }
       // A domain pointed at this server for short links answers at its root, with links one segment deep. The
       // server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
       // signed in, so a link domain added on the dashboard's own name can always be removed again. /go/:slug is
       // the server's own link path, which a link domain answers as a path with no link (a 404), as every adapter does.
       const own = request.method === "GET" && /^\/go\/[^/]+\/?$/.test(path);
-      const linkable = path === LINK_DOMAIN_CHECK || own || (/^\/[^/]*$/.test(path) && !SERVER_PATHS.has(path) && !(path === "/" && (await web.signedIn(request))));
+      const linkable = path === LINK_DOMAIN_CHECK || own || (/^\/[^/]*$/.test(path) && !SERVER_PATHS.has(path) && !ICON_PATHS.has(path) && !(path === "/" && (await web.signedIn(request))));
       if (linkable && !(publicHost && hostOf(request) === publicHost)) {
         const linked = await rl.linkDomainResponse(request, context);
         if (linked) return linked;
       }
       if (path === "/healthz") return new Response("ok", { headers: { "content-type": "text/plain", "cache-control": "no-store" } });
+      const icon = iconResponse(request);
+      if (icon) return icon;
       if (own) return await links(request, context);
       // Everything else, the sign-in pages and People included, is the routes'.
-      return await routes.handler(request, context);
+      return await withAppIcons(await routes.handler(request, context));
     } catch (error) {
       console.error("Runlight:", error);
       return coded("Internal error", "internal", 500);

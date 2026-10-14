@@ -65,6 +65,25 @@ class AccountsTest {
 
   @ParameterizedTest
   @MethodSource("kinds")
+  void siteAccountsCannotBecomeOwnersOrAdmins(String kind) {
+    Accounts accounts = new Accounts(store(kind), SECRET);
+    for (String role : List.of("owner", "admin")) {
+      assertEquals(
+          "role_scope",
+          codeOf(
+              () ->
+                  accounts.setPassword(
+                      "scoped@example.com", "a long password", NOW, role, "example.com")));
+    }
+    assertEquals(0, accounts.count());
+    Map<String, Object> member =
+        accounts.setPassword("scoped@example.com", "a long password", NOW, "member", "example.com");
+    assertEquals("member", member.get("role"));
+    assertEquals("example.com", member.get("site"));
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
   void theFirstAccountOwnsAndTheRestAreAdminsUnlessAsked(String kind) {
     Accounts accounts = new Accounts(store(kind), SECRET);
     assertEquals(0, accounts.count());

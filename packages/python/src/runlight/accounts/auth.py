@@ -263,6 +263,11 @@ class Accounts:
                 f"role {text(20)} NOT NULL, code_hash {text(128)} NOT NULL UNIQUE, invited_by {text(100)} NOT NULL, "
                 f"created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL){table}"
             )
+            for table_name in ("rl_users", "rl_invites"):
+                fields = db.all(f"PRAGMA table_info({table_name})") if db.dialect() == "sqlite" else db.all(
+                    f"SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = {'DATABASE()' if my else 'current_schema()'}", [table_name])
+                if not any(c.get("name", c.get("NAME")) == "site" for c in fields):
+                    db.run(f"ALTER TABLE {table_name} ADD COLUMN site TEXT")
             # A server has one owner. One from before, with several, keeps the first and the rest become admins,
             # who can still do everything but remove the owner. Invites to join as an owner become invites as an
             # admin.
@@ -280,6 +285,7 @@ class Accounts:
             "email": _js.string(r["email"]),
             "hash": _js.string(r["hash"]),
             "role": role_from(r.get("role")),
+            **({"site": str(r["site"])} if r.get("site") is not None else {}),
             "createdAt": _js.number(r["created_at"]),
             "twoFactor": _js.truthy(r.get("totp_secret")),
             "recoveryLeft": len(_recovery_list(r.get("totp_recovery"))),
@@ -463,6 +469,8 @@ class Accounts:
                 raise AccountError("Unknown account", "unknown_account")
             if user["role"] == "owner":
                 raise AccountError("Only the owner can change their own role, by handing ownership to an admin", "owner_protected")
+            if user.get("site") is not None and role == "admin":
+                raise AccountError("An admin needs access to all sites", "role_scope")
             if role == "owner":
                 raise AccountError("Ownership is handed over by the owner", "owner_hand_over")
             self.store.db.run("UPDATE rl_users SET role = ? WHERE id = ?", [role, id])
@@ -484,7 +492,7 @@ class Accounts:
                 raise AccountError("Only the owner can hand over ownership", "owner_hand_over")
             if nxt is None:
                 raise AccountError("Unknown account", "unknown_account")
-            if nxt["role"] != "admin":
+            if nxt.get("site") is not None or nxt["role"] != "admin":
                 raise AccountError("Make them an admin first", "owner_needs_admin")
             self.store.db.run("UPDATE rl_users SET role = 'owner' WHERE id = ?", [to])
             self.store.db.run("UPDATE rl_users SET role = 'admin' WHERE id = ?", [from_])
@@ -508,10 +516,12 @@ class Accounts:
 
         self._turn(change)
 
-    def set_password(self, email: str, password: str, now: int, role: str | None = None) -> dict[str, Any]:
+    def set_password(self, email: str, password: str, now: int, role: str | None = None, site: str | None = None) -> dict[str, Any]:
         """Makes an account, or sets a new password on an existing one. A new account is the owner when it is the
         first, and otherwise an admin unless a role is given, since a server has one owner."""
         self._init()
+        if site is not None and (not site or role not in ("member", "viewer")):
+            raise AccountError("Choose member or viewer for one site", "role_scope")
         address = _js.lower(_js.trim(email))
         if not EMAIL.match(address):
             raise AccountError("Enter an email address", "email_invalid")
@@ -533,10 +543,11 @@ class Accounts:
             "createdAt": now,
             "twoFactor": False,
             "recoveryLeft": 0,
+            **({"site": site} if site is not None else {}),
         }
         self.store.db.run(
-            "INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            [user["id"], user["email"], user["hash"], user["role"], user["createdAt"]],
+            "INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)",
+            [user["id"], user["email"], user["hash"], user["role"], user["createdAt"], site],
         )
         return user
 
@@ -545,6 +556,7 @@ class Accounts:
             "id": _js.string(r["id"]),
             "email": _js.string(r["email"]),
             "role": role_from(r.get("role")),
+            **({"site": str(r["site"])} if r.get("site") is not None else {}),
             "invitedBy": _js.string(r["invited_by"]),
             "createdAt": _js.number(r["created_at"]),
             "expiresAt": _js.number(r["expires_at"]),
@@ -556,24 +568,26 @@ class Accounts:
         self.store.db.run("DELETE FROM rl_invites WHERE expires_at <= ?", [now])
         return [self._invite_row(r) for r in self.store.db.all("SELECT * FROM rl_invites ORDER BY created_at DESC, id")]
 
-    def invite(self, email: str, role: str, invited_by: str, now: int) -> dict[str, Any]:
+    def invite(self, email: str, role: str, invited_by: str, now: int, site: str | None = None) -> dict[str, Any]:
         """Invites someone to join with a role, and returns {invite, code}, the code for their link.
         Asking again replaces the earlier invite, so only the newest link works."""
         self._init()
-        return self._turn(lambda: self._invite_now(email, role, invited_by, now))
+        return self._turn(lambda: self._invite_now(email, role, invited_by, now, site))
 
-    def _invite_now(self, email: str, role: str, invited_by: str, now: int) -> dict[str, Any]:
+    def _invite_now(self, email: str, role: str, invited_by: str, now: int, site: str | None = None) -> dict[str, Any]:
+        if site is not None and (not site or role not in ("member", "viewer")):
+            raise AccountError("Choose member or viewer for one site", "role_scope")
         address = _js.lower(_js.trim(email))
         if not EMAIL.match(address):
             raise AccountError("Enter an email address", "email_invalid")
         if self.by_email(address) is not None:
             raise AccountError(f"{address} already has an account", "account_exists", {"email": address})
         code = base64url(random_bytes(24))
-        invite = {"id": hex(random_bytes(12)), "email": address, "role": role, "invitedBy": invited_by, "createdAt": now, "expiresAt": now + INVITE_MS}
+        invite = {**({"site": site} if site is not None else {}), "id": hex(random_bytes(12)), "email": address, "role": role, "invitedBy": invited_by, "createdAt": now, "expiresAt": now + INVITE_MS}
         self.store.db.run("DELETE FROM rl_invites WHERE email = ?", [address])
         self.store.db.run(
-            "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [invite["id"], invite["email"], invite["role"], _code_hash(code), invite["invitedBy"], invite["createdAt"], invite["expiresAt"]],
+            "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [invite["id"], invite["email"], invite["role"], _code_hash(code), invite["invitedBy"], invite["createdAt"], invite["expiresAt"], site],
         )
         return {"invite": invite, "code": code}
 
@@ -604,12 +618,12 @@ class Accounts:
             if invite is None:
                 return None
             sender = self.by_email(invite["invitedBy"])
-            if sender is None or not may_invite(sender["role"]):
+            if sender is None or sender.get("site") is not None or not may_invite(sender["role"]):
                 self.store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
                 return None
             if self.by_email(invite["email"]) is not None:
                 raise AccountError(f"{invite['email']} already has an account", "account_exists", {"email": invite["email"]})
-            user = self.set_password(invite["email"], password, now, invite["role"])
+            user = self.set_password(invite["email"], password, now, invite["role"], invite.get("site"))
             self.store.db.run("DELETE FROM rl_invites WHERE id = ?", [invite["id"]])
             return user
 

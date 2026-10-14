@@ -120,7 +120,9 @@ module Runlight
       # Notes who made a token. A viewer makes no tokens; someone removed or made a viewer since allowing an app
       # gets none for it, and false takes the token back.
       def token_made(token, by)
-        role = @accounts.by_id(by)&.fetch("role", nil)
+        user = @accounts.by_id(by)
+        return false if user.nil? || !user["site"].nil?
+        role = user["role"]
         return false if role.nil? || role == "viewer"
 
         @store.set_setting("#{MADE_BY}#{token["id"]}", by)
@@ -146,6 +148,14 @@ module Runlight
           return redirect("#{@base}/login#{search == "" ? "" : "?next=#{Js.encode_uri_component("#{@home_path}#{search}")}"}")
         end
         nil
+      end
+
+      def confirm_password(request)
+        user = signed_in(request)
+        return coded("Sign in first", "sign_in", 401) if user.nil?
+        input = body(request)
+        return coded("Send JSON", "send_json", 415) if input.nil?
+        recheck(user, input, "password", ["Your password is not right", "password_wrong"])
       end
 
       private
@@ -202,11 +212,11 @@ module Runlight
       end
 
       def person(u)
-        { "id" => u["id"], "email" => u["email"], "role" => u["role"], "createdAt" => u["createdAt"], "twoFactor" => u["twoFactor"], "recoveryLeft" => u["recoveryLeft"] }
+        { **(u["site"].nil? ? {} : { "site" => u["site"] }), "id" => u["id"], "email" => u["email"], "role" => u["role"], "createdAt" => u["createdAt"], "twoFactor" => u["twoFactor"], "recoveryLeft" => u["recoveryLeft"] }
       end
 
       def invite_view(i)
-        { "id" => i["id"], "email" => i["email"], "role" => i["role"], "invitedBy" => i["invitedBy"], "createdAt" => i["createdAt"], "expiresAt" => i["expiresAt"] }
+        { **(i["site"].nil? ? {} : { "site" => i["site"] }), "id" => i["id"], "email" => i["email"], "role" => i["role"], "invitedBy" => i["invitedBy"], "createdAt" => i["createdAt"], "expiresAt" => i["expiresAt"] }
       end
 
       # The media type of a request's body, as a cross-site form cannot send application/json.
@@ -270,7 +280,7 @@ module Runlight
         origin = home_origin || Http::Url.new(request.url).origin
         link = "#{origin}#{@base}/invite?code=#{code}"
         host = Http::Url.new(origin).host
-        what = Pages.role_text(invite["role"])
+        what = Pages.role_text(invite["role"], invite["site"])
         return { "link" => link, "emailed" => false } unless @rl.mail_settings
 
         begin
@@ -278,8 +288,8 @@ module Runlight
             "to" => invite["email"],
             "subject" => "#{invite["invitedBy"]} invited you to Runlight",
             "text" => "#{invite["invitedBy"]} invited you to the Runlight at #{host} as #{what}.\n\nChoose a password to join:\n#{link}\n\nThe link works for seven days.\n",
-            "html" => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>" \
-                      "#{esc(invite["invitedBy"])} invited you to the Runlight at #{esc(host)} as #{what}.</p><p><a href=\"#{esc(link)}\" " \
+            "html" => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>" \
+                      "#{esc(invite["invitedBy"])} invited you to the Runlight at #{esc(host)} as #{esc(what)}.</p><p><a href=\"#{esc(link)}\" " \
                       "style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">" \
                       "Choose a password and join</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for seven days. If you were not expecting this, " \
                       "you can ignore it.</p></div>",
@@ -316,7 +326,7 @@ module Runlight
           "subject" => "Sign in to Runlight",
           "text" => "Someone, most likely you, signed in to Runlight at #{host} with your password while your account was held up by too many failed tries.\n\n" \
                     "Sign in with this link within fifteen minutes:\n#{link}\n\nIf this was not you, change your password, since someone knows it.\n",
-          "html" => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\">" \
+          "html" => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\">" \
                     "<p>Someone, most likely you, signed in to Runlight at #{esc(host)} with your password while your account was held up by too many failed tries.</p>" \
                     "<p><a href=\"#{esc(link)}\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;" \
                     "text-decoration:none;font-weight:600\">Sign in</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for fifteen minutes. " \
@@ -424,7 +434,7 @@ module Runlight
             invite = @accounts.invite_by_code(code, now)
             return html(Pages.invite_gone_page(base), 410) if invite.nil?
 
-            return html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "host" => url.host }))
+            return html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host }))
           end
           if method == "POST"
             form = Http::SearchParams.new(request.text)
@@ -433,7 +443,7 @@ module Runlight
             return html(Pages.invite_gone_page(base), 410) if invite.nil?
 
             again = lambda do |error|
-              html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "host" => url.host, "error" => error }), 400)
+              html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host, "error" => error }), 400)
             end
             return again.call("The two passwords are not the same.") if (form.get("password") || "") != (form.get("again") || "")
 
@@ -510,6 +520,21 @@ module Runlight
         html(login_page.call({ "error" => e.message, "email" => email }), 503, { "retry-after" => "5" })
       end
 
+      def recheck(user, input, name, wrong)
+        return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429) unless @rechecks.take(user["id"], now)
+        begin
+          right = @accounts.sign_in(user["email"], field(input, name))
+        rescue AccountError => e
+          raise unless e.code == "busy"
+
+          return coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503)
+        end
+        return coded(wrong[0], wrong[1], 400) if right.nil?
+
+        @rechecks.forgive(user["id"], now)
+        nil
+      end
+
       # Your own account, and for the owner and admins, everyone else's.
       def api(request, path)
         user = signed_in(request)
@@ -522,26 +547,12 @@ module Runlight
         return coded("Send JSON", "send_json", 415) if method == "POST" && media_type(request) != "application/json"
         return reply({ "account" => person(user) }) if path == "/api/account" && method == "GET"
 
-        recheck = lambda do |input, name, wrong|
-          return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429) unless @rechecks.take(user["id"], now)
-          begin
-            right = @accounts.sign_in(user["email"], field(input, name))
-          rescue AccountError => e
-            raise unless e.code == "busy"
-
-            return coded("Runlight is busy checking other sign-ins. Try again in a moment.", "busy", 503)
-          end
-          return coded(wrong[0], wrong[1], 400) if right.nil?
-
-          @rechecks.forgive(user["id"], now)
-          nil
-        end
         fresh = ->(updated) { { "set-cookie" => session_cookie(request, @accounts.session_for(updated, now), Accounts::SESSION_MS / 1000) } }
         if path == "/api/account/password" && method == "POST"
           input = body(request)
           return coded("Send JSON", "send_json", 415) if input.nil?
 
-          refused = recheck.call(input, "current", ["Your current password is not right", "password_current_wrong"])
+          refused = recheck(user, input, "current", ["Your current password is not right", "password_current_wrong"])
           return refused unless refused.nil?
 
           begin
@@ -573,7 +584,7 @@ module Runlight
             updated = @accounts.by_id(user["id"])
             return reply({ "recovery" => codes }, 200, fresh.call(updated))
           end
-          refused = recheck.call(input, "password", ["Your password is not right", "password_wrong"])
+          refused = recheck(user, input, "password", ["Your password is not right", "password_wrong"])
           return refused unless refused.nil?
 
           if action == "/start"
@@ -594,7 +605,7 @@ module Runlight
           end
           return coded("Not found", "not_found", 404)
         end
-        return coded("Only the owner or an admin can manage people", "people_owner", 403) if user["role"] != "owner" && user["role"] != "admin"
+        return coded("Only the owner or an admin can manage people", "people_owner", 403) if !user["site"].nil? || (user["role"] != "owner" && user["role"] != "admin")
 
         # The owner or an admin can turn off someone else's two-factor, for a coworker who lost both phone and recovery
         # codes, though never the owner's. It asks for their password like every other two-factor change, and their own
@@ -605,7 +616,7 @@ module Runlight
           input = body(request)
           return coded("Send JSON", "send_json", 415) if input.nil?
 
-          refused = recheck.call(input, "password", ["Your password is not right", "password_wrong"])
+          refused = recheck(user, input, "password", ["Your password is not right", "password_wrong"])
           return refused unless refused.nil?
 
           target = @accounts.by_id(reset[1])
@@ -622,7 +633,7 @@ module Runlight
           input = body(request)
           return coded("Send JSON", "send_json", 415) if input.nil?
 
-          refused = recheck.call(input, "password", ["Your password is not right", "password_wrong"])
+          refused = recheck(user, input, "password", ["Your password is not right", "password_wrong"])
           return refused unless refused.nil?
 
           begin
@@ -648,7 +659,11 @@ module Runlight
           return coded("#{email} already has an account", "account_exists", 409, { "email" => email }) unless @accounts.by_email(email).nil?
 
           begin
-            made = @accounts.invite(email, role, user["email"], now)
+            @rl.init
+            site = input["allSites"] == true ? nil : input["site"]
+            return coded("Choose a site or explicitly invite to all sites", "invite_site", 400) if input["allSites"] != true && (!site.is_a?(String) || site.empty?)
+            return coded("Unknown site", "unknown_site", 404) if !site.nil? && @rl.site(site).nil?
+            made = @accounts.invite(email, role, user["email"], now, site)
             return reply({ "invite" => invite_view(made["invite"]) }.merge(send_invite(request, made["invite"], made["code"])), 201)
           rescue AccountError => e
             return coded(e.message, e.code, 400, e.params)
@@ -664,7 +679,7 @@ module Runlight
             return coded("Unknown invite", "unknown_invite", 404) if old.nil?
 
             # A new link replaces the old one, which stops working.
-            made = @accounts.invite(old["email"], old["role"], user["email"], now)
+            made = @accounts.invite(old["email"], old["role"], user["email"], now, old["site"])
             return reply({ "invite" => invite_view(made["invite"]) }.merge(send_invite(request, made["invite"], made["code"])))
           end
         end

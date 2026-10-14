@@ -325,7 +325,7 @@ public final class Reports {
             : dashboard;
     String at = words.t("email.at", Map.of("where", where));
     String mark =
-        "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\">";
+        "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\">";
 
     String footer =
         words.t(

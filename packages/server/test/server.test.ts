@@ -197,7 +197,7 @@ test("the owner adds people by invite; viewers read every site and change nothin
 
   assert.deepEqual(((await (await json(owner, "GET", "/api/account")).json()) as any).account.role, "owner");
   // An owner invites; the person chooses their own password from the link.
-  const added = await json(owner, "POST", "/api/people", { email: "Viewer@Example.com", role: "viewer" });
+  const added = await json(owner, "POST", "/api/people", { allSites: true, email: "Viewer@Example.com", role: "viewer" });
   assert.equal(added.status, 201);
   const sent = (await added.json()) as any;
   assert.equal(sent.invite.email, "viewer@example.com");
@@ -205,7 +205,7 @@ test("the owner adds people by invite; viewers read every site and change nothin
   const link = new URL(sent.link);
   assert.equal(link.origin + link.pathname, `${origin}/invite`);
   assert.equal(((await (await json(owner, "GET", "/api/people")).json()) as any).invites.length, 1);
-  assert.equal((await json(owner, "POST", "/api/people", { email: "owner@example.com", role: "viewer" })).status, 409);
+  assert.equal((await json(owner, "POST", "/api/people", { allSites: true, email: "owner@example.com", role: "viewer" })).status, 409);
   assert.equal((await handle(req("/api/people", { method: "POST", headers: { cookie: owner, "content-type": "text/plain; application/json" }, body: "{}" }))).status, 415);
 
   const page = await handle(req(link.pathname + link.search));
@@ -225,7 +225,7 @@ test("the owner adds people by invite; viewers read every site and change nothin
   assert.equal(person.role, "viewer");
 
   // Sending again replaces the link; cancelling ends it.
-  const second = ((await (await json(owner, "POST", "/api/people", { email: "later@example.com", role: "admin" })).json()) as any);
+  const second = ((await (await json(owner, "POST", "/api/people", { allSites: true, email: "later@example.com", role: "admin" })).json()) as any);
   const resent = ((await (await json(owner, "POST", `/api/invites/${second.invite.id}/resend`)).json()) as any);
   assert.notEqual(resent.link, second.link);
   assert.equal((await handle(req(new URL(second.link).pathname + new URL(second.link).search))).status, 410, "the old link stopped working");
@@ -347,7 +347,7 @@ test("an invite goes out by email when the server has a mail service", async () 
     await server.accounts.setPassword("owner@example.com", "a long password", Date.now());
     const owner = cookieOf(await handle(req("/login", form({ email: "owner@example.com", password: "a long password" }))));
     await server.runlight.saveMailSettings({ service: "webhook", url: `http://127.0.0.1:${(hook.address() as { port: number }).port}/`, from: "runlight@example.com" });
-    const sent = (await (await handle(req("/api/people", { method: "POST", headers: { cookie: owner, "content-type": "application/json" }, body: JSON.stringify({ email: "new@example.com", role: "viewer" }) }))).json()) as any;
+    const sent = (await (await handle(req("/api/people", { method: "POST", headers: { cookie: owner, "content-type": "application/json" }, body: JSON.stringify({ allSites: true, email: "new@example.com", role: "viewer" }) }))).json()) as any;
     assert.equal(sent.emailed, true);
     assert.equal(got.length, 1);
     assert.equal(got[0].to, "new@example.com");
@@ -378,7 +378,7 @@ test("one owner, admins who manage everyone else, members kept from the install-
   assert.equal((await as(m, "POST", "/api/tokens", { name: "Script" })).status, 201);
   // Not people, the mail service, the assistant's settings, or deleting a site.
   assert.equal((await as(m, "GET", "/api/people")).status, 403);
-  assert.equal((await as(m, "POST", "/api/people", { email: "x@example.com", role: "viewer" })).status, 403);
+  assert.equal((await as(m, "POST", "/api/people", { allSites: true, email: "x@example.com", role: "viewer" })).status, 403);
   for (const [method, path] of [["PUT", "/api/mail"], ["DELETE", "/api/mail"], ["PUT", "/api/assistant"], ["DELETE", "/api/assistant"], ["PUT", "/api/assistant/limits"], ["POST", "/api/assistant/models"], ["DELETE", "/api/sites/blog.example.com"]] as const) {
     const refused = await as(m, method, path, {});
     assert.equal(refused.status, 403, `${method} ${path}`);
@@ -392,10 +392,10 @@ test("one owner, admins who manage everyone else, members kept from the install-
   assert.equal((await as(a, "PATCH", `/api/people/${owner.id}`, { role: "member" })).status, 403);
   assert.equal((await as(a, "DELETE", `/api/people/${owner.id}`)).status, 403);
   assert.equal((await as(a, "DELETE", `/api/people/${owner.id}/2fa`, { password: "a long password" })).status, 403);
-  assert.equal((await as(a, "POST", "/api/people", { email: "new@example.com", role: "owner" })).status, 400, "nobody is invited as the owner");
-  assert.equal((await as(a, "POST", "/api/people", { email: "new@example.com", role: "admin" })).status, 201);
+  assert.equal((await as(a, "POST", "/api/people", { allSites: true, email: "new@example.com", role: "owner" })).status, 400, "nobody is invited as the owner");
+  assert.equal((await as(a, "POST", "/api/people", { allSites: true, email: "new@example.com", role: "admin" })).status, 201);
   assert.equal((await as(a, "POST", `/api/people/${ada.id}/owner`, { password: "a long password" })).status, 403, "only the owner hands over");
-  assert.equal((await as(a, "DELETE", "/api/sites/blog.example.com")).status, 200, "an admin can delete a site");
+  assert.equal((await as(a, "DELETE", "/api/sites/blog.example.com", { password: "a long password" })).status, 200, "an admin can delete a site");
 
   // The owner hands over to an admin, with their password, and becomes an admin.
   assert.equal((await as(o, "POST", `/api/people/${mo.id}/owner`, { password: "a long password" })).status, 400, "only to an admin");
@@ -409,4 +409,27 @@ test("one owner, admins who manage everyone else, members kept from the install-
   const again = createServer({ store, secret: "s".repeat(64) });
   const roles = (await again.accounts.list()).map((u) => [u.email, u.role]);
   assert.deepEqual(roles, [["owner@example.com", "owner"], ["ada@example.com", "admin"], ["mo@example.com", "admin"]]);
+});
+
+test("standalone sessions retain site restrictions and deletion confirmation with custom authorization", async () => {
+  const { server, handle } = make("script-token");
+  const password = "a long password";
+  const owner = await server.accounts.setPassword("owner@example.com", password, Date.now());
+  const alpha = await server.runlight.addSite({ name: "Alpha", hostnames: ["alpha.example"] });
+  const beta = await server.runlight.addSite({ name: "Beta", hostnames: ["beta.example"] });
+  const member = await server.accounts.setPassword("member@example.com", password, Date.now(), "member", alpha.id);
+  const as = async (user: typeof owner) => `runlight_session=${encodeURIComponent(await server.accounts.sessionFor(user, Date.now()))}`;
+  const cookie = await as(member);
+  for (const authorization of ["", "Bearer invalid-token"]) {
+    const headers = { cookie, authorization, "content-type": "application/json" };
+    const sites = await (await handle(req("/api/sites", { headers }))).json() as any;
+    assert.deepEqual(sites.sites.map((site: any) => site.id), [alpha.id]);
+    assert.equal((await handle(req(`/api/stats?site=${beta.id}`, { headers }))).status, 404);
+    assert.equal((await handle(req("/api/people", { headers }))).status, 403);
+    assert.equal((await handle(req(`/api/goals?site=${beta.id}`, { method: "POST", headers, body: JSON.stringify({ name: "Bad", kind: "event", match: "Bad" }) }))).status, 404);
+  }
+  const headers = { cookie: await as(owner), "content-type": "application/json" };
+  assert.equal((await handle(req(`/api/sites/${beta.id}`, { method: "DELETE", headers, body: "{}" }))).status, 400);
+  assert.ok(server.runlight.site(beta.id));
+  assert.equal((await handle(req(`/api/sites/${beta.id}`, { method: "DELETE", headers, body: JSON.stringify({ password }) }))).status, 200);
 });

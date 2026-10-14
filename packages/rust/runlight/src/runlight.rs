@@ -1694,9 +1694,7 @@ impl Runlight {
         self.idle().await;
         {
             let _turn = self.0.prune_turn.lock().await;
-            if let Err(error) = self.apply_retention(None).await {
-                eprintln!("Runlight: could not apply retention {error}");
-            }
+            self.apply_retention(None).await?;
         }
         let due = {
             let mut state = self.state();

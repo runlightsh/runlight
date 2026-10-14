@@ -192,7 +192,7 @@ HTML, ['{title}' => $title, '{rows}' => $rows]);
         $u = Url::parse($links['dashboard']);
         $where = $u !== null ? $u->host() . preg_replace('#/$#D', '', $u->pathname) : $links['dashboard'];
         $at = $t('email.at', ['where' => $where]);
-        $mark = '<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px">';
+        $mark = '<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px">';
 
         $footer = $t('email.footer', ['frequency' => $t($monthly ? 'email.monthly' : 'email.weekly'), 'site' => $site['name']]);
         $atLine = self::esc($t('email.at', ['where' => "\0"]));

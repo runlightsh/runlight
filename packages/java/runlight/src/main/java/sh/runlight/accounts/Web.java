@@ -34,6 +34,12 @@ public final class Web {
   public interface Host {
     SqlStore store();
 
+    default void init() {}
+
+    default Map<String, Object> site(String id) {
+      return null;
+    }
+
     /** The mail service's settings, or null when there is none. */
     Map<String, Object> mailSettings();
 
@@ -349,13 +355,15 @@ public final class Web {
   }
 
   private static Map<String, Object> person(Map<String, Object> u) {
-    return Json.object(
-        "id", u.get("id"),
-        "email", u.get("email"),
-        "role", u.get("role"),
-        "createdAt", u.get("createdAt"),
-        "twoFactor", u.get("twoFactor"),
-        "recoveryLeft", u.get("recoveryLeft"));
+    return Accounts.withSite(
+        Json.object(
+            "id", u.get("id"),
+            "email", u.get("email"),
+            "role", u.get("role"),
+            "createdAt", u.get("createdAt"),
+            "twoFactor", u.get("twoFactor"),
+            "recoveryLeft", u.get("recoveryLeft")),
+        u.get("site"));
   }
 
   private static List<Object> people(List<Map<String, Object>> users) {
@@ -367,13 +375,15 @@ public final class Web {
   }
 
   private static Map<String, Object> inviteView(Map<String, Object> i) {
-    return Json.object(
-        "id", i.get("id"),
-        "email", i.get("email"),
-        "role", i.get("role"),
-        "invitedBy", i.get("invitedBy"),
-        "createdAt", i.get("createdAt"),
-        "expiresAt", i.get("expiresAt"));
+    return Accounts.withSite(
+        Json.object(
+            "id", i.get("id"),
+            "email", i.get("email"),
+            "role", i.get("role"),
+            "invitedBy", i.get("invitedBy"),
+            "createdAt", i.get("createdAt"),
+            "expiresAt", i.get("expiresAt")),
+        i.get("site"));
   }
 
   /** The media type of a request's body, as a cross-site form cannot send application/json. */
@@ -430,7 +440,7 @@ public final class Web {
     String origin = given != null ? given : new Url(request.url()).origin();
     String link = origin + base + "/invite?code=" + code;
     String host = new Url(origin).host();
-    String what = Pages.roleText((String) invite.get("role"));
+    String what = Pages.roleText((String) invite.get("role"), (String) invite.get("site"));
     String invitedBy = (String) invite.get("invitedBy");
     if (rl.mailSettings() == null) {
       return Json.object("link", link, "emailed", false);
@@ -452,12 +462,12 @@ public final class Web {
                   + link
                   + "\n\nThe link works for seven days.\n",
               "html",
-              "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>"
+              "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>"
                   + esc(invitedBy)
                   + " invited you to the Runlight at "
                   + esc(host)
                   + " as "
-                  + what
+                  + esc(what)
                   + ".</p><p><a href=\""
                   + esc(link)
                   + "\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Choose a password and join</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>"));
@@ -513,7 +523,7 @@ public final class Web {
                 + link
                 + "\n\nIf this was not you, change your password, since someone knows it.\n",
             "html",
-            "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>Someone, most likely you, signed in to Runlight at "
+            "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>Someone, most likely you, signed in to Runlight at "
                 + esc(host)
                 + " with your password while your account was held up by too many failed tries.</p><p><a href=\""
                 + esc(link)
@@ -711,6 +721,8 @@ public final class Web {
                         invite.get("email"),
                         "role",
                         invite.get("role"),
+                        "site",
+                        invite.get("site"),
                         "host",
                         url.host())))
             : html(Pages.inviteGonePage(base), 410);
@@ -752,6 +764,8 @@ public final class Web {
                 invite.get("email"),
                 "role",
                 invite.get("role"),
+                "site",
+                invite.get("site"),
                 "host",
                 url.host(),
                 "error",
@@ -866,6 +880,14 @@ public final class Web {
    * The password asked again before a change, with its own few tries; null when it checks out, else
    * the answer to send.
    */
+  public Response confirmPassword(Request request) {
+    var user = signedIn(request);
+    if (user == null) return coded("Sign in first", "sign_in", 401);
+    var input = body(request);
+    if (input == null) return coded("Send JSON", "send_json", 415);
+    return recheck(user, now(), input, "password", "Your password is not right", "password_wrong");
+  }
+
   private Response recheck(
       Map<String, Object> user,
       long at,
@@ -1013,7 +1035,7 @@ public final class Web {
       }
       return coded("Not found", "not_found", 404);
     }
-    if (!role.equals("owner") && !role.equals("admin")) {
+    if (user.get("site") != null || (!role.equals("owner") && !role.equals("admin"))) {
       return coded("Only the owner or an admin can manage people", "people_owner", 403);
     }
     // The owner or an admin can turn off someone else's two-factor, for a coworker who lost both
@@ -1094,7 +1116,17 @@ public final class Web {
             email + " already has an account", "account_exists", 409, Json.object("email", email));
       }
       try {
-        Map<String, Object> made = accounts.invite(email, given, (String) user.get("email"), at);
+        rl.init();
+        String site =
+            Boolean.TRUE.equals(input.get("allSites"))
+                ? null
+                : input.get("site") instanceof String text ? text : null;
+        if (!Boolean.TRUE.equals(input.get("allSites")) && (site == null || site.isEmpty()))
+          return coded("Choose a site or explicitly invite to all sites", "invite_site", 400);
+        if (site != null && rl.site(site) == null)
+          return coded("Unknown site", "unknown_site", 404);
+        Map<String, Object> made =
+            accounts.invite(email, given, (String) user.get("email"), at, site);
         Map<String, Object> invite = Js.map(made.get("invite"));
         Map<String, Object> out = Json.object("invite", inviteView(invite));
         out.putAll(sendInvite(request, invite, (String) made.get("code")));
@@ -1129,7 +1161,8 @@ public final class Web {
                 (String) old.get("email"),
                 (String) old.get("role"),
                 (String) user.get("email"),
-                at);
+                at,
+                (String) old.get("site"));
         Map<String, Object> invite = Js.map(made.get("invite"));
         Map<String, Object> out = Json.object("invite", inviteView(invite));
         out.putAll(sendInvite(request, invite, (String) made.get("code")));
@@ -1205,7 +1238,7 @@ public final class Web {
   public boolean tokenMade(Map<String, Object> token, String by) {
     Map<String, Object> maker = accounts.byId(by);
     Object role = maker == null ? null : maker.get("role");
-    if (role == null || role.equals("viewer")) {
+    if (role == null || maker.get("site") != null || role.equals("viewer")) {
       return false;
     }
     store.setSetting(MADE_BY + token.get("id"), by);
