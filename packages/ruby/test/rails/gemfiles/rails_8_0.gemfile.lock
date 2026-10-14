@@ -1,7 +1,7 @@
 PATH
   remote: ../../..
   specs:
-    runlight (0.1.5)
+    runlight (0.1.6)
       activerecord (>= 7.2, < 8.2)
 
 GEM
