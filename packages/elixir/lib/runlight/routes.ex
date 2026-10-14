@@ -1499,7 +1499,8 @@ defmodule Runlight.Routes do
                 to: to,
                 subject: Messages.t(lang, "email.test.subject"),
                 text: text,
-                html: ~s(<p style="font-family:sans-serif;font-size:15px">#{escape_html(text)}</p>)
+                html:
+                  ~s(<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">#{escape_html(text)}</p>)
               })
 
               json(JS.obj(ok: true))

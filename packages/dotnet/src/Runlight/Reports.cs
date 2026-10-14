@@ -256,12 +256,7 @@ public static class Reports
         var u = Url.Parse(dashboard);
         string where = u != null ? u.Host + (u.Pathname.EndsWith('/') ? u.Pathname[..^1] : u.Pathname) : dashboard;
         string at = T("email.at", new JsObject { ["where"] = where });
-        // The Runlight mark in table cells: mail apps block SVG and most inline images.
-        string mark = $$"""
-<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>
-<td class="rl-mark" width="24" height="24" align="center" style="width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:{{font}}">R</td>
-<td class="rl-ink" style="padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:{{font}}">Runlight</td></tr></table>
-""";
+        string mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\">";
 
         string footer = T("email.footer", new JsObject { ["frequency"] = T(monthly ? "email.monthly" : "email.weekly"), ["site"] = siteName });
         string atLine = Esc(T("email.at", new JsObject { ["where"] = "\0" }));

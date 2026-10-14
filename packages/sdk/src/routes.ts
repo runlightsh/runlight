@@ -1,3 +1,4 @@
+import { EMAIL_LOGO } from "./brand.js";
 import { AssistantError, PROVIDERS, chat, listModels } from "./assistant.js";
 import { ConnectError, finishConnect, startConnect } from "./connect.js";
 import { PAGES_PER_VISIT, journeys } from "./journeys.js";
@@ -978,7 +979,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (!settings) return coded("Set up a mail service first", "mail_unset", 400);
         const { t } = translator(String(body.lang ?? "en"));
         const name = settings.source === "app" ? (settings.via ?? "") : (SERVICES.find((x) => x.id === settings.service)?.name ?? "");
-        await runlight.sendMail({ to, subject: t("email.test.subject"), text: t("email.test.body", { service: name }), html: `<p style="font-family:sans-serif;font-size:15px">${escapeHtml(t("email.test.body", { service: name }))}</p>` });
+        await runlight.sendMail({ to, subject: t("email.test.subject"), text: t("email.test.body", { service: name }), html: `${EMAIL_LOGO}<p style="font-family:sans-serif;font-size:15px">${escapeHtml(t("email.test.body", { service: name }))}</p>` });
         return json({ ok: true });
       }
 

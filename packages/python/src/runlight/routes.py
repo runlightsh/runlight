@@ -1226,7 +1226,7 @@ class Routes:
                         "to": to,
                         "subject": t("email.test.subject"),
                         "text": t("email.test.body", {"service": name}),
-                        "html": f'<p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
+                        "html": f'<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
                     }
                 )
                 return json({"ok": True})

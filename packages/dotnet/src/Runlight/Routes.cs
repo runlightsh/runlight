@@ -1629,7 +1629,7 @@ public sealed class Routes
                     ["to"] = to,
                     ["subject"] = t.T("email.test.subject"),
                     ["text"] = t.T("email.test.body", new JsObject { ["service"] = name }),
-                    ["html"] = "<p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
+                    ["html"] = "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
                 }, cancellationToken).ConfigureAwait(false);
                 return JsonResponse(new JsObject { ["ok"] = true });
             }

@@ -1,3 +1,4 @@
+import { EMAIL_LOGO } from "./brand.js";
 import type { Runlight } from "./runlight.js";
 import { translator } from "./messages.js";
 import type { GoalRow, ReportRow, SiteRow, Stats } from "./store.js";
@@ -197,10 +198,7 @@ export async function buildReport(
     }
   })();
   const at = t("email.at", { where });
-  // The Runlight mark in table cells: mail apps block SVG and most inline images.
-  const mark = `<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>
-<td class="rl-mark" width="24" height="24" align="center" style="width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:${font}">R</td>
-<td class="rl-ink" style="padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:${font}">Runlight</td></tr></table>`;
+  const mark = EMAIL_LOGO;
 
   const footer = t("email.footer", { frequency: t(monthly ? "email.monthly" : "email.weekly"), site: site.name });
   const html = `<!doctype html><html lang="${code}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${esc(subject)}</title>
