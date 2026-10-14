@@ -23,6 +23,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Fixed
 
+- Account migrations recognize existing site-scope columns in prefixed Postgres, MySQL, and MariaDB tables when an installation starts again.
 - Scheduled checks report retention cleanup failures to the caller, so monitoring can alert instead of treating failed cleanup as a successful run.
 - Clicking the active Campaigns tab again leaves its empty state intact instead of starting a loading state that never finishes.
 - The Conversions add button opens Goals or Funnels according to the selected tab.

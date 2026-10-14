@@ -455,7 +455,7 @@ module Runlight
             "code_hash #{str.call(128)} NOT NULL UNIQUE, invited_by #{str.call(100)} NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)#{table}",
           )
           %w[rl_users rl_invites].each do |name|
-            fields = db.dialect == "sqlite" ? db.all("PRAGMA table_info(#{name})") : db.all("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = #{my ? 'DATABASE()' : 'current_schema()'}", [name])
+            fields = db.dialect == "sqlite" ? db.all("PRAGMA table_info(#{name})") : db.all("SELECT column_name AS name FROM information_schema.columns WHERE table_name = '#{name}' AND table_schema = #{my ? 'DATABASE()' : 'current_schema()'}")
             db.run("ALTER TABLE #{name} ADD COLUMN site TEXT") unless fields.any? { |c| c["name"] == "site" }
           end
           # A server has one owner. One from before, with several, keeps the first and the rest become admins,

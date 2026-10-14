@@ -210,9 +210,10 @@ export class Accounts {
         `CREATE TABLE IF NOT EXISTS rl_invites (id ${str(100)} PRIMARY KEY, email ${str(320)} NOT NULL UNIQUE, role ${str(20)} NOT NULL, code_hash ${str(128)} NOT NULL UNIQUE, invited_by ${str(100)} NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)${table}`,
       );
       for (const name of ["rl_users", "rl_invites"]) {
+        // These fixed table names stay in SQL so the store's prefix wrapper rewrites catalog lookups too.
         const fields = this.store.db.dialect === "sqlite"
           ? await this.store.db.all(`PRAGMA table_info(${name})`)
-          : await this.store.db.all(`SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = ${my ? "DATABASE()" : "current_schema()"}`, [name]);
+          : await this.store.db.all(`SELECT column_name AS name FROM information_schema.columns WHERE table_name = '${name}' AND table_schema = ${my ? "DATABASE()" : "current_schema()"}`);
         if (!fields.some((c) => c.name === "site")) await this.store.db.run(`ALTER TABLE ${name} ADD COLUMN site TEXT`);
       }
       // A server has one owner. One from before, with several, keeps the first and the rest become admins,

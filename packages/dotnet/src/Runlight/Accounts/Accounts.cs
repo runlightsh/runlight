@@ -119,7 +119,7 @@ public sealed class Accounts
                     cancellationToken).ConfigureAwait(false);
                 foreach (var name in new[] { "rl_users", "rl_invites" })
                 {
-                    var fields = db.Dialect == "sqlite" ? await db.AllAsync("PRAGMA table_info(" + name + ")", null, cancellationToken).ConfigureAwait(false) : await db.AllAsync("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = " + (my ? "DATABASE()" : "current_schema()"), [name], cancellationToken).ConfigureAwait(false);
+                    var fields = db.Dialect == "sqlite" ? await db.AllAsync("PRAGMA table_info(" + name + ")", null, cancellationToken).ConfigureAwait(false) : await db.AllAsync("SELECT column_name AS name FROM information_schema.columns WHERE table_name = '" + name + "' AND table_schema = " + (my ? "DATABASE()" : "current_schema()"), null, cancellationToken).ConfigureAwait(false);
                     if (!fields.Any(c => c.Str("name") == "site")) await db.RunAsync("ALTER TABLE " + name + " ADD COLUMN site TEXT", null, cancellationToken).ConfigureAwait(false);
                 }
                 // A server has one owner. One from before, with several, keeps the first and the rest become admins,

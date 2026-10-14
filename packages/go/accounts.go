@@ -237,7 +237,7 @@ func (a *AccountStore) init(ctx context.Context) error {
 				if my {
 					schema = "DATABASE()"
 				}
-				fields, err = db.All(ctx, "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = "+schema, name)
+				fields, err = db.All(ctx, "SELECT column_name AS name FROM information_schema.columns WHERE table_name = '"+name+"' AND table_schema = "+schema)
 			}
 			if err != nil {
 				return err
