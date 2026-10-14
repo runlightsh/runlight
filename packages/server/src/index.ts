@@ -1,6 +1,6 @@
 /**
- * runlight.sh: Runlight as its own server. Most people run it with
- * `npx runlight.sh` or the Docker image; this entry is for embedding it.
+ * @runlight/server: Runlight as its own server. Most people run it with
+ * `npx @runlight/server` or the Docker image; this entry is for embedding it.
  */
 export { createServer } from "./server.js";
 export type { Handler, RunlightServer, ServerOptions } from "./server.js";

@@ -1,4 +1,4 @@
-# runlight.sh
+# @runlight/server
 
 Runlight is privacy friendly web analytics that you run yourself. This package is Runlight as a server of its own, for sites that are not Node apps or for one dashboard across many sites. It counts visitors without cookies and without storing anyone’s IP address, so there is no consent banner to show.
 
@@ -7,7 +7,7 @@ Runlight is privacy friendly web analytics that you run yourself. This package i
 With Node 22 or later, run this.
 
 ```bash
-npx runlight.sh
+npx @runlight/server
 ```
 
 The server listens on port 3000 and keeps its data in a `runlight-data` folder in the directory you start it from. On its first start it prints a setup link with a one-time code. Open it to make the first account, then add a site and put its script tag on your pages.
@@ -29,6 +29,8 @@ Browser favicons, Apple touch icons, and a web manifest are served by the instal
 Set `CRONWATCH_MAIL_TO` to your alert recipient after configuring Runlight's mail service. CronWatch uses the same sender and credentials. It records maintenance and automatic location-data checks on their existing five-minute schedule, stores history in `DATA_DIR/cronwatch.db`, and checks for missed or stuck runs every minute. Owners and administrators can open `/cronwatch` after signing in. No separate CronWatch token is needed.
 
 Failed email reports, unavailable or stale location data, slow runs, and unexpected metric changes can send alerts. Zero emails sent is normal when no reports are due, and location checks can succeed without downloading anything. Keep the CronWatch database with your persistent data. This optional SQLite configuration is for a single standalone server, not multiple replicas. It does not monitor an entire server outage while its process is stopped.
+
+Previously published as `runlight.sh`. Use `npx @runlight/server` for new installs and upgrades, keeping the same data directory and environment settings. The installed `runlight.sh` command remains available for existing service scripts.
 
 ## License
 

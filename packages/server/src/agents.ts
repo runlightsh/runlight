@@ -1,5 +1,5 @@
 /**
- * npx runlight.sh agents: counts AI agents on a site that has only the script
+ * npx @runlight/server agents: counts AI agents on a site that has only the script
  * tag, by reading its web server's access log. Agents do not run JavaScript, so
  * the tracker never sees them; the server that answered them did.
  *

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * npx runlight.sh starts the server. Settings come from the environment:
+ * npx @runlight/server starts the server. Settings come from the environment:
  *
  *   PORT              where to listen (3000)
  *   HOST              which address to listen on (0.0.0.0)
@@ -29,10 +29,10 @@ const env = (name: string) => process.env[name]?.trim() || undefined;
 const HELP = `Runlight ${VERSION}, privacy friendly web analytics for any number of sites.
 
 Usage:
-  npx runlight.sh                      Start the server
-  npx runlight.sh password <email>     Make an account, or give one a new password
-  npx runlight.sh agents --log <file>  Count AI agents from a web server's access log
-  npx runlight.sh --version            Print the version
+  npx @runlight/server                      Start the server
+  npx @runlight/server password <email>     Make an account, or give one a new password
+  npx @runlight/server agents --log <file>  Count AI agents from a web server's access log
+  npx @runlight/server --version            Print the version
 
 Settings are environment variables. PORT (3000) and HOST (0.0.0.0) set where it
 listens. DATA_DIR (./runlight-data) holds the SQLite file and the secret, and
@@ -72,7 +72,7 @@ function secretFor(dataDir: string): string {
 const AGENTS_HELP = `Count AI agents on a site that has only the script tag, from its web server's log.
 
 Usage:
-  npx runlight.sh agents --log /var/log/nginx/access.log --to https://stats.example.com --key rlo_...
+  npx @runlight/server agents --log /var/log/nginx/access.log --to https://stats.example.com --key rlo_...
 
   --log <file>    The access log, in nginx or Apache's combined format, or Caddy's JSON
   --to <url>      Your Runlight, as its dashboard address (or RUNLIGHT_URL)
@@ -136,7 +136,7 @@ async function main(): Promise<void> {
 
   if (command === "password") {
     const email = args[0];
-    if (!email) throw new Error("Name the account: npx runlight.sh password you@example.com");
+    if (!email) throw new Error("Name the account: npx @runlight/server password you@example.com");
     await server.runlight.init();
     const password = randomBytes(12).toString("base64url");
     const existed = Boolean(await server.accounts.byEmail(email));
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
     await store.close();
     return;
   }
-  if (command && command !== "start") throw new Error(`Unknown command "${command}". Run npx runlight.sh --help.`);
+  if (command && command !== "start") throw new Error(`Unknown command "${command}". Run npx @runlight/server --help.`);
 
   await server.runlight.init();
   if (mailTo) {

@@ -1,8 +1,8 @@
 /**
  * Uses the packages the way a stranger would. Packs @runlight/sdk and
- * runlight.sh (build them first), installs both tarballs into a scratch
+ * @runlight/server (build them first), installs both tarballs into a scratch
  * project, and checks that every SDK entry point loads with import and with
- * require and exports what it should, that runlight.sh loads, and that its
+ * require and exports what it should, that @runlight/server loads, and that its
  * bin prints the version both packages carry.
  *
  *   node scripts/check-packages.mjs [--keep]
@@ -31,7 +31,7 @@ function fail(message) {
   process.exit(1);
 }
 
-if (serverPkg.version !== version) fail(`runlight.sh is ${serverPkg.version}, @runlight/sdk is ${version}`);
+if (serverPkg.version !== version) fail(`@runlight/server is ${serverPkg.version}, @runlight/sdk is ${version}`);
 
 // Every subpath the SDK exports, as the names a consumer imports.
 const entries = Object.keys(sdkPkg.exports)
@@ -77,10 +77,10 @@ for (const [name, mod] of loaded) {
 }
 const sdk = await import("@runlight/sdk");
 if (sdk.VERSION !== ${JSON.stringify(version)}) throw new Error(\`@runlight/sdk VERSION is \${sdk.VERSION}\`);
-const server = await import("runlight.sh");
-if (typeof server.createServer !== "function") throw new Error("runlight.sh lacks createServer");
-if (server.VERSION !== ${JSON.stringify(version)}) throw new Error(\`runlight.sh VERSION is \${server.VERSION}\`);
-console.log(\`import: \${loaded.length} SDK entries and runlight.sh\`);
+const server = await import("@runlight/server");
+if (typeof server.createServer !== "function") throw new Error("@runlight/server lacks createServer");
+if (server.VERSION !== ${JSON.stringify(version)}) throw new Error(\`@runlight/server VERSION is \${server.VERSION}\`);
+console.log(\`import: \${loaded.length} SDK entries and @runlight/server\`);
 `,
   );
   writeFileSync(
@@ -98,9 +98,11 @@ console.log(\`require: \${Object.keys(expected).length} SDK entries\`);
   process.stdout.write(run("node", ["cjs.cjs"], project));
   const bin = path.join(project, "node_modules", ".bin", process.platform === "win32" ? "runlight.sh.cmd" : "runlight.sh");
   const printed = run(bin, ["--version"], project).trim();
-  if (printed !== version) fail(`runlight.sh --version printed ${JSON.stringify(printed)}, not ${version}`);
-  console.log(`runlight.sh --version: ${printed}`);
-  console.log(`check-packages: @runlight/sdk and runlight.sh ${version} install and load`);
+  if (printed !== version) fail(`@runlight/server --version printed ${JSON.stringify(printed)}, not ${version}`);
+  console.log(`@runlight/server --version: ${printed}`);
+  const npxPrinted = run(npm, ["exec", "--offline", "--", "@runlight/server", "--version"], project).trim();
+  if (npxPrinted !== version) fail(`npx @runlight/server printed ${JSON.stringify(npxPrinted)}, not ${version}`);
+  console.log(`check-packages: @runlight/sdk and @runlight/server ${version} install and load`);
 } finally {
   if (keep) console.log(`Kept ${dir}`);
   else rmSync(dir, { recursive: true, force: true });
