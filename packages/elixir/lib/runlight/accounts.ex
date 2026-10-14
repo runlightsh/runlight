@@ -143,8 +143,7 @@ defmodule Runlight.Accounts do
           else:
             all(
               acc,
-              "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = #{if my, do: "DATABASE()", else: "current_schema()"}",
-              [name]
+              "SELECT column_name AS name FROM information_schema.columns WHERE table_name = '#{name}' AND table_schema = #{if my, do: "DATABASE()", else: "current_schema()"}"
             )
 
       unless Enum.any?(fields, &(&1["name"] == "site")), do: run(acc, "ALTER TABLE #{name} ADD COLUMN site TEXT")

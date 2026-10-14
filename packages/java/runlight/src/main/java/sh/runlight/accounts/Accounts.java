@@ -168,9 +168,10 @@ public final class Accounts {
                     db.dialect().equals("sqlite")
                         ? db.all("PRAGMA table_info(" + name + ")")
                         : db.all(
-                            "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = "
-                                + (my ? "DATABASE()" : "current_schema()"),
-                            List.of(name));
+                            "SELECT column_name AS name FROM information_schema.columns WHERE table_name = '"
+                                + name
+                                + "' AND table_schema = "
+                                + (my ? "DATABASE()" : "current_schema()"));
                 if (fields.stream().noneMatch(c -> "site".equals(c.get("name"))))
                   db.run("ALTER TABLE " + name + " ADD COLUMN site TEXT");
               }

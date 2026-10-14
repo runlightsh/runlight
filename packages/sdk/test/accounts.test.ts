@@ -58,6 +58,19 @@ test("two-factor secrets sealed by the server open here, and the other way round
 });
 
 for (const kind of STORES) {
+  test(`${kind}: reopening accounts preserves scoped invitations and existing columns`, async () => {
+    const store = freshStore(kind);
+    const { Accounts } = await import("../src/accounts/auth.js");
+    const now = Date.UTC(2026, 9, 14, 12);
+    const first = new Accounts(store, "a server secret long enough");
+    await first.setPassword("owner@example.com", "a long password", now);
+    await first.invite("member@example.com", "member", "owner@example.com", now, "alpha");
+    const reopened = new Accounts(store, "a server secret long enough");
+    assert.equal(await reopened.count(), 1);
+    assert.equal((await reopened.invites(now))[0]!.site, "alpha");
+    assert.equal((await reopened.byEmail("owner@example.com"))!.site, undefined);
+  });
+
   test(`${kind}: an app with accounts on makes its first account with its token, then invites people by role`, async () => {
     const rl = runlight({ store: freshStore(kind), secret: "k".repeat(64) });
     const { handler } = rl.routes({ token: "app-token", accounts: true });

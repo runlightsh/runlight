@@ -521,7 +521,7 @@ impl Accounts {
                 db.all(&format!("PRAGMA table_info({name})"), params![]).await?
             } else {
                 let schema = if my { "DATABASE()" } else { "current_schema()" };
-                db.all(&format!("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = {schema}"), params![name]).await?
+                db.all(&format!("SELECT column_name AS name FROM information_schema.columns WHERE table_name = '{name}' AND table_schema = {schema}"), params![]).await?
             };
             if !fields.iter().any(|row| row.text("name") == "site") {
                 db.run(&format!("ALTER TABLE {name} ADD COLUMN site TEXT"), params![]).await?;

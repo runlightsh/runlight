@@ -265,7 +265,7 @@ class Accounts:
             )
             for table_name in ("rl_users", "rl_invites"):
                 fields = db.all(f"PRAGMA table_info({table_name})") if db.dialect() == "sqlite" else db.all(
-                    f"SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = {'DATABASE()' if my else 'current_schema()'}", [table_name])
+                    f"SELECT column_name AS name FROM information_schema.columns WHERE table_name = '{table_name}' AND table_schema = {'DATABASE()' if my else 'current_schema()'}")
                 if not any(c.get("name", c.get("NAME")) == "site" for c in fields):
                     db.run(f"ALTER TABLE {table_name} ADD COLUMN site TEXT")
             # A server has one owner. One from before, with several, keeps the first and the rest become admins,
