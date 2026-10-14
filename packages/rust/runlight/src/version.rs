@@ -2,7 +2,7 @@
 //! has them.
 
 /// The SDK's version.
-pub const VERSION: &str = "0.1.4";
+pub const VERSION: &str = "0.1.5";
 
 /// Bumped when the HTTP API changes shape, so the dashboard and the hub can tell.
 pub const API_VERSION: u32 = 1;
