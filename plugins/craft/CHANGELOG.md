@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Updated the Runlight library to 0.1.6, keeping the dashboard, account-security, and database migration improvements from 0.1.5.
+
 ## 0.1.5 - 2026-10-14
 
 ### Changed

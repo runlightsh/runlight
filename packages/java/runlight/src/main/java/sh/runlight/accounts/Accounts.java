@@ -564,7 +564,10 @@ public final class Accounts {
         });
   }
 
-  /** As {@link #setPassword(String, String, long, String)}, the role chosen for a new account. */
+  /**
+   * As {@link #setPassword(String, String, long, String, String...)}, the role chosen for a new
+   * account.
+   */
   public Map<String, Object> setPassword(String email, String password, long now) {
     return setPassword(email, password, now, null);
   }
