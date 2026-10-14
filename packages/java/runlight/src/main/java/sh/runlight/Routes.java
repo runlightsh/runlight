@@ -2174,7 +2174,9 @@ public final class Routes {
                 "text",
                 said,
                 "html",
-                "<p style=\"font-family:sans-serif;font-size:15px\">" + escapeHtml(said) + "</p>"));
+                "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p style=\"font-family:sans-serif;font-size:15px\">"
+                    + escapeHtml(said)
+                    + "</p>"));
         return json(Json.object("ok", true));
       }
 

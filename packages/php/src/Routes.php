@@ -1426,7 +1426,7 @@ final class Routes
                     'to' => $to,
                     'subject' => $t('email.test.subject'),
                     'text' => $t('email.test.body', ['service' => $name]),
-                    'html' => '<p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
+                    'html' => '<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
                 ]);
                 return self::json(['ok' => true]);
             }

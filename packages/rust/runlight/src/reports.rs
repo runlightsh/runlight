@@ -359,12 +359,7 @@ pub async fn build_report(
         None => dashboard_link.to_string(),
     };
     let at = t("email.at", &[("where", place.clone().into())]);
-    // The Runlight mark in table cells: mail apps block SVG and most inline images.
-    let mark = format!(
-        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse\"><tr>
-<td class=\"rl-mark\" width=\"24\" height=\"24\" align=\"center\" style=\"width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:{font}\">R</td>
-<td class=\"rl-ink\" style=\"padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:{font}\">Runlight</td></tr></table>"
-    );
+    let mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\">";
 
     let footer = t(
         "email.footer",

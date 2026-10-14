@@ -183,7 +183,7 @@ pub(crate) async fn send_test_mail(rl: &Runlight, to: &str, lang: &str) -> R {
         to: to.to_string(),
         subject: t("email.test.subject", &[]),
         text: body.clone(),
-        html: format!("<p style=\"font-family:sans-serif;font-size:15px\">{}</p>", escape_html(&body)),
+        html: format!("<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p style=\"font-family:sans-serif;font-size:15px\">{}</p>", escape_html(&body)),
         ..Message::default()
     })
     .await?;

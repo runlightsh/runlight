@@ -256,10 +256,7 @@ func BuildReport(ctx context.Context, r *Runlight, site SiteRow, frequency strin
 		where = u.Host() + strings.TrimSuffix(u.Pathname, "/")
 	}
 	at := tr.T("email.at", Vars{"where": where})
-	// The Runlight mark in table cells: mail apps block SVG and most inline images.
-	mark := `<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>
-<td class="rl-mark" width="24" height="24" align="center" style="width:24px;height:24px;background:#111827;border-radius:7px;color:#ffffff;font-size:15px;font-weight:700;line-height:24px;text-align:center;font-family:` + font + `">R</td>
-<td class="rl-ink" style="padding-left:8px;font-size:15px;font-weight:700;color:#111827;font-family:` + font + `">Runlight</td></tr></table>`
+	mark := `<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px">`
 
 	frequencyWord := tr.T("email.weekly", nil)
 	if monthly {

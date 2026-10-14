@@ -1,3 +1,4 @@
+import { EMAIL_LOGO } from "../brand.js";
 /**
  * Accounts on the web: sign-in, the code step, invites, first-run setup, and the Account and People APIs, under
  * the base path the routes answer at. The standalone server and an app with routes({ accounts: true }) share it.
@@ -185,7 +186,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
         to: invite.email,
         subject: `${invite.invitedBy} invited you to Runlight`,
         text: `${invite.invitedBy} invited you to the Runlight at ${host} as ${what}.\n\nChoose a password to join:\n${link}\n\nThe link works for seven days.\n`,
-        html: `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><p>${esc(invite.invitedBy)} invited you to the Runlight at ${esc(host)} as ${what}.</p><p><a href="${esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>`,
+        html: `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px">${EMAIL_LOGO}<p>${esc(invite.invitedBy)} invited you to the Runlight at ${esc(host)} as ${what}.</p><p><a href="${esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>`,
       });
       return { link, emailed: true };
     } catch (error) {
@@ -211,7 +212,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       to: user.email,
       subject: "Sign in to Runlight",
       text: `Someone, most likely you, signed in to Runlight at ${host} with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n${link}\n\nIf this was not you, change your password, since someone knows it.\n`,
-      html: `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px"><p>Someone, most likely you, signed in to Runlight at ${esc(host)} with your password while your account was held up by too many failed tries.</p><p><a href="${esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>`,
+      html: `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px">${EMAIL_LOGO}<p>Someone, most likely you, signed in to Runlight at ${esc(host)} with your password while your account was held up by too many failed tries.</p><p><a href="${esc(link)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>`,
     });
     return true;
   }
