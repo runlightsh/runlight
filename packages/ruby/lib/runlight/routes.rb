@@ -600,6 +600,10 @@ module Runlight
     end
 
     # Whether this request acts as the owner. "read" is someone signed in who may only read, such as a viewer.
+    def session_scope(request)
+      @web.signed_in(request) if @web
+    end
+
     def can_read(request)
       return true if @managed.key?(request)
 
@@ -609,6 +613,8 @@ module Runlight
         given = bearer(request)
         return true if authorize.nil? && !@token.nil? && @token != "" && given != "" && constant_time_equal(given, @token)
 
+        scoped = session_scope(request)
+        return false if scoped && !scoped["site"].nil? && Http::Url.new(request.url).pathname.delete_prefix(@base).start_with?("/oauth/")
         answer = authorize.nil? ? @web.access(request) : authorize.call(request)
         # A member changes things like an owner, apart from the few controls admin_only? names.
         @members[request] = true if answer == "member"
@@ -1248,7 +1254,7 @@ module Runlight
             "to" => to,
             "subject" => t.call("email.test.subject"),
             "text" => t.call("email.test.body", { "service" => name }),
-            "html" => "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p style=\"font-family:sans-serif;font-size:15px\">#{escape_html(t.call("email.test.body", { "service" => name }))}</p>",
+            "html" => "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">#{escape_html(t.call("email.test.body", { "service" => name }))}</p>",
           })
           return json({ "ok" => true })
         end
@@ -1535,6 +1541,27 @@ module Runlight
     def api(request, path, url)
       rl = @rl
       method = request.method
+      scoped = session_scope(request)
+      if scoped && !scoped["site"].nil?
+        rl.init
+        site = scoped["site"]
+        return coded("Unknown site", "unknown_site", 404) if rl.site(site).nil?
+        asked = url.search_params.get("site")
+        site_path = path.match(%r{\A/api/sites/([^/]+)\z})
+        return coded("Unknown site", "unknown_site", 404) if (!asked.nil? && asked != site) || (site_path && decode_part(site_path[1]) != site)
+        read = method == "GET" && shared_path?(path)
+        assistant = (path == "/api/assistant" && method == "GET") || (path == "/api/assistant/chat" && method == "POST")
+        manage = scoped["role"] == "member" && manage_path(method, path)
+        return coded("Your account only has access to its assigned site", "site_access", 403) unless read || assistant || manage
+        if path == "/api/assistant/chat"
+          parsed, body = Js.parse_json(request.text)
+          return coded("Unknown site", "unknown_site", 404) unless parsed && Js.object?(body) && Js.get(body, "site") == site
+        end
+        url = Http::Url.new(url.href)
+        query = url.search_params
+        query.set("site", site)
+        url.search_params = query
+      end
       # An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
       if !request.headers.get(EMBED_HEADER).nil? && !(method == "GET" && shared_path?(path))
         return coded("Not available on a shared dashboard", "share_not_available", 403)
@@ -1987,6 +2014,10 @@ module Runlight
         id = decode_part(site_match[1])
         return coded("Unknown site", "unknown_site", 404) if id.nil?
 
+        if @web && session_scope(request)
+          refused = @web.confirm_password(request)
+          return refused unless refused.nil?
+        end
         begin
           rl.delete_site(id)
           return json({ "ok" => true })
@@ -2209,7 +2240,8 @@ module Runlight
       share_id = request.headers.get(SHARE_HEADER)
       shared = nil
       # The one site a share or a site's API token may read; nil for every site.
-      only = nil
+      scoped = session_scope(request)
+      only = scoped && scoped["site"]
       embed = request.headers.get(EMBED_HEADER)
       if share_id.nil? && !embed.nil?
         token = embed_reader(embed)
@@ -2225,7 +2257,7 @@ module Runlight
         if access != true
           return coded("API tokens can only read", "token_read_only", 403) unless shared_path?(path)
 
-          only = access["site"] != "" ? access["site"] : nil
+          only = scoped && scoped["site"] || (access["site"] != "" ? access["site"] : nil)
         end
       else
         shared = share_id.match?(SHARE_ID) ? store.share_by_id(share_id) : nil
@@ -2259,7 +2291,7 @@ module Runlight
           row
         end
         # A share never learns how the install is run.
-        return json(shared.nil? ? { "sites" => rows, "managed" => rl.managed_sites } : { "sites" => rows })
+        return json(shared.nil? ? { "sites" => rows, "managed" => !(scoped && scoped["site"]) && rl.managed_sites } : { "sites" => rows })
       end
 
       site = if !shared.nil?

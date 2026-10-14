@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, type Link, type LinkStats, type Row, type View } from "./api.js";
@@ -628,7 +629,7 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
         <span>{t("panel.links")}</span>
         <span class="num-head">{t("links.clicks")}</span>
       </div>
-      {!links ? <p class="empty">{t("common.loading")}</p> : null}
+      {!links ? <Loading /> : null}
       <ol class="rows">
         {top.map((l) => (
           <li>

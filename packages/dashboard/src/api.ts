@@ -166,6 +166,7 @@ export interface Funnel {
 
 /** Someone invited to the standalone server who has not chosen a password yet. */
 export interface PendingInvite {
+  site?: string;
   id: string;
   email: string;
   role: "owner" | "admin" | "member" | "viewer";
@@ -186,6 +187,7 @@ export interface InviteSent {
 }
 
 export interface Person {
+  site?: string;
   id: string;
   email: string;
   role: "owner" | "admin" | "member" | "viewer";
@@ -430,7 +432,7 @@ export const api = {
   pickTicket: (site: string, origin: string, back: string, nonce: string) => send<{ ticket: string }>("POST", `pick${siteQuery(site)}`, { origin, return: back, nonce }),
   resetTwoFactor: (id: string, password: string) => send<{ ok: true }>("DELETE", `people/${id}/2fa`, { password }),
   people: () => get<{ people: Person[]; invites?: PendingInvite[] }>("people", new URLSearchParams()),
-  addPerson: (email: string, role: Person["role"]) => send<InviteSent>("POST", "people", { email, role }),
+  addPerson: (email: string, role: Person["role"], site?: string) => send<InviteSent>("POST", "people", { email, role, ...(site === undefined ? { allSites: true } : { site }) }),
   resendInvite: (id: string) => send<InviteSent>("POST", `invites/${id}/resend`, {}),
   cancelInvite: (id: string) => del(`invites/${id}`),
   handOver: (id: string, password: string) => send<{ people: Person[] }>("POST", `people/${id}/owner`, { password }),
@@ -490,7 +492,7 @@ export const api = {
       return r;
     }),
   addSite: (site: { name: string; hostnames?: string; timezone?: string; remote?: { url: string; token: string } }) => send<{ site: Site }>("POST", "sites", site),
-  deleteSite: (id: string) => del(`sites/${encodeURIComponent(id)}`),
+  deleteSite: (id: string, password?: string) => send<{ ok: true }>("DELETE", `sites/${encodeURIComponent(id)}`, password === undefined ? {} : { password }),
   stats: (view: View) => get<{ range: Range; compare?: { from: string; to: string }; stats: Stats; previous?: Stats }>("stats", viewParams(view)),
   series: (view: View) => get<{ range: Range; points: Point[]; previous?: Point[] }>("series", viewParams(view)),
   breakdown: (view: View, dimension: string, limit: number) => {

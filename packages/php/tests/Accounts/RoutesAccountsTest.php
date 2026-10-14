@@ -94,7 +94,7 @@ final class RoutesAccountsTest extends TestCase
         $this->assertSame('owner', Json::decode($json($owner, 'GET', '/api/account')->text(), true)['account']['role']);
 
         // The owner invites a member, who joins with their own password.
-        $sent = Json::decode($json($owner, 'POST', '/api/people', ['email' => 'mo@example.com', 'role' => 'member'])->text(), true);
+        $sent = Json::decode($json($owner, 'POST', '/api/people', ['allSites' => true, 'email' => 'mo@example.com', 'role' => 'member'])->text(), true);
         $this->assertFalse($sent['emailed'], 'no mail service here, so the link is for passing on');
         $link = new Url($sent['link']);
         $this->assertSame('/runlight/invite', $link->pathname);

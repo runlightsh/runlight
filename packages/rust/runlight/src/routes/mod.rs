@@ -597,6 +597,13 @@ impl Routes {
     }
 
     /// Whether this request acts as the owner.
+    pub(crate) async fn session_scope(&self, request: &Request) -> Result<Option<crate::accounts::User>, crate::Error> {
+        if let Some(web) = &self.0.web {
+            return web.signed_in(request).await;
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn can_read(&self, request: &Request, call: &Call) -> CanRead {
         if call.is_managed() {
             return CanRead::Yes;
@@ -611,6 +618,11 @@ impl Routes {
                 && constant_time_equal(&given, token)
             {
                 return CanRead::Yes;
+            }
+            match self.session_scope(request).await {
+                Err(_) => return CanRead::No,
+                Ok(Some(user)) if user.site.is_some() && request.url.contains("/oauth/") => return CanRead::No,
+                _ => {}
             }
             let answer = match &inner.options.authorize {
                 Some(authorize) => authorize(request).await,

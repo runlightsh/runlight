@@ -58,7 +58,7 @@ class AccountsRoutesAccountsTest < RoutesTestCase
     assert_equal "owner", Json.decode(json.call(owner, "GET", "/api/account").text)["account"]["role"]
 
     # The owner invites a member, who joins with their own password.
-    sent = Json.decode(json.call(owner, "POST", "/api/people", { "email" => "mo@example.com", "role" => "member" }).text)
+    sent = Json.decode(json.call(owner, "POST", "/api/people", { "allSites" => true, "email" => "mo@example.com", "role" => "member" }).text)
     assert_equal false, sent["emailed"], "no mail service here, so the link is for passing on"
     link = Url.new(sent["link"])
     assert_equal "/runlight/invite", link.pathname
@@ -93,7 +93,7 @@ class AccountsRoutesAccountsTest < RoutesTestCase
     end
     owner = cookie_of(handler.call(form("/runlight/setup", { "code" => "app-token", "email" => "jon@example.com", "password" => "a long password", "again" => "a long password" })))
     join = lambda do |email, role, by = owner|
-      Url.new(Json.decode(json.call(by, "POST", "/api/people", { "email" => email, "role" => role }).text)["link"]).search_params.get("code").to_s
+      Url.new(Json.decode(json.call(by, "POST", "/api/people", { "allSites" => true, "email" => email, "role" => role }).text)["link"]).search_params.get("code").to_s
     end
     accept = ->(code) { handler.call(form("/runlight/invite", { "code" => code, "password" => "a long password", "again" => "a long password" })) }
     admin = cookie_of(accept.call(join.call("ada@example.com", "admin")))

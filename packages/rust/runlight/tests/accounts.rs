@@ -283,6 +283,7 @@ fn pages_match() {
             "invitePage" => pages::invite_page(
                 base,
                 &InvitePage {
+                    site: None,
                     code: s(o, "code"),
                     email: s(o, "email"),
                     role: s(o, "role"),
@@ -317,7 +318,9 @@ fn setup_asks_for_the_token_when_told() {
     assert!(page.contains("RUNLIGHT_TOKEN"));
     assert!(page.contains(r#"action="/runlight/setup""#));
     assert!(page.contains(r#"href="/runlight/auth.css""#));
-    let invite =
-        pages::invite_page("", &InvitePage { code: "c", email: "a@b.c", role: "member", host: "x", error: None });
+    let invite = pages::invite_page(
+        "",
+        &InvitePage { site: None, code: "c", email: "a@b.c", role: "member", host: "x", error: None },
+    );
     assert!(invite.contains("as a member"));
 }

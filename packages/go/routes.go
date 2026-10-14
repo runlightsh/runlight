@@ -240,6 +240,13 @@ const (
 
 // canRead says whether this request acts as the owner. canReadOnly is
 // someone signed in who may only read, such as a viewer.
+func (rt *Routes) sessionScope(c *call) (*User, error) {
+	if rt.web != nil {
+		return rt.web.SignedIn(c.ctx, c.req)
+	}
+	return nil, nil
+}
+
 func (rt *Routes) canRead(c *call) canResult {
 	if c.managed != nil {
 		return canFull
@@ -249,6 +256,13 @@ func (rt *Routes) canRead(c *call) canResult {
 		given := bearer(c.req)
 		if rt.options.Authorize == nil && rt.tokenSet && given != "" && constantTimeEqual(given, rt.token) {
 			return canFull
+		}
+		scoped, err := rt.sessionScope(c)
+		if err != nil {
+			return canNo
+		}
+		if scoped != nil && scoped.Site != "" && strings.Contains(c.req.URL, "/oauth/") {
+			return canNo
 		}
 		var answer Access
 		if rt.options.Authorize != nil {
@@ -1215,7 +1229,7 @@ func (rt *Routes) mailRoutes(c *call, path string, u *whatwg.URL) (*Response, er
 			name = js.String(settings.Value("via"))
 		}
 		text := tr.T("email.test.body", Vars{"service": name})
-		if err := rt.r.SendMail(ctx, MailMessage{To: to, Subject: tr.T("email.test.subject", nil), Text: text, HTML: `<img src="https://runlight.sh/icon-192.png" width="64" height="64" alt="Runlight" style="display:block;width:64px;height:64px;border:0;border-radius:14px"><p style="font-family:sans-serif;font-size:15px">` + escapeHTML(text) + `</p>`}); err != nil {
+		if err := rt.r.SendMail(ctx, MailMessage{To: to, Subject: tr.T("email.test.subject", nil), Text: text, HTML: `<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">` + escapeHTML(text) + `</p>`}); err != nil {
 			return nil, err
 		}
 		return jsonAnswer(js.NewObject("ok", true), 200), nil

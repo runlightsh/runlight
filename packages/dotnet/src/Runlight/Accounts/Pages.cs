@@ -36,6 +36,14 @@ main button { width: 100%; height: 40px; margin-top: 6px; border: 0; border-radi
 .theme:hover { color: var(--ink); }
 .theme svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .theme svg:not(.on) { display: none; }
+.strength { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.strength[hidden] { display: none; }
+.strength-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; width: 120px; }
+.strength-bar span { height: 4px; border-radius: 2px; background: var(--line); }
+.strength[data-score="0"] .strength-label, .strength[data-score="1"] .strength-label { color: var(--bad); }
+.strength[data-score="1"] .on { background: var(--bad); }
+.strength[data-score="2"] .on { background: #b7791f; }
+.strength[data-score="3"] .on, .strength[data-score="4"] .on { background: #22a065; }
 .secret { position: relative; display: block; margin-top: 6px; }
 .secret input { margin-top: 0; padding-right: 44px; }
 .eye { position: absolute; top: 50%; right: 5px; display: grid; place-items: center; width: 32px; height: 30px; margin: 0; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); transform: translateY(-50%); cursor: pointer; }
@@ -47,6 +55,37 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
     /// <summary>Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D).</summary>
     public const string AuthJs = """
 (() => {
+  const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
+  function strength(password, avoid = []) {
+    if (password.length < 10) return 0;
+    let pool = 0;
+    if (/[a-z]/.test(password)) pool += 26;
+    if (/[A-Z]/.test(password)) pool += 26;
+    if (/[0-9]/.test(password)) pool += 10;
+    if (/[^A-Za-z0-9]/.test(password)) pool += 33;
+    // Each character only counts once it adds something new: a pattern repeating ("abab", "Aa1!Aa1!",
+    // "aaaa") adds nothing, and a doubled letter or a run like "abc" adds little.
+    let effective = 0;
+    for (let i = 0; i < password.length; i++) {
+      const c = password.charCodeAt(i);
+      const prev = password.charCodeAt(i - 1);
+      let pattern = false;
+      for (let k = 1; k <= 4 && !pattern; k++) pattern = i - 1 - k >= 0 && password[i] === password[i - k] && password[i - 1] === password[i - 1 - k];
+      const repeat = i > 0 && c === prev;
+      const run = i > 1 && c - prev === prev - password.charCodeAt(i - 2) && Math.abs(c - prev) === 1;
+      effective += pattern ? 0 : repeat || run ? 0.25 : 1;
+    }
+    let bits = effective * Math.log2(Math.max(pool, 10));
+    const lower = password.toLowerCase();
+    for (const word of [...COMMON, ...avoid.map((a) => a.toLowerCase()).filter((a) => a.length >= 3)]) {
+      // Every time it appears, so "jonjonjon" costs three times.
+      bits -= (lower.split(word).length - 1) * word.length * 3;
+    }
+    if (bits < 40) return 1;
+    if (bits < 60) return 2;
+    if (bits < 80) return 3;
+    return 4;
+  }
   const KEY = "runlight_theme";
   const root = document.documentElement;
   const read = () => { try { const v = localStorage.getItem(KEY); return v === "dark" || v === "system" ? v : "light"; } catch { return "light"; } };
@@ -83,6 +122,30 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
       set(false);
       eye.addEventListener("click", () => set(input.type === "password"));
       wrap.append(eye);
+    }
+    const password = document.querySelector('input[name="password"][autocomplete="new-password"]');
+    if (password) {
+      const meter = document.createElement("span");
+      meter.className = "strength";
+      meter.id = "password-strength";
+      meter.setAttribute("aria-live", "polite");
+      meter.innerHTML = '<span class="strength-bar" aria-hidden="true"><span></span><span></span><span></span><span></span></span><span class="strength-label"></span>';
+      password.closest(".secret").after(meter);
+      password.setAttribute("aria-describedby", meter.id);
+      const email = document.querySelector('input[name="email"]');
+      const update = () => {
+        const address = email?.value || "";
+        const score = strength(password.value, [address, address.split("@")[0]]);
+        meter.hidden = !password.value;
+        meter.dataset.score = String(score);
+        meter.querySelector(".strength-label").textContent = ["Too short", "Weak", "Fair", "Good", "Strong"][score];
+        meter.querySelectorAll(".strength-bar span").forEach((bar, i) => bar.classList.toggle("on", score > i));
+      };
+      password.addEventListener("input", update);
+      password.addEventListener("change", update);
+      email?.addEventListener("input", update);
+      window.addEventListener("pageshow", update);
+      update();
     }
     show();
     document.querySelector(".theme")?.addEventListener("click", () => set({ light: "dark", dark: "system", system: "light" }[read()]));
@@ -139,8 +202,9 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
     }
 
     /// <summary>What someone invited with a role can do, after "as".</summary>
-    public static string RoleText(string role)
+    public static string RoleText(string role, string? site = null)
     {
+        if (site != null) return role == "viewer" ? "a viewer, who can read the stats for " + site + " only" : "a member, who can change the settings of " + site + " only";
         if (role == "viewer")
         {
             return "a viewer, who can read every site's stats";
@@ -153,13 +217,13 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
     }
 
     /// <summary>Where an invited person chooses a password and joins.</summary>
-    public static string InvitePage(string basePath, string code, string email, string role, string host, string? error = null)
+    public static string InvitePage(string basePath, string code, string email, string role, string host, string? error = null, string? site = null)
     {
         string b = Esc(basePath);
         return Page(
             basePath,
             "Join Runlight",
-            "<h1>Join Runlight</h1>\n<p>You were invited to " + Esc(host) + " as " + RoleText(role) + ". Choose a password to finish.</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
+            "<h1>Join Runlight</h1>\n<p>You were invited to " + Esc(host) + " as " + Esc(RoleText(role, site)) + ". Choose a password to finish.</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
                 + b + "/invite\">\n<input type=\"hidden\" name=\"code\" value=\"" + Esc(code) + "\">\n<label>Email<input type=\"email\" value=\"" + Esc(email)
                 + "\" disabled></label>\n<label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required autofocus></label>\n<label>Password again<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<button type=\"submit\">Join</button>\n</form>\n<p class=\"hint\">Use at least ten characters.</p>");
     }
@@ -179,7 +243,7 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
         return Page(
             basePath,
             "Create your account",
-            "<h1>Create your account</h1>\n<p>This account owns the dashboard. You can invite more people later in Settings, People.</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
+            "<h1>Create your account</h1>\n<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
                 + b + "/setup\">\n" + field + "\n<label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\"" + Esc(email ?? "")
                 + "\"></label>\n<label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<label>Password again<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<button type=\"submit\">Create account</button>\n</form>\n<p class=\"hint\">Use at least ten characters.</p>");
     }

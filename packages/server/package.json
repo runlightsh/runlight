@@ -27,6 +27,7 @@
   },
   "files": [
     "dist",
+    "assets",
     "README.md",
     "LICENSE"
   ],
@@ -36,6 +37,7 @@
     "test": "TZ=UTC node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
+    "@cronwatch/sdk": "^0.14.1",
     "@runlight/sdk": "0.1.4",
     "better-sqlite3": "^13.0.3",
     "mmdb-lib": "^3.0.3",

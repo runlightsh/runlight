@@ -4,6 +4,10 @@ module AccountsSupport
   # The little of a Runlight that accounts on the web reach for: its store, its mail, and the client's address.
   # Mail is kept in a list instead of sent; `mail_fails` makes sending raise.
   class StandIn
+    def init
+      nil
+    end
+
     attr_reader :store, :sent
     attr_accessor :mail, :mail_fails
 

@@ -22,6 +22,7 @@ import { Geo, fileLookup } from "./geo.js";
 import { secretIn } from "./secret.js";
 import { createServer } from "./server.js";
 import { VERSION } from "./version.js";
+import { createMonitoring } from "./monitoring.js";
 
 const env = (name: string) => process.env[name]?.trim() || undefined;
 
@@ -118,7 +119,10 @@ async function main(): Promise<void> {
   const lookup = geo ? geo.lookup : geoSetting !== "off" ? fileLookup(path.resolve(geoSetting)) : undefined;
   const url = env("RUNLIGHT_URL");
   if (url && !/^https?:\/\/[^/?#]+\/?$/.test(url)) throw new Error("Set RUNLIGHT_URL to the dashboard's address only, such as https://stats.example.com");
+  let monitoring: ReturnType<typeof createMonitoring> | null = null;
+  const mailTo = env("CRONWATCH_MAIL_TO");
   const server = createServer({
+    ...(mailTo ? { monitoring: (request: Request) => monitoring!.handler(request) } : {}),
     ...(lookup ? { geo: lookup } : {}),
     ...(url ? { url } : {}),
     geoCredit: Boolean(geo),
@@ -149,6 +153,11 @@ async function main(): Promise<void> {
   if (command && command !== "start") throw new Error(`Unknown command "${command}". Run npx runlight.sh --help.`);
 
   await server.runlight.init();
+  if (mailTo) {
+    if (!(await server.runlight.mailSettings())) throw new Error("Configure Runlight's mail service before enabling CronWatch alerts");
+    monitoring = createMonitoring({ runlight: server.runlight, dataDir, to: mailTo, ...(url ? { url } : {}), ...(geo ? { geo } : {}) });
+    monitoring.start();
+  }
   const port = Number(env("PORT") ?? 3000);
   const host = env("HOST") ?? "0.0.0.0";
   const http = createHttpServer(async (req, res) => {
@@ -175,8 +184,8 @@ async function main(): Promise<void> {
 
   // The scheduled check (salts, email reports, retention, and rollups) and this month's location data: now, then every five minutes.
   const tick = () => {
-    server.check().catch((error) => console.error("Runlight: the scheduled check failed", error));
-    geo?.refresh().catch((error) => console.error("Runlight: could not refresh location data", error));
+    (monitoring ? monitoring.maintenance() : server.check()).catch((error) => console.error("Runlight: the scheduled check failed", error));
+    (monitoring ? monitoring.locations() : geo?.refresh())?.catch((error) => console.error("Runlight: could not refresh location data", error));
   };
   void tick();
   const timer = setInterval(tick, 5 * 60_000);
@@ -184,7 +193,7 @@ async function main(): Promise<void> {
 
   const stop = () => {
     clearInterval(timer);
-    http.close(() => void store.close().finally(() => process.exit(0)));
+    http.close(() => void (monitoring?.close() ?? Promise.resolve()).finally(() => store.close()).finally(() => process.exit(0)));
     setTimeout(() => process.exit(0), 5000).unref();
   };
   process.on("SIGTERM", stop);

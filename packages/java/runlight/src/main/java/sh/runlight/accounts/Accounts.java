@@ -163,6 +163,17 @@ public final class Accounts {
                       + str(my, 100)
                       + " NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)"
                       + table);
+              for (String name : List.of("rl_users", "rl_invites")) {
+                var fields =
+                    db.dialect().equals("sqlite")
+                        ? db.all("PRAGMA table_info(" + name + ")")
+                        : db.all(
+                            "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = "
+                                + (my ? "DATABASE()" : "current_schema()"),
+                            List.of(name));
+                if (fields.stream().noneMatch(c -> "site".equals(c.get("name"))))
+                  db.run("ALTER TABLE " + name + " ADD COLUMN site TEXT");
+              }
               // A server has one owner. One from before, with several, keeps the first and the
               // rest become admins, who can still do everything but remove the owner. Invites to
               // join as an owner become invites as an admin.
@@ -193,14 +204,21 @@ public final class Accounts {
   }
 
   private static Map<String, Object> row(Map<String, Object> r) {
-    return Json.object(
-        "id", Js.string(r.get("id")),
-        "email", Js.string(r.get("email")),
-        "hash", Js.string(r.get("hash")),
-        "role", roleFrom(r.get("role")),
-        "createdAt", Js.num(Js.toNumber(r.get("created_at"))),
-        "twoFactor", Js.truthy(r.get("totp_secret")),
-        "recoveryLeft", (long) stringList(r.get("totp_recovery")).size());
+    return withSite(
+        Json.object(
+            "id", Js.string(r.get("id")),
+            "email", Js.string(r.get("email")),
+            "hash", Js.string(r.get("hash")),
+            "role", roleFrom(r.get("role")),
+            "createdAt", Js.num(Js.toNumber(r.get("created_at"))),
+            "twoFactor", Js.truthy(r.get("totp_secret")),
+            "recoveryLeft", (long) stringList(r.get("totp_recovery")).size()),
+        r.get("site"));
+  }
+
+  public static Map<String, Object> withSite(Map<String, Object> value, Object site) {
+    if (site != null) value.put("site", site);
+    return value;
   }
 
   private static String id(Map<String, Object> user) {
@@ -478,6 +496,8 @@ public final class Accounts {
                 "Only the owner can change their own role, by handing ownership to an admin",
                 "owner_protected");
           }
+          if (user.get("site") != null && role.equals("admin"))
+            throw new AccountError("An admin needs access to all sites", "role_scope");
           if (role.equals("owner")) {
             throw new AccountError("Ownership is handed over by the owner", "owner_hand_over");
           }
@@ -514,7 +534,7 @@ public final class Accounts {
           if (next == null) {
             throw new AccountError("Unknown account", "unknown_account");
           }
-          if (!next.get("role").equals("admin")) {
+          if (next.get("site") != null || !next.get("role").equals("admin")) {
             throw new AccountError("Make them an admin first", "owner_needs_admin");
           }
           db().run("UPDATE rl_users SET role = 'owner' WHERE id = ?", List.of(to));
@@ -552,8 +572,13 @@ public final class Accounts {
    * Makes an account, or sets a new password on an existing one. A new account is the owner when it
    * is the first, and otherwise an admin unless a role is given, since a server has one owner.
    */
-  public Map<String, Object> setPassword(String email, String password, long now, String role) {
+  public Map<String, Object> setPassword(
+      String email, String password, long now, String role, String... sites) {
+    String site = sites.length > 0 ? sites[0] : null;
     init();
+    if (site != null && (site.isEmpty() || !("member".equals(role) || "viewer".equals(role)))) {
+      throw new AccountError("Choose member or viewer for one site", "role_scope");
+    }
     String address = Js.lower(Js.trim(email));
     if (!EMAIL.matcher(address).find()) {
       throw new AccountError("Enter an email address", "email_invalid");
@@ -590,19 +615,22 @@ public final class Accounts {
             "recoveryLeft",
             0L);
     db().run(
-            "INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            List.of(user.get("id"), user.get("email"), user.get("hash"), user.get("role"), now));
-    return user;
+            "INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)",
+            java.util.Arrays.asList(
+                user.get("id"), user.get("email"), user.get("hash"), user.get("role"), now, site));
+    return withSite(user, site);
   }
 
   private static Map<String, Object> inviteRow(Map<String, Object> r) {
-    return Json.object(
-        "id", Js.string(r.get("id")),
-        "email", Js.string(r.get("email")),
-        "role", roleFrom(r.get("role")),
-        "invitedBy", Js.string(r.get("invited_by")),
-        "createdAt", Js.num(Js.toNumber(r.get("created_at"))),
-        "expiresAt", Js.num(Js.toNumber(r.get("expires_at"))));
+    return withSite(
+        Json.object(
+            "id", Js.string(r.get("id")),
+            "email", Js.string(r.get("email")),
+            "role", roleFrom(r.get("role")),
+            "invitedBy", Js.string(r.get("invited_by")),
+            "createdAt", Js.num(Js.toNumber(r.get("created_at"))),
+            "expiresAt", Js.num(Js.toNumber(r.get("expires_at")))),
+        r.get("site"));
   }
 
   /** Invites that still work, newest first. Expired ones are cleared on the way. */
@@ -621,12 +649,17 @@ public final class Accounts {
    * Invites someone to join with a role, and returns the code for their link as {invite, code}.
    * Asking again replaces the earlier invite, so only the newest link works.
    */
-  public Map<String, Object> invite(String email, String role, String invitedBy, long now) {
+  public Map<String, Object> invite(
+      String email, String role, String invitedBy, long now, String... sites) {
+    String site = sites.length > 0 ? sites[0] : null;
     init();
-    return turn(() -> inviteNow(email, role, invitedBy, now));
+    return turn(() -> inviteNow(email, role, invitedBy, now, site));
   }
 
-  private Map<String, Object> inviteNow(String email, String role, String invitedBy, long now) {
+  private Map<String, Object> inviteNow(
+      String email, String role, String invitedBy, long now, String site) {
+    if (site != null && (site.isEmpty() || !(role.equals("member") || role.equals("viewer"))))
+      throw new AccountError("Choose member or viewer for one site", "role_scope");
     String address = Js.lower(Js.trim(email));
     if (!EMAIL.matcher(address).find()) {
       throw new AccountError("Enter an email address", "email_invalid");
@@ -646,10 +679,17 @@ public final class Accounts {
             "expiresAt", now + INVITE_MS);
     db().run("DELETE FROM rl_invites WHERE email = ?", List.of(address));
     db().run(
-            "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            List.of(
-                invite.get("id"), address, role, codeHash(code), invitedBy, now, now + INVITE_MS));
-    return Json.object("invite", invite, "code", code);
+            "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            java.util.Arrays.asList(
+                invite.get("id"),
+                address,
+                role,
+                codeHash(code),
+                invitedBy,
+                now,
+                now + INVITE_MS,
+                site));
+    return Json.object("invite", withSite(invite, site), "code", code);
   }
 
   private static String codeHash(String code) {
@@ -692,7 +732,7 @@ public final class Accounts {
             throw inviteGone();
           }
           Map<String, Object> sender = byEmail((String) invite.get("invitedBy"));
-          if (sender == null || !mayInvite(sender.get("role"))) {
+          if (sender == null || sender.get("site") != null || !mayInvite(sender.get("role"))) {
             db().run("DELETE FROM rl_invites WHERE id = ?", List.of(invite.get("id")));
             throw inviteGone();
           }
@@ -701,7 +741,9 @@ public final class Accounts {
             throw new AccountError(
                 email + " already has an account", "account_exists", Json.object("email", email));
           }
-          Map<String, Object> user = setPassword(email, password, now, (String) invite.get("role"));
+          Map<String, Object> user =
+              setPassword(
+                  email, password, now, (String) invite.get("role"), (String) invite.get("site"));
           db().run("DELETE FROM rl_invites WHERE id = ?", List.of(invite.get("id")));
           return user;
         });

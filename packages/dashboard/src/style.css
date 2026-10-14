@@ -2487,6 +2487,10 @@ h1 .home:hover {
   flex-shrink: 0;
 }
 
+.settings-heading { display: flex; align-items: center; gap: 6px; }
+.settings-sign-out { display: inline-flex; padding: 5px; border-radius: 5px; color: var(--muted); }
+.settings-sign-out:hover { color: var(--ink); background: var(--wash); }
+
 .settings-nav h2 {
   margin: 0 10px;
   font-size: 18px;
@@ -5329,3 +5333,22 @@ a.ghost {
 .assistant-action .settings-actions {
   flex-wrap: wrap;
 }
+
+.ownership-warning { flex-basis: 100%; max-width: 380px; }
+.ownership-warning p { margin: 8px 0; }
+.ownership-warning label, .invite-scope { display: flex; align-items: center; gap: 8px; }
+.ownership-warning input, .invite-scope input { width: auto; }
+
+.loading-skeleton { padding: 14px 0; }
+.loading-skeleton > div { animation: skeleton-pulse 1.8s ease-in-out infinite; }
+.loading-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 34px; }
+.loading-row span, .loading-bars span { display: block; background: var(--line); border-radius: 4px; }
+.loading-row span:first-child { height: 12px; max-width: 75%; }
+.loading-row span:last-child { height: 12px; width: 28px; flex-shrink: 0; }
+.loading-chart { padding: 24px 0; }
+.loading-bars { height: 160px; display: flex; align-items: end; gap: 12px; border-bottom: 1px solid var(--line); }
+.loading-bars span { flex: 1; border-radius: 5px 5px 0 0; }
+@keyframes skeleton-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .loading-skeleton > div { animation: none; } }
+
+.empty-setup { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--ink); font-size: 13px; text-underline-offset: 3px; }

@@ -163,7 +163,7 @@ class RoutesAccountsTest {
                 owner,
                 "POST",
                 "/api/people",
-                Json.object("email", "mo@example.com", "role", "member")));
+                Json.object("allSites", true, "email", "mo@example.com", "role", "member")));
     assertEquals(false, sent.get("emailed"), "no mail service here, so the link is for passing on");
     Url link = new Url((String) sent.get("link"));
     assertEquals("/runlight/invite", link.pathname);
@@ -247,7 +247,12 @@ class RoutesAccountsTest {
     Join join =
         (by, email, role) -> {
           Map<String, Object> sent =
-              body(json.call(by, "POST", "/api/people", Json.object("email", email, "role", role)));
+              body(
+                  json.call(
+                      by,
+                      "POST",
+                      "/api/people",
+                      Json.object("allSites", true, "email", email, "role", role)));
           return new Url((String) sent.get("link")).searchParams().get("code");
         };
     Function<String, Response> accept =

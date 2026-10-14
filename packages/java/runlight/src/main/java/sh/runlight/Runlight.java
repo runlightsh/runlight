@@ -2589,11 +2589,7 @@ public final class Runlight
     }
     // Every site's retention covers any one site's that is still waiting.
     pruning.clear();
-    try {
-      applyRetention(null);
-    } catch (RuntimeException error) {
-      log("Runlight: could not apply retention " + error.getMessage());
-    }
+    applyRetention(null);
     if (now() - optimizedAt >= 86_400_000L) {
       optimizedAt = now();
       store.optimize();

@@ -475,6 +475,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
 
   // Requests from a manage token, already checked against its one site, act as the owner's.
   const managed = new WeakMap<Request, TokenRow>();
+  // A session's site restriction is checked on every API call, including assistant and MCP reads.
+  const sessionScope = async (request: Request) => web ? web.signedIn(request) : null;
   // Requests from a member: full access apart from the install-wide controls.
   const members = new WeakSet<Request>();
   /** The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site. */
@@ -496,6 +498,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       // A script's bearer token still has full access beside the sign-ins.
       const given = bearer(request);
       if (!options.authorize && token && given && constantTimeEqual(given, token)) return true;
+      const scoped = await sessionScope(request);
+      if (scoped?.site !== undefined && new URL(request.url).pathname.slice(base.length).startsWith("/oauth/")) return false;
       const answer = options.authorize ? await options.authorize(request) : await web!.access(request);
       // A member changes things like an owner, apart from the few controls adminOnly() names.
       if (answer === "member") members.add(request);
@@ -1202,6 +1206,24 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   }
 
   async function api(request: Request, path: string, url: URL): Promise<Response> {
+    const scoped = await sessionScope(request);
+    if (scoped?.site !== undefined) {
+      await runlight.init();
+      if (!runlight.site(scoped.site)) return coded("Unknown site", "unknown_site", 404);
+      const asked = url.searchParams.get("site");
+      const sitePath = /^\/api\/sites\/([^/]+)$/.exec(path);
+      if ((asked !== null && asked !== scoped.site) || (sitePath && decodePart(sitePath[1]!) !== scoped.site)) return coded("Unknown site", "unknown_site", 404);
+      const read = request.method === "GET" && sharedPath(path);
+      const assistant = (path === "/api/assistant" && request.method === "GET") || (path === "/api/assistant/chat" && request.method === "POST");
+      const manage = scoped.role === "member" && managePath(request.method, path);
+      if (!read && !assistant && !manage) return coded("Your account only has access to its assigned site", "site_access", 403);
+      if (path === "/api/assistant/chat") {
+        const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
+        if (!body || body.site !== scoped.site) return coded("Unknown site", "unknown_site", 404);
+      }
+      url = new URL(url);
+      url.searchParams.set("site", scoped.site);
+    }
     // An embedded dashboard reads what a share link shows and nothing else, whoever else the request comes from.
     if (request.headers.get(EMBED_HEADER) !== null && !(request.method === "GET" && sharedPath(path))) {
       return coded("Not available on a shared dashboard", "share_not_available", 403);
@@ -1691,6 +1713,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (access !== true) return denied(access);
       const id = decodePart(siteMatch[1]!);
       if (id === null) return coded("Unknown site", "unknown_site", 404);
+      if (web && await sessionScope(request)) {
+        const refused = await web.confirmPassword(request);
+        if (refused) return refused;
+      }
       try {
         await runlight.deleteSite(id);
         return json({ ok: true });
@@ -1756,7 +1782,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     const shareId = request.headers.get(SHARE_HEADER);
     let shared: ShareRow | null = null;
     // The one site a share or a site's API token may read; null for every site.
-    let only: string | null = null;
+    let only: string | null = scoped?.site ?? null;
     if (shareId !== null) {
       shared = SHARE_ID.test(shareId) ? await runlight.store.shareById(shareId) : null;
       if (!shared) return coded("This share link no longer works", "share_gone", 404);
@@ -1773,7 +1799,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (access === false || access === "unconfigured") return denied(access);
       if (access !== true) {
         if (!sharedPath(path)) return coded("API tokens can only read", "token_read_only", 403);
-        only = access.site || null;
+        only = scoped?.site ?? (access.site || null);
       }
     }
 
@@ -1798,7 +1824,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         })),
       );
       // A share never learns how the install is run.
-      return json(shared ? { sites } : { sites, managed: runlight.managedSites });
+      return json(shared ? { sites } : { sites, managed: scoped?.site === undefined && runlight.managedSites });
     }
 
     const site = shared ? runlight.site(shared.site) : only ? runlight.site(url.searchParams.get("site") ?? only) : await querySite(url);

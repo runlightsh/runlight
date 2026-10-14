@@ -267,13 +267,13 @@ final class Web
     /** @param User $u */
     private static function person(array $u): array
     {
-        return ['id' => $u['id'], 'email' => $u['email'], 'role' => $u['role'], 'createdAt' => $u['createdAt'], 'twoFactor' => $u['twoFactor'], 'recoveryLeft' => $u['recoveryLeft']];
+        return [...(isset($u['site']) ? ['site' => $u['site']] : []), 'id' => $u['id'], 'email' => $u['email'], 'role' => $u['role'], 'createdAt' => $u['createdAt'], 'twoFactor' => $u['twoFactor'], 'recoveryLeft' => $u['recoveryLeft']];
     }
 
     /** @param Invite $i */
     private static function inviteView(array $i): array
     {
-        return ['id' => $i['id'], 'email' => $i['email'], 'role' => $i['role'], 'invitedBy' => $i['invitedBy'], 'createdAt' => $i['createdAt'], 'expiresAt' => $i['expiresAt']];
+        return [...(isset($i['site']) ? ['site' => $i['site']] : []), 'id' => $i['id'], 'email' => $i['email'], 'role' => $i['role'], 'invitedBy' => $i['invitedBy'], 'createdAt' => $i['createdAt'], 'expiresAt' => $i['expiresAt']];
     }
 
     /** The media type of a request's body, as a cross-site form cannot send application/json. */
@@ -329,7 +329,7 @@ final class Web
         $origin = $this->homeOrigin() ?? (new Url($request->url))->origin();
         $link = "$origin$this->base/invite?code=$code";
         $host = (new Url($origin))->host();
-        $what = Pages::roleText($invite['role']);
+        $what = Pages::roleText($invite['role'], $invite['site'] ?? null);
         if (!$this->rl->mailSettings()) {
             return ['link' => $link, 'emailed' => false];
         }
@@ -338,7 +338,7 @@ final class Web
                 'to' => $invite['email'],
                 'subject' => "{$invite['invitedBy']} invited you to Runlight",
                 'text' => "{$invite['invitedBy']} invited you to the Runlight at $host as $what.\n\nChoose a password to join:\n$link\n\nThe link works for seven days.\n",
-                'html' => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>" . self::esc($invite['invitedBy']) . ' invited you to the Runlight at ' . self::esc($host) . " as $what.</p><p><a href=\"" . self::esc($link) . '" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>',
+                'html' => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>" . self::esc($invite['invitedBy']) . ' invited you to the Runlight at ' . self::esc($host) . " as " . self::esc($what) . ".</p><p><a href=\"" . self::esc($link) . '" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Choose a password and join</a></p><p style="color:#6b7280;font-size:13px">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>',
             ]);
             return ['link' => $link, 'emailed' => true];
         } catch (\Throwable $error) {
@@ -378,7 +378,7 @@ final class Web
             'to' => $user['email'],
             'subject' => 'Sign in to Runlight',
             'text' => "Someone, most likely you, signed in to Runlight at $host with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n$link\n\nIf this was not you, change your password, since someone knows it.\n",
-            'html' => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>Someone, most likely you, signed in to Runlight at " . self::esc($host) . ' with your password while your account was held up by too many failed tries.</p><p><a href="' . self::esc($link) . '" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>',
+            'html' => "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>Someone, most likely you, signed in to Runlight at " . self::esc($host) . ' with your password while your account was held up by too many failed tries.</p><p><a href="' . self::esc($link) . '" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">Sign in</a></p><p style="color:#6b7280;font-size:13px">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>',
         ]);
         return true;
     }
@@ -492,7 +492,7 @@ final class Web
                 $code = $query->get('code') ?? '';
                 $invite = $this->accounts->inviteByCode($code, $this->now());
                 return $invite !== null
-                    ? self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'host' => $url->host()]))
+                    ? self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'site' => $invite['site'] ?? null, 'host' => $url->host()]))
                     : self::html(Pages::inviteGonePage($base), 410);
             }
             if ($method === 'POST') {
@@ -502,7 +502,7 @@ final class Web
                 if ($invite === null) {
                     return self::html(Pages::inviteGonePage($base), 410);
                 }
-                $again = static fn (string $error): Response => self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'host' => $url->host(), 'error' => $error]), 400);
+                $again = static fn (string $error): Response => self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'site' => $invite['site'] ?? null, 'host' => $url->host(), 'error' => $error]), 400);
                 if (($form->get('password') ?? '') !== ($form->get('again') ?? '')) {
                     return $again('The two passwords are not the same.');
                 }
@@ -609,6 +609,32 @@ final class Web
     }
 
     /** Your own account, and for the owner and admins, everyone else's. */
+    private function recheck(array $user, \stdClass $input, string $field, array $wrong): ?Response {
+        $now = $this->now();
+        if (!$this->rechecks->take($user['id'], $now)) {
+            return self::coded('Too many tries. Wait fifteen minutes and try again.', 'too_many_tries', 429);
+        }
+        $checked = $this->checkPassword($user['email'], self::field($input, $field));
+        if ($checked === false) {
+            $this->rechecks->forgive($user['id']);
+            return self::coded(self::BUSY, 'busy', 503);
+        }
+        if ($checked === null) {
+            return self::coded($wrong[0], $wrong[1], 400);
+        }
+        $this->rechecks->forgive($user['id']);
+        return null;
+    }
+
+    public function confirmPassword(Request $request): ?Response
+    {
+        $user = $this->signedIn($request);
+        if ($user === null) return self::coded('Sign in first', 'sign_in', 401);
+        $input = self::body($request);
+        if ($input === null) return self::coded('Send JSON', 'send_json', 415);
+        return $this->recheck($user, $input, 'password', ['Your password is not right', 'password_wrong']);
+    }
+
     private function api(Request $request, string $path): Response
     {
         $user = $this->signedIn($request);
@@ -624,28 +650,13 @@ final class Web
         if ($path === '/api/account' && $method === 'GET') {
             return self::reply(['account' => self::person($user)]);
         }
-        $recheck = function (\stdClass $input, string $field, array $wrong) use ($user, $now): ?Response {
-            if (!$this->rechecks->take($user['id'], $now)) {
-                return self::coded('Too many tries. Wait fifteen minutes and try again.', 'too_many_tries', 429);
-            }
-            $checked = $this->checkPassword($user['email'], self::field($input, $field));
-            if ($checked === false) {
-                $this->rechecks->forgive($user['id']);
-                return self::coded(self::BUSY, 'busy', 503);
-            }
-            if ($checked === null) {
-                return self::coded($wrong[0], $wrong[1], 400);
-            }
-            $this->rechecks->forgive($user['id']);
-            return null;
-        };
         $fresh = fn (array $updated): array => ['set-cookie' => $this->sessionCookie($request, $this->accounts->sessionFor($updated, $now), intdiv(Accounts::SESSION_MS, 1000))];
         if ($path === '/api/account/password' && $method === 'POST') {
             $input = self::body($request);
             if ($input === null) {
                 return self::coded('Send JSON', 'send_json', 415);
             }
-            $refused = $recheck($input, 'current', ['Your current password is not right', 'password_current_wrong']);
+            $refused = $this->recheck($user, $input, 'current', ['Your current password is not right', 'password_current_wrong']);
             if ($refused !== null) {
                 return $refused;
             }
@@ -680,7 +691,7 @@ final class Web
                 $updated = $this->accounts->byId($user['id']);
                 return self::reply(['recovery' => $codes], 200, $fresh($updated));
             }
-            $refused = $recheck($input, 'password', ['Your password is not right', 'password_wrong']);
+            $refused = $this->recheck($user, $input, 'password', ['Your password is not right', 'password_wrong']);
             if ($refused !== null) {
                 return $refused;
             }
@@ -703,7 +714,7 @@ final class Web
             }
             return self::coded('Not found', 'not_found', 404);
         }
-        if ($user['role'] !== 'owner' && $user['role'] !== 'admin') {
+        if (isset($user['site']) || ($user['role'] !== 'owner' && $user['role'] !== 'admin')) {
             return self::coded('Only the owner or an admin can manage people', 'people_owner', 403);
         }
         // The owner or an admin can turn off someone else's two-factor, for a coworker who lost both phone and recovery
@@ -717,7 +728,7 @@ final class Web
             if ($input === null) {
                 return self::coded('Send JSON', 'send_json', 415);
             }
-            $refused = $recheck($input, 'password', ['Your password is not right', 'password_wrong']);
+            $refused = $this->recheck($user, $input, 'password', ['Your password is not right', 'password_wrong']);
             if ($refused !== null) {
                 return $refused;
             }
@@ -740,7 +751,7 @@ final class Web
             if ($input === null) {
                 return self::coded('Send JSON', 'send_json', 415);
             }
-            $refused = $recheck($input, 'password', ['Your password is not right', 'password_wrong']);
+            $refused = $this->recheck($user, $input, 'password', ['Your password is not right', 'password_wrong']);
             if ($refused !== null) {
                 return $refused;
             }
@@ -770,7 +781,11 @@ final class Web
                 return self::coded("$email already has an account", 'account_exists', 409, ['email' => $email]);
             }
             try {
-                ['invite' => $invite, 'code' => $code] = $this->accounts->invite($email, $role, $user['email'], $now);
+                $site = ($input->allSites ?? null) === true ? null : ($input->site ?? null);
+                if (($input->allSites ?? null) !== true && (!is_string($site) || $site === '')) return self::coded('Choose a site or explicitly invite to all sites', 'invite_site', 400);
+                if ($site !== null) $this->rl->init();
+                if ($site !== null && $this->rl->site($site) === null) return self::coded('Unknown site', 'unknown_site', 404);
+                ['invite' => $invite, 'code' => $code] = $this->accounts->invite($email, $role, $user['email'], $now, $site);
                 return self::reply(['invite' => self::inviteView($invite)] + $this->sendInvite($request, $invite, $code), 201);
             } catch (AccountError $error) {
                 return self::coded($error->getMessage(), $error->code, 400, $error->params);
@@ -793,7 +808,7 @@ final class Web
                     return self::coded('Unknown invite', 'unknown_invite', 404);
                 }
                 // A new link replaces the old one, which stops working.
-                ['invite' => $invite, 'code' => $code] = $this->accounts->invite($old['email'], $old['role'], $user['email'], $now);
+                ['invite' => $invite, 'code' => $code] = $this->accounts->invite($old['email'], $old['role'], $user['email'], $now, $old['site'] ?? null);
                 return self::reply(['invite' => self::inviteView($invite)] + $this->sendInvite($request, $invite, $code));
             }
         }
@@ -854,7 +869,9 @@ final class Web
      */
     public function tokenMade(array $token, string $by): bool
     {
-        $role = $this->accounts->byId($by)['role'] ?? null;
+        $user = $this->accounts->byId($by);
+        if (isset($user['site'])) return false;
+        $role = $user['role'] ?? null;
         if ($role === null || $role === 'viewer') {
             return false;
         }

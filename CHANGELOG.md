@@ -4,9 +4,28 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Added
+
+- Optional CronWatch monitoring in the standalone server records maintenance and location-data checks, emails alerts through the saved mail service, and provides an owner/admin dashboard at `/cronwatch`. Set `CRONWATCH_MAIL_TO` to enable it.
+
 ### Changed
 
-- Reports, invitations, sign-in recovery emails, and test emails show the Runlight logo at 64 by 64 pixels above the message.
+- Standalone installations serve local favicons, Apple touch icons, and a web manifest with the green Runlight indicator on home-screen artwork.
+- Reports, invitations, sign-in recovery emails, and test emails show the Runlight logo at 48 by 48 pixels with more space above the message.
+- Team Members replaces People. Invitations default to the current site, with an explicit option for all sites.
+- Password setup and invitation pages show password strength, and the settings sidebar includes a sign-out shortcut.
+- Dashboard panels use skeleton loading states, and the AI agents empty state explains how to enable server-side reporting.
+
+### Security
+
+- Site-scoped accounts are restricted throughout the dashboard, API, assistant, and MCP reads. They cannot create tokens, authorize OAuth connections, or manage installation-wide settings. Restrictions also apply with custom authorization callbacks and when an invalid bearer header accompanies a session.
+- Deleting a site from an authenticated account requires the current password, and the dashboard asks for an explicit acknowledgment. Transferring ownership also explains that ownership applies to every site and requires confirmation.
+
+### Fixed
+
+- Scheduled checks report retention cleanup failures to the caller, so monitoring can alert instead of treating failed cleanup as a successful run.
+- Clicking the active Campaigns tab again leaves its empty state intact instead of starting a loading state that never finishes.
+- The Conversions add button opens Goals or Funnels according to the selected tab.
 
 ## 0.1.4 - 2026-10-13
 

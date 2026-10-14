@@ -68,7 +68,7 @@ def test_an_app_with_accounts_on_makes_its_first_account_with_its_token_then_inv
     assert _js.loads(json(owner, "GET", "/api/account").text())["account"]["role"] == "owner"
 
     # The owner invites a member, who joins with their own password.
-    sent = _js.loads(json(owner, "POST", "/api/people", {"email": "mo@example.com", "role": "member"}).text())
+    sent = _js.loads(json(owner, "POST", "/api/people", {"allSites": True, "email": "mo@example.com", "role": "member"}).text())
     assert sent["emailed"] is False, "no mail service here, so the link is for passing on"
     link = Url(sent["link"])
     assert link.pathname == "/runlight/invite"
@@ -105,7 +105,7 @@ def test_invites_go_with_whoever_sent_them_removed_made_a_member_or_no_longer_al
     owner = cookie_of(handler(form("/runlight/setup", {"code": "app-token", "email": "jon@example.com", "password": "a long password", "again": "a long password"})))
 
     def join(email: str, role: str, by: str = owner) -> str:
-        return Url(_js.loads(json(by, "POST", "/api/people", {"email": email, "role": role}).text())["link"]).search_params.get("code") or ""
+        return Url(_js.loads(json(by, "POST", "/api/people", {"allSites": True, "email": email, "role": role}).text())["link"]).search_params.get("code") or ""
 
     def accept(code: str) -> Response:
         return handler(form("/runlight/invite", {"code": code, "password": "a long password", "again": "a long password"}))

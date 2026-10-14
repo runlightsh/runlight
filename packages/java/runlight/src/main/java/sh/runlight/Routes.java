@@ -1110,6 +1110,10 @@ public final class Routes {
    * Whether this request acts as the owner: true, false, "read" for someone signed in who may only
    * read, such as a viewer, or "unconfigured".
    */
+  private Map<String, Object> sessionScope(Request request) {
+    return web != null ? web.signedIn(request) : null;
+  }
+
   private Object canRead(Request request) {
     if (managed.containsKey(request)) {
       return true;
@@ -1125,6 +1129,9 @@ public final class Routes {
           && constantTimeEqual(given, token)) {
         return true;
       }
+      var scoped = sessionScope(request);
+      if (scoped != null && scoped.get("site") != null && request.url().contains("/oauth/"))
+        return false;
       Object answer = authorize != null ? authorize.apply(request) : web.access(request);
       // A member changes things like an owner, apart from the few controls adminOnly() names.
       if ("member".equals(answer)) {
@@ -2174,7 +2181,7 @@ public final class Routes {
                 "text",
                 said,
                 "html",
-                "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p style=\"font-family:sans-serif;font-size:15px\">"
+                "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">"
                     + escapeHtml(said)
                     + "</p>"));
         return json(Json.object("ok", true));
@@ -2622,6 +2629,38 @@ public final class Routes {
   private Response api(Request request, String path, Url url) {
     Runlight rl = this.rl;
     String method = request.method();
+    var scopedAccount = sessionScope(request);
+    if (scopedAccount != null && scopedAccount.get("site") instanceof String site) {
+      rl.init();
+      if (rl.site(site) == null) return coded("Unknown site", "unknown_site", 404);
+      String asked = url.searchParams().get("site");
+      var sitePath = java.util.regex.Pattern.compile("^/api/sites/([^/]+)$").matcher(path);
+      if ((asked != null && !asked.equals(site))
+          || (sitePath.matches() && !site.equals(decodePart(sitePath.group(1)))))
+        return coded("Unknown site", "unknown_site", 404);
+      boolean read = request.method().equals("GET") && sharedPath(path);
+      boolean assistant =
+          (path.equals("/api/assistant") && request.method().equals("GET"))
+              || (path.equals("/api/assistant/chat") && request.method().equals("POST"));
+      boolean manage =
+          "member".equals(scopedAccount.get("role")) && managePath(request.method(), path);
+      if (!read && !assistant && !manage)
+        return coded("Your account only has access to its assigned site", "site_access", 403);
+      if (path.equals("/api/assistant/chat")) {
+        Object body;
+        try {
+          body = Json.parse(request.text());
+        } catch (RuntimeException error) {
+          body = null;
+        }
+        if (!(body instanceof Map<?, ?> map) || !site.equals(map.get("site")))
+          return coded("Unknown site", "unknown_site", 404);
+      }
+      url = new Url(url.href());
+      var query = url.searchParams();
+      query.set("site", site);
+      url.setSearchParams(query);
+    }
     // An embedded dashboard reads what a share link shows and nothing else, whoever else the
     // request comes from.
     if (request.headers().get(EMBED_HEADER) != null
@@ -3236,6 +3275,10 @@ public final class Routes {
       if (id == null) {
         return coded("Unknown site", "unknown_site", 404);
       }
+      if (web != null && sessionScope(request) != null) {
+        var refused = web.confirmPassword(request);
+        if (refused != null) return refused;
+      }
       try {
         rl.deleteSite(id);
         return json(Json.object("ok", true));
@@ -3570,7 +3613,8 @@ public final class Routes {
     String shareId = request.headers().get(SHARE_HEADER);
     Map<String, Object> shared = null;
     // The one site a share or a site's API token may read; null for every site.
-    String only = null;
+    var scopedAccount = sessionScope(request);
+    String only = scopedAccount == null ? null : (String) scopedAccount.get("site");
     if (shareId != null) {
       shared = SHARE_ID.matcher(shareId).find() ? store.shareById(shareId) : null;
       if (shared == null) {
@@ -3599,7 +3643,10 @@ public final class Routes {
           return coded("API tokens can only read", "token_read_only", 403);
         }
         String tokenSite = (String) asMap(access).get("site");
-        only = !tokenSite.isEmpty() ? tokenSite : null;
+        only =
+            scopedAccount != null && scopedAccount.get("site") != null
+                ? (String) scopedAccount.get("site")
+                : !tokenSite.isEmpty() ? tokenSite : null;
       }
     }
 
@@ -3644,7 +3691,11 @@ public final class Routes {
       return json(
           shared != null
               ? Json.object("sites", sites)
-              : Json.object("sites", sites, "managed", rl.managedSites));
+              : Json.object(
+                  "sites",
+                  sites,
+                  "managed",
+                  (scopedAccount == null || scopedAccount.get("site") == null) && rl.managedSites));
     }
 
     Map<String, Object> site;

@@ -62,6 +62,7 @@ func mayInvite(role string) bool { return role == "owner" || role == "admin" }
 
 // User is an account.
 type User struct {
+	Site      string `json:"site,omitempty"`
 	ID        string `json:"id"`
 	Email     string `json:"email"`
 	Hash      string `json:"hash"`
@@ -78,6 +79,7 @@ const InviteMs = 7 * 86_400_000
 
 // Invite is someone asked to join, until they choose a password. Only a hash of the link's code is kept.
 type Invite struct {
+	Site      string `json:"site,omitempty"`
 	ID        string `json:"id"`
 	Email     string `json:"email"`
 	Role      string `json:"role"`
@@ -226,6 +228,32 @@ func (a *AccountStore) init(ctx context.Context) error {
 		if err := db.Run(ctx, `CREATE TABLE IF NOT EXISTS rl_invites (id `+strCol(100)+` PRIMARY KEY, email `+strCol(320)+` NOT NULL UNIQUE, role `+strCol(20)+` NOT NULL, code_hash `+strCol(128)+` NOT NULL UNIQUE, invited_by `+strCol(100)+` NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)`+table); err != nil {
 			return err
 		}
+		for _, name := range []string{"rl_users", "rl_invites"} {
+			var fields []Row
+			if db.Dialect() == "sqlite" {
+				fields, err = db.All(ctx, "PRAGMA table_info("+name+")")
+			} else {
+				schema := "current_schema()"
+				if my {
+					schema = "DATABASE()"
+				}
+				fields, err = db.All(ctx, "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = "+schema, name)
+			}
+			if err != nil {
+				return err
+			}
+			found := false
+			for _, field := range fields {
+				if str(field["name"]) == "site" {
+					found = true
+				}
+			}
+			if !found {
+				if err := db.Run(ctx, "ALTER TABLE "+name+" ADD COLUMN site TEXT"); err != nil {
+					return err
+				}
+			}
+		}
 		// A server has one owner. One from before, with several, keeps the first and the rest become admins.
 		// Invites to join as an owner become invites as an admin.
 		owners, err := db.All(ctx, `SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id`)
@@ -270,7 +298,11 @@ func recoveryList(value any) []string {
 }
 
 func (a *AccountStore) row(r Row) User {
-	return User{ID: str(r["id"]), Email: str(r["email"]), Hash: str(r["hash"]), Role: roleFrom(r["role"]), CreatedAt: numInt(r["created_at"]),
+	site := ""
+	if r["site"] != nil {
+		site = str(r["site"])
+	}
+	return User{Site: site, ID: str(r["id"]), Email: str(r["email"]), Hash: str(r["hash"]), Role: roleFrom(r["role"]), CreatedAt: numInt(r["created_at"]),
 		TwoFactor: r["totp_secret"] != nil && str(r["totp_secret"]) != "", RecoveryLeft: len(recoveryList(r["totp_recovery"]))}
 }
 
@@ -578,6 +610,9 @@ func (a *AccountStore) SetRole(ctx context.Context, id, role string) (User, erro
 		if user.Role == "owner" {
 			return accountError("Only the owner can change their own role, by handing ownership to an admin", "owner_protected")
 		}
+		if user.Site != "" && role == "admin" {
+			return accountError("An admin needs access to all sites", "role_scope")
+		}
 		if role == "owner" {
 			return accountError("Ownership is handed over by the owner", "owner_hand_over")
 		}
@@ -614,7 +649,7 @@ func (a *AccountStore) HandOver(ctx context.Context, from, to string) error {
 		if next == nil {
 			return accountError("Unknown account", "unknown_account")
 		}
-		if next.Role != "admin" {
+		if next.Site != "" || next.Role != "admin" {
 			return accountError("Make them an admin first", "owner_needs_admin")
 		}
 		if err := a.store.db.Run(ctx, `UPDATE rl_users SET role = 'owner' WHERE id = ?`, to); err != nil {
@@ -654,7 +689,14 @@ func (a *AccountStore) Remove(ctx context.Context, id string) error {
 // SetPassword makes an account, or sets a new password on an existing one.
 // A new account is the owner when it is the first, and otherwise an admin
 // unless a role is given ("" for none), since a server has one owner.
-func (a *AccountStore) SetPassword(ctx context.Context, email, password string, now int64, role string) (User, error) {
+func (a *AccountStore) SetPassword(ctx context.Context, email, password string, now int64, role string, sites ...string) (User, error) {
+	site := ""
+	if len(sites) > 0 {
+		site = sites[0]
+	}
+	if site != "" && role != "member" && role != "viewer" {
+		return User{}, accountError("Choose member or viewer for one site", "role_scope")
+	}
 	if err := a.init(ctx); err != nil {
 		return User{}, err
 	}
@@ -695,12 +737,16 @@ func (a *AccountStore) SetPassword(ctx context.Context, email, password string, 
 	if given == "owner" && !first {
 		given = "admin"
 	}
-	user := User{ID: accounts.Hex(accounts.RandomBytes(12)), Email: address, Hash: hash, Role: given, CreatedAt: now}
-	return user, a.store.db.Run(ctx, `INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)`, user.ID, user.Email, user.Hash, user.Role, user.CreatedAt)
+	user := User{Site: site, ID: accounts.Hex(accounts.RandomBytes(12)), Email: address, Hash: hash, Role: given, CreatedAt: now}
+	return user, a.store.db.Run(ctx, `INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)`, user.ID, user.Email, user.Hash, user.Role, user.CreatedAt, nilIfEmpty(site))
 }
 
 func inviteRow(r Row) Invite {
-	return Invite{ID: str(r["id"]), Email: str(r["email"]), Role: roleFrom(r["role"]), InvitedBy: str(r["invited_by"]), CreatedAt: numInt(r["created_at"]), ExpiresAt: numInt(r["expires_at"])}
+	site := ""
+	if r["site"] != nil {
+		site = str(r["site"])
+	}
+	return Invite{Site: site, ID: str(r["id"]), Email: str(r["email"]), Role: roleFrom(r["role"]), InvitedBy: str(r["invited_by"]), CreatedAt: numInt(r["created_at"]), ExpiresAt: numInt(r["expires_at"])}
 }
 
 // Invites are invites that still work, newest first. Expired ones are cleared on the way.
@@ -725,7 +771,14 @@ func (a *AccountStore) Invites(ctx context.Context, now int64) ([]Invite, error)
 // InviteSomeone invites someone to join with a role, and returns the code
 // for their link. Asking again replaces the earlier invite, so only the
 // newest link works.
-func (a *AccountStore) InviteSomeone(ctx context.Context, email, role, invitedBy string, now int64) (Invite, string, error) {
+func (a *AccountStore) InviteSomeone(ctx context.Context, email, role, invitedBy string, now int64, sites ...string) (Invite, string, error) {
+	site := ""
+	if len(sites) > 0 {
+		site = sites[0]
+		if site == "" || (role != "member" && role != "viewer") {
+			return Invite{}, "", accountError("Choose member or viewer for one site", "role_scope")
+		}
+	}
 	if err := a.init(ctx); err != nil {
 		return Invite{}, "", err
 	}
@@ -744,12 +797,12 @@ func (a *AccountStore) InviteSomeone(ctx context.Context, email, role, invitedBy
 			return accountError(address+" already has an account", "account_exists", "email", address)
 		}
 		code = accounts.Base64url(accounts.RandomBytes(24))
-		invite = Invite{ID: accounts.Hex(accounts.RandomBytes(12)), Email: address, Role: role, InvitedBy: invitedBy, CreatedAt: now, ExpiresAt: now + InviteMs}
+		invite = Invite{Site: site, ID: accounts.Hex(accounts.RandomBytes(12)), Email: address, Role: role, InvitedBy: invitedBy, CreatedAt: now, ExpiresAt: now + InviteMs}
 		if err := a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE email = ?`, address); err != nil {
 			return err
 		}
-		return a.store.db.Run(ctx, `INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			invite.ID, invite.Email, invite.Role, codeHash(code), invite.InvitedBy, invite.CreatedAt, invite.ExpiresAt)
+		return a.store.db.Run(ctx, `INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			invite.ID, invite.Email, invite.Role, codeHash(code), invite.InvitedBy, invite.CreatedAt, invite.ExpiresAt, nilIfEmpty(site))
 	})
 	return invite, code, err
 }
@@ -807,7 +860,7 @@ func (a *AccountStore) AcceptInvite(ctx context.Context, code, password string, 
 		if err != nil {
 			return err
 		}
-		if sender == nil || !mayInvite(sender.Role) {
+		if sender == nil || sender.Site != "" || !mayInvite(sender.Role) {
 			if err := a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE id = ?`, invite.ID); err != nil {
 				return err
 			}
@@ -820,7 +873,7 @@ func (a *AccountStore) AcceptInvite(ctx context.Context, code, password string, 
 		if existing != nil {
 			return accountError(invite.Email+" already has an account", "account_exists", "email", invite.Email)
 		}
-		user, err := a.SetPassword(ctx, invite.Email, password, now, invite.Role)
+		user, err := a.SetPassword(ctx, invite.Email, password, now, invite.Role, invite.Site)
 		if err != nil {
 			return err
 		}
@@ -1041,4 +1094,11 @@ func (t *Throttle) Clear(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.delete(t.id(key))
+}
+
+func nilIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

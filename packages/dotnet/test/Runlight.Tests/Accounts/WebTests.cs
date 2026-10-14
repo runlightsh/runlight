@@ -292,7 +292,7 @@ public sealed class WebTests : IAsyncLifetime
     {
         var web = await WebAsync();
         string owner = await OwnerCookie(web);
-        var sent = await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "Mo@Example.com"), ("role", "member"))));
+        var sent = await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "Mo@Example.com"), ("role", "member"))));
         Assert.Equal(201, sent.Status);
         var body = BodyOf(sent);
         Assert.Equal(["invite", "link", "emailed"], body.Keys);
@@ -304,11 +304,11 @@ public sealed class WebTests : IAsyncLifetime
         Assert.Contains("as a member", (await H(web, Req("/invite?code=" + code))).Text());
         Assert.Equal(410, (await H(web, Req("/invite?code=nope"))).Status);
 
-        Assert.Equal(409, (await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "jon@example.com"), ("role", "admin"))))).Status);
-        var noRole = await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "x@example.com"), ("role", "owner"))));
+        Assert.Equal(409, (await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "jon@example.com"), ("role", "admin"))))).Status);
+        var noRole = await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "x@example.com"), ("role", "owner"))));
         Assert.Equal("{\"error\":\"Pick admin, member, or viewer\",\"code\":\"role_needed\"}", noRole.Text());
         Assert.Equal("nosniff", noRole.Headers.Get("x-content-type-options"));
-        var badEmail = await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "nobody"), ("role", "admin"))));
+        var badEmail = await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "nobody"), ("role", "admin"))));
         Assert.Equal("{\"error\":\"Enter an email address\",\"code\":\"email_invalid\",\"params\":{}}", badEmail.Text());
         var form = await H(web, Req("/api/people", "POST", new Dictionary<string, string> { ["cookie"] = owner, ["content-type"] = "text/plain" }, "{}"));
         Assert.Equal(415, form.Status);
@@ -347,7 +347,7 @@ public sealed class WebTests : IAsyncLifetime
         Assert.Equal("remove_self", BodyOf(await H(web, JsonReq(owner, "DELETE", "/api/people/" + jonId))).Str("code"));
 
         // Invites listed, resent, and cancelled.
-        await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "zed@example.com"), ("role", "viewer"))));
+        await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "zed@example.com"), ("role", "viewer"))));
         var people = BodyOf(await H(web, JsonReq(owner, "GET", "/api/people")));
         Assert.Equal(["jon@example.com", "mo@example.com"], people.Arr("people")!.Cast<JsObject>().Select(p => p.Str("email")).Order(StringComparer.Ordinal));
         Assert.Equal(["zed@example.com"], people.Arr("invites")!.Cast<JsObject>().Select(p => p.Str("email")));
@@ -369,19 +369,19 @@ public sealed class WebTests : IAsyncLifetime
         var web = await WebAsync(FirstAccount.Token("app-token"), "https://stats.example.com");
         string owner = await OwnerCookie(web);
         _rl.Mail = O(("service", "smtp"), ("from", "runlight@example.com"));
-        var body = BodyOf(await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "mo@example.com"), ("role", "viewer")))));
+        var body = BodyOf(await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "mo@example.com"), ("role", "viewer")))));
         Assert.True(body.Bool("emailed"));
         Assert.StartsWith("https://stats.example.com/runlight/invite?code=", body.Str("link"), StringComparison.Ordinal);
         Assert.Equal("jon@example.com invited you to Runlight", _rl.Sent[0].Str("subject"));
         Assert.Equal("jon@example.com invited you to the Runlight at stats.example.com as a viewer, who can read every site's stats.\n\nChoose a password to join:\n" + body.Str("link") + "\n\nThe link works for seven days.\n", _rl.Sent[0].Str("text"));
 
         _rl.MailFails = new CodedError("The server refused the password", "mail_auth", O(("host", "smtp.example.com")));
-        var failed = BodyOf(await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "ada@example.com"), ("role", "admin")))));
+        var failed = BodyOf(await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "ada@example.com"), ("role", "admin")))));
         Assert.Equal(["invite", "link", "emailed", "mailError", "mailCode", "mailParams"], failed.Keys);
         Assert.Equal("mail_auth", failed.Str("mailCode"));
         Assert.Equal("{\"host\":\"smtp.example.com\"}", Json.Stringify(failed.Get("mailParams")));
         _rl.MailFails = new InvalidOperationException("Something else");
-        var other = BodyOf(await H(web, JsonReq(owner, "POST", "/api/people", O(("email", "zed@example.com"), ("role", "admin")))));
+        var other = BodyOf(await H(web, JsonReq(owner, "POST", "/api/people", O(("allSites", true), ("email", "zed@example.com"), ("role", "admin")))));
         Assert.Equal(["invite", "link", "emailed", "mailError"], other.Keys);
     }
 

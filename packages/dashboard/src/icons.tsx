@@ -1,5 +1,6 @@
 /** Small line icons for buttons, drawn on a 16px grid in the dashboard's stroke style. */
 const PATHS = {
+  signOut: "M6.5 2.5H3v11h3.5M6 8h8M11 5l3 3-3 3",
   "arrow-up": "M8 13V3M4 7l4-4 4 4",
   "arrow-down": "M8 3v10M4 9l4 4 4-4",
   plus: "M8 3.5v9M3.5 8h9",

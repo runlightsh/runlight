@@ -90,7 +90,7 @@ for (const kind of STORES) {
     assert.equal(((await (await json(owner, "GET", "/api/account")).json()) as any).account.role, "owner");
 
     // The owner invites a member, who joins with their own password.
-    const sent = (await (await json(owner, "POST", "/api/people", { email: "mo@example.com", role: "member" })).json()) as any;
+    const sent = (await (await json(owner, "POST", "/api/people", { allSites: true, email: "mo@example.com", role: "member" })).json()) as any;
     assert.equal(sent.emailed, false, "no mail service here, so the link is for passing on");
     const link = new URL(sent.link);
     assert.equal(link.pathname, "/runlight/invite");
@@ -132,7 +132,7 @@ test("invites go with whoever sent them: removed, made a member, or no longer al
     handler(req(`/runlight${path}`, { method, headers: { cookie, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
   const owner = cookieOf(await handler(req("/runlight/setup", form({ code: "app-token", email: "jon@example.com", password: "a long password", again: "a long password" }))));
   const join = async (email: string, role: string, by = owner) => {
-    const link = new URL(((await (await json(by, "POST", "/api/people", { email, role })).json()) as any).link);
+    const link = new URL(((await (await json(by, "POST", "/api/people", { allSites: true, email, role })).json()) as any).link);
     return link.searchParams.get("code")!;
   };
   const accept = (code: string) => handler(req("/runlight/invite", form({ code, password: "a long password", again: "a long password" })));
@@ -221,3 +221,71 @@ for (const kind of STORES) {
     assert.equal((one as unknown as { checking: Map<string, unknown> }).checking.size, 0, "a finished check leaves nothing queued behind");
   });
 }
+
+for (const role of ["member", "viewer"] as const) {
+  test(`site-only ${role}: invitations preserve scope and reject cross-site and install-wide access`, async () => {
+    const rl = runlight({ store: freshStore("sqlite"), secret: "k".repeat(64), sites: [
+      { id: "alpha", name: "Alpha", hostnames: ["alpha.example"] },
+      { id: "beta", name: "Beta", hostnames: ["beta.example"] },
+    ] });
+    const { handler } = rl.routes({ token: "app-token", accounts: true });
+    const json = (cookie: string, method: string, path: string, body?: unknown) => handler(req(`/runlight${path}`, {
+      method, headers: { cookie, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }));
+    const owner = cookieOf(await handler(req("/runlight/setup", form({ code: "app-token", email: "owner@example.com", password: "a long password", again: "a long password" }))));
+    assert.equal((await json(owner, "POST", "/api/people", { email: "missing@example.com", role })).status, 400);
+    assert.equal((await json(owner, "POST", "/api/people", { email: "bad@example.com", role: "admin", site: "alpha" })).status, 400);
+    assert.equal((await json(owner, "POST", "/api/people", { email: "bad@example.com", role, site: "missing" })).status, 404);
+    const invite = await (await json(owner, "POST", "/api/people", { email: `${role}@example.com`, role, site: "alpha" })).json() as any;
+    assert.equal(invite.invite.site, "alpha");
+    const resent = await (await json(owner, "POST", `/api/invites/${invite.invite.id}/resend`, {})).json() as any;
+    assert.equal(resent.invite.site, "alpha");
+    const code = new URL(resent.link).searchParams.get("code")!;
+    assert.match(await (await handler(req(`/runlight/invite?code=${code}`))).text(), /alpha only/);
+    const session = cookieOf(await handler(req("/runlight/invite", form({ code, password: "another long password", again: "another long password" }))));
+    const me = (await (await json(session, "GET", "/api/account")).json() as any).account;
+    assert.equal(me.site, "alpha");
+    assert.equal((await json(owner, "PATCH", `/api/people/${me.id}`, { role: "admin" })).status, 400);
+    const listed = await (await json(session, "GET", "/api/sites")).json() as any;
+    assert.deepEqual(listed.sites.map((site: any) => site.id), ["alpha"]);
+    assert.equal(listed.managed, false);
+    assert.equal((await json(session, "GET", "/api/stats?site=alpha&period=today")).status, 200);
+    assert.equal((await json(session, "GET", "/api/stats?site=beta&period=today")).status, 404);
+    assert.equal((await json(session, "GET", "/api/sites?site=beta")).status, 404);
+    for (const path of ["/api/tokens", "/api/people", "/api/check", "/api/observe-key"]) {
+      assert.equal((await json(session, "GET", path)).status, 403, path);
+    }
+    for (const path of ["/api/sites", "/api/people", "/api/tokens", "/api/mail/test", "/api/observe", "/api/sites/connect"]) {
+      assert.equal((await json(session, "POST", path, {})).status, path === "/api/sites/connect" ? 404 : 403, path);
+    }
+    assert.equal((await json(session, "POST", "/api/assistant/chat", { site: "beta", messages: [{ role: "user", content: "stats" }] })).status, 404);
+    assert.equal((await json(session, "POST", "/api/goals?site=beta", { name: "Cross site", kind: "event", match: "bad" })).status, 404);
+    assert.equal((await json(session, "POST", "/api/goals?site=alpha", { name: "Signup", kind: "event", match: "Signup" })).status, role === "member" ? 201 : 403);
+    const mcp = await (await json(session, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_sites", arguments: {} } })).json() as any;
+    assert.ok(JSON.stringify(mcp).includes('alpha.example'));
+    assert.ok(!JSON.stringify(mcp).includes('beta.example'));
+    assert.ok(!JSON.stringify(mcp).includes('"Beta"'));
+  });
+}
+
+
+test("deleting a site from a signed-in browser requires the current password and throttles guessing", async () => {
+  const rl = runlight({ store: freshStore("sqlite"), managedSites: true, secret: "k".repeat(64) });
+  const { handler } = rl.routes({ token: "app-token", accounts: true });
+  const password = "a long password";
+  const owner = cookieOf(await handler(req("/runlight/setup", form({ code: "app-token", email: "owner@example.com", password, again: password }))));
+  const site = await rl.addSite({ name: "Delete test", hostnames: ["delete.example"] });
+  const remove = (value: unknown, headers: Record<string, string> = { cookie: owner, "content-type": "application/json" }) => handler(req(`/runlight/api/sites/${site.id}`, { method: "DELETE", headers, body: JSON.stringify(value) }));
+  assert.equal((await remove({})).status, 400);
+  assert.equal((await remove({ password: "incorrect" })).status, 400);
+  assert.equal((await remove({ password }, { cookie: owner, "content-type": "text/plain" })).status, 415);
+  assert.ok(rl.site(site.id));
+  assert.equal((await remove({ password })).status, 200);
+  assert.equal(rl.site(site.id), null);
+  const again = await rl.addSite({ name: "Delete test", hostnames: ["delete.example"] });
+  assert.equal(again.id, site.id);
+  for (let i = 0; i < 8; i++) assert.equal((await remove({ password: "incorrect" })).status, 400);
+  assert.equal((await remove({ password })).status, 429);
+  assert.ok(rl.site(site.id));
+  assert.equal((await remove({}, { authorization: "Bearer app-token", "content-type": "application/json" })).status, 200);
+});

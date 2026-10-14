@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, base, type Funnel, type Goal, type GoalInput, type GoalReport, type GoalTotals, type Site, type View } from "./api.js";
 import { Chart } from "./chart.js";
@@ -35,7 +36,7 @@ function revenueText(rows: Row[]): string {
 }
 
 /** The Conversions box: each goal's conversions, conversion rate, and revenue. */
-export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOnly?: boolean; onAdd: () => void }) {
+export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOnly?: boolean; onAdd: (section: "goals" | "funnels") => void }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
@@ -81,7 +82,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
               </button>
             </nav>
             {readOnly ? null : (
-              <button type="button" class="box-button icon-only" title={t("goals.add")} aria-label={t("goals.add")} onClick={onAdd}>
+              <button type="button" class="box-button icon-only" title={t(showing === "funnels" ? "funnels.add" : "goals.add")} aria-label={t(showing === "funnels" ? "funnels.add" : "goals.add")} onClick={() => onAdd(showing)}>
                 <Icon name="plus" />
               </button>
             )}
@@ -120,7 +121,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
           ) : null}
           {readOnly ? null : (
             // With the switch beside it, the button keeps only its icon so the header stays on one line.
-            <button type="button" class={funnels.length ? "box-button icon-only" : "box-button"} title={t("goals.add")} aria-label={t("goals.add")} onClick={onAdd}>
+            <button type="button" class={funnels.length ? "box-button icon-only" : "box-button"} title={t(showing === "funnels" ? "funnels.add" : "goals.add")} aria-label={t(showing === "funnels" ? "funnels.add" : "goals.add")} onClick={() => onAdd(showing)}>
               <Icon name="plus" />
               {funnels.length ? null : t("goals.add")}
             </button>
@@ -128,7 +129,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
         </div>
       </header>
       {error ? <p class="empty">{error}</p> : null}
-      {!rows && !error ? <p class="empty">{t("common.loading")}</p> : null}
+      {!rows && !error ? <Loading /> : null}
       {rows && rows.length === 0 ? <Empty icon="target" title={t("goals.emptyTitle")} hint={t("goals.emptyHint")} /> : null}
       {rows && rows.length ? (
         <>

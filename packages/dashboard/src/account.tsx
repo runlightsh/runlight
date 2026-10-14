@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { ApiError, api, type InviteSent, type PendingInvite, type Person } from "./api.js";
+import { ApiError, api, type InviteSent, type PendingInvite, type Person, type Site } from "./api.js";
 import { day } from "./format.js";
 import { errorText, t, tn, type Key } from "./i18n.js";
 import { Secret } from "./secret.js";
@@ -46,7 +46,7 @@ export function AccountSheet({ me, onClose }: { me: Person; onClose: () => void 
     <Sheet title={t("account.title")} sub={me.email} onClose={onClose}>
       <div class="sheet-body account-body">
         <form class="link-form" onSubmit={save}>
-          <p class="settings-text">{t(`account.${me.role}` as Key)}</p>
+          <p class="settings-text">{me.site ? t(me.role === "viewer" ? "account.siteViewer" : "account.siteMember", { site: me.site }) : t(`account.${me.role}` as Key)}</p>
           <label class="field-row">
             <span class="field-label">{t("account.current")}</span>
             <Secret class="value" autoComplete="current-password" required value={current} onInput={(e) => edit(setCurrent, e)} />
@@ -270,8 +270,9 @@ function TwoFactor({ me }: { me: Person }) {
 
 /** Resetting someone's two-factor asks for your own password first, like every two-factor change. */
 /** Asks for your password again before something that matters: resetting someone's two-factor, or handing over ownership. */
-function WithPassword({ icon, label, onConfirm, onCancel }: { icon: IconName; label: string; onConfirm: (password: string) => Promise<void>; onCancel: () => void }) {
+function WithPassword({ icon, label, warning, onConfirm, onCancel }: { warning?: string; icon: IconName; label: string; onConfirm: (password: string) => Promise<void>; onCancel: () => void }) {
   const [password, setPassword] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   // Shown under the form it belongs to, rather than at the foot of the list.
   const [error, setError] = useState("");
@@ -279,14 +280,16 @@ function WithPassword({ icon, label, onConfirm, onCancel }: { icon: IconName; la
     e.preventDefault();
     setBusy(true);
     setError("");
+    if (warning && !confirmed) { setBusy(false); return; }
     void onConfirm(password)
       .catch((err: Error) => setError(err.message))
       .finally(() => setBusy(false));
   };
   return (
     <form class="reset-twofactor" onSubmit={submit}>
+      {warning ? <div class="ownership-warning"><strong>{t("people.areYouSure")}</strong><p>{warning}</p><label><input type="checkbox" required checked={confirmed} onChange={(e) => setConfirmed(e.currentTarget.checked)} />{t("people.confirmAllSites")}</label></div> : null}
       <Secret class="value" autoComplete="current-password" required placeholder={t("twofa.password")} value={password} onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
-      <button type="submit" class="copy inline armed" disabled={busy || !password}>
+      <button type="submit" class="copy inline armed" disabled={busy || !password || Boolean(warning && !confirmed)}>
         <Icon name={icon} />
         {label}
       </button>
@@ -307,11 +310,12 @@ const roleName = (role: Person["role"]) => t(`people.${role}` as Key);
  * no role to pick and no remove button; the owner can hand ownership to an admin from that admin's row.
  * `onDemoted` runs when you change your own role, with the role you now have.
  */
-export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person["role"]) => void }) {
+export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemoted: (role: Person["role"]) => void }) {
   const [people, setPeople] = useState<Person[] | null>(null);
   const [invites, setInvites] = useState<PendingInvite[]>([]);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Person["role"]>("member");
+  const [allSites, setAllSites] = useState(false);
   const [sent, setSent] = useState<InviteSent | null>(null);
   const [error, setError] = useState("");
   // While an invite is on its way, its buttons wait, so a double click sends one.
@@ -342,7 +346,7 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
     setError("");
     setSending(true);
     api
-      .addPerson(email.trim(), role)
+      .addPerson(email.trim(), role, allSites ? undefined : site.id)
       .then((r) => {
         setEmail("");
         return done(r);
@@ -391,7 +395,7 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
                   {p.id === me.id ? <span class="people-you">{t("people.you")}</span> : null}
                   {p.twoFactor ? <span class="people-you">{t("people.twoFactor")}</span> : null}
                 </span>
-                <span class="share-meta">{t("links.createdOn", { date: dateOf(p.createdAt) })}</span>
+                <span class="share-meta">{t("links.createdOn", { date: dateOf(p.createdAt) })} · {p.site ?? t("assistant.action.allSites")}</span>
               </div>
               <div class="domain-actions">
                 {resetting === p.id ? (
@@ -411,6 +415,7 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
                   <WithPassword
                     icon="key"
                     label={t("people.handOverConfirm")}
+                    warning={t("people.handOverWarning", { email: p.email })}
                     onCancel={() => setHanding(null)}
                     onConfirm={(password) =>
                       api.handOver(p.id, password).then(() => {
@@ -426,7 +431,7 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
                   <span class="people-owner">{t("people.owner")}</span>
                 ) : (
                   <>
-                    {me.role === "owner" && p.role === "admin" ? (
+                    {me.role === "owner" && p.role === "admin" && p.site === undefined ? (
                       <button type="button" class="copy inline" title={t("people.handOverHint")} onClick={() => setHanding(p.id)}>
                         <Icon name="key" />
                         {t("people.handOver")}
@@ -450,7 +455,7 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
                       </span>
                     ) : (
                       <select class="value people-role" value={p.role} aria-label={t("people.role")} onChange={(e) => void change(p.id, (e.target as HTMLSelectElement).value as Person["role"])}>
-                        {ROLES.map((r) => (
+                        {ROLES.filter((r) => p.site === undefined || r !== "admin").map((r) => (
                           <option value={r}>{roleName(r)}</option>
                         ))}
                       </select>
@@ -478,7 +483,7 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
                   {i.email}
                   <span class="people-you">{t("people.invited")}</span>
                 </span>
-                <span class="share-meta">{t("people.invitedMeta", { role: roleName(i.role), date: dateOf(i.expiresAt) })}</span>
+                <span class="share-meta">{t("people.invitedMeta", { role: roleName(i.role), date: dateOf(i.expiresAt) })} · {i.site ?? t("assistant.action.allSites")}</span>
               </div>
               <div class="domain-actions">
                 <button
@@ -504,10 +509,12 @@ export function People({ me, onDemoted }: { me: Person; onDemoted: (role: Person
         </ul>
       ) : null}
       <p class="field-hint domain-note">{t("people.roles")}</p>
+      <label class="invite-scope"><input type="checkbox" checked={allSites} onChange={(e) => { setAllSites(e.currentTarget.checked); if (!e.currentTarget.checked && role === "admin") setRole("member"); }} />{t("people.allSites")}</label>
+      <p class="field-hint">{allSites ? t("people.allSitesHint") : t("people.siteHint", { site: site.name })}</p>
       <form class="domain-add token-add" onSubmit={add}>
         <input class="value" type="email" required placeholder={t("people.emailPlaceholder")} value={email} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
         <select class="value" value={role} aria-label={t("people.role")} onChange={(e) => setRole((e.target as HTMLSelectElement).value as Person["role"])}>
-          {ROLES.map((r) => (
+          {ROLES.filter((r) => allSites || r !== "admin").map((r) => (
             <option value={r}>{roleName(r)}</option>
           ))}
         </select>

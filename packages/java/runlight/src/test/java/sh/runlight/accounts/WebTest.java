@@ -434,6 +434,29 @@ class WebTest {
   }
 
   @Test
+  void invitePasswordErrorsKeepTheSiteScope() {
+    Web web = web();
+    owner(web);
+    Map<String, Object> sent =
+        web.accounts()
+            .invite("member@example.com", "member", "jon@example.com", now, "example.com");
+    Response response =
+        handle(
+            web,
+            form(
+                "/invite",
+                "code",
+                (String) sent.get("code"),
+                "password",
+                "a long password",
+                "again",
+                "a different password"));
+    assertEquals(400, response.status());
+    assertTrue(response.text().contains("settings of example.com only"));
+    assertFalse(response.text().contains("settings of every site"));
+  }
+
+  @Test
   void invitesPeopleAndRoles() {
     Web web = web();
     String owner = owner(web);
@@ -444,7 +467,7 @@ class WebTest {
                 owner,
                 "POST",
                 "/api/people",
-                Json.object("email", "Mo@Example.com", "role", "member")));
+                Json.object("allSites", true, "email", "Mo@Example.com", "role", "member")));
     assertEquals(201, sent.status());
     Map<String, Object> body = parse(sent);
     assertEquals(List.of("invite", "link", "emailed"), new ArrayList<>(body.keySet()));
@@ -464,7 +487,7 @@ class WebTest {
                     owner,
                     "POST",
                     "/api/people",
-                    Json.object("email", "jon@example.com", "role", "admin")))
+                    Json.object("allSites", true, "email", "jon@example.com", "role", "admin")))
             .status());
     Response noRole =
         handle(
@@ -473,14 +496,18 @@ class WebTest {
                 owner,
                 "POST",
                 "/api/people",
-                Json.object("email", "x@example.com", "role", "owner")));
+                Json.object("allSites", true, "email", "x@example.com", "role", "owner")));
     assertEquals(
         "{\"error\":\"Pick admin, member, or viewer\",\"code\":\"role_needed\"}", noRole.text());
     assertEquals("nosniff", noRole.headers().get("x-content-type-options"));
     Response badEmail =
         handle(
             web,
-            json(owner, "POST", "/api/people", Json.object("email", "nobody", "role", "admin")));
+            json(
+                owner,
+                "POST",
+                "/api/people",
+                Json.object("allSites", true, "email", "nobody", "role", "admin")));
     assertEquals(
         "{\"error\":\"Enter an email address\",\"code\":\"email_invalid\",\"params\":{}}",
         badEmail.text());
@@ -613,7 +640,7 @@ class WebTest {
             owner,
             "POST",
             "/api/people",
-            Json.object("email", "zed@example.com", "role", "viewer")));
+            Json.object("allSites", true, "email", "zed@example.com", "role", "viewer")));
     Map<String, Object> listed = parse(handle(web, json(owner, "GET", "/api/people")));
     List<Object> emails = new ArrayList<>();
     for (Object p : Js.list(listed.get("people"))) {
@@ -650,7 +677,7 @@ class WebTest {
                     owner,
                     "POST",
                     "/api/people",
-                    Json.object("email", "mo@example.com", "role", "viewer"))));
+                    Json.object("allSites", true, "email", "mo@example.com", "role", "viewer"))));
     assertEquals(true, body.get("emailed"));
     String link = (String) body.get("link");
     assertTrue(
@@ -676,7 +703,7 @@ class WebTest {
                     owner,
                     "POST",
                     "/api/people",
-                    Json.object("email", "ada@example.com", "role", "admin"))));
+                    Json.object("allSites", true, "email", "ada@example.com", "role", "admin"))));
     assertEquals(
         List.of("invite", "link", "emailed", "mailError", "mailCode", "mailParams"),
         new ArrayList<>(failed.keySet()));
@@ -691,7 +718,7 @@ class WebTest {
                     owner,
                     "POST",
                     "/api/people",
-                    Json.object("email", "zed@example.com", "role", "admin"))));
+                    Json.object("allSites", true, "email", "zed@example.com", "role", "admin"))));
     assertEquals(
         List.of("invite", "link", "emailed", "mailError"),
         new ArrayList<>(other.keySet()),

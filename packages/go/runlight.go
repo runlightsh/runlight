@@ -2163,10 +2163,11 @@ func (r *Runlight) runCheck(ctx context.Context) (CheckResult, error) {
 	// Retention runs here, after any still going, rather than through Idle,
 	// which steady traffic starting work after each answer could hold up.
 	r.pruneMu.Lock()
-	if err := r.applyRetention(context.Background(), ""); err != nil {
-		r.logf("Runlight: could not apply retention %v", err)
-	}
+	err = r.applyRetention(ctx, "")
 	r.pruneMu.Unlock()
+	if err != nil {
+		return CheckResult{}, err
+	}
 	if r.now()-r.optimized >= 86_400_000 {
 		r.optimized = r.now()
 		r.Store.Optimize(ctx, false)

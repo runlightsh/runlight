@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, download, geoCredit, viewParams, type Row, type View } from "./api.js";
 import { count, countryName, duration, flag, hourLabel, percent, readablePath, weekdays } from "./format.js";
@@ -298,7 +299,7 @@ function AllRows({ title, tab, view, onFilter, onClose }: { title: Key; tab: Tab
           </span>
         </div>
         <div class="sheet-body">
-          {!rows ? <p class="empty">{t("common.loading")}</p> : null}
+          {!rows ? <Loading /> : null}
           {rows && shown.length === 0 ? (
             needle ? <Empty size="line" icon="list" title={t("empty.search", { q: needle })} /> : <Empty size="line" icon="chart" title={t("empty.mini")} />
           ) : null}
@@ -390,6 +391,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
                   class={i === active ? "tab on" : "tab"}
                   aria-pressed={i === active}
                   onClick={() => {
+                    if (i === active) return;
                     setActive(i);
                     setRows(null);
                   }}
@@ -427,7 +429,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
       {detail ? <EventProps view={view} event={detail} onClose={() => setDetail(null)} /> : null}
       {showAll ? <AllRows title={title} tab={tab} view={view} onFilter={onFilter} onClose={() => setShowAll(false)} /> : null}
       {empty ? (
-        <Empty icon={EMPTY[title]?.icon ?? "chart"} title={t(EMPTY[title]?.title ?? "panel.empty")} hint={EMPTY[title] ? t(EMPTY[title]!.hint) : undefined} />
+        <Empty icon={EMPTY[title]?.icon ?? "chart"} title={t(EMPTY[title]?.title ?? "panel.empty")} hint={EMPTY[title] ? t(EMPTY[title]!.hint) : undefined}>{title === "panel.ai" ? <a class="empty-setup" href="https://runlight.sh/docs/ai/" target="_blank" rel="noopener noreferrer">{t("ai.setup")}<Icon name="external" /></a> : null}</Empty>
       ) : showMap ? (
         <WorldMap view={view} onFilter={onFilter} />
       ) : (
@@ -436,7 +438,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
           <div class="table">
             <Columns tab={tab} />
             {error ? <p class="empty">{error}</p> : null}
-            {!rows && !error ? <p class="empty">{t("common.loading")}</p> : null}
+            {!rows && !error ? <Loading /> : null}
             <Rows rows={all.slice(0, SHORT)} tab={tab} onFilter={onFilter} onDetail={tab.dimension === "event" ? (value) => openInTab(`${name}:detail:${value}`) || setDetail(value) : undefined} />
           </div>
           {all.length > SHORT ? (
@@ -513,7 +515,7 @@ export function Rhythm({ view, wide }: { view: View; wide?: boolean }) {
         {busiest ? <span class="aside">{t("rhythm.busiest", { when: `${days[busiest[0]]} ${hourLabel(busiest[1])}` })}</span> : null}
       </header>
       {error ? <p class="empty">{error}</p> : null}
-      {!grid && !error ? <p class="empty">{t("common.loading")}</p> : null}
+      {!grid && !error ? <Loading chart /> : null}
       {grid && max === 0 ? <Empty icon="clock" title={t("empty.rhythm.title")} hint={t("empty.rhythm.hint")} /> : null}
       {grid && max > 0 ? (
         <div class="rhythm" role="table" aria-label={t("rhythm.table")} ref={box} onPointerLeave={() => setHover(null)}>

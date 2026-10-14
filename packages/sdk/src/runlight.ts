@@ -1255,8 +1255,10 @@ export class Runlight {
     this.salts.clear();
     for (const timezone of new Set(this.sites.map((s) => s.timezone))) await this.currentSalts(this.now(), timezone);
     await this.dropOldSalts(this.now());
-    this.pruning = this.pruning.then(() => this.applyRetention()).catch((error) => console.error("Runlight: could not apply retention", error));
-    await this.pruning;
+    const pruning = this.pruning.then(() => this.applyRetention());
+    // Keep the queue usable, but let the scheduled check report this failure.
+    this.pruning = pruning.catch(() => {});
+    await pruning;
     if (this.now() - this.optimizedAt >= 86_400_000) {
       this.optimizedAt = this.now();
       await this.store.optimize();

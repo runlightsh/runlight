@@ -117,6 +117,11 @@ public sealed class Accounts
                     "CREATE TABLE IF NOT EXISTS rl_invites (id " + Str(100) + " PRIMARY KEY, email " + Str(320) + " NOT NULL UNIQUE, role " + Str(20) + " NOT NULL, code_hash " + Str(128) + " NOT NULL UNIQUE, invited_by " + Str(100) + " NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)" + table,
                     null,
                     cancellationToken).ConfigureAwait(false);
+                foreach (var name in new[] { "rl_users", "rl_invites" })
+                {
+                    var fields = db.Dialect == "sqlite" ? await db.AllAsync("PRAGMA table_info(" + name + ")", null, cancellationToken).ConfigureAwait(false) : await db.AllAsync("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ? AND table_schema = " + (my ? "DATABASE()" : "current_schema()"), [name], cancellationToken).ConfigureAwait(false);
+                    if (!fields.Any(c => c.Str("name") == "site")) await db.RunAsync("ALTER TABLE " + name + " ADD COLUMN site TEXT", null, cancellationToken).ConfigureAwait(false);
+                }
                 // A server has one owner. One from before, with several, keeps the first and the rest become admins,
                 // who can still do everything but remove the owner. Invites to join as an owner become invites as an admin.
                 var owners = await db.AllAsync("SELECT id FROM rl_users WHERE role = 'owner' ORDER BY created_at, id", null, cancellationToken).ConfigureAwait(false);
@@ -134,7 +139,7 @@ public sealed class Accounts
     private static List<object?> RecoveryList(object? stored) =>
         Js.Truthy(stored) && Json.Parse(Sql.S(stored)) is List<object?> list ? list : [];
 
-    private static JsObject Row(JsObject r) => new()
+    private static JsObject Row(JsObject r) => WithSite(new JsObject()
     {
         ["id"] = Sql.S(r.Get("id")),
         ["email"] = Sql.S(r.Get("email")),
@@ -143,7 +148,9 @@ public sealed class Accounts
         ["createdAt"] = Js.Number(r.Get("created_at")),
         ["twoFactor"] = Js.Truthy(r.Get("totp_secret")),
         ["recoveryLeft"] = (long)RecoveryList(r.Get("totp_recovery")).Count,
-    };
+    }, r.Str("site"));
+
+    internal static JsObject WithSite(JsObject value, string? site) { if (site != null) value["site"] = site; return value; }
 
     private static string Id(JsObject user) => user.Str("id")!;
 
@@ -380,6 +387,7 @@ public sealed class Accounts
                 {
                     throw new AccountError("Only the owner can change their own role, by handing ownership to an admin", "owner_protected");
                 }
+                if (user.Str("site") != null && role == "admin") throw new AccountError("An admin needs access to all sites", "role_scope");
                 if (role == "owner")
                 {
                     throw new AccountError("Ownership is handed over by the owner", "owner_hand_over");
@@ -416,7 +424,7 @@ public sealed class Accounts
                 {
                     throw new AccountError("Unknown account", "unknown_account");
                 }
-                if (next.Str("role") != "admin")
+                if (next.Str("site") != null || next.Str("role") != "admin")
                 {
                     throw new AccountError("Make them an admin first", "owner_needs_admin");
                 }
@@ -452,9 +460,10 @@ public sealed class Accounts
     /// Makes an account, or sets a new password on an existing one. A new account is the owner when it is the first,
     /// and otherwise an admin unless a role is given, since a server has one owner.
     /// </summary>
-    public async Task<JsObject> SetPasswordAsync(string email, string password, long now, string? role = null, CancellationToken cancellationToken = default)
+    public async Task<JsObject> SetPasswordAsync(string email, string password, long now, string? role = null, CancellationToken cancellationToken = default, string? site = null)
     {
         await InitAsync(cancellationToken).ConfigureAwait(false);
+        if (site != null && (site.Length == 0 || (role != "member" && role != "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
         string address = Js.Lower(Js.Trim(email));
         if (!Email.IsMatch(address))
         {
@@ -488,13 +497,13 @@ public sealed class Accounts
             ["recoveryLeft"] = 0L,
         };
         await Db.RunAsync(
-            "INSERT INTO rl_users (id, email, hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            [user.Get("id"), user.Get("email"), user.Get("hash"), user.Get("role"), now],
+            "INSERT INTO rl_users (id, email, hash, role, created_at, site) VALUES (?, ?, ?, ?, ?, ?)",
+            [user.Get("id"), user.Get("email"), user.Get("hash"), user.Get("role"), now, site],
             cancellationToken).ConfigureAwait(false);
-        return user;
+        return WithSite(user, site);
     }
 
-    private static JsObject InviteRow(JsObject r) => new()
+    private static JsObject InviteRow(JsObject r) => WithSite(new JsObject()
     {
         ["id"] = Sql.S(r.Get("id")),
         ["email"] = Sql.S(r.Get("email")),
@@ -502,7 +511,7 @@ public sealed class Accounts
         ["invitedBy"] = Sql.S(r.Get("invited_by")),
         ["createdAt"] = Js.Number(r.Get("created_at")),
         ["expiresAt"] = Js.Number(r.Get("expires_at")),
-    };
+    }, r.Str("site"));
 
     /// <summary>Invites that still work, newest first. Expired ones are cleared on the way.</summary>
     public async Task<List<JsObject>> InvitesAsync(long now, CancellationToken cancellationToken = default)
@@ -516,14 +525,15 @@ public sealed class Accounts
     /// Invites someone to join with a role, and returns the code for their link. Asking again replaces the
     /// earlier invite, so only the newest link works.
     /// </summary>
-    public async Task<(JsObject Invite, string Code)> InviteAsync(string email, string role, string invitedBy, long now, CancellationToken cancellationToken = default)
+    public async Task<(JsObject Invite, string Code)> InviteAsync(string email, string role, string invitedBy, long now, CancellationToken cancellationToken = default, string? site = null)
     {
         await InitAsync(cancellationToken).ConfigureAwait(false);
-        return await TurnAsync(() => InviteNowAsync(email, role, invitedBy, now, cancellationToken), cancellationToken).ConfigureAwait(false);
+        return await TurnAsync(() => InviteNowAsync(email, role, invitedBy, now, cancellationToken, site), cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<(JsObject Invite, string Code)> InviteNowAsync(string email, string role, string invitedBy, long now, CancellationToken cancellationToken)
+    private async Task<(JsObject Invite, string Code)> InviteNowAsync(string email, string role, string invitedBy, long now, CancellationToken cancellationToken, string? site)
     {
+        if (site != null && (site.Length == 0 || (role != "member" && role != "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
         string address = Js.Lower(Js.Trim(email));
         if (!Email.IsMatch(address))
         {
@@ -545,10 +555,10 @@ public sealed class Accounts
         };
         await Db.RunAsync("DELETE FROM rl_invites WHERE email = ?", [address], cancellationToken).ConfigureAwait(false);
         await Db.RunAsync(
-            "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [invite.Get("id"), address, role, CodeHash(code), invitedBy, now, now + InviteMs],
+            "INSERT INTO rl_invites (id, email, role, code_hash, invited_by, created_at, expires_at, site) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [invite.Get("id"), address, role, CodeHash(code), invitedBy, now, now + InviteMs, site],
             cancellationToken).ConfigureAwait(false);
-        return (invite, code);
+        return (WithSite(invite, site), code);
     }
 
     private static string CodeHash(string code) => Crypto.Hex(Crypto.Sha256(code));
@@ -587,7 +597,7 @@ public sealed class Accounts
                 static AccountError Gone() => new("This invite has expired or was already used. Ask for a new one.", "invite_gone");
                 var invite = await InviteByCodeAsync(code, now, cancellationToken).ConfigureAwait(false) ?? throw Gone();
                 var sender = await ByEmailAsync(invite.Str("invitedBy") ?? "", cancellationToken).ConfigureAwait(false);
-                if (sender == null || !MayInvite(sender.Str("role")))
+                if (sender == null || sender.Str("site") != null || !MayInvite(sender.Str("role")))
                 {
                     await Db.RunAsync("DELETE FROM rl_invites WHERE id = ?", [invite.Str("id")], cancellationToken).ConfigureAwait(false);
                     throw Gone();
@@ -597,7 +607,7 @@ public sealed class Accounts
                 {
                     throw new AccountError(email + " already has an account", "account_exists", new Dictionary<string, string>(StringComparer.Ordinal) { ["email"] = email });
                 }
-                var user = await SetPasswordAsync(email, password, now, invite.Str("role"), cancellationToken).ConfigureAwait(false);
+                var user = await SetPasswordAsync(email, password, now, invite.Str("role"), cancellationToken, invite.Str("site")).ConfigureAwait(false);
                 await Db.RunAsync("DELETE FROM rl_invites WHERE id = ?", [invite.Str("id")], cancellationToken).ConfigureAwait(false);
                 return user;
             },

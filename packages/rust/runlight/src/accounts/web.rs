@@ -11,7 +11,7 @@ use super::auth::{
 use super::crypto::{base64url, random_bytes, same_text};
 use super::pages::{
     AUTH_CSS, AUTH_JS, CodePage, InvitePage, LoginPage, SetupPage, code_page, invite_gone_page, invite_page,
-    login_page, role_text, setup_locked_page, setup_needs_token_page, setup_page,
+    login_page, scoped_role_text, setup_locked_page, setup_needs_token_page, setup_page,
 };
 use crate::error::Error;
 use crate::http::{Headers, Request, Response, SearchParams, Url};
@@ -164,10 +164,9 @@ fn reply(body: &Value, status: u16, extra: &[(&str, &str)]) -> Response {
 }
 
 fn person(u: &User) -> Value {
-    obj! {
-        "id" => u.id.as_str(), "email" => u.email.as_str(), "role" => u.role.as_str(), "createdAt" => u.created_at,
-        "twoFactor" => u.two_factor, "recoveryLeft" => u.recovery_left,
-    }
+    let Value::Object(mut value) = u.to_value() else { unreachable!() };
+    value.remove("hash");
+    Value::Object(value)
 }
 
 fn invite_view(i: &Invite) -> Value {
@@ -364,7 +363,7 @@ impl AccountsWeb {
     /// Notes who made a token. A viewer makes no tokens; someone removed or made a viewer since allowing an app
     /// gets none for it, and false takes the token back.
     pub async fn token_made(&self, token: &TokenRow, by: &str) -> R<bool> {
-        match self.0.accounts.by_id(by).await?.map(|u| u.role) {
+        match self.0.accounts.by_id(by).await?.filter(|u| u.site.is_none()).map(|u| u.role) {
             None | Some(Role::Viewer) => Ok(false),
             Some(_) => {
                 self.0.store.set_setting(&format!("{MADE_BY}{}", token.id), Some(by)).await?;
@@ -442,7 +441,7 @@ impl AccountsWeb {
         let link = format!("{origin}{}/invite?code={code}", self.0.base);
         let host =
             Url::parse(&origin).map(|u| u.host()).ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?;
-        let what = role_text(invite.role.as_str());
+        let what = scoped_role_text(invite.role.as_str(), invite.site.as_deref());
         out.set("link", link.as_str());
         if self.0.rl.mail_settings().await?.is_none() {
             out.set("emailed", false);
@@ -456,9 +455,10 @@ impl AccountsWeb {
                 invite.invited_by
             ),
             html: format!(
-                "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>{} invited you to the Runlight at {} as {what}.</p><p><a href=\"{}\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Choose a password and join</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>",
+                "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>{} invited you to the Runlight at {} as {}.</p><p><a href=\"{}\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Choose a password and join</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for seven days. If you were not expecting this, you can ignore it.</p></div>",
                 esc(&invite.invited_by),
                 esc(&host),
+                esc(&what),
                 esc(&link)
             ),
             ..Message::default()
@@ -503,7 +503,7 @@ impl AccountsWeb {
                 "Someone, most likely you, signed in to Runlight at {host} with your password while your account was held up by too many failed tries.\n\nSign in with this link within fifteen minutes:\n{link}\n\nIf this was not you, change your password, since someone knows it.\n"
             ),
             html: format!(
-                "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\"><p>Someone, most likely you, signed in to Runlight at {} with your password while your account was held up by too many failed tries.</p><p><a href=\"{}\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Sign in</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>",
+                "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>Someone, most likely you, signed in to Runlight at {} with your password while your account was held up by too many failed tries.</p><p><a href=\"{}\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600\">Sign in</a></p><p style=\"color:#6b7280;font-size:13px\">The link works for fifteen minutes. If this was not you, change your password, since someone knows it.</p></div>",
                 esc(&host),
                 esc(&link)
             ),
@@ -712,6 +712,7 @@ impl AccountsWeb {
                                 code,
                                 email: &invite.email,
                                 role: invite.role.as_str(),
+                                site: invite.site.as_deref(),
                                 host: &host,
                                 error: None,
                             },
@@ -735,6 +736,7 @@ impl AccountsWeb {
                                 code,
                                 email: &invite.email,
                                 role: invite.role.as_str(),
+                                site: invite.site.as_deref(),
                                 host: &host,
                                 error: Some(error),
                             },
@@ -843,6 +845,14 @@ impl AccountsWeb {
     }
 
     /// Asks for the password again before a change; an answer when it is refused.
+    pub async fn confirm_password(&self, request: &Request) -> R<Option<Response>> {
+        let Some(user) = self.signed_in(request).await? else {
+            return Ok(Some(coded("Sign in first", "sign_in", 401, None)));
+        };
+        let Some(input) = body(request) else { return Ok(Some(coded("Send JSON", "send_json", 415, None))) };
+        self.recheck(&user, &input, "password", ("Your password is not right", "password_wrong")).await
+    }
+
     async fn recheck(&self, user: &User, input: &Value, name: &str, wrong: (&str, &str)) -> R<Option<Response>> {
         if !self.0.rechecks.take(&user.id, self.now()) {
             return Ok(Some(coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429, None)));
@@ -960,7 +970,7 @@ impl AccountsWeb {
             }
             return Ok(coded("Not found", "not_found", 404, None));
         }
-        if user.role != Role::Owner && user.role != Role::Admin {
+        if user.site.is_some() || (user.role != Role::Owner && user.role != Role::Admin) {
             return Ok(coded("Only the owner or an admin can manage people", "people_owner", 403, None));
         }
         let people_id = |suffix: &str| -> Option<String> {
@@ -1026,7 +1036,19 @@ impl AccountsWeb {
                     Some(obj! { "email" => email.as_str() }),
                 ));
             }
-            return match self.0.accounts.invite(&email, role, &user.email, self.now()).await {
+            self.0.rl.init().await?;
+            let site = if input.get("allSites") == Some(&Value::Bool(true)) {
+                None
+            } else {
+                match input.get("site") {
+                    Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
+                    _ => return Ok(coded("Choose a site or explicitly invite to all sites", "invite_site", 400, None)),
+                }
+            };
+            if site.is_some() && self.0.rl.site(site).is_none() {
+                return Ok(coded("Unknown site", "unknown_site", 404, None));
+            }
+            return match self.0.accounts.invite_scoped(&email, role, &user.email, self.now(), site).await {
                 Ok(made) => Ok(reply(&self.invite_answer(request, &made.invite, &made.code).await?, 201, &[])),
                 Err(AuthError::Account(error)) => Ok(refused(&error, 400)),
                 Err(error) => Err(error.into()),
@@ -1050,7 +1072,11 @@ impl AccountsWeb {
                         return Ok(coded("Unknown invite", "unknown_invite", 404, None));
                     };
                     // A new link replaces the old one, which stops working.
-                    let made = self.0.accounts.invite(&old.email, old.role, &user.email, self.now()).await?;
+                    let made = self
+                        .0
+                        .accounts
+                        .invite_scoped(&old.email, old.role, &user.email, self.now(), old.site.as_deref())
+                        .await?;
                     return Ok(reply(&self.invite_answer(request, &made.invite, &made.code).await?, 200, &[]));
                 }
             }

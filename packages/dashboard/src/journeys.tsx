@@ -1,3 +1,4 @@
+import { Loading } from "./loading.js";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { api, type JourneyAnswer, type View } from "./api.js";
 import { count, readablePath } from "./format.js";
@@ -131,7 +132,7 @@ export function JourneysSheet({ view, onClose }: { view: View; onClose: () => vo
         {answer?.sampled ? <p class="field-hint">{t("journeys.sampled", { n: count(answer.sampled) })}</p> : null}
         {error ? <p class="settings-error">{error}</p> : null}
         {!answer ? (
-          <p class="empty">{t("common.loading")}</p>
+          <Loading />
         ) : answer.visits === 0 ? (
           <Empty icon="arrive" title={t("journeys.emptyTitle")} hint={t("journeys.none")} />
         ) : (

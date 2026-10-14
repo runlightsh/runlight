@@ -183,7 +183,7 @@ module Runlight
       u = Http::Url.parse(links["dashboard"])
       where = u.nil? ? links["dashboard"] : u.host + u.pathname.sub(%r{/\z}, "")
       at = t.call("email.at", { "where" => where })
-      mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"64\" height=\"64\" alt=\"Runlight\" style=\"display:block;width:64px;height:64px;border:0;border-radius:14px\">"
+      mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\">"
 
       footer = t.call("email.footer", { "frequency" => t.call(monthly ? "email.monthly" : "email.weekly"), "site" => site["name"] })
       at_line = esc(t.call("email.at", { "where" => "\0" }))

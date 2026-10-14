@@ -1289,6 +1289,10 @@ defmodule Runlight do
 
   # Deletes visits older than each site's retention allows. Cheap when there is nothing to delete.
   defp apply_retention(rl, only) do
+    State.one_at_a_time(rl.table, :retention, fn -> prune_retention(rl, only) end)
+  end
+
+  defp prune_retention(rl, only) do
     for site <- sites(rl), only == nil or site["id"] == only, remote(rl, site["id"]) == nil do
       case retention_cutoff(rl, site["id"]) do
         nil ->
@@ -1870,8 +1874,8 @@ defmodule Runlight do
     now = now(rl)
     for timezone <- sites(rl) |> Enum.map(& &1["timezone"]) |> Enum.uniq(), do: current_salts(rl, now, timezone)
     drop_old_salts(rl, now(rl))
-    State.later(rl.table, fn -> safely_apply_retention(rl, nil) end)
     idle(rl)
+    apply_retention(rl, nil)
 
     if now(rl) - State.get(rl.table, :optimized_at, 0) >= 86_400_000 do
       State.put(rl.table, :optimized_at, now(rl))

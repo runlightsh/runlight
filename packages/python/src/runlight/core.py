@@ -1560,10 +1560,7 @@ class Runlight:
         # Every site's retention covers any one site's that is still waiting.
         with self._pruning_lock:
             self._pruning = []
-        try:
-            self._apply_retention()
-        except Exception as error:
-            print(f"Runlight: could not apply retention {error}", file=sys.stderr)
+        self._apply_retention()
         if self.now() - self._optimized_at >= 86_400_000:
             self._optimized_at = self.now()
             self.store.optimize()
