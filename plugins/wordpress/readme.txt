@@ -121,6 +121,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Updated the bundled Runlight library to 0.1.6. Includes the dashboard, account-security, and database migration improvements from 0.1.5.
+
 = 0.1.5 =
 * Updated the bundled Runlight library to 0.1.5.
 * Improved dashboard loading states, Campaigns tabs, and the Goals and Funnels shortcuts.
