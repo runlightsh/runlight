@@ -33,7 +33,7 @@ It works with Next.js, Nuxt, SvelteKit, Astro, Remix, Express, NestJS, Fastify, 
 The standalone server suits sites that are not Node apps, and gives any number of sites one dashboard, with sign-in for the people you invite.
 
 ```bash
-npx runlight.sh
+npx @runlight/server
 ```
 
 Or with Docker:

@@ -1,5 +1,5 @@
 {
-  "name": "runlight.sh",
+  "name": "@runlight/server",
   "version": "0.1.6",
   "description": "Runlight as its own server: privacy friendly web analytics for any number of sites, with a login, short links on your own domains, and email reports.",
   "license": "MIT",
@@ -51,5 +51,8 @@
     "tsup": "^8.5.1",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

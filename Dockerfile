@@ -21,7 +21,7 @@ WORKDIR /app
 RUN cp /src/package.json /src/package-lock.json . \
   && mkdir -p packages/sdk packages/server \
   && tar -xzf /pack/runlight-sdk-*.tgz -C packages/sdk --strip-components=1 \
-  && tar -xzf /pack/runlight.sh-*.tgz -C packages/server --strip-components=1 \
+  && tar -xzf /pack/runlight-server-*.tgz -C packages/server --strip-components=1 \
   && npm ci --omit=dev --workspace packages/server --no-audit --no-fund
 
 FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
@@ -33,4 +33,4 @@ USER node
 VOLUME /data
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
-CMD ["node", "node_modules/runlight.sh/dist/cli.js"]
+CMD ["node", "node_modules/@runlight/server/dist/cli.js"]
