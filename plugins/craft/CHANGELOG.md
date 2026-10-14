@@ -1,5 +1,11 @@
 # Release Notes for Runlight
 
+## 0.1.5 - 2026-10-14
+
+### Changed
+- Updated the bundled Runlight library to 0.1.5, including account security, site-scoped access, and prefixed-table migration fixes.
+- Improved dashboard loading states, Campaigns tabs, Goals and Funnels shortcuts, and AI agent reporting guidance.
+
 ## 0.1.4 - 2026-10-13
 
 ### Changed
