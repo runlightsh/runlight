@@ -35,6 +35,9 @@ $files = ['runlight.php', 'uninstall.php', 'readme.txt'];
 foreach (glob("$root/includes/*.php") ?: [] as $file) {
     $files[] = 'includes/' . basename($file);
 }
+foreach (glob("$root/assets/*.js") ?: [] as $file) {
+    $files[] = 'assets/' . basename($file);
+}
 sort($files);
 
 // Runlight itself, from packages/php, for running it in this WordPress: its source and the built dashboard,
@@ -44,7 +47,7 @@ sort($files);
 // So is whatever the plugin always replaces with WordPress's own: curl (includes/Fetcher.php), the files shared
 // between requests (includes/Cache.php), the location data's files (includes/Locations.php), and the SMTP client,
 // which the plugin does not offer. Sign-in accounts are left out too, as WordPress's own users sign in. So is what
-// reads PHP's superglobals and environment, and its error log, as the plugin passes Runlight an unslashed copy of
+// reads PHP's superglobals and environment, and its error log, as the plugin passes Runlight a sanitized copy of
 // the request (Local::request()), every setting it would look for in the environment, and a log of its own.
 $library = dirname($root, 2) . '/packages/php';
 $leftOut = [

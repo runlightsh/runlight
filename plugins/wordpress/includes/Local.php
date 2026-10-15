@@ -200,21 +200,67 @@ final class Local {
 	}
 
 	/**
-	 * The request being served, as the visitor sent it. WordPress adds
-	 * slashes to $_SERVER, so Runlight reads a copy without them, with the
-	 * body read up to its limit as Request::fromGlobals() reads it.
+	 * Only the server fields Runlight uses, unslashed and sanitized before
+	 * they enter the library. URLs keep percent escapes; text does not carry
+	 * markup, and addresses, methods, hosts, and lengths are validated.
+	 *
+	 * @return array<string,string>
+	 */
+	private static function server(): array {
+		$server = array();
+		foreach ( array(
+			'REQUEST_METHOD', 'HTTPS', 'HTTP_HOST', 'SERVER_NAME', 'REMOTE_ADDR',
+			'CONTENT_TYPE', 'CONTENT_LENGTH', 'REDIRECT_HTTP_AUTHORIZATION',
+			'HTTP_AUTHORIZATION', 'HTTP_COOKIE', 'HTTP_USER_AGENT', 'HTTP_ACCEPT_LANGUAGE',
+			'HTTP_IF_NONE_MATCH', 'HTTP_SEC_CH_UA', 'HTTP_SEC_CH_UA_MOBILE', 'HTTP_SEC_CH_UA_PLATFORM',
+			'HTTP_X_FORWARDED_FOR', 'HTTP_CF_CONNECTING_IP', 'HTTP_CF_IPCOUNTRY',
+			'HTTP_CF_REGION_CODE',
+		) as $key ) {
+			if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {
+				$server[ $key ] = sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) );
+			}
+		}
+		foreach ( array( 'REQUEST_URI', 'HTTP_ORIGIN', 'HTTP_REFERER' ) as $key ) {
+			if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {
+				$server[ $key ] = esc_url_raw( wp_unslash( $_SERVER[ $key ] ), array( 'http', 'https' ) );
+			}
+		}
+		// Cloudflare encodes city names, so sanitize the text without losing spaces or accented letters.
+		if ( isset( $_SERVER['HTTP_CF_IPCITY'] ) && is_string( $_SERVER['HTTP_CF_IPCITY'] ) ) {
+			$server['HTTP_CF_IPCITY'] = rawurlencode( sanitize_text_field( rawurldecode( wp_strip_all_tags( wp_unslash( $_SERVER['HTTP_CF_IPCITY'] ) ) ) ) );
+		}
+		$uri                   = $server['REQUEST_URI'] ?? '/';
+		$server['REQUEST_URI'] = str_starts_with( $uri, '/' ) && ! str_starts_with( $uri, '//' ) ? $uri : '/';
+		foreach ( array( 'HTTP_HOST', 'SERVER_NAME' ) as $key ) {
+			if ( isset( $server[ $key ] ) && ! preg_match( '/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\])(?::[0-9]{1,5})?$/iD', $server[ $key ] ) ) {
+				unset( $server[ $key ] );
+			}
+		}
+		if ( ! preg_match( '/^[A-Z]+$/D', $server['REQUEST_METHOD'] ?? '' ) ) {
+			$server['REQUEST_METHOD'] = 'GET';
+		}
+		if ( isset( $server['CONTENT_LENGTH'] ) && ! ctype_digit( $server['CONTENT_LENGTH'] ) ) {
+			unset( $server['CONTENT_LENGTH'] );
+		}
+		if ( ! filter_var( $server['REMOTE_ADDR'] ?? '', FILTER_VALIDATE_IP ) ) {
+			$server['REMOTE_ADDR'] = '';
+		}
+		return $server;
+	}
+
+	/**
+	 * The sanitized request, with its body read up to the library's limit.
 	 *
 	 * @throws \Runlight\Http\BodyTooLarge When the body is past its limit.
 	 */
 	public static function request(): Request {
 		Library::load();
-		return Request::fromServer( wp_unslash( $_SERVER ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- the path and headers reach Runlight as sent, and it checks each one itself.
+		return Request::fromServer( self::server() );
 	}
 
 	/** The path of the request being served, without its query. */
 	private static function path(): string {
-		$uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '/';
-		return (string) wp_parse_url( $uri, PHP_URL_PATH );
+		return (string) wp_parse_url( self::server()['REQUEST_URI'], PHP_URL_PATH );
 	}
 
 	/**
@@ -246,7 +292,7 @@ final class Local {
 			exit;
 		}
 		self::load();
-		$server  = wp_unslash( $_SERVER ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Visitor reads only REMOTE_ADDR and two headers, each checked to be an IP address.
+		$server  = self::server();
 		$context = array( 'ip' => Visitor::address( $server ) );
 		// Cloudflare's location headers are believed only for a connection from Cloudflare, as its CF-Connecting-IP is.
 		if ( Visitor::from_cloudflare( $server ) ) {

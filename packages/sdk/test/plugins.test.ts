@@ -94,6 +94,8 @@ test("the WordPress plugin hands Runlight the request without the slashes WordPr
     define("ABSPATH", "/");
     function slash($v) { return is_array($v) ? array_map(__NAMESPACE__ . "\\\\slash", $v) : (is_string($v) ? addslashes($v) : $v); }
     function wp_unslash($v) { return is_array($v) ? array_map(__NAMESPACE__ . "\\\\wp_unslash", $v) : (is_string($v) ? stripslashes($v) : $v); }
+    function sanitize_text_field($v) { return trim(preg_replace("/%[a-f0-9]{2}/i", "", strip_tags($v))); }
+    function esc_url_raw($v, $protocols = []) { return str_replace('"', '', $v); }
     require ${JSON.stringify(includes + "Library.php")};
     require ${JSON.stringify(includes + "Local.php")};
     $_SERVER = slash(["REQUEST_METHOD" => "GET", "HTTP_HOST" => "example.com", "REQUEST_URI" => "/runlight/it's?q=\\"a\\"", "HTTP_USER_AGENT" => "Bot \\"quoted\\" O'Brien", "HTTP_COOKIE" => "a=\\"b\\"", "REMOTE_ADDR" => "203.0.113.9"]);
@@ -107,7 +109,32 @@ test("the WordPress plugin hands Runlight the request without the slashes WordPr
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && !process.env.CI) return t.skip("PHP is not installed");
     throw error;
   }
-  assert.deepEqual(JSON.parse(answer), ['http://example.com/runlight/it\'s?q="a"', 'Bot "quoted" O\'Brien', 'a="b"', "203.0.113.9"]);
+  assert.deepEqual(JSON.parse(answer), ['http://example.com/runlight/it\'s?q=a', 'Bot "quoted" O\'Brien', 'a="b"', "203.0.113.9"]);
+});
+
+test("WordPress validates request fields and excludes unrelated server data", (t) => {
+  const answer = wordpressPhp(t, `
+    require ${JSON.stringify(WORDPRESS + "includes/Library.php")};
+    require ${JSON.stringify(WORDPRESS + "includes/Local.php")};
+    $_SERVER = [
+      "REQUEST_METHOD" => "GET", "HTTP_HOST" => "example.com:8080",
+      "REQUEST_URI" => "/runlight/api/pages?path=%2Fhello%20world&next=%22quoted%22",
+      "HTTP_CF_IPCITY" => "S%C3%A3o%20Paulo",
+      "HTTP_USER_AGENT" => "<b>Example</b>", "HTTP_AUTHORIZATION" => "Bearer rl_example",
+      "HTTP_COOKIE" => ["unexpected"], "CONTENT_LENGTH" => "dog",
+      "REMOTE_ADDR" => "not an IP", "HTTP_UNUSED" => "private", "SECRET" => "private"
+    ];
+    $request = \\Runlight\\WordPress\\Local::request();
+    echo json_encode([$request->url, $request->headers->get("user-agent"),
+      $request->headers->get("authorization"), $request->headers->get("cookie"),
+      $request->headers->get("content-length"), $request->headers->get("unused"), $request->remoteAddress,
+      rawurldecode($request->headers->get("cf-ipcity"))]);
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [
+    "http://example.com:8080/runlight/api/pages?path=%2Fhello%20world&next=%22quoted%22",
+    "Example", "Bearer rl_example", null, null, null, "", "São Paulo",
+  ]);
 });
 
 test("every CMS plugin's PHP parses", (t) => {
@@ -878,8 +905,9 @@ test("every CMS plugin frames the dashboard with the one script in the PHP packa
   // Drupal loads it as a library, so it keeps a copy in the module.
   assert.equal(read("plugins/drupal/js/frame.js"), script, "plugins/drupal/js/frame.js differs from packages/php/assets/frame.js: copy it over");
   assert.match(read("plugins/drupal/js/embed.js"), /forEach\(window\.runlightFrame\)/);
-  // WordPress and Craft put the package's own on the page.
-  assert.match(read("plugins/wordpress/includes/Dashboard.php"), /wp_add_inline_script\( 'runlight-dashboard', Frame::run\(\) \)/);
+  assert.equal(read("plugins/wordpress/assets/frame.js"), script);
+  assert.match(read("plugins/wordpress/assets/dashboard.js"), /window\.runlightFrame\(document\.getElementById\("runlight-embed"\)\)/);
+  assert.doesNotMatch(read("plugins/wordpress/includes/Dashboard.php"), /wp_add_inline_script/);
   assert.match(read("plugins/craft/src/controllers/DashboardController.php"), /'frameScript' => Frame::run\(\)/);
   for (const file of ["plugins/wordpress/includes/Dashboard.php", "plugins/craft/src/templates/_dashboard.twig", "plugins/drupal/src/Controller/DashboardController.php"]) {
     const source = read(file);

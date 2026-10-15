@@ -10,8 +10,6 @@
 
 namespace Runlight\WordPress;
 
-use Runlight\Cms\Frame;
-
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
@@ -174,12 +172,7 @@ final class Dashboard {
 		if ( 'toplevel_page_' . self::PAGE !== $hook ) {
 			return;
 		}
-		Library::load();
-		if ( ! class_exists( Frame::class ) ) {
-			return;
-		}
-		wp_register_script( 'runlight-dashboard', false, array(), RUNLIGHT_PLUGIN_VERSION, true );
-		wp_enqueue_script( 'runlight-dashboard' );
-		wp_add_inline_script( 'runlight-dashboard', Frame::run() );
+		wp_enqueue_script( 'runlight-frame', plugins_url( 'assets/frame.js', RUNLIGHT_PLUGIN_FILE ), array(), RUNLIGHT_PLUGIN_VERSION, true );
+		wp_enqueue_script( 'runlight-dashboard', plugins_url( 'assets/dashboard.js', RUNLIGHT_PLUGIN_FILE ), array( 'runlight-frame' ), RUNLIGHT_PLUGIN_VERSION, true );
 	}
 }
