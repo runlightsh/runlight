@@ -1060,6 +1060,8 @@
   "assistant.action.inviteManual": "Einladung ohne E-Mail erstellt. Öffne den Link, um ihn selbst zu teilen.",
   "people.areYouSure": "Bist du sicher?",
   "people.handOverWarning": "{email} wird Eigentümer dieser gesamten Runlight-Instanz und ALLER ihrer Websites. Du wirst Administrator und kannst die Eigentümerschaft nicht selbst zurückholen.",
+  "people.handOverWarningSingle": "Damit wird {email} Eigentümer dieser Runlight-Installation. Du wirst Administrator und kannst die Eigentümerschaft nicht selbst zurückholen.",
+  "people.confirmOwnership": "Ich verstehe, dass damit die Eigentümerschaft dieser Installation übertragen wird.",
   "people.confirmAllSites": "Ich verstehe, dass die Eigentümerschaft aller Websites übertragen wird.",
   "people.allSites": "Zu allen Websites einladen",
   "people.allSitesHint": "Diese Einladung gewährt Zugriff auf alle aktuellen und zukünftigen Websites.",

@@ -9,6 +9,7 @@ import { Callout } from "./callout.js";
 import { Icon } from "./icons.js";
 import { DeleteButton } from "./links.js";
 import { useDialogFocus } from "./focus.js";
+import { Loading } from "./loading.js";
 
 interface Message {
   role: "user" | "assistant";
@@ -88,7 +89,8 @@ export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetu
   const key = `runlight_assistant:${site.id}`;
   const dialog = useRef<HTMLDivElement>(null);
   useDialogFocus(dialog);
-  const [state, setState] = useState<AssistantState | null>(null);
+  const [state, setState] = useState<AssistantState | null>(() => api.cachedAssistant() ?? null);
+  const [loadError, setLoadError] = useState("");
   const [messages, setMessages] = useState<Message[]>(() => {
     try {
       const saved = JSON.parse(sessionStorage.getItem(key) ?? "[]") as Message[];
@@ -109,7 +111,7 @@ export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetu
   const input = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    void api.assistant().then(setState).catch(() => setState({ configured: false }));
+    void api.assistant().then(setState).catch((e: Error) => setLoadError(e.message));
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
     document.body.classList.add("locked");
@@ -215,7 +217,8 @@ export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetu
         </header>
         <p class="assistant-about">{t("assistant.about", { site: site.name })}</p>
         <div class="drawer-body assistant-messages" ref={list} aria-live="polite">
-          {state && !state.configured ? (
+          {loadError ? <p class="failure" role="alert">{loadError}</p> : null}
+          {state === null ? (loadError ? null : <Loading chart />) : !state.configured ? (
             <div class="assistant-empty">
               <span class="assistant-mark" aria-hidden="true">
                 <Icon name="robot" />

@@ -38,6 +38,10 @@ if (!empty && (await rl.store.db.all("SELECT id FROM rl_links LIMIT 1")).length 
 
 if (!empty && (await rl.store.goals("default")).length === 0) await seedGoals();
 
+// Seeded history needs the same summaries that scheduled upkeep builds in an app.
+if (!empty) while (await rl.buildRollups()) { /* Catch up before accepting requests. */ }
+setInterval(() => void rl.buildRollups().catch(console.error), 60_000).unref();
+
 const accountsOn = process.argv.includes("--accounts");
 const api = rl.routes({ token: null, accounts: accountsOn });
 const routes = toNodeHandler(api.handler);

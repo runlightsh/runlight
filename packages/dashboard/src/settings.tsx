@@ -936,9 +936,9 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
       <div class="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" ref={panel}>
         <header class="settings-toolbar">
           <h2 id="settings-title">{t("settings.title")}</h2>
-          <select class="value settings-site-picker" aria-label={t("app.site")} value={site.id} onChange={(e) => onSite(e.currentTarget.value, section)}>
+          {sites.length > 1 ? <select class="value settings-site-picker" aria-label={t("app.site")} value={site.id} onChange={(e) => onSite(e.currentTarget.value, section)}>
             {sites.map((s) => <option value={s.id}>{s.name}</option>)}
-          </select>
+          </select> : null}
           <button type="button" class="remove" aria-label={t("common.close")} onClick={onClose}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
         </header>
         <nav class="settings-nav" aria-label={t("settings.title")}>
@@ -970,7 +970,7 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
             ) : section === "sharing" ? (
               <Sharing site={site} />
             ) : section === "people" && me ? (
-              <People me={me} site={site} onDemoted={onDemoted} />
+              <People me={me} site={site} multiSite={install.managed || sites.length > 1} onDemoted={onDemoted} />
             ) : section === "api" ? (
               <Tokens sites={sites} />
             ) : section === "links" ? (

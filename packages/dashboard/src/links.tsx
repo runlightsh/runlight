@@ -270,17 +270,21 @@ export function LinkDetail({ view, id, prefix, domains, onClose }: { view: View;
   const [stats, setStats] = useState<LinkStats | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    api.link(view, id).then(setStats).catch((e: Error) => setError(e.message));
+    let active = true;
+    setStats(null);
+    setError("");
+    api.link(view, id).then((data) => { if (active) setStats(data); }).catch((e: Error) => { if (active) setError(e.message); });
+    return () => { active = false; };
   }, [view, id]);
   const address = stats ? shortUrl(stats.link, prefix, domains) : "";
   const series = [
     { key: "clicks", slot: 1, label: t("links.clicksLabel"), format: count },
-    { key: "visitors", slot: 2, label: t("metric.visitors"), format: count },
   ];
   return (
     <Sheet title={stats?.link.name ?? t("common.loading")} sub={stats ? tn("links.total", stats.clicks, { n: count(stats.clicks) }) : undefined} wide onClose={onClose}>
       <div class="sheet-body">
         {error ? <p class="failure">{error}</p> : null}
+        {!stats && !error ? <Loading chart /> : null}
         {stats ? (
           <>
             <div class="link-head">
@@ -557,6 +561,7 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
 
   useEffect(() => {
     let live = true;
+    setLinks(null);
     api
       .links(view)
       .then((r) => {
@@ -634,7 +639,7 @@ export function LinksPanel({ view, site, readOnly }: { view: View; site: string;
         {top.map((l) => (
           <li>
             <span class="bar" style={{ width: `${((l.clicks ?? 0) / max) * 100}%` }} />
-            <button type="button" class="name" title={display(shortUrl(l, prefix, domains))} onClick={() => openInTab(`links:link:${l.id}`) || setOpen({ id: l.id })}>
+            <button type="button" class="name" title={display(shortUrl(l, prefix, domains))} onMouseEnter={() => void api.link(view, l.id).catch(() => {})} onFocus={() => void api.link(view, l.id).catch(() => {})} onClick={() => openInTab(`links:link:${l.id}`) || setOpen({ id: l.id })}>
               <span class="name-text">{l.name}</span>
               <span class="link-slug">/{l.slug}</span>
             </button>

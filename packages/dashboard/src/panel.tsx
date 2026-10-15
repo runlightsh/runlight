@@ -336,7 +336,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
   const [wantedDetail, setWantedDetail] = useState(start.startsWith("detail:") && tabs[0]?.dimension === "event" ? start.slice(7) : "");
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState("");
-  /** Set when a reload takes longer than 300 ms, to fade the rows still showing. */
+  /** Set when a reload takes longer than 300 ms, to replace old rows with a loading placeholder. */
   const [slow, setSlow] = useState(false);
   const tab = tabs[active] ?? tabs[0]!;
   const column = tab.column ?? "visitors";
@@ -379,7 +379,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
   }
 
   return (
-    <section class={`${wide ? "panel wide" : "panel"}${slow && rows ? " stale" : ""}`} aria-busy={slow}>
+    <section class={wide ? "panel wide" : "panel"} aria-busy={slow}>
       <header class="panel-head">
         <h2>{t(title)}</h2>
         <div class="head-tools">
@@ -428,7 +428,7 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
       {journeysOpen ? <JourneysSheet view={view} onClose={() => setJourneys(false)} /> : null}
       {detail ? <EventProps view={view} event={detail} onClose={() => setDetail(null)} /> : null}
       {showAll ? <AllRows title={title} tab={tab} view={view} onFilter={onFilter} onClose={() => setShowAll(false)} /> : null}
-      {empty ? (
+      {slow && !error ? <Loading /> : empty ? (
         <Empty icon={EMPTY[title]?.icon ?? "chart"} title={t(EMPTY[title]?.title ?? "panel.empty")} hint={EMPTY[title] ? t(EMPTY[title]!.hint) : undefined}>{title === "panel.ai" ? <a class="empty-setup" href="https://runlight.sh/docs/ai/" target="_blank" rel="noopener noreferrer">{t("ai.setup")}<Icon name="external" /></a> : null}</Empty>
       ) : showMap ? (
         <WorldMap view={view} onFilter={onFilter} />
@@ -482,6 +482,8 @@ export function Rhythm({ view, wide }: { view: View; wide?: boolean }) {
   useEffect(() => {
     let live = true;
     setError("");
+    setGrid(null);
+    setHover(null);
     api
       .rhythm(view)
       .then((r) => {
@@ -515,7 +517,22 @@ export function Rhythm({ view, wide }: { view: View; wide?: boolean }) {
         {busiest ? <span class="aside">{t("rhythm.busiest", { when: `${days[busiest[0]]} ${hourLabel(busiest[1])}` })}</span> : null}
       </header>
       {error ? <p class="empty">{error}</p> : null}
-      {!grid && !error ? <Loading chart /> : null}
+      {!grid && !error ? (
+        <div class="rhythm-loading" role="status" aria-label={t("common.loading")}>
+          <div class="rhythm" aria-hidden="true">
+            {days.map((day) => (
+              <div class="rhythm-row">
+                <span class="rhythm-day">{day}</span>
+                {Array.from({ length: 24 }, () => <span class="cell" />)}
+              </div>
+            ))}
+            <div class="rhythm-row hours">
+              <span class="rhythm-day" />
+              {Array.from({ length: 24 }, (_, h) => <span class="hour">{h % 6 === 0 ? hourLabel(h) : ""}</span>)}
+            </div>
+          </div>
+        </div>
+      ) : null}
       {grid && max === 0 ? <Empty icon="clock" title={t("empty.rhythm.title")} hint={t("empty.rhythm.hint")} /> : null}
       {grid && max > 0 ? (
         <div class="rhythm" role="table" aria-label={t("rhythm.table")} ref={box} onPointerLeave={() => setHover(null)}>

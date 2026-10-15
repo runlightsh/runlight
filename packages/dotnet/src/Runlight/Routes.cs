@@ -3216,6 +3216,7 @@ public sealed class Routes
 
         if (path == "/api/goals")
         {
+            if (parameters.Get("definitions") == "1") return JsonResponse(new JsObject { ["site"] = siteId, ["goals"] = await store.GoalsAsync(siteId, cancellationToken).ConfigureAwait(false) });
             var goals = await store.GoalsAsync(siteId, cancellationToken).ConfigureAwait(false);
             double visitors = await store.VisitorsAsync(query, cancellationToken).ConfigureAwait(false);
             double previousVisitors = before != null ? await store.VisitorsAsync(before, cancellationToken).ConfigureAwait(false) : 0;
@@ -3331,6 +3332,7 @@ public sealed class Routes
 
         if (path == "/api/funnels")
         {
+            if (parameters.Get("definitions") == "1") return JsonResponse(new JsObject { ["site"] = siteId, ["funnels"] = await store.FunnelsAsync(siteId, cancellationToken).ConfigureAwait(false) });
             // One funnel at a time, so a page of funnels never takes every database connection at once.
             var rows = new List<object?>();
             foreach (var funnel in await store.FunnelsAsync(siteId, cancellationToken).ConfigureAwait(false))

@@ -1095,6 +1095,13 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		return jsonAnswer(js.NewObject("site", site.ID, "range", ranged, "compare", compareOut, "stats", stats, "previous", previous), 200), nil
 
 	case "/api/goals":
+		if u.SearchParams().Value("definitions") == "1" {
+			definitions, err := r.Store.Goals(ctx, site.ID)
+			if err != nil {
+				return nil, err
+			}
+			return jsonAnswer(js.NewObject("site", site.ID, "goals", definitions), 200), nil
+		}
 		goals, err := r.Store.Goals(ctx, site.ID)
 		if err != nil {
 			return nil, err
@@ -1184,6 +1191,13 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		return jsonAnswer(out, 200), nil
 
 	case "/api/funnels":
+		if u.SearchParams().Value("definitions") == "1" {
+			definitions, err := r.Store.Funnels(ctx, site.ID)
+			if err != nil {
+				return nil, err
+			}
+			return jsonAnswer(js.NewObject("site", site.ID, "funnels", definitions), 200), nil
+		}
 		funnels, err := r.Store.Funnels(ctx, site.ID)
 		if err != nil {
 			return nil, err

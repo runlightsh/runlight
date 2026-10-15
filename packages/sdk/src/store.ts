@@ -464,6 +464,8 @@ function schema(dialect: Db["dialect"]): string[] {
     // MySQL takes an index that leads with the site as a way to read all of a site's rows, even where a
     // range of time would read far fewer, so there an index for looking a value up leads with that value.
     `CREATE INDEX IF NOT EXISTS rl_sessions_visitor ON rl_sessions (${my ? "visitor, site" : "site, visitor"}, last_at)`,
+    // Keep exact visitor counts in index order without loading every session row.
+    ...(dialect === "sqlite" ? [`CREATE INDEX IF NOT EXISTS rl_sessions_visit_visitors ON rl_sessions (site, visitor, started_at) WHERE pageviews > 0 OR events > 0`] : []),
     `CREATE TABLE IF NOT EXISTS rl_events (
       id ${id}, site ${site} NOT NULL, ts BIGINT NOT NULL, kind ${str(20)} NOT NULL,
       visitor ${text(100)}, session ${text(100)}, pageview ${text(100)},
@@ -476,6 +478,7 @@ function schema(dialect: Db["dialect"]): string[] {
     // Page and event filters find the visits they pick through these, rather than reading every row in the range.
     // MySQL indexes the first 255 characters of a path, which is enough to find it.
     `CREATE INDEX IF NOT EXISTS rl_events_site_path ON rl_events (${my ? "path(255), site" : "site, path"}, ts)`,
+    ...(dialect === "sqlite" ? [`CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'`] : []),
     // MySQL has no partial index, so its index of event names holds the kind too.
     my
       ? `CREATE INDEX IF NOT EXISTS rl_events_site_name ON rl_events (name, site, kind, ts)`
@@ -710,6 +713,12 @@ function pageviewsOf(filters: Filter[], site: string, from: number, to: number, 
   };
 }
 
+// SQLite can prefer the path index to avoid a sort, reading the site's entire history.
+// Reports bounded by event kind and time should use the matching range index instead.
+function eventKindTable(dialect: Db["dialect"]): string {
+  return dialect === "sqlite" ? "rl_events e INDEXED BY rl_events_site_kind_ts" : "rl_events e";
+}
+
 /**
  * For reports that count rows (goals, event properties, funnels): the rows of the visits a query picks,
  * as a FROM list and conditions over `e` and `s`. These count visits the way every other report does,
@@ -717,10 +726,10 @@ function pageviewsOf(filters: Filter[], site: string, from: number, to: number, 
  * EVENT_TAIL_MS past the range. Written as a CROSS JOIN so SQLite reads the events through their (site,
  * kind, ts) index and looks each visit up by its id, whatever its statistics say.
  */
-function visitRows(filters: Filter[], site: string, from: number, to: number, dialect: Db["dialect"]): { from: string; sql: string; params: unknown[] } {
+function visitRows(filters: Filter[], site: string, from: number, to: number, dialect: Db["dialect"], kindBound = false): { from: string; sql: string; params: unknown[] } {
   const scope = visitScope(filters, site, from, to, dialect);
   return {
-    from: "rl_events e CROSS JOIN rl_sessions s",
+    from: `${kindBound ? eventKindTable(dialect) : "rl_events e"} CROSS JOIN rl_sessions s`,
     sql: `e.site = ? AND e.ts >= ? AND e.ts < ? AND s.id = e.session AND s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql}`,
     params: [site, from, to + EVENT_TAIL_MS, site, from, to, ...scope.params],
   };
@@ -982,8 +991,8 @@ export class SqlStore {
     // Pages and events, from the rows of the day's visits. The time bounds let the (site, kind, ts) index
     // find them; a visit's last row comes at most EVENT_TAIL_MS after it starts.
     const ofDay = (kind: string) =>
-      `FROM rl_events e JOIN rl_sessions s ON s.id = e.session
-       WHERE e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}`;
+      `FROM ${eventKindTable(dialect)} CROSS JOIN rl_sessions s
+       WHERE s.id = e.session AND e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}`;
     const window = [site, start, end + EVENT_TAIL_MS, start, end];
     await this.transaction(async (store) => {
       const db = store.db;
@@ -1106,7 +1115,7 @@ export class SqlStore {
       // Bounded by time as well, so the events index finds them (see buildRollupDay).
       const lo = Math.min(...plan.rest.map(([a]) => a));
       const hi = Math.max(...plan.rest.map(([, b]) => b)) + EVENT_TAIL_MS;
-      const ofRest = (kind: string) => `FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${IS_VISIT} AND ${w.sql}`;
+      const ofRest = (kind: string) => `FROM ${eventKindTable(this.db.dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${IS_VISIT} AND ${w.sql}`;
       const at = [query.site, lo, hi, ...w.params];
       if (page) {
         for (const row of await this.db.all(`SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, ${LIVE_VIEWS} AS views ${ofRest("pageview")} GROUP BY e.path`, at)) bump(row);
@@ -1399,13 +1408,19 @@ export class SqlStore {
   async funnelCounts(query: Query, funnel: FunnelRow): Promise<number[]> {
     // The rows of the picked visits that match any step, in order, read once and walked here: a join from
     // each step to the next is planned badly by Postgres, which cannot guess how many visits go on.
-    const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect);
+    const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect, true);
     const scopes = funnel.steps.map((step) => this.goalScope({ kind: step.kind, match: step.match, name: step.match } as GoalRow));
+    // Separate seeks let SQLite use the path/name indexes for each step. UNION
+    // keeps one copy of an event matching several steps, preserving step order.
+    const seek = this.db.dialect === "sqlite" && !this.db.metered;
+    const candidates = scopes.map((scope) => `SELECT e.id, e.site, e.session, e.ts, e.kind, e.path, e.name FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND ${scope.sql}`);
+    const from = seek ? `(${candidates.join(" UNION ")}) e CROSS JOIN rl_sessions s` : v.from;
+    const candidateParams = seek ? scopes.flatMap((scope) => [query.site, query.from, query.to + EVENT_TAIL_MS, ...scope.params]) : [];
     const rows = await this.db.all<Record<string, unknown>>(
       `SELECT e.session AS session, ${scopes.map((scope, i) => `CASE WHEN ${scope.sql} THEN 1 ELSE 0 END AS m${i}`).join(", ")}
-       FROM ${v.from} WHERE ${v.sql} AND (${scopes.map((scope) => `(${scope.sql})`).join(" OR ")})
+       FROM ${from} WHERE ${v.sql} AND e.kind IN ('pageview', 'event') AND (${scopes.map((scope) => `(${scope.sql})`).join(" OR ")})
        ORDER BY e.session, e.ts, e.id`,
-      [...scopes.flatMap((scope) => scope.params), ...v.params, ...scopes.flatMap((scope) => scope.params)],
+      [...scopes.flatMap((scope) => scope.params), ...candidateParams, ...v.params, ...scopes.flatMap((scope) => scope.params)],
     );
     const counts = funnel.steps.map(() => 0);
     let session: unknown = undefined;
@@ -1765,7 +1780,13 @@ export class SqlStore {
    */
   async goalTotalsAll(query: Query, goals: GoalRow[]): Promise<Map<string, GoalTotals>> {
     const out = new Map<string, GoalTotals>();
-    const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect);
+    // Local SQLite can seek each goal's path or event name instead of scanning
+    // every pageview for a mixed set of goals. Metered stores keep the batch.
+    if (this.db.dialect === "sqlite" && !this.db.metered) {
+      for (const goal of goals) out.set(goal.id, await this.goalTotals(query, goal));
+      return out;
+    }
+    const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect, true);
     // As many goals per query as keep it under D1's parameter limit.
     const chunks: GoalRow[][] = [[]];
     let count = v.params.length;
@@ -1963,8 +1984,9 @@ export class SqlStore {
   /** Just the visitor count from stats(), in one query, for conversion rates. */
   async visitors(query: Query): Promise<number> {
     const scope = visitScope(query.filters, query.site, query.from, query.to, this.db.dialect);
+    const table = this.db.dialect === "sqlite" && query.filters.length === 0 ? "rl_sessions s INDEXED BY rl_sessions_visit_visitors" : "rl_sessions s";
     const [row] = await this.db.all(
-      `SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql}`,
+      `SELECT COUNT(DISTINCT s.visitor) AS visitors FROM ${table} WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql}`,
       [query.site, query.from, query.to, ...scope.params],
     );
     return num(row?.visitors);
@@ -2062,6 +2084,27 @@ export class SqlStore {
         visitDuration: n > 0 ? Math.round(num(row?.duration) / n) : 0,
       };
     });
+  }
+
+  /** Seek one matching event per hostname, skipping its remaining events before the next seek. */
+  async hostnameSuggestions(query: Query, limit: number): Promise<Array<{ value: string }>> {
+    const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect);
+    const within = rowScope(query.filters, ["page", "hostname"], this.db.dialect);
+    const table = this.db.dialect === "sqlite" ? "rl_events e INDEXED BY rl_events_hostname_suggest" : "rl_events e";
+    const rows: Array<{ value: string }> = [];
+    let after: string | undefined;
+    while (rows.length < limit) {
+      const [row] = await this.db.all<{ value: string }>(
+        `SELECT e.hostname AS value FROM ${table} CROSS JOIN rl_sessions s
+         WHERE ${v.sql} AND e.kind = 'pageview'${within.sql}${after === undefined ? "" : " AND e.hostname > ?"}
+         ORDER BY e.hostname${this.textOrder} LIMIT 1`,
+        [...v.params, ...within.params, ...(after === undefined ? [] : [after])],
+      );
+      if (!row) break;
+      after = String(row.value);
+      rows.push({ value: after });
+    }
+    return rows;
   }
 
   async breakdown(query: Query, dimension: Dimension, limit: number, offset: number): Promise<BreakdownRow[]> {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { api, type Filter, type Row, type View } from "./api.js";
+import { api, viewParams, type Filter, type Row, type View } from "./api.js";
 import { count } from "./format.js";
 import { t, tn, type Key } from "./i18n.js";
 import { label } from "./panel.js";
@@ -35,19 +35,23 @@ function Clause({ draft, view, first, onChange, onRemove }: {
   onChange: (d: Draft) => void;
   onRemove: () => void;
 }) {
-  const [suggestions, setSuggestions] = useState<Row[]>([]);
+  const [suggestions, setSuggestions] = useState<Array<Pick<Row, "value"> & Partial<Row>>>([]);
+  const [loading, setLoading] = useState(false);
+  const scoped = { ...view, filters: view.filters.filter((f) => f.dimension !== draft.dimension) };
+  const scopeKey = viewParams(scoped).toString();
   useEffect(() => {
     let live = true;
+    setSuggestions([]);
+    setLoading(true);
     // Suggest from the current view, minus any filter on this same field.
-    const scoped = { ...view, filters: view.filters.filter((f) => f.dimension !== draft.dimension) };
-    api
-      .breakdown(scoped, draft.dimension, 12)
+    (draft.dimension === "hostname" ? api.hostnameSuggestions(scoped) : api.breakdown(scoped, draft.dimension, 12))
       .then((r) => live && setSuggestions(r.rows))
-      .catch(() => live && setSuggestions([]));
+      .catch(() => live && setSuggestions([]))
+      .finally(() => live && setLoading(false));
     return () => {
       live = false;
     };
-  }, [draft.dimension, view]);
+  }, [draft.dimension, scopeKey]);
 
   return (
     <div class="clause">
@@ -89,12 +93,13 @@ function Clause({ draft, view, first, onChange, onRemove }: {
           value={draft.value}
           onInput={(e) => onChange({ ...draft, value: (e.target as HTMLInputElement).value })}
         />
+        {loading ? <p class="field-hint suggestions-loading" role="status"><span class="chart-spinner" aria-hidden="true" /><span>{t("common.loading")}</span></p> : null}
         {suggestions.length ? (
           <div class="suggestions">
             {suggestions.map((s) => (
               <button type="button" class={s.value === draft.value ? "suggestion on" : "suggestion"} onClick={() => onChange({ ...draft, value: s.value })}>
                 {label(draft.dimension, s.value)}
-                <span>{count(Number(s.visitors || s.events || 0))}</span>
+                {draft.dimension !== "hostname" ? <span>{count(Number(s.visitors || s.events || 0))}</span> : null}
               </button>
             ))}
           </div>
@@ -114,7 +119,6 @@ export function FilterDrawer({ view, onApply, onClose }: { view: View; onApply: 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
-    panel.current?.querySelector<HTMLElement>("select, input")?.focus();
     document.body.classList.add("locked");
     return () => {
       document.removeEventListener("keydown", onKey);
@@ -145,10 +149,11 @@ export function FilterDrawer({ view, onApply, onClose }: { view: View; onApply: 
           <div class="drawer-body">
             {drafts.map((d, i) => (
               <Clause
+                key={d.id}
                 draft={d}
                 view={view}
                 first={i === 0}
-                onChange={(next) => setDrafts(drafts.map((x) => (x.id === d.id ? next : x)))}
+                onChange={(next) => setDrafts((current) => current.map((x) => (x.id === d.id ? next : x)))}
                 onRemove={() => setDrafts(drafts.filter((x) => x.id !== d.id))}
               />
             ))}

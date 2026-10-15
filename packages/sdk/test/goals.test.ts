@@ -20,6 +20,22 @@ function suite(kind: StoreKind) {
     return { ...t, write };
   };
 
+  test("settings definitions never calculate conversion reports", async () => {
+    const t = setup();
+    await t.write("POST", "/api/goals", { name: "Signup", kind: "event", match: "Signup" });
+    await t.write("POST", "/api/funnels", { name: "Signup flow", steps: [{ kind: "page", match: "/" }, { kind: "event", match: "Signup" }] });
+    const unexpected = async (): Promise<never> => { throw new Error("Settings must not calculate reports"); };
+    t.rl.store.visitors = unexpected;
+    t.rl.store.goalTotalsAll = unexpected;
+    t.rl.store.funnelCounts = unexpected;
+    const goals = await t.get("/api/goals?definitions=1");
+    const funnels = await t.get("/api/funnels?definitions=1");
+    assert.equal(goals.goals[0].name, "Signup");
+    assert.equal(funnels.funnels[0].name, "Signup flow");
+    assert.equal(goals.goals[0].conversions, undefined);
+    assert.equal(funnels.funnels[0].steps[0].visits, undefined);
+  });
+
   test("goals count events, page patterns, and revenue, including visits from before the goal", async () => {
     const t = setup();
     // Three visitors, before any goal exists.
