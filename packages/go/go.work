@@ -15,4 +15,4 @@ use (
 	./echo
 )
 
-replace runlight.sh/go v0.1.6 => ./
+replace runlight.sh/go v0.1.7 => ./
