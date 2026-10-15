@@ -29,6 +29,7 @@ test("home-screen artwork and the manifest are local and public before account s
     assert.equal(manifest.headers.get("content-type"), "application/manifest+json");
     const body = await manifest.json();
     assert.equal(body.start_url, "/");
+    assert.equal(body.display, "standalone");
     assert.deepEqual(body.icons.map((icon: { src: string }) => icon.src), ["/icon-192.png", "/icon-512.png"]);
     assert.equal((await server.handler(new Request(origin + "/api/sites"))).status, 401);
   } finally {
