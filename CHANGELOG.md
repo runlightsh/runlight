@@ -2,6 +2,21 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Added
+
+- An Add funnel action alongside Add goal in the conversions panel.
+
+### Changed
+
+- Settings keeps a site switcher visible on desktop and mobile, and separates the labeled Sign out action with confirmation.
+- The first-visit waiting status is more prominent, invitation access hints sit closer to their checkbox, and loading placeholders wait briefly to avoid flashing on quick responses.
+
+### Fixed
+
+- Mobile inputs avoid focus zoom, and long page paths no longer widen the Right now dialog.
+
 ## 0.1.7 - 2026-10-15
 
 ### Fixed

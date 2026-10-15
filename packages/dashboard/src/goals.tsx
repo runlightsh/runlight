@@ -119,6 +119,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
               </button>
             </nav>
           ) : null}
+          {!readOnly && !funnels.length ? <button type="button" class="box-button" onClick={() => onAdd("funnels")}><Icon name="plus" />{t("funnels.add")}</button> : null}
           {readOnly ? null : (
             // With the switch beside it, the button keeps only its icon so the header stays on one line.
             <button type="button" class={funnels.length ? "box-button icon-only" : "box-button"} title={t(showing === "funnels" ? "funnels.add" : "goals.add")} aria-label={t(showing === "funnels" ? "funnels.add" : "goals.add")} onClick={() => onAdd(showing)}>

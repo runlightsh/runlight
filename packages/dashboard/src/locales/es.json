@@ -390,8 +390,8 @@
   "panel.conversions": "Conversiones",
   "goals.revenueAside": "{amount} de ingresos",
   "goals.add": "Añadir objetivo",
-  "goals.emptyTitle": "Tus objetivos aparecerán aquí",
-  "goals.emptyHint": "Un objetivo cuenta lo que te importa, como un registro o un clic en un botón. Un objetivo de evento o de página también cuenta las visitas pasadas, y uno de clic cuenta desde que lo añades.",
+  "goals.emptyTitle": "Tus objetivos y embudos aparecerán aquí",
+  "goals.emptyHint": "Los objetivos miden acciones como registros y clics. Los embudos muestran los pasos que siguen las personas y dónde abandonan.",
   "goals.goal": "Objetivo",
   "goals.rate": "Tasa",
   "goals.conversions": "Conversiones",
@@ -1068,5 +1068,8 @@
   "sites.deleteAcknowledge": "Entiendo que este sitio y sus datos se eliminarán permanentemente.",
   "sites.deleting": "Eliminando...",
   "account.siteMember": "Solo puedes cambiar la configuración de {site}.",
-  "account.siteViewer": "Solo puedes consultar los informes de {site}."
+  "account.siteViewer": "Solo puedes consultar los informes de {site}.",
+  "welcome.waiting": "Esperando la primera visita",
+  "welcome.waitingHint": "Esta página se completa automáticamente cuando llega una visita.",
+  "app.signOutConfirm": "¿Cerrar sesión en Runlight?"
 }

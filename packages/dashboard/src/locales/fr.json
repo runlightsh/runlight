@@ -390,8 +390,8 @@
   "panel.conversions": "Conversions",
   "goals.revenueAside": "{amount} de revenus",
   "goals.add": "Ajouter un objectif",
-  "goals.emptyTitle": "Vos objectifs apparaîtront ici",
-  "goals.emptyHint": "Un objectif compte ce qui vous importe, comme une inscription ou un clic sur un bouton. Un objectif d’événement ou de page compte aussi les visites passées, et un objectif de clic compte à partir de son ajout.",
+  "goals.emptyTitle": "Vos objectifs et entonnoirs apparaîtront ici",
+  "goals.emptyHint": "Les objectifs suivent les actions comme les inscriptions et les clics. Les entonnoirs montrent les étapes suivies et où les visiteurs abandonnent.",
   "goals.goal": "Objectif",
   "goals.rate": "Taux",
   "goals.conversions": "Conversions",
@@ -1068,5 +1068,8 @@
   "sites.deleteAcknowledge": "Je comprends que ce site et ses données seront supprimés définitivement.",
   "sites.deleting": "Suppression...",
   "account.siteMember": "Vous pouvez modifier les paramètres de {site} uniquement.",
-  "account.siteViewer": "Vous pouvez consulter les rapports de {site} uniquement."
+  "account.siteViewer": "Vous pouvez consulter les rapports de {site} uniquement.",
+  "welcome.waiting": "En attente de la première visite",
+  "welcome.waitingHint": "Cette page se remplit automatiquement dès qu’une visite arrive.",
+  "app.signOutConfirm": "Se déconnecter de Runlight ?"
 }

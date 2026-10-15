@@ -390,8 +390,8 @@
   "panel.conversions": "Conversões",
   "goals.revenueAside": "{amount} de receita",
   "goals.add": "Adicionar meta",
-  "goals.emptyTitle": "Suas metas vão aparecer aqui",
-  "goals.emptyHint": "Uma meta conta o que importa para você, como um cadastro ou um clique em um botão. Uma meta de evento ou de página conta também as visitas passadas, e uma meta de clique conta a partir de quando é adicionada.",
+  "goals.emptyTitle": "Suas metas e funis vão aparecer aqui",
+  "goals.emptyHint": "As metas acompanham ações como cadastros e cliques. Os funis mostram as etapas que as pessoas seguem e onde desistem.",
   "goals.goal": "Meta",
   "goals.rate": "Taxa",
   "goals.conversions": "Conversões",
@@ -1068,5 +1068,8 @@
   "sites.deleteAcknowledge": "Entendo que este site e seus dados serão excluídos permanentemente.",
   "sites.deleting": "Removendo...",
   "account.siteMember": "Você pode alterar as configurações apenas de {site}.",
-  "account.siteViewer": "Você pode consultar os relatórios apenas de {site}."
+  "account.siteViewer": "Você pode consultar os relatórios apenas de {site}.",
+  "welcome.waiting": "À espera da primeira visita",
+  "welcome.waitingHint": "Esta página é preenchida automaticamente quando chega uma visita.",
+  "app.signOutConfirm": "Sair do Runlight?"
 }

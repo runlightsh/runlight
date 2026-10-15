@@ -2487,24 +2487,8 @@ h1 .home:hover {
   flex-shrink: 0;
 }
 
-.settings-heading { display: flex; align-items: center; gap: 6px; }
-.settings-sign-out { display: inline-flex; padding: 5px; border-radius: 5px; color: var(--muted); }
+.settings-sign-out { display: inline-flex; border-radius: 5px; color: var(--muted); }
 .settings-sign-out:hover { color: var(--ink); background: var(--wash); }
-
-.settings-nav h2 {
-  margin: 0 10px;
-  font-size: 18px;
-  font-weight: 650;
-}
-
-.settings-site {
-  margin: 2px 10px 16px;
-  font: 12px var(--mono);
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .settings-tab {
   padding: 8px 10px;
@@ -5352,3 +5336,48 @@ a.ghost {
 @media (prefers-reduced-motion: reduce) { .loading-skeleton > div { animation: none; } }
 
 .empty-setup { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--ink); font-size: 13px; text-underline-offset: 3px; }
+
+/* Keep the settings context visible on desktop and phones. */
+.settings { grid-template-rows: auto minmax(0, 1fr); }
+.settings-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.settings-toolbar h2 { margin: 0; font-size: 18px; font-weight: 650; }
+.settings-site-picker { min-width: 0; max-width: 300px; flex: 1; }
+.settings-toolbar .remove { margin-left: auto; flex: none; }
+.settings-sign-out-row { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.settings-sign-out { align-items: center; gap: 8px; padding: 8px 10px; font-size: 14px; }
+.settings-sign-out svg { width: 16px; height: 16px; }
+.invite-scope-group { display: flex; flex-direction: column; gap: 6px; }
+.invite-scope-group .field-hint { margin: 0; }
+.welcome-lead {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--sunk);
+  align-items: flex-start;
+}
+.welcome-lead strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 16px; }
+.welcome-lead .beat { margin-top: 6px; background: var(--s1); flex: none; }
+/* Grid items must shrink to fit long page paths instead of widening the dialog. */
+.live-body, .live-body .mini, .live-body .minutes, .live-body .mini-grid { min-width: 0; }
+.live-body .mini-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.live-body .name-text { white-space: nowrap; }
+@media (max-width: 720px) {
+  .live-body { padding: 4px 16px 20px; }
+  .live-body .mini-grid.three { grid-template-columns: minmax(0, 1fr); }
+  .list-sheet .drawer-head h2 { min-width: 0; }
+  .sheet-sub { display: block; margin: 4px 0 0; }
+  .settings-toolbar { padding: 12px 16px; gap: 10px; flex-wrap: wrap; }
+  .settings-toolbar h2 { flex: 1; }
+  .settings-site-picker { order: 3; flex-basis: 100%; max-width: none; }
+  /* iOS zooms focused text controls below 16px. Keep browser zoom available. */
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea,
+  input.value, select.value, textarea.value, .site-search input.value, .assistant-ask textarea.value { font-size: 16px; }
+}
