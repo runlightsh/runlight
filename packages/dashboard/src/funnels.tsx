@@ -1,3 +1,4 @@
+import { SettingsLoading } from "./loading.js";
 import { useEffect, useState } from "preact/hooks";
 import { api, type Funnel, type FunnelStep, type Site, type View } from "./api.js";
 import { count, percent } from "./format.js";
@@ -35,13 +36,13 @@ export function FunnelBars({ funnel }: { funnel: Funnel }) {
 }
 
 /** Settings, Goals, Funnels: name the steps a visit should take, in order. */
-export function Funnels({ site, view }: { site: Site; view: View }) {
+export function Funnels({ site }: { site: Site; view: View }) {
   const [funnels, setFunnels] = useState<Funnel[] | null>(null);
   const [editing, setEditing] = useState<Funnel | "new" | null>(null);
   const [error, setError] = useState("");
   const load = () =>
     api
-      .funnels({ ...view, site: site.id })
+      .funnelDefinitions(site.id)
       .then((r) => setFunnels(r.funnels))
       .catch((e: Error) => setError(e.message));
   useEffect(() => {
@@ -62,6 +63,7 @@ export function Funnels({ site, view }: { site: Site; view: View }) {
   return (
     <div class="settings-group">
       <p class="settings-text">{t("funnels.intro")}</p>
+      {funnels === null && !error ? <SettingsLoading /> : null}
       {funnels && funnels.length ? (
         <ul class="domain-list goal-list">
           {funnels.map((f) => (

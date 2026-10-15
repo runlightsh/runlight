@@ -10,11 +10,19 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Changed
 
-- Settings keeps a site switcher visible on desktop and mobile, and separates the labeled Sign out action with confirmation.
+- Settings shows a site switcher when multiple sites are available on desktop and mobile, and separates the labeled Sign out action with confirmation.
 - The first-visit waiting status is more prominent, invitation access hints sit closer to their checkbox, and loading placeholders wait briefly to avoid flashing on quick responses.
 
 ### Fixed
 
+- Link detail charts show clicks only, prefetch on hover or focus, reuse recent responses, and show a spinner while loading.
+- Hostname suggestions avoid counting every matching event, and assistant setup state is prefetched before heavy reports.
+- Live counts load ahead of heavy reports, and chart comparisons finish before conversion calculations. SQLite uses a covering index for exact visitor counts.
+- Dashboard refreshes show chart spinners and report placeholders instead of fading old values. Conversion details retain their title and show a spinner while loading.
+- Goal and funnel settings load definitions without calculating reports and show a loading indicator. Comparison changes keep current-range panels in place, and redundant chart hints are removed.
+- SQLite dashboard reports use bounded event indexes and goal lookups, and the local demo builds daily summaries before serving traffic.
+- Chart loading uses a spinner, and filter suggestions keep input focus and reuse recently loaded reports. Identical reports share requests and are cached for ten seconds, with saved changes clearing the cache.
+- Team ownership confirmations fit below member details, and single-site installs hide multi-site invitation controls and wording.
 - Mobile inputs avoid focus zoom, and long page paths no longer widen the Right now dialog.
 
 ## 0.1.7 - 2026-10-15

@@ -3815,6 +3815,8 @@ public final class Routes {
     }
 
     if (path.equals("/api/goals")) {
+      if ("1".equals(params.get("definitions")))
+        return json(Json.object("site", siteId, "goals", store.goals(siteId)));
       List<Map<String, Object>> goals = store.goals(siteId);
       double visitors = Js.asDouble(store.visitors(query));
       double previousVisitors = before != null ? Js.asDouble(store.visitors(before)) : 0;
@@ -3978,6 +3980,8 @@ public final class Routes {
     }
 
     if (path.equals("/api/funnels")) {
+      if ("1".equals(params.get("definitions")))
+        return json(Json.object("site", siteId, "funnels", store.funnels(siteId)));
       // One funnel at a time, so a page of funnels never takes every database connection at once.
       List<Object> rows = new ArrayList<>();
       for (Map<String, Object> funnel : store.funnels(siteId)) {

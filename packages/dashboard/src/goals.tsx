@@ -1,4 +1,4 @@
-import { Loading } from "./loading.js";
+import { Loading, SettingsLoading } from "./loading.js";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, base, type Funnel, type Goal, type GoalInput, type GoalReport, type GoalTotals, type Site, type View } from "./api.js";
 import { Chart } from "./chart.js";
@@ -36,21 +36,24 @@ function revenueText(rows: Row[]): string {
 }
 
 /** The Conversions box: each goal's conversions, conversion rate, and revenue. */
-export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOnly?: boolean; onAdd: (section: "goals" | "funnels") => void }) {
+export function ConversionsPanel({ view, funnelView, readOnly, onAdd }: { view: View; funnelView: View; readOnly?: boolean; onAdd: (section: "goals" | "funnels") => void }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   // A linked goal opens once the report shows it is one, so a mistyped id opens nothing.
   const [wanted, setWanted] = useState(() => openingIn("goal") ?? "");
   const [funnels, setFunnels] = useState<Funnel[]>([]);
+  const [funnelsLoading, setFunnelsLoading] = useState(true);
   const [showing, setShowing] = useState<"goals" | "funnels">("goals");
   useEffect(() => {
     let live = true;
     setError("");
-    api
-      .goals(view)
+    setRows(null);
+    // Let the chart responses reach the browser before conversion scans occupy SQLite.
+    Promise.allSettled([api.stats(view), api.series(view)])
+      .then(() => live ? api.goals(view) : null)
       .then((r) => {
-        if (!live) return;
+        if (!live || !r) return;
         setRows(r.goals);
         if (wanted) {
           if (r.goals.some((g) => g.id === wanted)) setOpen(wanted);
@@ -58,14 +61,20 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
         }
       })
       .catch((e: Error) => live && setError(e.message));
+    return () => { live = false; };
+  }, [view]);
+  useEffect(() => {
+    let live = true;
+    setFunnelsLoading(true);
     api
-      .funnels(view)
+      .funnels(funnelView)
       .then((r) => live && setFunnels(r.funnels))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => live && setFunnelsLoading(false));
     return () => {
       live = false;
     };
-  }, [view]);
+  }, [funnelView]);
   if (readOnly && rows && rows.length === 0 && funnels.length === 0) return null;
   if (showing === "funnels" && funnels.length) {
     return (
@@ -88,7 +97,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
             )}
           </div>
         </header>
-        {funnels.map((f) => (
+        {funnelsLoading ? <Loading /> : funnels.map((f) => (
           <div class="funnel-block">
             <h3 class="funnel-name">{f.name}</h3>
             <FunnelBars funnel={f} />
@@ -156,7 +165,7 @@ export function ConversionsPanel({ view, readOnly, onAdd }: { view: View; readOn
           </div>
         </>
       ) : null}
-      {open ? <GoalDetail view={view} id={open} onClose={() => setOpen(null)} /> : null}
+      {open ? <GoalDetail view={view} id={open} goal={rows?.find((row) => row.id === open)} onClose={() => setOpen(null)} /> : null}
     </section>
   );
 }
@@ -184,13 +193,13 @@ function GoalList({ title, rows, dimension, currency, valued }: { title: Key; ro
 }
 
 /** One goal over the dashboard's range: totals, a chart, and where conversions came from. */
-function GoalDetail({ view, id, onClose }: { view: View; id: string; onClose: () => void }) {
+function GoalDetail({ view, id, goal, onClose }: { view: View; id: string; goal?: Goal; onClose: () => void }) {
   const [report, setReport] = useState<GoalReport | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     api.goal(view, id).then(setReport).catch((e: Error) => setError(e.message));
   }, [view, id]);
-  const g = report?.goal;
+  const g = report?.goal ?? goal;
   const valued = Boolean(g && g.valueMode !== "none");
   const series = g
     ? [
@@ -202,6 +211,7 @@ function GoalDetail({ view, id, onClose }: { view: View; id: string; onClose: ()
     <Sheet title={g?.name ?? t("common.loading")} sub={g ? describeGoal(g) : undefined} wide onClose={onClose}>
       <div class="sheet-body">
         {error ? <p class="failure">{error}</p> : null}
+        {!report && !error ? <Loading chart /> : null}
         {report && g ? (
           <>
             <div class="goal-tiles">
@@ -478,7 +488,7 @@ export function Goals({ site, view }: { site: Site; view: View }) {
   const [error, setError] = useState("");
   const load = () =>
     api
-      .goals({ ...view, site: site.id })
+      .goalDefinitions(site.id)
       .then((r) => setGoals(r.goals))
       .catch((e: Error) => setError(e.message));
   useEffect(() => {
@@ -504,6 +514,7 @@ export function Goals({ site, view }: { site: Site; view: View }) {
   return (
     <div class="settings-group">
       <p class="settings-text">{t("goals.intro")}</p>
+      {goals === null && !error ? <SettingsLoading /> : null}
       {sorted.length ? (
         <ul class="domain-list goal-list">
           {sorted.map((g) => (

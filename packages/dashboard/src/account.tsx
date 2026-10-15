@@ -270,7 +270,7 @@ function TwoFactor({ me }: { me: Person }) {
 
 /** Resetting someone's two-factor asks for your own password first, like every two-factor change. */
 /** Asks for your password again before something that matters: resetting someone's two-factor, or handing over ownership. */
-function WithPassword({ icon, label, warning, onConfirm, onCancel }: { warning?: string; icon: IconName; label: string; onConfirm: (password: string) => Promise<void>; onCancel: () => void }) {
+function WithPassword({ icon, label, warning, confirmation, onConfirm, onCancel }: { warning?: string; confirmation?: string; icon: IconName; label: string; onConfirm: (password: string) => Promise<void>; onCancel: () => void }) {
   const [password, setPassword] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -287,7 +287,7 @@ function WithPassword({ icon, label, warning, onConfirm, onCancel }: { warning?:
   };
   return (
     <form class="reset-twofactor" onSubmit={submit}>
-      {warning ? <div class="ownership-warning"><strong>{t("people.areYouSure")}</strong><p>{warning}</p><label><input type="checkbox" required checked={confirmed} onChange={(e) => setConfirmed(e.currentTarget.checked)} />{t("people.confirmAllSites")}</label></div> : null}
+      {warning ? <div class="ownership-warning"><strong>{t("people.areYouSure")}</strong><p>{warning}</p><label><input type="checkbox" required checked={confirmed} onChange={(e) => setConfirmed(e.currentTarget.checked)} />{confirmation ?? t("people.confirmAllSites")}</label></div> : null}
       <Secret class="value" autoComplete="current-password" required placeholder={t("twofa.password")} value={password} onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
       <button type="submit" class="copy inline armed" disabled={busy || !password || Boolean(warning && !confirmed)}>
         <Icon name={icon} />
@@ -310,7 +310,7 @@ const roleName = (role: Person["role"]) => t(`people.${role}` as Key);
  * no role to pick and no remove button; the owner can hand ownership to an admin from that admin's row.
  * `onDemoted` runs when you change your own role, with the role you now have.
  */
-export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemoted: (role: Person["role"]) => void }) {
+export function People({ me, site, multiSite, onDemoted }: { site: Site; me: Person; multiSite: boolean; onDemoted: (role: Person["role"]) => void }) {
   const [people, setPeople] = useState<Person[] | null>(null);
   const [invites, setInvites] = useState<PendingInvite[]>([]);
   const [email, setEmail] = useState("");
@@ -346,7 +346,7 @@ export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemo
     setError("");
     setSending(true);
     api
-      .addPerson(email.trim(), role, allSites ? undefined : site.id)
+      .addPerson(email.trim(), role, multiSite && allSites ? undefined : site.id)
       .then((r) => {
         setEmail("");
         return done(r);
@@ -388,14 +388,14 @@ export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemo
       {people ? (
         <ul class="domain-list share-list">
           {people.map((p) => (
-            <li key={p.id}>
+            <li key={p.id} class={handing === p.id || resetting === p.id ? "people-confirming" : undefined}>
               <div class="domain-main">
                 <span class="share-name">
                   {p.email}
                   {p.id === me.id ? <span class="people-you">{t("people.you")}</span> : null}
                   {p.twoFactor ? <span class="people-you">{t("people.twoFactor")}</span> : null}
                 </span>
-                <span class="share-meta">{t("links.createdOn", { date: dateOf(p.createdAt) })} · {p.site ?? t("assistant.action.allSites")}</span>
+                <span class="share-meta">{t("links.createdOn", { date: dateOf(p.createdAt) })}{multiSite ? <> · {p.site === site.id ? site.name : p.site ?? t("assistant.action.allSites")}</> : null}</span>
               </div>
               <div class="domain-actions">
                 {resetting === p.id ? (
@@ -415,7 +415,8 @@ export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemo
                   <WithPassword
                     icon="key"
                     label={t("people.handOverConfirm")}
-                    warning={t("people.handOverWarning", { email: p.email })}
+                    warning={t(multiSite ? "people.handOverWarning" : "people.handOverWarningSingle", { email: p.email })}
+                    confirmation={t(multiSite ? "people.confirmAllSites" : "people.confirmOwnership")}
                     onCancel={() => setHanding(null)}
                     onConfirm={(password) =>
                       api.handOver(p.id, password).then(() => {
@@ -483,7 +484,7 @@ export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemo
                   {i.email}
                   <span class="people-you">{t("people.invited")}</span>
                 </span>
-                <span class="share-meta">{t("people.invitedMeta", { role: roleName(i.role), date: dateOf(i.expiresAt) })} · {i.site ?? t("assistant.action.allSites")}</span>
+                <span class="share-meta">{t("people.invitedMeta", { role: roleName(i.role), date: dateOf(i.expiresAt) })}{multiSite ? <> · {i.site === site.id ? site.name : i.site ?? t("assistant.action.allSites")}</> : null}</span>
               </div>
               <div class="domain-actions">
                 <button
@@ -509,10 +510,10 @@ export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemo
         </ul>
       ) : null}
       <p class="field-hint domain-note">{t("people.roles")}</p>
-      <div class="invite-scope-group">
+      {multiSite ? <div class="invite-scope-group">
       <label class="invite-scope"><input type="checkbox" checked={allSites} onChange={(e) => { setAllSites(e.currentTarget.checked); if (!e.currentTarget.checked && role === "admin") setRole("member"); }} />{t("people.allSites")}</label>
       <p class="field-hint">{allSites ? t("people.allSitesHint") : t("people.siteHint", { site: site.name })}</p>
-      </div>
+      </div> : null}
       <form class="domain-add token-add" onSubmit={add}>
         <input class="value" type="email" required placeholder={t("people.emailPlaceholder")} value={email} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
         <select class="value" value={role} aria-label={t("people.role")} onChange={(e) => setRole((e.target as HTMLSelectElement).value as Person["role"])}>

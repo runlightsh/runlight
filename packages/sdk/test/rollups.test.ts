@@ -16,6 +16,7 @@ async function everything(get: (path: string) => Promise<any>) {
   const out: Record<string, unknown> = {};
   for (const range of ["period=7d", "period=30d", "from=2026-09-29&to=2026-10-03", "period=today", "period=all"]) {
     out[`stats ${range}`] = (await get(`/api/stats?${range}&compare=previous`)).stats;
+    out[`goals ${range}`] = (await get(`/api/goals?${range}&compare=previous`)).goals;
     out[`series ${range}`] = (await get(`/api/series?${range}&compare=off`)).points;
     out[`rhythm ${range}`] = await get(`/api/rhythm?${range}`);
     for (const dimension of ["page", "event", "entry", "exit", "source", "channel", "referrer", "country", "browser", "device", "os"]) {
@@ -56,6 +57,15 @@ for (const kind of STORES) {
     }
     t.advance(start - t.now + 2 * HOUR);
 
+    for (const [i, goal] of [
+      { kind: "page", match: "/pricing", valueMode: "none" },
+      { kind: "page", match: "/blog/*", valueMode: "fixed" },
+      { kind: "event", match: "Signup", valueMode: "fixed" },
+      { kind: "event", match: "Signup", valueMode: "prop" },
+      { kind: "click", match: "button", valueMode: "none" },
+    ].entries()) {
+      await t.rl.store.saveGoal({ id: String(i).padStart(24, "0"), site: "default", name: "Signup", kind: goal.kind as "page" | "event" | "click", match: goal.match, clickBy: "selector", valueMode: goal.valueMode as "none" | "fixed" | "prop", value: 1.25, valueProp: "revenue", currency: "USD", createdAt: t.now });
+    }
     const before = await everything(t.get);
     // D1 builds a few days a check, the others ten.
     let built = 0;

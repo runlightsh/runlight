@@ -1874,6 +1874,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     }
 
     if (path === "/api/goals") {
+      if (url.searchParams.get("definitions") === "1") return json({ site: site.id, goals: await runlight.store.goals(site.id) });
       const goals = await runlight.store.goals(site.id);
       const visitors = await runlight.store.visitors(query);
       const previousVisitors = compared ? await runlight.store.visitors({ ...query, from: compared.from, to: compared.to }) : 0;
@@ -1951,6 +1952,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     }
 
     if (path === "/api/funnels") {
+      if (url.searchParams.get("definitions") === "1") return json({ site: site.id, funnels: await runlight.store.funnels(site.id) });
       const funnels = await runlight.store.funnels(site.id);
       // One funnel at a time, so a page of funnels never takes every database connection at once.
       const rows = [];
@@ -1981,6 +1983,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       if (!isDimension(dimension)) return coded(`Unknown dimension "${dimension}"`, "unknown_dimension", 400, { dimension });
       const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit")) || 10));
       const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      if (dimension === "hostname" && url.searchParams.get("suggestions") === "1" && url.searchParams.get("format") !== "csv") {
+        const rows = await runlight.store.hostnameSuggestions(query, Math.min(limit, 50));
+        return json({ site: site.id, range: rangeOut, dimension, rows });
+      }
       const rows = await runlight.store.breakdown(query, dimension, limit, (page - 1) * limit);
       if (url.searchParams.get("format") === "csv") return download(`${site.id}-${dimension}-${range.fromDate}-${range.toDate}.csv`, rowsCsv(rows, { timezone: site.timezone, dimension }), "text/csv; charset=utf-8");
       return json({ site: site.id, range: rangeOut, dimension, rows });

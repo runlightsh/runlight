@@ -2358,6 +2358,7 @@ module Runlight
       end
 
       if path == "/api/goals"
+        return json({ "site" => site["id"], "goals" => store.goals(site["id"]) }) if params.get("definitions") == "1"
         goals = store.goals(site["id"])
         visitors = store.visitors(query)
         previous_visitors = before.nil? ? 0 : store.visitors(before)
@@ -2439,6 +2440,7 @@ module Runlight
       end
 
       if path == "/api/funnels"
+        return json({ "site" => site["id"], "funnels" => store.funnels(site["id"]) }) if params.get("definitions") == "1"
         # One funnel at a time, so a page of funnels never takes every database connection at once.
         rows = store.funnels(site["id"]).map do |funnel|
           counts = store.funnel_counts(query, funnel)

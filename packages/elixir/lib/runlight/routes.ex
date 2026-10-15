@@ -3301,6 +3301,9 @@ defmodule Runlight.Routes do
         previous = if compared, do: Store.stats(store, before.()), else: :undefined
         json(JS.obj(site: site["id"], range: range_out, compare: compare_out, stats: stats, previous: previous))
 
+      path == "/api/goals" and SearchParams.get(q, "definitions") == "1" ->
+        json(JS.obj(site: site["id"], goals: Store.goals(store, site["id"])))
+
       path == "/api/goals" ->
         goals = Store.goals(store, site["id"])
         visitors = Store.visitors(store, query)
@@ -3393,6 +3396,9 @@ defmodule Runlight.Routes do
         out = JS.obj(site: site["id"], range: range_out) |> Object.merge(answer)
         out = if sampled, do: Object.put(out, "sampled", Runlight.Store.Sql.journey_visits()), else: out
         json(out)
+
+      path == "/api/funnels" and SearchParams.get(q, "definitions") == "1" ->
+        json(JS.obj(site: site["id"], funnels: Store.funnels(store, site["id"])))
 
       path == "/api/funnels" ->
         funnels = Store.funnels(store, site["id"])

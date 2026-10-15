@@ -1060,6 +1060,8 @@
   "assistant.action.inviteManual": "Invitation créée sans envoi d’e-mail. Ouvrez le lien pour le partager vous-même.",
   "people.areYouSure": "Êtes-vous sûr ?",
   "people.handOverWarning": "{email} deviendra propriétaire de toute cette instance Runlight et de TOUS ses sites. Vous deviendrez administrateur et ne pourrez pas reprendre la propriété vous-même.",
+  "people.handOverWarningSingle": "{email} deviendra propriétaire de cette installation Runlight. Vous deviendrez administrateur et ne pourrez pas reprendre la propriété vous-même.",
+  "people.confirmOwnership": "Je comprends que cela transfère la propriété de cette installation.",
   "people.confirmAllSites": "Je comprends que la propriété de tous les sites sera transférée.",
   "people.allSites": "Inviter à tous les sites",
   "people.allSitesHint": "Cette invitation donne accès à tous les sites actuels et futurs.",

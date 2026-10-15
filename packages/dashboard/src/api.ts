@@ -1,3 +1,4 @@
+import { reportCache } from "./report-cache.js";
 import { errorText } from "./i18n.js";
 
 export interface Site {
@@ -334,7 +335,18 @@ async function failure(response: Response): Promise<ApiError> {
   return new ApiError(response.status, (body?.code && errorText(body.code, body.params)) || body?.error || response.statusText, body?.code ?? "");
 }
 
-async function get<T>(path: string, params: URLSearchParams): Promise<T> {
+const reports = reportCache();
+const liveReports = reportCache(1000);
+const assistantReports = reportCache(30_000, 1);
+const REPORT_PATHS = new Set(["stats", "series", "breakdown", "goals", "funnels", "rhythm"]);
+
+function get<T>(path: string, params: URLSearchParams): Promise<T> {
+  const load = () => fetchReport<T>(path, params);
+  if (path === "realtime") return liveReports.read(`${base}/${path}?${params}:${JSON.stringify(readHeaders())}`, load);
+  return (REPORT_PATHS.has(path) || path === "links" || /^links\/[a-f0-9]+$/.test(path)) ? reports.read(`${base}/${path}?${params}:${JSON.stringify(readHeaders())}`, load) : load();
+}
+
+async function fetchReport<T>(path: string, params: URLSearchParams): Promise<T> {
   const response = await fetch(`${base}/api/${path}?${params}`, {
     credentials: "same-origin",
     headers: readHeaders(),
@@ -386,19 +398,33 @@ export function viewParams(view: View): URLSearchParams {
 }
 
 async function send<T>(method: string, path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${base}/api/${path}`, {
-    method,
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) throw await failure(response);
-  return response.json() as Promise<T>;
+  reports.clear();
+  if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+  try {
+    const response = await fetch(`${base}/api/${path}`, {
+      method,
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw await failure(response);
+    return await response.json() as T;
+  } finally {
+    reports.clear();
+    if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+  }
 }
 
 const del = async (path: string) => {
-  const response = await fetch(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin" });
-  if (!response.ok) throw await failure(response);
+  reports.clear();
+  if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+  try {
+    const response = await fetch(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin" });
+    if (!response.ok) throw await failure(response);
+  } finally {
+    reports.clear();
+    if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+  }
 };
 
 const siteQuery = (site: string) => (site ? `?site=${encodeURIComponent(site)}` : "");
@@ -419,6 +445,8 @@ export const api = {
     ),
   observeKey: (site: string) => get<{ key: string }>("observe-key", new URLSearchParams({ site })),
   newObserveKey: (site: string) => send<{ key: string }>("POST", `observe-key/new${siteQuery(site)}`, {}),
+  goalDefinitions: (site: string) => get<{ goals: Goal[] }>("goals", new URLSearchParams({ site, definitions: "1" })),
+  funnelDefinitions: (site: string) => get<{ funnels: Funnel[] }>("funnels", new URLSearchParams({ site, definitions: "1" })),
   funnels: (view: View) => get<{ funnels: Funnel[] }>("funnels", viewParams(view)),
   saveFunnel: (site: string, id: string | null, funnel: { name: string; steps: FunnelStep[] }) =>
     send<{ funnel: Funnel }>(id ? "PATCH" : "POST", `funnels${id ? `/${id}` : ""}${siteQuery(site)}`, funnel),
@@ -459,7 +487,8 @@ export const api = {
   // A connected site's reports go out through its own install's mail service.
   mail: (site?: string) => get<MailState>("mail", new URLSearchParams(site ? { site } : {})),
   connect: (url: string, site?: string) => send<{ authorize: string }>("POST", "sites/connect", { url, ...(site ? { site } : {}) }),
-  assistant: () => get<AssistantState>("assistant", new URLSearchParams()),
+  assistant: () => assistantReports.read("assistant", () => get<AssistantState>("assistant", new URLSearchParams())),
+  cachedAssistant: () => assistantReports.peek<AssistantState>("assistant"),
   saveAssistant: (input: { provider: string; model: string; baseUrl: string; key: string }) => send<{ ok: true }>("PUT", "assistant", input),
   removeAssistant: () => del("assistant"),
   saveAssistantLimit: (viewerDaily: number) => send<{ viewerDaily: number }>("PUT", "assistant/limits", { viewerDaily }),
@@ -494,12 +523,20 @@ export const api = {
   addSite: (site: { name: string; hostnames?: string; timezone?: string; remote?: { url: string; token: string } }) => send<{ site: Site }>("POST", "sites", site),
   deleteSite: (id: string, password?: string) => send<{ ok: true }>("DELETE", `sites/${encodeURIComponent(id)}`, password === undefined ? {} : { password }),
   stats: (view: View) => get<{ range: Range; compare?: { from: string; to: string }; stats: Stats; previous?: Stats }>("stats", viewParams(view)),
+  hostnameSuggestions: (view: View) => {
+    const params = viewParams({ ...view, compare: "off", compareFrom: "", compareTo: "" });
+    params.set("dimension", "hostname");
+    params.set("limit", "12");
+    // Older SDKs may ignore this hint and return full rows, which work here too.
+    params.set("suggestions", "1");
+    return get<{ rows: Array<{ value: string }> }>("breakdown", params);
+  },
   series: (view: View) => get<{ range: Range; points: Point[]; previous?: Point[] }>("series", viewParams(view)),
   breakdown: (view: View, dimension: string, limit: number) => {
-    const params = viewParams(view);
+    const params = viewParams({ ...view, compare: "off", compareFrom: "", compareTo: "" });
     params.set("dimension", dimension);
-    params.set("limit", String(limit));
-    return get<{ rows: Row[] }>("breakdown", params);
+    params.set("limit", String(Math.max(50, limit)));
+    return get<{ rows: Row[] }>("breakdown", params).then((result) => ({ ...result, rows: result.rows.slice(0, limit) }));
   },
   rhythm: (view: View) => get<{ grid: number[][]; cells: RhythmCell[][] }>("rhythm", viewParams(view)),
   journeys: (view: View, options: { steps: number; start: string; end: string; through: { step: number; value: string } | null }) => {

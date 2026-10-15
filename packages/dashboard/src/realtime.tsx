@@ -96,15 +96,20 @@ function Feed({ recent }: { recent: Realtime["recent"] }) {
 }
 
 /** What is happening on the site right now, refreshed while open. */
-export function RealtimeModal({ site, onClose }: { site: string; onClose: () => void }) {
-  const [data, setData] = useState<Realtime | null>(null);
+export function RealtimeModal({ site, initialData, onClose }: { site: string; initialData?: Realtime; onClose: () => void }) {
+  const [data, setData] = useState<Realtime | null>(initialData ?? null);
+  const [error, setError] = useState("");
   useEffect(() => {
     let live = true;
     const load = () =>
       api
         .realtime(site)
-        .then((r) => live && setData(r))
-        .catch(() => {});
+        .then((r) => {
+          if (!live) return;
+          setData(r);
+          setError("");
+        })
+        .catch((e: Error) => live && setError(e.message));
     void load();
     const timer = setInterval(load, REFRESH_MS);
     return () => {
@@ -115,6 +120,7 @@ export function RealtimeModal({ site, onClose }: { site: string; onClose: () => 
   return (
     <Sheet title={t("live.title")} sub={t("live.sub")} wide onClose={onClose}>
       <div class="live-body">
+        {error ? <p class="failure" role="alert">{error}</p> : null}
         {data ? (
           <>
             <p class="live-count">
@@ -139,9 +145,7 @@ export function RealtimeModal({ site, onClose }: { site: string; onClose: () => 
               </>
             )}
           </>
-        ) : (
-          <Loading />
-        )}
+        ) : !error ? <Loading chart /> : null}
       </div>
     </Sheet>
   );

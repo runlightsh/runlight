@@ -1060,6 +1060,8 @@
   "assistant.action.inviteManual": "Invitation created, but no email was sent. Open the link to share it yourself.",
   "people.areYouSure": "Are you sure?",
   "people.handOverWarning": "This makes {email} the owner of this entire Runlight instance and ALL its sites. You will become an admin and cannot take ownership back yourself.",
+  "people.handOverWarningSingle": "This makes {email} the owner of this Runlight install. You will become an admin and cannot take ownership back yourself.",
+  "people.confirmOwnership": "I understand this transfers ownership of this install.",
   "people.confirmAllSites": "I understand this transfers ownership of all sites.",
   "people.allSites": "Invite to all sites",
   "people.allSitesHint": "This invitation grants access to every current and future site.",

@@ -4574,6 +4574,44 @@
           }
         },
         {
+          "method": "GET",
+          "path": "/api/goals?definitions=1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "goals": []
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/funnels?definitions=1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "funnels": []
+            }
+          }
+        },
+        {
           "method": "POST",
           "path": "/api/goals",
           "headers": {
@@ -4675,6 +4713,52 @@
               "error": "Give the goal a name",
               "code": "goal_name",
               "params": {}
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/goals?definitions=1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "goals": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "name": "Purchase",
+                  "kind": "event",
+                  "match": "Purchase",
+                  "clickBy": "",
+                  "valueMode": "prop",
+                  "value": 0,
+                  "valueProp": "amount",
+                  "currency": "USD",
+                  "createdAt": 1791298861000
+                },
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "name": "Thanks page",
+                  "kind": "page",
+                  "match": "/thanks*",
+                  "clickBy": "",
+                  "valueMode": "none",
+                  "value": 0,
+                  "valueProp": "",
+                  "currency": "USD",
+                  "createdAt": 1791298862000
+                }
+              ]
             }
           }
         },
@@ -4996,6 +5080,46 @@
                 ],
                 "createdAt": 1791298862000
               }
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/funnels?definitions=1",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "funnels": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "name": "Checkout",
+                  "steps": [
+                    {
+                      "kind": "page",
+                      "match": "/"
+                    },
+                    {
+                      "kind": "page",
+                      "match": "/cart"
+                    },
+                    {
+                      "kind": "event",
+                      "match": "Purchase"
+                    }
+                  ],
+                  "createdAt": 1791298862000
+                }
+              ]
             }
           }
         },

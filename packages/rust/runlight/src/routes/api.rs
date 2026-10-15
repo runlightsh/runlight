@@ -711,6 +711,14 @@ impl Routes {
         }
 
         if path == "/api/goals" {
+            if url.search_params().get("definitions") == Some("1") {
+                let definitions = store.goals(Some(&site.id)).await?;
+                return Ok(json(
+                    &obj! { "site" => site.id.clone(), "goals" => Value::Array(definitions.iter().map(|item| item.to_value()).collect()) },
+                    200,
+                    &[],
+                ));
+            }
             let goals = store.goals(Some(&site.id)).await?;
             let visitors = store.visitors(query).await?;
             let previous_visitors = match compared {
@@ -871,6 +879,14 @@ impl Routes {
         }
 
         if path == "/api/funnels" {
+            if url.search_params().get("definitions") == Some("1") {
+                let definitions = store.funnels(&site.id).await?;
+                return Ok(json(
+                    &obj! { "site" => site.id.clone(), "funnels" => Value::Array(definitions.iter().map(|item| item.to_value()).collect()) },
+                    200,
+                    &[],
+                ));
+            }
             // One funnel at a time, so a page of funnels never takes every database connection at once.
             let mut rows = Vec::new();
             for funnel in store.funnels(&site.id).await? {

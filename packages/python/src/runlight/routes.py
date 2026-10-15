@@ -2300,6 +2300,8 @@ class Routes:
             return json({"site": site["id"], "range": range_out, "compare": compare_out, "stats": stats, "previous": previous})
 
         if path == "/api/goals":
+            if params.get("definitions") == "1":
+                return json({"site": site["id"], "goals": store.goals(site["id"])})
             goals = store.goals(site["id"])
             visitors = store.visitors(query)
             previous_visitors = store.visitors(before) if before else 0
@@ -2391,6 +2393,8 @@ class Routes:
             return json(answer)
 
         if path == "/api/funnels":
+            if params.get("definitions") == "1":
+                return json({"site": site["id"], "funnels": store.funnels(site["id"])})
             # One funnel at a time, so a page of funnels never takes every database connection at once.
             rows = []
             for funnel in store.funnels(site["id"]):

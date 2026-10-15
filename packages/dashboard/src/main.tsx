@@ -2,7 +2,7 @@ import { Loading } from "./loading.js";
 import { Avatar } from "./site-avatar.js";
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
-import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, install, onEmbedExpired, share, shared, viewParams, type Person, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
+import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, install, onEmbedExpired, share, shared, viewParams, type Person, type Realtime, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
 import { Chart, asSeries } from "./chart.js";
 import { change, exact } from "./format.js";
 import { FilterDrawer, MAX_FILTERS, fieldName, opName } from "./filters.js";
@@ -112,10 +112,11 @@ function Delta({ now, before, lowerIsBetter, compared }: { now: number; before: 
 
 /** The live count. Before a site's first visit there is nothing to watch, so it is plain text, not a button. */
 function Live({ site, ready }: { site: string; ready: boolean }) {
-  const [n, setN] = useState<number | null>(null);
+  const [data, setData] = useState<Realtime | null>(null);
+  const n = data?.visitors ?? null;
   useEffect(() => {
     let live = true;
-    const load = () => api.realtime(site).then((r) => live && setN(r.visitors)).catch(() => {});
+    const load = () => api.realtime(site).then((r) => live && setData(r)).catch(() => {});
     load();
     const timer = setInterval(load, 30_000);
     return () => {
@@ -124,7 +125,7 @@ function Live({ site, ready }: { site: string; ready: boolean }) {
     };
   }, [site]);
   const [open, setOpen] = useState(() => opening("live"));
-  if (n === null) return null;
+  if (n === null) return <span class="live" role="status" aria-label={t("common.loading")}><span class="live-placeholder" aria-hidden="true" /></span>;
   if (!ready) {
     return (
       <span class="live">
@@ -139,7 +140,7 @@ function Live({ site, ready }: { site: string; ready: boolean }) {
         <span class={n > 0 ? "beat on" : "beat"} aria-hidden="true" />
         {tn("app.live", n, { n: exact(n) })}
       </button>
-      {open ? <RealtimeModal site={site} onClose={() => setOpen(false)} /> : null}
+      {open ? <RealtimeModal site={site} initialData={data ?? undefined} onClose={() => setOpen(false)} /> : null}
     </>
   );
 }
@@ -180,6 +181,8 @@ function App() {
   const [, setLanguage] = useState(currentLocale());
   const [sites, setSites] = useState<Site[] | null>(null);
   const [view, setView] = useState<View>(readView);
+  // Comparison choices do not change the current-range panels or funnel counts.
+  const panelView = useMemo<View>(() => ({ ...view, compare: "off", compareFrom: "", compareTo: "" }), [view.site, view.period, view.from, view.to, view.filters]);
   const [charted, setCharted] = useState<MetricKey[]>(readCharted);
   const [stats, setStats] = useState<{ range: Range; compare?: { from: string; to: string }; stats: Stats; previous?: Stats } | null>(null);
   const [points, setPoints] = useState<Point[]>([]);
@@ -225,9 +228,14 @@ function App() {
     setFailure(e instanceof ApiError && e.status === 401 ? "signed-out" : share && e instanceof ApiError && e.status === 404 ? t("share.gone") : e.message);
 
   useEffect(() => {
+    // Check setup before heavy reports run, so opening the assistant needs no loading screen.
+    if (!shared) void api.assistant().catch(() => {});
     api
       .sites()
       .then((r) => {
+        // Start the live count before mounting panels that request expensive reports.
+        const selected = r.sites.find((s) => s.id === view.site) ?? r.sites[0];
+        if (selected) void api.realtime(selected.id).catch(() => {});
         setSites(r.sites);
         // A ?site= that names no site, such as one deleted since the link was made, gives way to the first.
         setView((v) => (v.site && !r.sites.some((s) => s.id === v.site) ? { ...v, site: r.sites[0]?.id ?? "" } : v));
@@ -239,7 +247,7 @@ function App() {
     writeUrl(view, charted);
   }, [view, charted]);
 
-  // The last numbers stay up while new ones load; past 300 ms they fade, so a slow database shows it is working.
+  // Show loading placeholders when a refresh takes longer than 300 ms.
   const [slow, setSlow] = useState(false);
   // On the standalone server the sites come first, so a server with none yet asks for nothing that would fail.
   const noSites = install.managed && !sites?.length;
@@ -319,7 +327,7 @@ function App() {
         .sites()
         .then((r) => {
           setSites(r.sites);
-          if (r.sites.find((x) => x.id === site?.id)?.lastSeen != null) setView((v) => ({ ...v }));
+          if (r.sites.find((x) => x.id === site?.id)?.lastSeen != null) setView((v) => ({ ...v, filters: [...v.filters] }));
         })
         .catch(() => {});
     }, 5000);
@@ -379,7 +387,7 @@ function App() {
                   </button>
                 </h1>
               )}
-              {site ? <Live site={site.id} ready={site.lastSeen != null} /> : null}
+              {site ? <Live key={site.id} site={site.id} ready={site.lastSeen != null} /> : null}
             </div>
             {site && !readOnly ? (
               <button type="button" class="gear" aria-label={t("settings.open")} title={t("settings.open")} onClick={() => openSettings("general")}>
@@ -428,7 +436,7 @@ function App() {
             />
           </div>
         </div>
-        {waiting ? null : stats ? <Headline view={view} stats={stats.stats} previous={stats.previous} compare={stats.compare} /> : <p class="headline">&nbsp;</p>}
+        {waiting ? null : stats && !slow ? <Headline view={view} stats={stats.stats} previous={stats.previous} compare={stats.compare} /> : <p class="headline" role="status" aria-label={t("common.loading")}><span class="headline-placeholder" aria-hidden="true" /></p>}
         {view.filters.length ? (
           <div class="filters">
             {view.filters.map((f) => (
@@ -472,13 +480,13 @@ function App() {
           onClose={() => {
             setSettingsOpen(null);
             // Goals may have changed; the board reads them again.
-            setView((v) => ({ ...v }));
+            setView((v) => ({ ...v, filters: [...v.filters] }));
             refreshMe();
           }}
           onSaved={(saved) => {
             setSites((all) => (all ?? []).map((x) => (x.id === saved.id ? { ...x, ...saved } : x)));
             // A new timezone moves every day boundary, so reload the numbers.
-            setView((v) => ({ ...v }));
+            setView((v) => ({ ...v, filters: [...v.filters] }));
           }}
           onLanguage={changeLanguage}
           onDemoted={(role) => {
@@ -541,7 +549,7 @@ function App() {
           }}
           onClose={() => {
             setAsking(false);
-            setView((v) => ({ ...v }));
+            setView((v) => ({ ...v, filters: [...v.filters] }));
           }}
         />
       ) : null}
@@ -559,7 +567,7 @@ function App() {
         </section>
       ) : null}
 
-      <section class={slow ? "overview stale" : "overview"} hidden={waiting} aria-busy={slow}>
+      <section class="overview" hidden={waiting} aria-busy={slow}>
         <div class="metrics">
           {METRICS.map((m) => {
             const on = charted.includes(m.key);
@@ -570,21 +578,15 @@ function App() {
                   <span class={`swatch s${m.slot}`} />
                   {metricLabel(m)}
                 </span>
-                <span class="metric-value">{value === undefined ? " " : m.format(value)}</span>
+                <span class="metric-value">{!stats || slow ? <span class="metric-placeholder" aria-label={t("common.loading")} /> : value === undefined ? " " : m.format(value)}</span>
                 <span class="metric-foot">
-                  {stats ? <Delta now={stats.stats[m.key]} before={stats.previous?.[m.key]} lowerIsBetter={m.lowerIsBetter} compared={Boolean(stats.previous?.visits)} /> : null}
+                  {stats && !slow ? <Delta now={stats.stats[m.key]} before={stats.previous?.[m.key]} lowerIsBetter={m.lowerIsBetter} compared={Boolean(stats.previous?.visits)} /> : null}
                 </span>
               </button>
             );
           })}
         </div>
-        <div class="chart-head">
-          <span class="chart-note">
-            {shownMetrics.length > 1 ? t("chart.scaled") : t("chart.pick")}
-            {stats?.compare ? ` ${t("chart.dashed", { range: rangeText(stats.compare.from, stats.compare.to) })}` : ""}
-          </span>
-        </div>
-        {stats ? (
+        {stats && !slow ? (
           <Chart
             points={points as unknown as Array<{ start: number } & Record<string, number>>}
             previous={previousPoints as unknown as Array<{ start: number } & Record<string, number>> | undefined}
@@ -593,22 +595,22 @@ function App() {
             timezone={stats.range.timezone}
           />
         ) : (
-          <div class="chart"><Loading chart /></div>
+          <div class="chart chart-loading"><Loading chart /></div>
         )}
       </section>
 
       <div class="board" hidden={waiting}>
         {panels.map((panel, i) =>
           panel.title === "panel.rhythm" ? (
-            <Rhythm view={view} wide={panel.wide} />
+            <Rhythm view={panelView} wide={panel.wide} />
           ) : (
-            <Panel title={panel.title} tabs={panel.tabs} view={view} onFilter={addFilter} wide={panel.wide} map={panel.title === "panel.locations"} key={i} />
+            <Panel title={panel.title} tabs={panel.tabs} view={panelView} onFilter={addFilter} wide={panel.wide} map={panel.title === "panel.locations"} key={i} />
           ),
         )}
         {/* The last row, Links wide and Conversions narrow, so the zigzag of the rows above carries on. A viewer
             reads the links without changing them, and a share never shows them. */}
-        {site && !shared && !elsewhere ? <LinksPanel view={view} site={site.id} readOnly={readOnly} /> : null}
-        {site ? <ConversionsPanel view={view} readOnly={readOnly || elsewhere} onAdd={(section) => openSettings(section)} /> : null}
+        {site && !shared && !elsewhere ? <LinksPanel view={panelView} site={site.id} readOnly={readOnly} /> : null}
+        {site ? <ConversionsPanel view={view} funnelView={panelView} readOnly={readOnly || elsewhere} onAdd={(section) => openSettings(section)} /> : null}
       </div>
 
       <footer class="foot">

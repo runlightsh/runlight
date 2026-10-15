@@ -2677,6 +2677,7 @@ final class Routes
         }
 
         if ($path === '/api/goals') {
+            if ($params->get('definitions') === '1') return self::json(['site' => $site['id'], 'goals' => $store->goals($site['id'])]);
             $goals = $store->goals($site['id']);
             $visitors = $store->visitors($query);
             $previousVisitors = $before !== null ? $store->visitors($before) : 0;
@@ -2757,6 +2758,7 @@ final class Routes
         }
 
         if ($path === '/api/funnels') {
+            if ($params->get('definitions') === '1') return self::json(['site' => $site['id'], 'funnels' => $store->funnels($site['id'])]);
             // One funnel at a time, so a page of funnels never takes every database connection at once.
             $rows = [];
             foreach ($store->funnels($site['id']) as $funnel) {
