@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.6
+Stable tag: 0.1.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -120,6 +120,11 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 * When an administrator opens the Runlight page in wp-admin and you have entered a dashboard key, the plugin sends that key and the address wp-admin is served from (its scheme, host, and port) to the same Runlight, from your server, and gets back a ticket that opens the dashboard once. The page then loads the dashboard from that Runlight in a frame, in the administrator's browser.
 
 == Changelog ==
+
+= 0.1.7 =
+* Sanitized and validated request fields before passing them to Runlight.
+* Loaded dashboard and settings scripts from files with WordPress-encoded settings.
+* Sanitized the connection address directly when reading the submitted form.
 
 = 0.1.6 =
 * Updated the bundled Runlight library to 0.1.6. Includes the dashboard, account-security, and database migration improvements from 0.1.5.
