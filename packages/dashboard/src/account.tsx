@@ -509,8 +509,10 @@ export function People({ me, site, onDemoted }: { site: Site; me: Person; onDemo
         </ul>
       ) : null}
       <p class="field-hint domain-note">{t("people.roles")}</p>
+      <div class="invite-scope-group">
       <label class="invite-scope"><input type="checkbox" checked={allSites} onChange={(e) => { setAllSites(e.currentTarget.checked); if (!e.currentTarget.checked && role === "admin") setRole("member"); }} />{t("people.allSites")}</label>
       <p class="field-hint">{allSites ? t("people.allSitesHint") : t("people.siteHint", { site: site.name })}</p>
+      </div>
       <form class="domain-add token-add" onSubmit={add}>
         <input class="value" type="email" required placeholder={t("people.emailPlaceholder")} value={email} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
         <select class="value" value={role} aria-label={t("people.role")} onChange={(e) => setRole((e.target as HTMLSelectElement).value as Person["role"])}>

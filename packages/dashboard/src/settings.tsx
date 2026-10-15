@@ -39,6 +39,10 @@ const SECTIONS: Array<[Section, Key]> = [
 /** Whether a name from a link is one of the sections, so a mistyped one opens nothing. */
 export const isSection = (name: string): name is Section => name === "people" || SECTIONS.some(([id]) => id === name);
 
+function SettingsSignOut({ menu = false }: { menu?: boolean }) {
+  return signOut ? <div class="settings-sign-out-row"><a class="settings-sign-out" role={menu ? "menuitem" : undefined} href={signOut} onClick={(e) => { if (!window.confirm(t("app.signOutConfirm"))) e.preventDefault(); }}><Icon name="signOut" />{t("app.signOut")}</a></div> : null;
+}
+
 /** On a phone the tabs give way to the section's name as a menu of every section. */
 function SectionMenu({ sections, section, site, onPick }: { sections: Array<[Section, Key]>; section: Section; site: string; onPick: (id: Section) => void }) {
   const { open, setOpen, root } = useFlyout();
@@ -68,6 +72,7 @@ function SectionMenu({ sections, section, site, onPick }: { sections: Array<[Sec
               {id === section ? <Icon name="check" /> : null}
             </button>
           ))}
+          <SettingsSignOut menu />
         </div>
       ) : null}
     </div>
@@ -883,11 +888,12 @@ function LinkDomains({ site }: { site: Site }) {
   );
 }
 
-export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLanguage, onDeleted, onDemoted, me }: {
+export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLanguage, onDeleted, onDemoted, me, onSite }: {
   site: Site;
   view: View;
   start?: Section;
   sites: Site[];
+  onSite: (id: string, section: Section) => void;
   onClose: () => void;
   onSaved: (site: Site) => void;
   onLanguage: (code: string) => void;
@@ -928,27 +934,25 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
   return (
     <div class="scrim center" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div class="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" ref={panel}>
+        <header class="settings-toolbar">
+          <h2 id="settings-title">{t("settings.title")}</h2>
+          <select class="value settings-site-picker" aria-label={t("app.site")} value={site.id} onChange={(e) => onSite(e.currentTarget.value, section)}>
+            {sites.map((s) => <option value={s.id}>{s.name}</option>)}
+          </select>
+          <button type="button" class="remove" aria-label={t("common.close")} onClick={onClose}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>
+        </header>
         <nav class="settings-nav" aria-label={t("settings.title")}>
-          <div class="settings-heading">
-            <h2 id="settings-title">{t("settings.title")}</h2>
-            {signOut ? <a class="settings-sign-out" href={signOut} aria-label={t("app.signOut")} title={t("app.signOut")}><Icon name="signOut" /></a> : null}
-          </div>
-          <p class="settings-site">{site.name}</p>
           {sections.map(([id, label]) => (
             <button type="button" class={section === id ? "settings-tab on" : "settings-tab"} aria-current={section === id ? "page" : undefined} onClick={() => setSection(id)}>
               {t(label)}
             </button>
           ))}
+          <SettingsSignOut />
         </nav>
         <div class="settings-body">
           <header class="settings-head">
             <h3>{t(sections.find(([id]) => id === section)![1])}</h3>
             <SectionMenu sections={sections} section={section} site={site.name} onPick={setSection} />
-            <button type="button" class="remove" aria-label={t("common.close")} onClick={onClose}>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M4 4l8 8M12 4l-8 8" />
-              </svg>
-            </button>
           </header>
           <div class="settings-content">
             {section === "general" ? (

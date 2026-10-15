@@ -463,9 +463,11 @@ function App() {
       {failure ? <p class="failure">{failure}</p> : null}
       {settingsOpen && site && sites ? (
         <SettingsModal
+          key={site.id}
           site={site}
           sites={sites}
           view={view}
+          onSite={(id, section) => { setSettingsOpen(section); update({ site: id, filters: [] }); }}
           start={settingsOpen}
           onClose={() => {
             setSettingsOpen(null);
@@ -547,9 +549,9 @@ function App() {
       {waiting && site && sites ? (
         <section class="welcome">
           <h2>{t("welcome.title", { name: site.name })}</h2>
-          <p class="welcome-lead">
+          <p class="welcome-lead" role="status">
             <span class="beat wait" aria-hidden="true" />
-            {t("welcome.lead")}
+            <span><strong>{t("welcome.waiting")}</strong><span>{t("welcome.waitingHint")}</span></span>
           </p>
           <div class="welcome-steps">
             <Install site={site} sites={sites} />

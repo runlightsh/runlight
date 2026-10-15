@@ -390,8 +390,8 @@
   "panel.conversions": "Conversions",
   "goals.revenueAside": "{amount} Umsatz",
   "goals.add": "Ziel hinzufügen",
-  "goals.emptyTitle": "Deine Ziele erscheinen hier",
-  "goals.emptyHint": "Ein Ziel zählt, was dir wichtig ist, etwa eine Anmeldung oder einen Klick auf einen Button. Ein Ereignis- oder Seitenziel zählt auch vergangene Besuche, und ein Klickziel zählt ab dem Hinzufügen.",
+  "goals.emptyTitle": "Deine Ziele und Trichter erscheinen hier",
+  "goals.emptyHint": "Ziele erfassen Aktionen wie Anmeldungen und Klicks. Trichter zeigen die Schritte der Besucher und wo sie abspringen.",
   "goals.goal": "Ziel",
   "goals.rate": "Rate",
   "goals.conversions": "Conversions",
@@ -1068,5 +1068,8 @@
   "sites.deleteAcknowledge": "Ich verstehe, dass diese Website und ihre Daten dauerhaft gelöscht werden.",
   "sites.deleting": "Wird entfernt...",
   "account.siteMember": "Du kannst nur die Einstellungen für {site} ändern.",
-  "account.siteViewer": "Du kannst nur Berichte für {site} lesen."
+  "account.siteViewer": "Du kannst nur Berichte für {site} lesen.",
+  "welcome.waiting": "Warten auf den ersten Besuch",
+  "welcome.waitingHint": "Diese Seite füllt sich automatisch, sobald ein Besuch eingeht.",
+  "app.signOutConfirm": "Von Runlight abmelden?"
 }

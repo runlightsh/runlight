@@ -390,8 +390,8 @@
   "panel.conversions": "Conversions",
   "goals.revenueAside": "{amount} revenue",
   "goals.add": "Add goal",
-  "goals.emptyTitle": "Your goals will show up here",
-  "goals.emptyHint": "A goal counts what matters to you, like a signup or a click on a button. An event or page goal you add counts past visits too, and a click goal counts from when you add it.",
+  "goals.emptyTitle": "Your goals and funnels will show up here",
+  "goals.emptyHint": "Goals track actions like signups and clicks. Funnels show the steps people take and where they drop off.",
   "goals.goal": "Goal",
   "goals.rate": "Rate",
   "goals.conversions": "Conversions",
@@ -1068,5 +1068,8 @@
   "sites.deleteAcknowledge": "I understand this permanently deletes this site and its data.",
   "sites.deleting": "Removing...",
   "account.siteMember": "You can change settings for {site} only.",
-  "account.siteViewer": "You can read reports for {site} only."
+  "account.siteViewer": "You can read reports for {site} only.",
+  "welcome.waiting": "Waiting for the first visit",
+  "welcome.waitingHint": "This page fills in automatically once a visit arrives.",
+  "app.signOutConfirm": "Sign out of Runlight?"
 }
