@@ -6,6 +6,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Fixed
 
+- Installed standalone Runlight dashboards open in their own app window using the web manifest’s standalone display mode.
 - The WordPress plugin sanitizes and validates request fields before passing them to Runlight, and loads dashboard and settings scripts from files with WordPress-encoded settings.
 
 ### Changed

@@ -22,7 +22,7 @@ assets.set("/manifest.webmanifest", {
     id: "/",
     start_url: "/",
     scope: "/",
-    display: "browser",
+    display: "standalone",
     background_color: "#000000",
     theme_color: "#000000",
     icons: [192, 512].map((size) => ({ src: `/icon-${size}.png`, sizes: `${size}x${size}`, type: "image/png", purpose: "any" })),
