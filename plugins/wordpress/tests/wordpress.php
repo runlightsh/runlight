@@ -201,7 +201,7 @@ function wp_unslash( $value ) {
 	return $value;
 }
 function sanitize_text_field( $value ): string {
-	return trim( (string) $value );
+	return trim( preg_replace( '/%[a-f0-9]{2}/i', '', strip_tags( (string) $value ) ) );
 }
 function wp_strip_all_tags( $text ): string {
 	return trim( strip_tags( (string) $text ) );

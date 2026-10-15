@@ -116,8 +116,9 @@ final class Connect {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_die( esc_html__( 'Sorry, you are not allowed to connect this site.', 'runlight' ), 403 );
 		}
-		$fields  = isset( $_POST[ Settings::OPTION ] ) && is_array( $_POST[ Settings::OPTION ] ) ? wp_unslash( $_POST[ Settings::OPTION ] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- the one field used is sanitized below.
-		$address = Settings::sanitize_address( sanitize_text_field( (string) ( $fields['address'] ?? '' ) ) );
+		$address = isset( $_POST[ Settings::OPTION ]['address'] ) && is_string( $_POST[ Settings::OPTION ]['address'] )
+			? Settings::sanitize_address( sanitize_text_field( wp_unslash( $_POST[ Settings::OPTION ]['address'] ) ) )
+			: '';
 		if ( ! Settings::can_change_address() ) {
 			$address = Settings::get()['address'];
 		}

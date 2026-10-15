@@ -4,6 +4,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Fixed
+
+- The WordPress plugin sanitizes and validates request fields before passing them to Runlight, and loads dashboard and settings scripts from files with WordPress-encoded settings.
+
 ### Changed
 
 - The standalone npm package is now `@runlight/server`, under the Runlight organization alongside `@runlight/sdk`. Use `npx @runlight/server` instead of `npx runlight.sh`, keeping the same data directory and settings. The installed `runlight.sh` command remains available for existing service scripts.
