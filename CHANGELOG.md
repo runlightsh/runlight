@@ -7,6 +7,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Added
 
 - An Add funnel action alongside Add goal in the conversions panel.
+- `/api/goals` and `/api/funnels` take `definitions=1` to return the saved goals or funnels without calculating their numbers, in every language.
 
 ### Changed
 
