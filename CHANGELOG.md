@@ -12,6 +12,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Changed
 
 - Settings shows a site switcher when multiple sites are available on desktop and mobile, and separates the labeled Sign out action with confirmation.
+- AI agents shows live fetches in green, so they stand apart from crawls in blue.
 - The first-visit waiting status is more prominent, invitation access hints sit closer to their checkbox, and loading placeholders wait briefly to avoid flashing on quick responses.
 
 ### Fixed

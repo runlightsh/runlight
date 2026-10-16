@@ -697,7 +697,7 @@ function layout(): Array<{ title: Key; tabs: Tab[]; wide?: boolean }> {
       title: "panel.ai",
       wide: true,
       tabs: [
-        { dimension: "ai_agent", label: "tab.agents", column: "fetches", groups: { of: (v) => (LIVE_AGENTS.has(v) ? "ai.live" : "ai.crawl"), slots: { "ai.live": 7, "ai.crawl": 1 } } },
+        { dimension: "ai_agent", label: "tab.agents", column: "fetches", groups: { of: (v) => (LIVE_AGENTS.has(v) ? "ai.live" : "ai.crawl"), slots: { "ai.live": 3, "ai.crawl": 1 } } },
         { dimension: "ai_page", label: "tab.pages", column: "fetches" },
       ],
     },
