@@ -41,7 +41,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - SQLite dashboard reports use bounded event indexes and goal lookups, and the local demo builds daily summaries before serving traffic.
 - Chart loading uses a spinner, and filter suggestions keep input focus and reuse recently loaded reports. Identical reports share requests and are cached for ten seconds, with saved changes clearing the cache.
 - Team ownership confirmations fit below member details, and single-site installs hide multi-site invitation controls and wording.
-- Mobile inputs avoid focus zoom, and long page paths no longer widen the Right now dialog.
+- Mobile inputs avoid focus zoom, and long page paths in the Right now dialog wrap onto more lines rather than running past its edge on a phone.
 
 ## 0.1.7 - 2026-10-15
 

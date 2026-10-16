@@ -5327,7 +5327,10 @@ a.ghost {
 /* Grid items must shrink to fit long page paths instead of widening the dialog. */
 .live-body, .live-body .mini, .live-body .minutes, .live-body .mini-grid { min-width: 0; }
 .live-body .mini-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.live-body .name-text { white-space: nowrap; }
+/* A long page path wraps onto more lines, the row growing with it, rather than running past the dialog's edge. */
+.live-body .rows li { height: auto; min-height: 32px; }
+.live-body .name { min-width: 0; padding-block: 6px; }
+.live-body .name-text { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 @media (max-width: 720px) {
   .live-body { padding: 4px 16px 20px; }
   .live-body .mini-grid.three { grid-template-columns: minmax(0, 1fr); }
