@@ -407,6 +407,12 @@ export function prefixed(inner: Db, prefix: string): Db {
 
 const PIECE_MS = 86_400_000;
 
+/** Text cut to at most `max` characters, as a VARCHAR(max) holds it, never through the middle of one. */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return Array.from(text).slice(0, max).join("");
+}
+
 
 /**
  * Pageviews that can report engaged time: the tracker's, which carry a pageview id. Imported history has
@@ -1013,6 +1019,14 @@ export class SqlStore {
     const window = [site, start, end + EVENT_TAIL_MS, start, end];
     await this.transaction(async (store) => {
       const db = store.db;
+      // MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two processes
+      // building one day could each add its rows. There the day is marked first: the second waits on that
+      // mark until the first commits, then fails, and the day counts as built elsewhere. Elsewhere the rows'
+      // own key refuses a second set, and a database without transactions (D1) must not mark a day first.
+      if (dialect === "mysql") {
+        await db.run(`DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, [site, day]);
+        await db.run(`INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)`, [site, day, start, end]);
+      }
       await db.run(`DELETE FROM rl_rollups WHERE site = ? AND day = ?`, [site, day]);
       // The WITH goes after INSERT INTO, the one place every database takes it.
       await db.run(
@@ -1038,8 +1052,10 @@ export class SqlStore {
          SELECT ?, ?, 'event', e.name, COUNT(DISTINCT e.visitor), COUNT(*) ${ofDay("event")} GROUP BY e.name`,
         [site, day, ...window],
       );
-      await db.run(`DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, [site, day]);
-      await db.run(`INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)`, [site, day, start, end]);
+      if (dialect !== "mysql") {
+        await db.run(`DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, [site, day]);
+        await db.run(`INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)`, [site, day, start, end]);
+      }
     });
   }
 
@@ -1249,9 +1265,21 @@ export class SqlStore {
     return rows[0]?.salt ?? null;
   }
 
-  /** Deletes every salt older than `day`, so old hashes can never be recomputed. */
-  async dropSaltsBefore(day: string): Promise<void> {
-    await this.db.run(`DELETE FROM rl_salts WHERE day < ?`, [day]);
+  /** Deletes every salt but those of these days, so the hashes made with them can never be made again. */
+  async dropSaltsExcept(days: string[]): Promise<void> {
+    await this.db.run(`DELETE FROM rl_salts WHERE day NOT IN (${days.map(() => "?").join(", ")})`, days);
+  }
+
+  /** Whether a visit to one of these sites that started in a stretch of time was still going at `since`. */
+  async visitOpen(sites: string[], from: number, to: number, since: number): Promise<boolean> {
+    // As many sites a statement as keep it under D1's 100.
+    const open = await inPieces(sites, MAX_PARAMS - 3, (piece) =>
+      this.db.all(
+        `SELECT 1 AS open FROM rl_sessions WHERE site IN (${piece.map(() => "?").join(", ")}) AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1`,
+        [...piece, from, to, since],
+      ),
+    );
+    return open.length > 0;
   }
 
   // Ingest
@@ -1268,16 +1296,19 @@ export class SqlStore {
   }
 
   async insertSession(row: SessionRow): Promise<void> {
+    const c = clip;
     await this.db.run(
       `INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, engaged_ms, hostname, referrer_host, referrer_path,
         source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, country, region, city,
         browser, browser_version, os, os_version, device, screen, language)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        row.id, row.site, row.visitor, row.startedAt, row.startedAt, row.hostname, row.referrerHost, row.referrerPath,
-        row.source, row.channel, row.utmSource, row.utmMedium, row.utmCampaign, row.utmTerm, row.utmContent,
-        row.country, row.region, row.city, row.browser, row.browserVersion, row.os, row.osVersion, row.device,
-        row.screen, row.language,
+        // Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps the
+        // same, and no header, however long, can make a row Postgres's indexes refuse.
+        row.id, row.site, row.visitor, row.startedAt, row.startedAt, c(row.hostname, 255), c(row.referrerHost, 255), c(row.referrerPath, 500),
+        c(row.source, 200), c(row.channel, 100), c(row.utmSource, 200), c(row.utmMedium, 200), c(row.utmCampaign, 200), c(row.utmTerm, 200), c(row.utmContent, 200),
+        c(row.country, 16), c(row.region, 100), c(row.city, 100), c(row.browser, 100), c(row.browserVersion, 100), c(row.os, 100), c(row.osVersion, 100), c(row.device, 50),
+        c(row.screen, 50), c(row.language, 50),
       ],
     );
   }
@@ -1293,7 +1324,7 @@ export class SqlStore {
       await this.db.run(
         `UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,
            entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?`,
-        [ts, path, path, id],
+        [ts, clip(path, 1000), clip(path, 1000), id],
       );
     } else if (reopen) {
       await this.db.run(`UPDATE rl_sessions SET events = events + 1, last_at = ? WHERE id = ?`, [ts, id]);
@@ -1343,8 +1374,8 @@ export class SqlStore {
       `INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname, title, name, props, engaged_ms, scroll, link)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        row.site, row.ts, row.kind, row.visitor, row.session, row.pageview, row.path, row.hostname, row.title,
-        row.name, row.props ? JSON.stringify(row.props) : null, row.engagedMs, row.scroll, row.link,
+        row.site, row.ts, row.kind, row.visitor, row.session, row.pageview, clip(row.path, 1000), clip(row.hostname, 255), clip(row.title, 500),
+        clip(row.name, 255), row.props ? JSON.stringify(row.props) : null, row.engagedMs, row.scroll, row.link,
       ],
     );
   }
@@ -1670,21 +1701,37 @@ export class SqlStore {
   }
 
   async saveGoal(g: GoalRow, before?: GoalRow): Promise<void> {
+    const write = (db: Db) =>
+      db.run(
+        upsert(
+          db.dialect,
+          "rl_goals",
+          ["id", "site", "name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency", "created_at"],
+          ["id"],
+          ["name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency"],
+        ),
+        [g.id, g.site, g.name, g.kind, g.match, g.clickBy, g.valueMode, g.value, g.valueProp, g.currency, g.createdAt],
+      );
     // A click goal is counted by its name, which the tracker sends as the event
     // name. Renaming one renames its past clicks too, so its history stays.
-    if (before?.kind === "click" && g.kind === "click" && before.name !== g.name) {
-      await this.db.run(`UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?`, [g.name, g.site, before.name]);
-    }
-    await this.db.run(
-      upsert(
-        this.db.dialect,
-        "rl_goals",
-        ["id", "site", "name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency", "created_at"],
-        ["id"],
-        ["name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency"],
-      ),
-      [g.id, g.site, g.name, g.kind, g.match, g.clickBy, g.valueMode, g.value, g.valueProp, g.currency, g.createdAt],
-    );
+    if (!(before?.kind === "click" && g.kind === "click" && before.name !== g.name)) return write(this.db);
+    await this.transaction(async (store) => {
+      const db = store.db;
+      await db.run(`UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?`, [g.name, g.site, before.name]);
+      // The daily rollups count events by name too, and goals read them, so they take the new name as well.
+      // A day that already has events under the new name counts both together now, so it is built again.
+      const both = (await db.all(
+        `SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?
+         AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)`,
+        [g.site, before.name, g.site, g.name],
+      )).map((r) => String(r.day));
+      for (const day of both) {
+        await db.run(`DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, [g.site, day]);
+        await db.run(`DELETE FROM rl_rollups WHERE site = ? AND day = ?`, [g.site, day]);
+      }
+      await db.run(`UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?`, [g.name, g.site, before.name]);
+      await write(db);
+    });
   }
 
   async deleteGoal(id: string): Promise<void> {

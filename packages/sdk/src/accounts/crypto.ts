@@ -48,7 +48,14 @@ export function sameText(a: string, b: string): boolean {
 }
 
 type Scrypt = (password: string, salt: Uint8Array, keylen: number, options: { N: number; r: number; p: number; maxmem: number }, done: (error: Error | null, key: Uint8Array) => void) => void;
-const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+type ScryptCost = { N: number; r: number; p: number };
+/**
+ * What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check, so several sign-ins at once stay
+ * within a small server's memory. Each hash records its own cost, so this can rise again.
+ */
+const SCRYPT: ScryptCost = { N: 32768, r: 8, p: 3 };
+/** What a hash written as scrypt$salt$key costs: the setting before hashes recorded theirs. */
+const SCRYPT_BEFORE: ScryptCost = { N: 16384, r: 8, p: 1 };
 
 /** Node's scrypt, where the runtime has it: Node, Bun, and Deno do, and edge runtimes mostly do not. */
 async function nodeScrypt(): Promise<Scrypt | null> {
@@ -68,8 +75,21 @@ async function nodeScrypt(): Promise<Scrypt | null> {
   }
 }
 
-const runScrypt = (scrypt: Scrypt, password: string, salt: Uint8Array, length: number) =>
-  new Promise<Uint8Array>((resolve, reject) => scrypt(password, salt, length, SCRYPT, (error, key) => (error ? reject(error) : resolve(new Uint8Array(key)))));
+const runScrypt = (scrypt: Scrypt, password: string, salt: Uint8Array, length: number, cost: ScryptCost) =>
+  new Promise<Uint8Array>((resolve, reject) =>
+    // Memory is 128 * N * r bytes; room for twice that.
+    scrypt(password, salt, length, { ...cost, maxmem: 256 * cost.N * cost.r }, (error, key) => (error ? reject(error) : resolve(new Uint8Array(key)))),
+  );
+
+/** A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key). Null for one out of bounds. */
+function scryptCost(parts: string[]): ScryptCost | null {
+  if (parts.length === 3) return SCRYPT_BEFORE;
+  const [N, r, p] = parts.slice(1, 4).map(Number) as [number, number, number];
+  const whole = (n: number, max: number) => Number.isInteger(n) && n >= 1 && n <= max;
+  // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
+  if (!whole(N, 1 << 20) || N < 2 || (N & (N - 1)) !== 0 || !whole(r, 32) || !whole(p, 16)) return null;
+  return { N, r, p };
+}
 
 /** As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on. */
 const PBKDF2_ROUNDS = 100_000;
@@ -83,14 +103,14 @@ async function pbkdf2(password: string, salt: Uint8Array<ArrayBuffer>, rounds: n
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
   const scrypt = await nodeScrypt();
-  if (scrypt) return `scrypt$${base64url(salt)}$${base64url(await runScrypt(scrypt, password, salt, 32))}`;
+  if (scrypt) return `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${base64url(salt)}$${base64url(await runScrypt(scrypt, password, salt, 32, SCRYPT))}`;
   return `pbkdf2$${PBKDF2_ROUNDS}$${base64url(salt)}$${base64url(await pbkdf2(password, salt, PBKDF2_ROUNDS, 32))}`;
 }
 
-/** Whether a password matches a hash. A scrypt hash only checks out where the runtime has scrypt. */
 /** The shortest stored key accepted. Ours are 32 bytes; an empty or cut key would match too easily, or anything. */
 const MIN_KEY_BYTES = 16;
 
+/** Whether a password matches a hash. A scrypt hash only checks out where the runtime has scrypt. */
 export async function checkPassword(password: string, stored: string): Promise<boolean> {
   const parts = stored.split("$");
   // A stored hash whose salt or key is not base64url matches nothing, rather than failing the sign-in.
@@ -101,13 +121,14 @@ export async function checkPassword(password: string, stored: string): Promise<b
       return null;
     }
   };
-  if (parts[0] === "scrypt" && parts.length === 3) {
+  if (parts[0] === "scrypt" && (parts.length === 3 || parts.length === 6)) {
     const scrypt = await nodeScrypt();
-    if (!scrypt) return false;
-    const expected = decode(parts[2]!);
-    const salt = decode(parts[1]!);
+    const cost = scryptCost(parts);
+    if (!scrypt || !cost) return false;
+    const expected = decode(parts[parts.length - 1]!);
+    const salt = decode(parts[parts.length - 2]!);
     if (!expected || !salt || expected.length < MIN_KEY_BYTES) return false;
-    return sameBytes(await runScrypt(scrypt, password, salt, expected.length), expected);
+    return sameBytes(await runScrypt(scrypt, password, salt, expected.length, cost), expected);
   }
   if (parts[0] === "pbkdf2" && parts.length === 4) {
     const rounds = Number(parts[1]);
@@ -118,6 +139,19 @@ export async function checkPassword(password: string, stored: string): Promise<b
     return sameBytes(await pbkdf2(password, salt, rounds, expected.length), expected);
   }
   return false;
+}
+
+/**
+ * Whether a stored hash costs less than a new one would here, so the password it matched is hashed again: an
+ * scrypt hash with a lower cost, or a PBKDF2 one where scrypt is now there.
+ */
+export async function weakerThanNow(stored: string): Promise<boolean> {
+  const parts = stored.split("$");
+  if (!(await nodeScrypt())) return false;
+  if (parts[0] === "pbkdf2") return true;
+  if (parts[0] !== "scrypt") return false;
+  const cost = scryptCost(parts);
+  return cost !== null && cost.N * cost.r * cost.p < SCRYPT.N * SCRYPT.r * SCRYPT.p;
 }
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
