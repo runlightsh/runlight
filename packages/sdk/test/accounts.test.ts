@@ -334,3 +334,21 @@ test("deleting a site from a signed-in browser requires the current password and
   assert.ok(rl.site(site.id));
   assert.equal((await remove({}, { authorization: "Bearer app-token", "content-type": "application/json" })).status, 200);
 });
+
+for (const kind of STORES) {
+  test(`${kind}: deleting a site removes the accounts and invitations kept to it, and no one else`, async () => {
+    const store = freshStore(kind);
+    const { Accounts } = await import("../src/accounts/auth.js");
+    const now = Date.UTC(2026, 9, 14, 12);
+    await store.migrate();
+    const accounts = new Accounts(store, "a server secret long enough");
+    await accounts.setPassword("owner@example.com", "a long password", now);
+    await accounts.setPassword("alpha@example.com", "a long password", now, "viewer", "alpha");
+    await accounts.setPassword("beta@example.com", "a long password", now, "member", "beta");
+    await accounts.invite("invited@example.com", "member", "owner@example.com", now, "alpha");
+    await accounts.invite("other@example.com", "member", "owner@example.com", now, "beta");
+    await accounts.forgetSite("alpha");
+    assert.deepEqual((await accounts.list()).map((u) => u.email).sort(), ["beta@example.com", "owner@example.com"]);
+    assert.deepEqual((await accounts.invites(now)).map((i) => i.email), ["other@example.com"]);
+  });
+}
