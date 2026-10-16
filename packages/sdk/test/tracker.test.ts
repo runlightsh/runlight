@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { TRACKER } from "../src/generated/tracker.js";
 
-function browser(hook: string, beacon = true, configured = true) {
+function browser(hook: string, beacon = true, configured = true, stand: { webdriver?: boolean; manual?: boolean; ignored?: boolean } = {}) {
   const sent: string[] = [];
   const listeners: Record<string, () => void> = {};
   let clock = 1000;
@@ -11,12 +11,12 @@ function browser(hook: string, beacon = true, configured = true) {
   const context: Record<string, unknown> = {
     URL, Uint8Array, location, screen: { width: 1200, height: 800 },
     Date: { now: () => clock },
-    navigator: { language: "en", sendBeacon: (_url: string, body: string) => { if (beacon) sent.push(body); return beacon; } },
-    localStorage: { getItem: () => null },
+    navigator: { language: "en", webdriver: stand.webdriver ?? false, sendBeacon: (_url: string, body: string) => { if (beacon) sent.push(body); return beacon; } },
+    localStorage: { getItem: (key: string) => (key === "runlight_ignore" && stand.ignored ? "1" : null), setItem() {}, removeItem() {} },
     history: { pushState() {}, replaceState() {} },
     document: {
       title: "Private note title", referrer: "https://app.example.com/notes/secret-id?key=secret",
-      currentScript: { src: "https://analytics.example.com/s.js?site=example.com", getAttribute: (key: string) => key === "data-before-send" && configured ? "scrub" : key === "data-site" ? "example.com" : null },
+      currentScript: { src: "https://analytics.example.com/s.js?site=example.com", getAttribute: (key: string) => key === "data-before-send" && configured ? "scrub" : key === "data-site" ? "example.com" : key === "data-manual" && stand.manual ? "" : null },
       visibilityState: "visible", hasFocus: () => true, documentElement: { scrollHeight: 1000, scrollTop: 0 },
       addEventListener: (name: string, fn: () => void) => { listeners[name] = fn; },
     },
@@ -59,4 +59,20 @@ test("without the attribute, normal tracking remains enabled", () => {
   const b = browser("", true, false);
   assert.equal(b.sent.length, 1);
   assert.equal(JSON.parse(b.sent[0]!).t, "Private note title");
+});
+
+test("a tracker standing down still answers every call, runlight.pageview() included, and sends nothing", () => {
+  // An automated browser (a site's own end-to-end tests) and the owner's ignore flag, with manual pageviews,
+  // as a single page app calls them on each route change.
+  for (const stand of [{ webdriver: true, manual: true }, { ignored: true, manual: true }, { webdriver: true }]) {
+    const b = browser("", true, false, stand);
+    const track = b.context.runlight as ((name: string, props?: object) => void) & { pageview: (url?: string) => void };
+    assert.doesNotThrow(() => {
+      track.pageview("/checkout");
+      track.pageview();
+      track("Signup", { plan: "pro" });
+    }, JSON.stringify(stand));
+    b.leave();
+    assert.equal(b.sent.length, 0, JSON.stringify(stand));
+  }
 });

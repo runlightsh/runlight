@@ -17,6 +17,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Fixed
 
+- The tracker standing down (an automated browser, Do Not Track with `data-dnt`, the owner's ignore flag, or the goal picker) still answers every call a site makes and sends nothing. It used to replace `runlight` with a function that had no `pageview`, so a site using `data-manual` threw on every route change there, its own end-to-end tests included.
 - SQLite gathers its planner statistics again once the events have more than doubled since they were last gathered, at startup, in the scheduled check, and at most hourly before reports. Statistics gathered on a new, empty database stayed until the daily check, and an app that never runs the check kept them for good, so goals on a million visits took a minute rather than milliseconds.
 - Goals for a whole page path or an event or click, worth nothing or a fixed amount, are counted from the daily rollups, and so is the visitor count behind every conversion rate. A year of goals no longer reads every pageview and event.
 - Finding a site's last visit reads the newest pageview and the newest event separately, which took 2 s on MySQL with a million visits and now takes about a millisecond.
