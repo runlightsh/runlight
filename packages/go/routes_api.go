@@ -1065,6 +1065,8 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		return jsonAnswer(realtime, 200), nil
 	}
 
+	// Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+	r.freshenStatistics(ctx)
 	read, refused, err := rt.readQuery(ctx, u, site)
 	if err != nil || refused != nil {
 		return refused, err
@@ -1080,16 +1082,17 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 
 	switch path {
 	case "/api/stats":
-		stats, err := r.Store.Stats(ctx, query)
+		// The range and its comparison side by side, which a database with a pool of connections runs at once.
+		var stats, p Stats
+		err := sideBySide(
+			func() (err error) { stats, err = r.Store.Stats(ctx, query); return },
+			whenCompared(compared, func() (err error) { p, err = r.Store.Stats(ctx, previousQuery); return }),
+		)
 		if err != nil {
 			return nil, err
 		}
 		var previous any = js.Undefined{}
 		if compared != nil {
-			p, err := r.Store.Stats(ctx, previousQuery)
-			if err != nil {
-				return nil, err
-			}
 			previous = p
 		}
 		return jsonAnswer(js.NewObject("site", site.ID, "range", ranged, "compare", compareOut, "stats", stats, "previous", previous), 200), nil
@@ -1106,26 +1109,16 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		if err != nil {
 			return nil, err
 		}
-		visitors, err := r.Store.Visitors(ctx, query)
-		if err != nil {
+		// Every goal in one pass for the range, and one more for the comparison, side by side.
+		var visitors, previousVisitors int64
+		var nowAll, beforeAll map[string]GoalTotals
+		if err := sideBySide(
+			func() (err error) { visitors, err = r.Store.Visitors(ctx, query); return },
+			whenCompared(compared, func() (err error) { previousVisitors, err = r.Store.Visitors(ctx, previousQuery); return }),
+			func() (err error) { nowAll, err = r.Store.GoalTotalsAll(ctx, query, goals); return },
+			whenCompared(compared, func() (err error) { beforeAll, err = r.Store.GoalTotalsAll(ctx, previousQuery, goals); return }),
+		); err != nil {
 			return nil, err
-		}
-		previousVisitors := int64(0)
-		var beforeAll map[string]GoalTotals
-		if compared != nil {
-			if previousVisitors, err = r.Store.Visitors(ctx, previousQuery); err != nil {
-				return nil, err
-			}
-		}
-		// Every goal in one pass for the range, and one more for the comparison.
-		nowAll, err := r.Store.GoalTotalsAll(ctx, query, goals)
-		if err != nil {
-			return nil, err
-		}
-		if compared != nil {
-			if beforeAll, err = r.Store.GoalTotalsAll(ctx, previousQuery, goals); err != nil {
-				return nil, err
-			}
 		}
 		rows := []any{}
 		for _, goal := range goals {
@@ -1145,17 +1138,22 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		return jsonAnswer(js.NewObject("site", site.ID, "range", ranged, "compare", compareOut, "visitors", visitors, "goals", rows), 200), nil
 
 	case "/api/series":
-		points, err := r.Store.Series(ctx, query.Site, query.Filters, Buckets(rng, site.Timezone))
-		if err != nil {
+		var points, p []SeriesPoint
+		if err := sideBySide(
+			func() (err error) {
+				points, err = r.Store.Series(ctx, query.Site, query.Filters, Buckets(rng, site.Timezone))
+				return
+			},
+			// Comparison points line up with the main ones by position.
+			whenCompared(compared, func() (err error) {
+				p, err = r.Store.Series(ctx, query.Site, query.Filters, Buckets(*compared, site.Timezone))
+				return
+			}),
+		); err != nil {
 			return nil, err
 		}
 		var previous any = js.Undefined{}
 		if compared != nil {
-			// Comparison points line up with the main ones by position.
-			p, err := r.Store.Series(ctx, query.Site, query.Filters, Buckets(*compared, site.Timezone))
-			if err != nil {
-				return nil, err
-			}
 			if len(p) > len(points) {
 				p = p[:len(points)]
 			}

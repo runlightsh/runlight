@@ -26,6 +26,35 @@ class RollupsTest extends StoreTestCase {
       List.of("Google", "Hacker News", "", "ChatGPT", "Twitter");
   private static final List<String> COUNTRIES = List.of("GB", "US", "DE", "CA");
 
+  /** Goals the rollups count (a whole path, an event, a click) and goals that need the events. */
+  private static final List<Map<String, Object>> GOALS =
+      List.of(
+          goal("g0", "page", "/pricing", "", "none", 0),
+          goal("g1", "page", "/blog/*", "", "none", 0),
+          goal("g2", "event", "Signup", "", "fixed", 2.5),
+          goal("g3", "event", "Signup", "", "prop", 0),
+          goal("g4", "click", "", "Signup", "fixed", 1.25),
+          goal("g5", "page", "/about", "", "fixed", 3));
+
+  private static Map<String, Object> goal(
+      String id, String kind, String match, String name, String valueMode, double value) {
+    return Json.object(
+        "id",
+        id,
+        "kind",
+        kind,
+        "match",
+        match,
+        "name",
+        name,
+        "valueMode",
+        valueMode,
+        "valueProp",
+        valueMode.equals("prop") ? "amount" : "",
+        "value",
+        value);
+  }
+
   /** Ten days of visits, some running past midnight, ending two hours before NOW. */
   private static void tenDays(SqlStore store) {
     long now = NOW - 10 * DAY;
@@ -84,6 +113,12 @@ class RollupsTest extends StoreTestCase {
       long to = range.getValue()[1];
       Map<String, Object> query = q(from, to);
       out.put("stats " + name, store.stats(query));
+      out.put("visitors " + name, store.visitors(query));
+      out.put("goals " + name, store.goalTotalsAll(query, GOALS));
+      out.put(
+          "rollable goals " + name,
+          store.goalTotalsAll(
+              query, List.of(GOALS.get(0), GOALS.get(2), GOALS.get(4), GOALS.get(5))));
       List<Map<String, Object>> buckets = new ArrayList<>();
       for (long at = from == 0 ? NOW - 12 * DAY : from; at < to; at += DAY) {
         buckets.add(Json.object("start", at, "end", Math.min(at + DAY, to)));
@@ -143,7 +178,15 @@ class RollupsTest extends StoreTestCase {
             "DELETE FROM rl_sessions WHERE started_at >= ? AND started_at < ?",
             List.of(s, e - 2 * HOUR));
     Map<String, String> again = everything(store);
-    for (String key : List.of("stats 30d", "source 30d", "page 30d", "event 30d", "hourly 30d")) {
+    for (String key :
+        List.of(
+            "stats 30d",
+            "visitors 30d",
+            "rollable goals 30d",
+            "source 30d",
+            "page 30d",
+            "event 30d",
+            "hourly 30d")) {
       assertEquals(before.get(key), again.get(key), key + " comes from rollups");
     }
   }

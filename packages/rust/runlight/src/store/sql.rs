@@ -593,6 +593,12 @@ pub(crate) fn visit_rows(filters: &[Filter], site: &str, from: i64, to: i64, dia
     }
 }
 
+/// The events table, as `e`. SQLite can prefer the path index to avoid a sort, reading the site's entire
+/// history, so reports bounded by event kind and time are sent through the matching range index.
+pub(crate) fn event_kind_table(dialect: Dialect) -> &'static str {
+    if dialect == Dialect::Sqlite { "rl_events e INDEXED BY rl_events_site_kind_ts" } else { "rl_events e" }
+}
+
 /// `Math.round(x * 100) / 100`.
 pub(crate) fn cents(x: f64) -> f64 {
     crate::js::round(x * 100.0) / 100.0

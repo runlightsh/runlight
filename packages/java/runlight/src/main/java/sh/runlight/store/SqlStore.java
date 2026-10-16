@@ -12,8 +12,10 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -309,20 +311,56 @@ public final class SqlStore implements AutoCloseable {
   /**
    * Keeps SQLite's planner statistics current, which it never gathers by itself. A sample of each
    * index is enough. Postgres gathers its own.
+   *
+   * <p>With onlyWhenStale, only when there are none, or the events have more than doubled since
+   * they were gathered. Statistics gathered on a new, empty database say every table is empty, and
+   * a goal over a million visits then took a minute rather than milliseconds.
    */
-  public void optimize(boolean onlyWhenMissing) {
+  public void optimize(boolean onlyWhenStale) {
     if (!db.dialect().equals("sqlite")) {
       return;
     }
     try {
-      if (onlyWhenMissing
-          && !db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'").isEmpty()) {
-        return;
+      Map<String, Object> top = first(db.all("SELECT MAX(id) AS n FROM rl_events"));
+      long events = top == null ? 0 : (long) dnum(top.get("n"));
+      if (onlyWhenStale) {
+        Map<String, Object> seen =
+            first(db.all("SELECT value FROM rl_meta WHERE \"key\" = 'statistics_events'"));
+        double then = Double.NaN;
+        if (seen != null) {
+          try {
+            then = Double.parseDouble(text(seen.get("value")).trim());
+          } catch (NumberFormatException e) {
+            then = Double.NaN;
+          }
+        }
+        boolean gathered =
+            !db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'").isEmpty();
+        if (gathered
+            && !Double.isNaN(then)
+            && !Double.isInfinite(then)
+            && !(events > 2 * then && events - then >= 1000)) {
+          return;
+        }
       }
-      db.run("PRAGMA analysis_limit = 1000");
-      db.run("ANALYZE");
+      try {
+        db.run("PRAGMA analysis_limit = 1000");
+        db.run("ANALYZE");
+      } catch (RuntimeException e) {
+        // Some hosted SQLite services refuse these, and gather statistics themselves.
+      }
+      // Noted even when refused, so a service that refuses is not asked again until the events
+      // double.
+      db.run(
+          Sql.upsert(
+              db.dialect(),
+              "rl_meta",
+              List.of("\"key\"", "value"),
+              List.of("\"key\""),
+              List.of("value")),
+          List.of("statistics_events", Long.toString(events)));
     } catch (RuntimeException e) {
-      // Some hosted SQLite services refuse these, and gather statistics themselves.
+      // Statistics only help; a failure here never stops the app.
     }
   }
 
@@ -993,8 +1031,14 @@ public final class SqlStore implements AutoCloseable {
     Map<String, Object> row =
         first(
             db.all(
-                "SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')",
-                List.of(site)));
+                // One MAX for each kind, which every database reads from the end of its (site,
+                // kind,
+                // ts) index. Asked for both kinds at once, MySQL read every pageview and event of
+                // the
+                // site: 2 s on a million visits.
+                "SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'\n"
+                    + "       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x",
+                List.of(site, site)));
     return row == null || row.get("t") == null ? null : num(row.get("t"));
   }
 
@@ -1920,7 +1964,104 @@ public final class SqlStore implements AutoCloseable {
    */
   public Map<String, Map<String, Object>> goalTotalsAll(
       Map<String, Object> query, List<Map<String, Object>> goals) {
+    // A goal the daily rollups count exactly comes from the built days and the visits of the rest:
+    // a
+    // page by its whole path, or an event or click by name, worth nothing or a fixed amount.
+    // Visitor
+    // ids last a day, so each day's visitors add up, as they do for every other report. A pattern
+    // or
+    // a value sent with each event needs the events themselves.
+    Predicate<Map<String, Object>> rollable =
+        goal ->
+            !"prop".equals(goal.get("valueMode"))
+                && !("page".equals(goal.get("kind")) && text(goal.get("match")).contains("*"));
+    Plan plan =
+        goals.stream().anyMatch(rollable) ? rollupPlan(query, from(query), to(query)) : null;
+    if (plan == null || plan.days().isEmpty()) {
+      return rawGoalTotalsAll(query, goals);
+    }
+    List<Map<String, Object>> rolled = goals.stream().filter(rollable).toList();
+    Map<String, Map<String, Object>> out =
+        rawGoalTotalsAll(query, goals.stream().filter(rollable.negate()).toList());
+    Map<String, double[]> counted = new HashMap<>();
+    for (String dim : List.of("page", "event")) {
+      String column = dim.equals("page") ? "pageviews" : "events";
+      Set<String> values = new LinkedHashSet<>();
+      for (Map<String, Object> g : rolled) {
+        boolean page = "page".equals(g.get("kind"));
+        if (page == dim.equals("page")) {
+          values.add(
+              page || !"click".equals(g.get("kind")) ? text(g.get("match")) : text(g.get("name")));
+        }
+      }
+      List<Map<String, Object>> rows =
+          Sql.inPieces(
+              new ArrayList<>(values),
+              Sql.VALUES_PER_QUERY,
+              piece ->
+                  db.all(
+                      "SELECT value, SUM(visitors) AS visitors, SUM("
+                          + column
+                          + ") AS n FROM rl_rollups\n           WHERE site = ? AND dim = '"
+                          + dim
+                          + "' AND day IN ("
+                          + Sql.BUILT_DAYS
+                          + ") AND value IN ("
+                          + String.join(", ", Collections.nCopies(piece.size(), "?"))
+                          + ") GROUP BY value",
+                      concat(list(site(query), site(query), from(query), to(query)), piece)));
+      for (Map<String, Object> row : rows) {
+        counted.put(
+            dim + ":" + text(row.get("value")),
+            new double[] {dnum(row.get("visitors")), dnum(row.get("n"))});
+      }
+    }
+    List<Map<String, Map<String, Object>>> rest = new ArrayList<>();
+    for (double[] stretch : plan.rest()) {
+      Map<String, Object> part = new LinkedHashMap<>(query);
+      part.put("from", Js.num(stretch[0]));
+      part.put("to", Js.num(stretch[1]));
+      rest.add(rawGoalTotalsAll(part, rolled));
+    }
+    for (Map<String, Object> goal : rolled) {
+      boolean page = "page".equals(goal.get("kind"));
+      String key =
+          page
+              ? "page:" + text(goal.get("match"))
+              : "event:"
+                  + text("click".equals(goal.get("kind")) ? goal.get("name") : goal.get("match"));
+      double[] hit = counted.getOrDefault(key, new double[] {0, 0});
+      double visitors = hit[0];
+      double conversions = hit[1];
+      String id = text(goal.get("id"));
+      for (Map<String, Map<String, Object>> part : rest) {
+        visitors += dnum(part.get(id).get("visitors"));
+        conversions += dnum(part.get(id).get("conversions"));
+      }
+      Object revenue =
+          "fixed".equals(goal.get("valueMode")) ? cents(conversions * dnum(goal.get("value"))) : 0L;
+      out.put(
+          id,
+          Json.object(
+              "conversions", whole(conversions),
+              "visitors", whole(visitors),
+              "revenue", revenue));
+    }
+    // In the order the goals came.
+    Map<String, Map<String, Object>> ordered = new LinkedHashMap<>();
+    for (Map<String, Object> goal : goals) {
+      ordered.put(text(goal.get("id")), out.get(text(goal.get("id"))));
+    }
+    return ordered;
+  }
+
+  /** Every goal's totals read from the events of the range's visits. */
+  private Map<String, Map<String, Object>> rawGoalTotalsAll(
+      Map<String, Object> query, List<Map<String, Object>> goals) {
     Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+    if (goals.isEmpty()) {
+      return out;
+    }
     Sql.VisitRows v =
         Sql.visitRows(filters(query), site(query), from(query), to(query), db.dialect());
     // As many goals per query as keep it under D1's parameter limit.
@@ -2292,6 +2433,11 @@ public final class SqlStore implements AutoCloseable {
 
   /** Just the visitor count from stats(), in one query, for conversion rates. */
   public Object visitors(Map<String, Object> query) {
+    // Built days add up their visitors, as the stats do.
+    Map<String, Object> rolled = rolledStats(query);
+    if (rolled != null) {
+      return rolled.get("visitors");
+    }
     Sql.Piece scope =
         Sql.visitScope(filters(query), site(query), from(query), to(query), db.dialect());
     Map<String, Object> row =
@@ -2825,7 +2971,11 @@ public final class SqlStore implements AutoCloseable {
                 list(site, since)));
     List<Map<String, Object>> pages =
         db.all(
-            "SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events\n       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path"
+            // Through the kind and time index: SQLite otherwise reads the site's whole history by
+            // path to group it.
+            "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e"
+                + (db.dialect().equals("sqlite") ? " INDEXED BY rl_events_site_kind_ts" : "")
+                + "\n       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path"
                 + textOrder()
                 + " LIMIT 10",
             list(site, since));

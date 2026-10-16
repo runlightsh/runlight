@@ -84,6 +84,9 @@ for (const kind of STORES) {
     assert.deepEqual((await t.get(`/api/breakdown?period=30d&dimension=page&limit=3`)).rows, before["page period=30d"]);
     assert.deepEqual((await t.get(`/api/breakdown?period=30d&dimension=event&limit=3`)).rows, before["event period=30d"]);
     assert.deepEqual(await t.get(`/api/rhythm?period=30d`), before["rhythm period=30d"]);
+    // Goals by a whole path or a name, worth nothing or a fixed amount; a pattern or a sent value reads events.
+    const goals = (await t.get(`/api/goals?period=30d&compare=previous`)).goals;
+    for (const i of [0, 2, 4]) assert.deepEqual(goals[i], (before["goals period=30d"] as unknown[])[i], `goal ${i} comes from rollups`);
 
   });
 }

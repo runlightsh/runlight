@@ -7,6 +7,8 @@ use crate::query::{Query, dimensions, is_dimension};
 use crate::runlight::RETENTION_MONTHS;
 use crate::store::ShareRow;
 use crate::time::{buckets, is_timezone, local_weekday_hour};
+use std::future::Future;
+use std::task::Poll;
 
 impl Routes {
     pub(crate) async fn api(&self, request: &Request, path: &str, url: &mut Url, call: &Call) -> R {
@@ -680,6 +682,8 @@ impl Routes {
             return Ok(json(&unfeed(rl.store().realtime(&site.id, rl.now()).await?), 200, &[]));
         }
 
+        // Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+        rl.freshen_statistics().await;
         let read = match self.read_query(url, &site).await? {
             Ok(r) => r,
             Err(r) => return Ok(r),
@@ -693,11 +697,16 @@ impl Routes {
         let store = rl.store();
 
         if path == "/api/stats" {
-            let stats = store.stats(query).await?;
-            let previous = match compared {
-                Some(c) => Some(store.stats(&before(c)).await?),
-                None => None,
-            };
+            // The range and its comparison side by side, which a database with a pool of connections runs at once.
+            let earlier = compared.as_ref().map(before);
+            let (stats, previous) = both(store.stats(query), async {
+                match &earlier {
+                    Some(q) => store.stats(q).await.map(Some),
+                    None => Ok(None),
+                }
+            })
+            .await;
+            let (stats, previous) = (stats?, previous?);
             return Ok(json(
                 &with_optional(
                     &site.id,
@@ -720,17 +729,25 @@ impl Routes {
                 ));
             }
             let goals = store.goals(Some(&site.id)).await?;
-            let visitors = store.visitors(query).await?;
-            let previous_visitors = match compared {
-                Some(c) => store.visitors(&before(c)).await?,
-                None => 0.0,
-            };
-            // Every goal in one pass for the range, and one more for the comparison.
-            let now_all = store.goal_totals_all(query, &goals).await?;
-            let before_all = match compared {
-                Some(c) => Some(store.goal_totals_all(&before(c), &goals).await?),
-                None => None,
-            };
+            let earlier = compared.as_ref().map(before);
+            // Every goal in one pass for the range, and one more for the comparison, side by side.
+            let ((visitors, previous_visitors), (now_all, before_all)) = both(
+                both(store.visitors(query), async {
+                    match &earlier {
+                        Some(q) => store.visitors(q).await,
+                        None => Ok(0.0),
+                    }
+                }),
+                both(store.goal_totals_all(query, &goals), async {
+                    match &earlier {
+                        Some(q) => store.goal_totals_all(q, &goals).await.map(Some),
+                        None => Ok(None),
+                    }
+                }),
+            )
+            .await;
+            let (visitors, previous_visitors, now_all, before_all) =
+                (visitors?, previous_visitors?, now_all?, before_all?);
             let rows: Vec<Value> = goals
                 .iter()
                 .map(|goal| {
@@ -797,16 +814,22 @@ impl Routes {
         }
 
         if path == "/api/series" {
-            let points = store.series(&query.site, &query.filters, &buckets(range, &site.timezone)).await?;
+            let (points, earlier) =
+                both(store.series(&query.site, &query.filters, &buckets(range, &site.timezone)), async {
+                    match compared {
+                        Some(c) => {
+                            store.series(&query.site, &query.filters, &buckets(c, &site.timezone)).await.map(Some)
+                        }
+                        None => Ok(None),
+                    }
+                })
+                .await;
+            let points = points?;
             // Comparison points line up with the main ones by position.
-            let previous = match compared {
-                Some(c) => {
-                    let mut p = store.series(&query.site, &query.filters, &buckets(c, &site.timezone)).await?;
-                    p.truncate(points.len());
-                    Some(Value::Array(p))
-                }
-                None => None,
-            };
+            let previous = earlier?.map(|mut p| {
+                p.truncate(points.len());
+                Value::Array(p)
+            });
             return Ok(json(
                 &with_optional(
                     &site.id,
@@ -1337,4 +1360,26 @@ pub(crate) fn date_parse(text: &str) -> f64 {
         return z.timestamp().as_millisecond() as f64;
     }
     f64::NAN
+}
+
+/// Two futures run side by side on the current task, which a database with a pool of connections answers
+/// at once and one with a single connection answers in turn. Nothing here starts a thread.
+async fn both<A, B>(a: impl Future<Output = A>, b: impl Future<Output = B>) -> (A, B) {
+    let (mut a, mut b) = (Box::pin(a), Box::pin(b));
+    let (mut done_a, mut done_b) = (None, None);
+    std::future::poll_fn(|cx| {
+        if done_a.is_none()
+            && let Poll::Ready(v) = a.as_mut().poll(cx)
+        {
+            done_a = Some(v);
+        }
+        if done_b.is_none()
+            && let Poll::Ready(v) = b.as_mut().poll(cx)
+        {
+            done_b = Some(v);
+        }
+        if done_a.is_some() && done_b.is_some() { Poll::Ready(()) } else { Poll::Pending }
+    })
+    .await;
+    (done_a.expect("a finished"), done_b.expect("b finished"))
 }

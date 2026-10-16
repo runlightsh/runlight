@@ -18,6 +18,8 @@ class CoreCheckTest < CoreTestCase
                "some" => t.query("2026-09-29", "2026-10-03"), "all" => t.all }
     ranges.each do |name, q|
       out["stats #{name}"] = t.stats(q)
+      out["visitors #{name}"] = t.store.visitors(q)
+      out["goals #{name}"] = t.store.goal_totals_all(q, t.store.goals("default"))
       out["hourly #{name}"] = t.store.hourly(q)
       %w[page event entry exit source channel referrer country browser device os].each do |dimension|
         out["#{dimension} #{name}"] = t.store.breakdown(q, dimension, 3, 0)
@@ -58,6 +60,13 @@ class CoreCheckTest < CoreTestCase
     end
     t.advance(start - t.now + (2 * HOUR))
 
+    [
+      ["page", "/blog/one", "none"], ["page", "/blog/*", "fixed"], ["event", "Signup", "fixed"],
+      ["event", "Signup", "prop"], ["click", "button", "none"]
+    ].each_with_index do |(kind_of, match, mode), i|
+      t.store.save_goal({ "id" => i.to_s.rjust(24, "0"), "site" => "default", "name" => "Signup", "kind" => kind_of, "match" => match, "clickBy" => "selector",
+                          "valueMode" => mode, "value" => 1.25, "valueProp" => "revenue", "currency" => "USD", "createdAt" => t.now })
+    end
     before = everything(t)
     built = 0
     while (made = t.rl.build_rollups).positive?
@@ -66,6 +75,17 @@ class CoreCheckTest < CoreTestCase
     assert_operator built, :>=, 8
     assert_equal 0, t.rl.build_rollups, "a built day is not built again"
     assert_equal before, everything(t)
+
+    # Proof the goals read the rollups: with the built days' raw visits gone, a goal by a whole path or a name,
+    # worth nothing or a fixed amount, still adds up. A pattern or a sent value reads events.
+    first = t.store.db.all("SELECT MIN(start_at) AS s, MAX(end_at) AS e FROM rl_rollup_days")[0]
+    t.store.db.run("DELETE FROM rl_events WHERE ts >= ? AND ts < ?", [first["s"].to_i, first["e"].to_i - (2 * HOUR)])
+    t.store.db.run("DELETE FROM rl_sessions WHERE started_at >= ? AND started_at < ?", [first["s"].to_i, first["e"].to_i - (2 * HOUR)])
+    afterwards = t.store.goal_totals_all(t.query("2026-09-07", "2026-10-06"), t.store.goals("default"))
+    [0, 2, 4].each do |i|
+      id = i.to_s.rjust(24, "0")
+      assert_equal before["goals 30d"][id], afterwards[id], "goal #{i} comes from rollups"
+    end
   end
 
   on_every_database("a late event and engagement on an old pageview are counted once the day is built again") do |kind|
@@ -192,6 +212,31 @@ class CoreCheckTest < CoreTestCase
     t.rl.check
     assert_equal 3, analyzed
     refute_empty t.store.db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"), "statistics written"
+  end
+
+  def test_planner_statistics_gathered_on_an_empty_database_are_gathered_again_once_the_events_outgrow_them
+    watched = WatchedDb.new(Databases.fresh("sqlite").db)
+    analyzed = 0
+    watched.before = ->(sql, _params) { analyzed += 1 if sql == "ANALYZE" }
+    t = Harness.new(Runlight::Store::SqlStore.new(watched), { "site" => { "hostnames" => ["example.com"], "timezone" => "UTC" } })
+    t.rl.init
+    analyzed = 0
+    t.store.optimize(true)
+    assert_equal 0, analyzed, "fresh enough while still empty"
+    insert = "INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v', 's', ?, '/', 'example.com')"
+    1500.times { |i| t.store.db.run(insert, [t.now, "p#{i}"]) }
+    t.store.optimize(true)
+    assert_equal 1, analyzed, "gathered again once the events grew"
+    stat = t.store.db.all("SELECT stat FROM sqlite_stat1 WHERE idx = 'rl_events_site_ts'")[0]
+    # A sample, so an estimate of the 1,500 rather than an exact count.
+    assert_operator stat["stat"].split[0].to_i, :>, 1000, "statistics count the events: #{stat["stat"]}"
+    t.store.optimize(true)
+    assert_equal 1, analyzed, "not again until they double"
+    # An app that never runs the scheduled check gets them from its reports, at most hourly.
+    1600.times { |i| t.store.db.run(insert, [t.now, "q#{i}"]) }
+    t.rl.freshen_statistics
+    t.rl.freshen_statistics
+    assert_equal 2, analyzed, "once for the doubled events, then not again within the hour"
   end
 
   def test_short_link_clicks_are_not_visits_in_the_heatmap_raw_or_rolled_up_nor_the_first_visit

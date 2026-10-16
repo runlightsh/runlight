@@ -3279,11 +3279,34 @@ defmodule Runlight.Routes do
         json(unfeed(Store.realtime(rl.store, site["id"], Runlight.now(rl)), shared))
 
       true ->
+        # Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+        Runlight.freshen_statistics(routes.rl)
+
         case read_query(routes, url, site) do
           {:error, response} -> response
           {:ok, read} -> report_reads(routes, path, url, site, read)
         end
     end
+  end
+
+  # Runs the reads at once, one process each, and answers their results in order. A read that raises raises here,
+  # as it would have run in place.
+  defp side_by_side(funs) do
+    funs
+    |> Enum.map(fn fun ->
+      Task.async(fn ->
+        try do
+          {:ok, fun.()}
+        rescue
+          error -> {:raised, error, __STACKTRACE__}
+        end
+      end)
+    end)
+    |> Task.await_many(:infinity)
+    |> Enum.map(fn
+      {:ok, value} -> value
+      {:raised, error, stacktrace} -> reraise error, stacktrace
+    end)
   end
 
   defp report_reads(routes, path, url, site, %{query: query, range: range, compared: compared}) do
@@ -3297,8 +3320,13 @@ defmodule Runlight.Routes do
 
     cond do
       path == "/api/stats" ->
-        stats = Store.stats(store, query)
-        previous = if compared, do: Store.stats(store, before.()), else: :undefined
+        # The range and its comparison side by side, which a pool of connections runs at once.
+        [stats, previous] =
+          side_by_side([
+            fn -> Store.stats(store, query) end,
+            fn -> if compared, do: Store.stats(store, before.()), else: :undefined end
+          ])
+
         json(JS.obj(site: site["id"], range: range_out, compare: compare_out, stats: stats, previous: previous))
 
       path == "/api/goals" and SearchParams.get(q, "definitions") == "1" ->
@@ -3306,11 +3334,15 @@ defmodule Runlight.Routes do
 
       path == "/api/goals" ->
         goals = Store.goals(store, site["id"])
-        visitors = Store.visitors(store, query)
-        previous_visitors = if compared, do: Store.visitors(store, before.()), else: 0
-        # Every goal in one pass for the range, and one more for the comparison.
-        now_all = Store.goal_totals_all(store, query, goals)
-        before_all = if compared, do: Store.goal_totals_all(store, before.(), goals)
+        earlier = if compared, do: before.()
+        # Every goal in one pass for the range, and one more for the comparison, side by side.
+        [visitors, previous_visitors, now_all, before_all] =
+          side_by_side([
+            fn -> Store.visitors(store, query) end,
+            fn -> if earlier, do: Store.visitors(store, earlier), else: 0 end,
+            fn -> Store.goal_totals_all(store, query, goals) end,
+            fn -> if earlier, do: Store.goal_totals_all(store, earlier, goals) end
+          ])
 
         rows =
           Enum.map(goals, fn goal ->
@@ -3362,12 +3394,14 @@ defmodule Runlight.Routes do
         end
 
       path == "/api/series" ->
-        points = Store.series(store, query, Time.buckets(range, site["timezone"]))
+        [points, earlier] =
+          side_by_side([
+            fn -> Store.series(store, query, Time.buckets(range, site["timezone"])) end,
+            fn -> if compared, do: Store.series(store, query, Time.buckets(compared, site["timezone"])) end
+          ])
+
         # Comparison points line up with the main ones by position.
-        previous =
-          if compared,
-            do: store |> Store.series(query, Time.buckets(compared, site["timezone"])) |> Enum.take(length(points)),
-            else: :undefined
+        previous = if earlier, do: Enum.take(earlier, length(points)), else: :undefined
 
         json(JS.obj(site: site["id"], range: range_out, compare: compare_out, points: points, previous: previous))
 

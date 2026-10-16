@@ -240,23 +240,50 @@ impl SqlStore {
         Ok(())
     }
 
-    /// Keeps SQLite's planner statistics current, which it never gathers by itself. Postgres gathers
+    /// Keeps SQLite's planner statistics current, which it never gathers by itself. A sample of each
+    /// index is enough, so this takes a few seconds at most even on a large database. Postgres gathers
     /// its own.
-    pub async fn optimize(&self, only_when_missing: bool) {
+    ///
+    /// With `only_when_stale`, only when there are none, or the events have more than doubled since they
+    /// were gathered. Statistics gathered on a new, empty database say every table is empty, and a goal
+    /// over a million visits then took a minute rather than milliseconds.
+    pub async fn optimize(&self, only_when_stale: bool) {
         if self.dialect() != Dialect::Sqlite {
             return;
         }
         let run = async {
-            if only_when_missing
-                && !self.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'", vec![]).await?.is_empty()
-            {
-                return Ok::<(), DbError>(());
+            let events = self
+                .first("SELECT MAX(id) AS n FROM rl_events", vec![])
+                .await?
+                .and_then(|r| r.opt_int("n"))
+                .unwrap_or(0);
+            if only_when_stale {
+                let seen = self.first("SELECT value FROM rl_meta WHERE \"key\" = 'statistics_events'", vec![]).await?;
+                let then = seen.and_then(|r| r.text("value").trim().parse::<f64>().ok()).filter(|n| n.is_finite());
+                let gathered =
+                    !self.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'", vec![]).await?.is_empty();
+                if let (true, Some(then)) = (gathered, then)
+                    && !(events as f64 > 2.0 * then && events as f64 - then >= 1000.0)
+                {
+                    return Ok::<(), DbError>(());
+                }
             }
-            self.run("PRAGMA analysis_limit = 1000", vec![]).await?;
-            self.run("ANALYZE", vec![]).await?;
+            let gather = async {
+                self.run("PRAGMA analysis_limit = 1000", vec![]).await?;
+                self.run("ANALYZE", vec![]).await?;
+                Ok::<(), DbError>(())
+            };
+            // Some hosted SQLite services refuse these, and gather statistics themselves.
+            let _ = gather.await;
+            // Noted even when refused, so a service that refuses is not asked again until the events double.
+            self.run(
+                &upsert(self.dialect(), "rl_meta", &["\"key\"", "value"], &["\"key\""], &["value"]),
+                params!["statistics_events", events.to_string()],
+            )
+            .await?;
             Ok(())
         };
-        // Some hosted SQLite services refuse these, and gather statistics themselves.
+        // Statistics only help; a failure here never stops the app.
         let _ = run.await;
     }
 
@@ -824,7 +851,13 @@ impl SqlStore {
     /// When the site last recorded a visit, or `None` if it never has.
     pub async fn last_seen(&self, site: &str) -> R<Option<i64>> {
         let row = self
-            .first("SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')", params![site])
+            .first(
+                // One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+                // both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+                "SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x",
+                params![site, site],
+            )
             .await?;
         Ok(row.and_then(|r| r.opt_int("t")))
     }
@@ -1632,7 +1665,78 @@ impl SqlStore {
 
     /// Every goal's totals in one pass over the range's events, instead of a query per goal.
     pub async fn goal_totals_all(&self, query: &Query, goals: &[GoalRow]) -> R<HashMap<String, GoalTotals>> {
+        // A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page
+        // by its whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a
+        // day, so each day's visitors add up, as they do for every other report. A pattern or a value sent with
+        // each event needs the events themselves.
+        let rollable =
+            |goal: &GoalRow| goal.value_mode != "prop" && !(goal.kind == "page" && goal.match_.contains('*'));
+        let plan = if goals.iter().any(rollable) {
+            self.rollup_plan(&query.site, !query.filters.is_empty(), query.from, query.to).await?
+        } else {
+            None
+        };
+        let Some(plan) = plan.filter(|p| !p.days.is_empty()) else {
+            return self.raw_goal_totals_all(query, goals).await;
+        };
+        let rolled: Vec<GoalRow> = goals.iter().filter(|g| rollable(g)).cloned().collect();
+        let others: Vec<GoalRow> = goals.iter().filter(|g| !rollable(g)).cloned().collect();
+        let mut out = self.raw_goal_totals_all(query, &others).await?;
+        let named = |goal: &GoalRow| if goal.kind == "click" { goal.name.clone() } else { goal.match_.clone() };
+        let mut counted: HashMap<String, (f64, f64)> = HashMap::new();
+        for (dim, column) in [("page", "pageviews"), ("event", "events")] {
+            let mut values: Vec<String> = Vec::new();
+            for goal in &rolled {
+                if (goal.kind == "page") == (dim == "page") {
+                    let value = if dim == "page" { goal.match_.clone() } else { named(goal) };
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                }
+            }
+            let rows = in_pieces(&values, VALUES_PER_QUERY, |piece| {
+                let sql = format!(
+                    "SELECT value, SUM(visitors) AS visitors, SUM({column}) AS n FROM rl_rollups
+       WHERE site = ? AND dim = '{dim}' AND day IN ({BUILT_DAYS}) AND value IN ({}) GROUP BY value",
+                    piece.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+                );
+                let mut p = params![&query.site, &query.site, query.from, query.to];
+                p.extend(piece.into_iter().map(Param::Text));
+                async move { self.all(&sql, p).await }
+            })
+            .await?;
+            for row in &rows {
+                counted.insert(format!("{dim}:{}", row.text("value")), (row.num("visitors"), row.num("n")));
+            }
+        }
+        let mut rest = Vec::new();
+        for &(from, to) in &plan.rest {
+            rest.push(self.raw_goal_totals_all(&Query { from, to, ..query.clone() }, &rolled).await?);
+        }
+        for goal in &rolled {
+            let key =
+                if goal.kind == "page" { format!("page:{}", goal.match_) } else { format!("event:{}", named(goal)) };
+            let (visitors, conversions) = counted.get(&key).copied().unwrap_or((0.0, 0.0));
+            let mut sum = GoalTotals { conversions, visitors, revenue: 0.0 };
+            for part in &rest {
+                let part = part.get(&goal.id).copied().unwrap_or_default();
+                sum.visitors += part.visitors;
+                sum.conversions += part.conversions;
+            }
+            if goal.value_mode == "fixed" {
+                sum.revenue = cents(sum.conversions * goal.value);
+            }
+            out.insert(goal.id.clone(), sum);
+        }
+        Ok(out)
+    }
+
+    /// Every goal's totals read from the events of the range's visits.
+    async fn raw_goal_totals_all(&self, query: &Query, goals: &[GoalRow]) -> R<HashMap<String, GoalTotals>> {
         let mut out = HashMap::new();
+        if goals.is_empty() {
+            return Ok(out);
+        }
         let v = visit_rows(&query.filters, &query.site, query.from, query.to, self.dialect());
         // As many goals per query as keep it under D1's parameter limit.
         let mut chunks: Vec<Vec<&GoalRow>> = vec![vec![]];
@@ -1967,6 +2071,10 @@ impl SqlStore {
 
     /// Just the visitor count from stats(), in one query, for conversion rates.
     pub async fn visitors(&self, query: &Query) -> R<f64> {
+        // Built days add up their visitors, as the stats do.
+        if let Some(rolled) = self.rolled_stats(query).await? {
+            return Ok(rolled.visitors);
+        }
         let scope = visit_scope(&query.filters, &query.site, query.from, query.to, self.dialect());
         let row = self
             .first(
@@ -2407,8 +2515,10 @@ impl SqlStore {
         let pages = self
             .all(
                 &format!(
-                    "SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path{order} LIMIT 10"
+                    // Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+                    "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM {}
+       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path{order} LIMIT 10",
+                    event_kind_table(self.dialect())
                 ),
                 params![site, since],
             )

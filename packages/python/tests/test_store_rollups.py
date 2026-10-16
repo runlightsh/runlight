@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from support.databases import store_kinds
-from support.store import DAY, HOUR, MIN, NOW, WatchedDb, build_days, event, q, store, utc, visit
+from support.store import DAY, HOUR, MIN, NOW, WatchedDb, build_days, event, goal, q, store, utc, visit
 
 from runlight import _js
 from runlight.store import SqlStore
@@ -71,6 +71,12 @@ def _everything(s: SqlStore) -> dict[str, str]:
             out[f"{dimension} {name}"] = s.breakdown(query, dimension, 3, 0)
             out[f"{dimension} {name} page 2"] = s.breakdown(query, dimension, 3, 3)
     out["filtered"] = s.stats(q(NOW - 30 * DAY, NOW + DAY, ("country", "is", "GB")))
+    goals = s.goals("default")
+    for name in ("7d", "30d", "odd", "today", "all"):
+        query = q(*ranges[name])
+        out[f"visitors {name}"] = s.visitors(query)
+        totals = s.goal_totals_all(query, goals)
+        out[f"goals {name}"] = [totals[g["id"]] for g in goals]
     return {k: _js.dumps(v) for k, v in out.items()}
 
 
@@ -78,6 +84,10 @@ def _everything(s: SqlStore) -> dict[str, str]:
 def test_reports_read_from_daily_rollups_match_reports_read_from_every_visit(databases: Any, kind: str) -> None:
     s = store(databases, kind)
     _ten_days(s)
+    for i, (g_kind, match, mode) in enumerate(
+        [("page", "/pricing", "none"), ("page", "/blog/*", "fixed"), ("event", "Signup", "fixed"), ("event", "Signup", "prop"), ("click", "button", "none")]
+    ):
+        s.save_goal(goal(str(i).zfill(24), kind=g_kind, match=match, name="Signup", clickBy="selector", valueMode=mode, value=1.25, valueProp="revenue", createdAt=NOW))
     before = _everything(s)
     assert build_days(s, "default", NOW - 11 * DAY, NOW) >= 8
     assert len(s.rollup_days("default")) == 11
@@ -92,6 +102,11 @@ def test_reports_read_from_daily_rollups_match_reports_read_from_every_visit(dat
     again = _everything(s)
     for key in ("stats 30d", "source 30d", "page 30d", "event 30d", "hourly 30d"):
         assert again[key] == before[key], f"{key} comes from rollups"
+    # Goals by a whole path or a name, worth nothing or a fixed amount; a pattern or a sent value reads events.
+    goals = _js.loads(again["goals 30d"])
+    for i in (0, 2, 4):
+        assert goals[i] == _js.loads(before["goals 30d"])[i], f"goal {i} comes from rollups"
+    assert again["visitors 30d"] == before["visitors 30d"], "visitors come from rollups"
 
 
 @pytest.mark.parametrize("kind", KINDS)

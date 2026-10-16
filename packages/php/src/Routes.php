@@ -2661,6 +2661,8 @@ final class Routes
             return self::json($unfeed($store->realtime($site['id'], $rl->now())));
         }
 
+        // Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+        $rl->freshenStatistics();
         $read = $this->readQuery($url, $site);
         if ($read instanceof Response) {
             return $read;

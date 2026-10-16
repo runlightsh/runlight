@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"runlight.sh/go/internal/assets"
@@ -504,3 +506,31 @@ var (
 	fileName  = regexp.MustCompile(`filename="([A-Za-z0-9._-]+)"`)
 	errorCode = regexp.MustCompile(`^[a-z_]{1,40}$`)
 )
+
+// whenCompared is fn when there is a comparison range, and nothing without one.
+func whenCompared(compared *Range, fn func() error) func() error {
+	if compared == nil {
+		return nil
+	}
+	return fn
+}
+
+// sideBySide runs the reads at once, which a database with a pool of
+// connections answers in parallel, and returns their errors joined, in the
+// order given. A nil read is skipped.
+func sideBySide(reads ...func() error) error {
+	errs := make([]error, len(reads))
+	var wg sync.WaitGroup
+	for i, read := range reads {
+		if read == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = read()
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}

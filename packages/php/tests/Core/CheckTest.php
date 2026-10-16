@@ -31,6 +31,9 @@ final class CheckTest extends CoreTestCase
                 $out["$dimension $name page 2"] = $t->store()->breakdown($q, $dimension, 3, 3);
             }
         }
+        $out['goals 30d'] = $t->store()->goalTotalsAll($ranges['30d'], $t->store()->goals('default'));
+        $out['goals some'] = $t->store()->goalTotalsAll($ranges['some'], $t->store()->goals('default'));
+        $out['visitors 30d'] = $t->store()->visitors($ranges['30d']);
         $out['filtered'] = $t->stats($t->query('2026-09-07', '2026-10-06', null, [['dimension' => 'country', 'op' => 'is', 'value' => 'GB']]));
         return $out;
     }
@@ -42,6 +45,16 @@ final class CheckTest extends CoreTestCase
         $t = new Harness($kind, ['site' => ['hostnames' => ['example.com'], 'timezone' => 'America/Toronto']]);
         $start = $t->now;
         $t->advance(-10 * 24 * self::HOUR);
+        $t->rl->init();
+        foreach ([
+            ['page', '/pricing', 'none'],
+            ['page', '/blog/*', 'fixed'],
+            ['event', 'Signup', 'fixed'],
+            ['event', 'Signup', 'prop'],
+            ['click', 'button', 'none'],
+        ] as $i => [$goalKind, $match, $mode]) {
+            $t->store()->saveGoal(['id' => str_pad((string) $i, 24, '0', STR_PAD_LEFT), 'site' => 'default', 'name' => 'Signup', 'kind' => $goalKind, 'match' => $match, 'clickBy' => 'selector', 'valueMode' => $mode, 'value' => 1.25, 'valueProp' => 'revenue', 'currency' => 'USD', 'createdAt' => $t->now]);
+        }
         $n = 0;
         for ($day = 0; $day < 10; $day++) {
             for ($v = 0; $v < 6; $v++) {
@@ -76,6 +89,16 @@ final class CheckTest extends CoreTestCase
         self::assertGreaterThanOrEqual(8, $built);
         self::assertSame(0, $t->rl->buildRollups(), 'a built day is not built again');
         self::assertEquals($before, self::everything($t));
+
+        // Proof the goals read the rollups: with the built days' raw visits gone, a long range still adds up.
+        $first = $t->store()->db->all('SELECT MIN(start_at) AS s, MAX(end_at) AS e FROM rl_rollup_days')[0];
+        $t->store()->db->run('DELETE FROM rl_events WHERE ts >= ? AND ts < ?', [$first['s'], $first['e'] - 2 * self::HOUR]);
+        $t->store()->db->run('DELETE FROM rl_sessions WHERE started_at >= ? AND started_at < ?', [$first['s'], $first['e'] - 2 * self::HOUR]);
+        $goals = $t->store()->goalTotalsAll($t->query('2026-09-07', '2026-10-06'), $t->store()->goals('default'));
+        foreach ([0, 2, 4] as $i) {
+            $id = str_pad((string) $i, 24, '0', STR_PAD_LEFT);
+            self::assertEquals($before['goals 30d'][$id], $goals[$id], "goal $i comes from rollups");
+        }
     }
 
     #[DataProvider('kinds')]
@@ -226,6 +249,47 @@ final class CheckTest extends CoreTestCase
         $t->rl->check();
         self::assertSame(3, $analyzed);
         self::assertNotEmpty($t->store()->db->all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"), 'statistics written');
+    }
+
+    #[DataProvider('kinds')]
+    public function testPlannerStatisticsGatheredOnAnEmptyDatabaseAreGatheredAgainOnceTheEventsOutgrowThem(string $kind): void
+    {
+        $watched = new WatchedDb(Databases::fresh($kind)->db);
+        $analyzed = 0;
+        $watched->before = static function (string $sql) use (&$analyzed): void {
+            if ($sql === 'ANALYZE') {
+                $analyzed++;
+            }
+        };
+        $t = new Harness(new SqlStore($watched), ['site' => ['hostnames' => ['example.com'], 'timezone' => 'UTC']]);
+        $t->rl->init();
+        $db = $watched;
+        $store = $t->store();
+        $analyzed = 0;
+        $store->optimize(true);
+        self::assertSame(0, $analyzed, 'fresh enough while still empty');
+        $insert = static function (string $prefix, int $n) use ($db, $t): void {
+            for ($i = 0; $i < $n; $i++) {
+                $db->run("INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v', 's', ?, '/', 'example.com')", [$t->now, "$prefix$i"]);
+            }
+        };
+        $insert('p', 1500);
+        $store->optimize(true);
+        if ($db->dialect() !== 'sqlite') {
+            self::assertSame(0, $analyzed, 'only SQLite needs this');
+            return;
+        }
+        self::assertSame(1, $analyzed, 'gathered again once the events grew');
+        $stat = $db->all("SELECT stat FROM sqlite_stat1 WHERE idx = 'rl_events_site_ts'")[0] ?? null;
+        // A sample, so an estimate of the 1,500 rather than an exact count.
+        self::assertGreaterThan(1000, (int) explode(' ', (string) ($stat['stat'] ?? ''))[0], 'statistics count the events');
+        $store->optimize(true);
+        self::assertSame(1, $analyzed, 'not again until they double');
+        // An app that never runs the scheduled check gets them from its reports, at most hourly.
+        $insert('q', 1600);
+        $t->rl->freshenStatistics();
+        $t->rl->freshenStatistics();
+        self::assertSame(2, $analyzed, 'once for the doubled events, then not again within the hour');
     }
 
     public function testShortLinkClicksAreNotVisitsInTheHeatmapRawOrRolledUpNorTheFirstVisit(): void

@@ -524,6 +524,16 @@ func visitRows(filters []Filter, site string, from, to int64, dialect string) vi
 	}
 }
 
+// eventKindTable is the events through their kind and time index. SQLite can
+// prefer the path index to avoid a sort, reading the site's entire history;
+// reports bounded by event kind and time should use the matching range index.
+func eventKindTable(dialect string) string {
+	if dialect == "sqlite" {
+		return "rl_events e INDEXED BY rl_events_site_kind_ts"
+	}
+	return "rl_events e"
+}
+
 func placeholders(n int) string {
 	marks := make([]string, n)
 	for i := range marks {

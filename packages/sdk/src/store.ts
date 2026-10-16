@@ -835,16 +835,33 @@ export class SqlStore {
   /**
    * Keeps SQLite's planner statistics current, which it never gathers by itself. Without them it can
    * choose a plan that reads a table once for every row of another. A sample of each index is enough,
-   * so this takes milliseconds even on a large database. Postgres gathers its own.
+   * so this takes a few seconds at most even on a large database. Postgres gathers its own.
+   *
+   * With `onlyWhenStale`, only when there are none, or the events have more than doubled since they were
+   * gathered. Statistics gathered on a new, empty database say every table is empty, and a goal over a
+   * million visits then took a minute rather than milliseconds.
    */
-  async optimize(onlyWhenMissing = false): Promise<void> {
+  async optimize(onlyWhenStale = false): Promise<void> {
     if (this.db.dialect !== "sqlite") return;
     try {
-      if (onlyWhenMissing && (await this.db.all(`SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'`)).length) return;
-      await this.db.run("PRAGMA analysis_limit = 1000");
-      await this.db.run("ANALYZE");
+      const [top] = await this.db.all(`SELECT MAX(id) AS n FROM rl_events`);
+      const events = num(top?.n);
+      if (onlyWhenStale) {
+        const [seen] = await this.db.all<{ value: string }>(`SELECT value FROM rl_meta WHERE "key" = 'statistics_events'`);
+        const then = seen ? Number(seen.value) : NaN;
+        const gathered = (await this.db.all(`SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'`)).length > 0;
+        if (gathered && Number.isFinite(then) && !(events > 2 * then && events - then >= 1000)) return;
+      }
+      try {
+        await this.db.run("PRAGMA analysis_limit = 1000");
+        await this.db.run("ANALYZE");
+      } catch {
+        // Some hosted SQLite services refuse these, and gather statistics themselves.
+      }
+      // Noted even when refused, so a service that refuses is not asked again until the events double.
+      await this.db.run(upsert(this.db.dialect, "rl_meta", ['"key"', "value"], ['"key"'], ["value"]), ["statistics_events", String(events)]);
     } catch {
-      // Some hosted SQLite services refuse these, and gather statistics themselves.
+      // Statistics only help; a failure here never stops the app.
     }
   }
 
@@ -1201,7 +1218,13 @@ export class SqlStore {
 
   /** When the site last recorded a visit, or null if it never has. */
   async lastSeen(site: string): Promise<number | null> {
-    const [row] = await this.db.all(`SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')`, [site]);
+    // One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+    // both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+    const [row] = await this.db.all(
+      `SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x`,
+      [site, site],
+    );
     return row?.t === null || row?.t === undefined ? null : num(row.t);
   }
 
@@ -1779,7 +1802,47 @@ export class SqlStore {
    * per goal: each goal adds a conditional count, distinct count, and sum.
    */
   async goalTotalsAll(query: Query, goals: GoalRow[]): Promise<Map<string, GoalTotals>> {
+    // A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page
+    // by its whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a
+    // day, so each day's visitors add up, as they do for every other report. A pattern or a value sent with
+    // each event needs the events themselves.
+    const rollable = (goal: GoalRow) => goal.valueMode !== "prop" && !(goal.kind === "page" && goal.match.includes("*"));
+    const plan = goals.some(rollable) ? await this.rollupPlan(query, query.from, query.to) : null;
+    if (!plan?.days.length) return this.rawGoalTotalsAll(query, goals);
+    const rolled = goals.filter(rollable);
+    const out = await this.rawGoalTotalsAll(query, goals.filter((goal) => !rollable(goal)));
+    const counted = new Map<string, { visitors: number; n: number }>();
+    for (const [dim, column, values] of [
+      ["page", "pageviews", rolled.filter((g) => g.kind === "page").map((g) => g.match)],
+      ["event", "events", rolled.filter((g) => g.kind !== "page").map((g) => (g.kind === "click" ? g.name : g.match))],
+    ] as const) {
+      const rows = await inPieces([...new Set(values)], VALUES_PER_QUERY, (piece) =>
+        this.db.all(
+          `SELECT value, SUM(visitors) AS visitors, SUM(${column}) AS n FROM rl_rollups
+           WHERE site = ? AND dim = '${dim}' AND day IN (${BUILT_DAYS}) AND value IN (${piece.map(() => "?").join(", ")}) GROUP BY value`,
+          [query.site, query.site, query.from, query.to, ...piece],
+        ),
+      );
+      for (const row of rows) counted.set(`${dim}:${String(row.value)}`, { visitors: num(row.visitors), n: num(row.n) });
+    }
+    const rest = await Promise.all(plan.rest.map(([from, to]) => this.rawGoalTotalsAll({ ...query, from, to }, rolled)));
+    for (const goal of rolled) {
+      const key = goal.kind === "page" ? `page:${goal.match}` : `event:${goal.kind === "click" ? goal.name : goal.match}`;
+      const sum = { conversions: counted.get(key)?.n ?? 0, visitors: counted.get(key)?.visitors ?? 0 };
+      for (const part of rest) {
+        sum.visitors += part.get(goal.id)!.visitors;
+        sum.conversions += part.get(goal.id)!.conversions;
+      }
+      const revenue = goal.valueMode === "fixed" ? Math.round(sum.conversions * goal.value * 100) / 100 : 0;
+      out.set(goal.id, { ...sum, revenue });
+    }
+    return out;
+  }
+
+  /** Every goal's totals read from the events of the range's visits. */
+  private async rawGoalTotalsAll(query: Query, goals: GoalRow[]): Promise<Map<string, GoalTotals>> {
     const out = new Map<string, GoalTotals>();
+    if (!goals.length) return out;
     // Local SQLite can seek each goal's path or event name instead of scanning
     // every pageview for a mixed set of goals. Metered stores keep the batch.
     if (this.db.dialect === "sqlite" && !this.db.metered) {
@@ -1983,6 +2046,9 @@ export class SqlStore {
 
   /** Just the visitor count from stats(), in one query, for conversion rates. */
   async visitors(query: Query): Promise<number> {
+    // Built days add up their visitors, as the stats do.
+    const rolled = await this.rolledStats(query);
+    if (rolled) return rolled.visitors;
     const scope = visitScope(query.filters, query.site, query.from, query.to, this.db.dialect);
     const table = this.db.dialect === "sqlite" && query.filters.length === 0 ? "rl_sessions s INDEXED BY rl_sessions_visit_visitors" : "rl_sessions s";
     const [row] = await this.db.all(
@@ -2274,8 +2340,9 @@ export class SqlStore {
       [site, since],
     );
     const pages = await this.db.all(
-      `SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path${this.textOrder} LIMIT 10`,
+      // Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+      `SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM ${eventKindTable(this.db.dialect)}
+       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path${this.textOrder} LIMIT 10`,
       [site, since],
     );
     const sources = await this.db.all(

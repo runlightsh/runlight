@@ -97,17 +97,32 @@ module Runlight
 
       # Keeps SQLite's planner statistics current, which it never gathers by itself. Without them it can
       # choose a plan that reads a table once for every row of another. A sample of each index is enough,
-      # so this takes milliseconds even on a large database. Postgres gathers its own.
-      def optimize(only_when_missing = false)
+      # so this takes a few seconds at most even on a large database. Postgres gathers its own.
+      #
+      # With only_when_stale, only when there are none, or the events have more than doubled since they were
+      # gathered. Statistics gathered on a new, empty database say every table is empty, and a goal over a
+      # million visits then took a minute rather than milliseconds.
+      def optimize(only_when_stale = false)
         return if @db.dialect != "sqlite"
 
         begin
-          return if only_when_missing && !@db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'").empty?
-
-          @db.run("PRAGMA analysis_limit = 1000")
-          @db.run("ANALYZE")
+          events = Sql.num(@db.all("SELECT MAX(id) AS n FROM rl_events")[0]&.fetch("n", nil))
+          if only_when_stale
+            seen = @db.all("SELECT value FROM rl_meta WHERE \"key\" = 'statistics_events'")[0]
+            then_events = seen.nil? ? nil : Js.number(seen["value"])
+            gathered = !@db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'").empty?
+            return if gathered && !then_events.nil? && then_events.finite? && !(events > 2 * then_events && events - then_events >= 1000)
+          end
+          begin
+            @db.run("PRAGMA analysis_limit = 1000")
+            @db.run("ANALYZE")
+          rescue StandardError
+            # Some hosted SQLite services refuse these, and gather statistics themselves.
+          end
+          # Noted even when refused, so a service that refuses is not asked again until the events double.
+          @db.run(Sql.upsert(@db.dialect, "rl_meta", ['"key"', "value"], ['"key"'], ["value"]), ["statistics_events", events.to_s])
         rescue StandardError
-          # Some hosted SQLite services refuse these, and gather statistics themselves.
+          # Statistics only help; a failure here never stops the app.
         end
       end
 
@@ -308,7 +323,13 @@ module Runlight
 
       # When the site last recorded a visit, or nil if it never has.
       def last_seen(site)
-        row = @db.all("SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')", [site])[0]
+        # One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+        # both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+        row = @db.all(
+          "SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x",
+          [site, site],
+        )[0]
         row.nil? || row["t"].nil? ? nil : Sql.num(row["t"])
       end
 
@@ -809,7 +830,50 @@ module Runlight
       # per goal: each goal adds a conditional count, distinct count, and sum.
       # Keyed by goal id: {"conversions", "visitors", "revenue"}.
       def goal_totals_all(query, goals)
+        # A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page
+        # by its whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a
+        # day, so each day's visitors add up, as they do for every other report. A pattern or a value sent with
+        # each event needs the events themselves.
+        rollable = ->(goal) { goal["valueMode"] != "prop" && !(goal["kind"] == "page" && goal["match"].include?("*")) }
+        plan = goals.any?(&rollable) ? rollup_plan(query, query["from"], query["to"]) : nil
+        return raw_goal_totals_all(query, goals) if plan.nil? || plan["days"].empty?
+
+        rolled = goals.select(&rollable)
+        out = raw_goal_totals_all(query, goals.reject(&rollable))
+        counted = {}
+        [
+          ["page", "pageviews", rolled.select { |g| g["kind"] == "page" }.map { |g| g["match"] }],
+          ["event", "events", rolled.reject { |g| g["kind"] == "page" }.map { |g| g["kind"] == "click" ? g["name"] : g["match"] }],
+        ].each do |dim, column, values|
+          rows = Sql.in_pieces(values.uniq, Sql::VALUES_PER_QUERY) do |piece|
+            @db.all(
+              "SELECT value, SUM(visitors) AS visitors, SUM(#{column}) AS n FROM rl_rollups
+           WHERE site = ? AND dim = '#{dim}' AND day IN (#{Sql::BUILT_DAYS}) AND value IN (#{piece.map { "?" }.join(", ")}) GROUP BY value",
+              [query["site"], query["site"], query["from"], query["to"], *piece],
+            )
+          end
+          rows.each { |row| counted["#{dim}:#{Sql.string(row["value"])}"] = { "visitors" => Sql.num(row["visitors"]), "n" => Sql.num(row["n"]) } }
+        end
+        rest = plan["rest"].map { |from, to| raw_goal_totals_all(query.merge("from" => from, "to" => to), rolled) }
+        rolled.each do |goal|
+          key = goal["kind"] == "page" ? "page:#{goal["match"]}" : "event:#{goal["kind"] == "click" ? goal["name"] : goal["match"]}"
+          sum = { "conversions" => counted.dig(key, "n") || 0, "visitors" => counted.dig(key, "visitors") || 0 }
+          rest.each do |part|
+            sum["visitors"] += part[goal["id"]]["visitors"]
+            sum["conversions"] += part[goal["id"]]["conversions"]
+          end
+          revenue = goal["valueMode"] == "fixed" ? cents(sum["conversions"] * goal["value"]) : 0
+          out[goal["id"]] = sum.merge("revenue" => revenue)
+        end
+        # In the order the goals came in, as the single pass answers.
+        goals.to_h { |goal| [goal["id"], out[goal["id"]]] }
+      end
+
+      # Every goal's totals read from the events of the range's visits.
+      def raw_goal_totals_all(query, goals)
         out = {}
+        return out if goals.empty?
+
         v = Sql.visit_rows(query["filters"], query["site"], query["from"], query["to"], @db.dialect)
         # As many goals per query as keep it under D1's parameter limit.
         chunks = [[]]
@@ -1003,6 +1067,10 @@ module Runlight
 
       # Just the visitor count from stats(), in one query, for conversion rates.
       def visitors(query)
+        # Built days add up their visitors, as the stats do.
+        rolled = rolled_stats(query)
+        return rolled["visitors"] if rolled
+
         scope = Sql.visit_scope(query["filters"], query["site"], query["from"], query["to"], @db.dialect)
         row = @db.all(
           "SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND #{Sql::IS_VISIT}#{scope["sql"]}",
@@ -1289,8 +1357,9 @@ module Runlight
           [site, since],
         )[0] || {}
         pages = @db.all(
-          "SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path#{text_order} LIMIT 10",
+          # Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+          "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM #{Sql.event_kind_table(@db.dialect)}
+       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path#{text_order} LIMIT 10",
           [site, since],
         )
         sources = @db.all(

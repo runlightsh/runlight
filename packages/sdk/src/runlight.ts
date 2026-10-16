@@ -222,6 +222,8 @@ export class Runlight {
   /** The scheduled check under way, which a second caller shares, and when planner statistics were last gathered. */
   private checking: Promise<{ ok: true; reports: { sent: number; failed: number } }> | null = null;
   private optimizedAt = 0;
+  /** When statistics were last checked for staleness, which reports do at most hourly. */
+  private freshenedAt = 0;
   private linkDomainCache: { at: number; domains: Set<string> } | null = null;
   /** Work queued per key by oneAtATime, such as one visitor's session. */
   private readonly turns = new Map<string, Promise<void>>();
@@ -1231,6 +1233,16 @@ export class Runlight {
   }
 
   /**
+   * Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app
+   * that never runs the scheduled check still reads its reports with statistics that fit its data.
+   */
+  async freshenStatistics(): Promise<void> {
+    if (this.now() - this.freshenedAt < 3_600_000) return;
+    this.freshenedAt = this.now();
+    await this.store.optimize(true);
+  }
+
+  /**
    * Scheduled upkeep, safe to run every minute. It rotates salts, sends the email
    * reports that are due, deletes visits past each site's retention, and builds
    * daily rollups. It also rereads sites, their dashboard settings, and connected
@@ -1262,6 +1274,9 @@ export class Runlight {
     if (this.now() - this.optimizedAt >= 86_400_000) {
       this.optimizedAt = this.now();
       await this.store.optimize();
+    } else {
+      // Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+      await this.store.optimize(true);
     }
     await this.buildRollups();
     return { ok: true, reports: await this.sendReports() };

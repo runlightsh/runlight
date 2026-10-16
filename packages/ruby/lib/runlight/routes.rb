@@ -2339,8 +2339,10 @@ module Runlight
         })
       end
 
-      return json(unfeed.call(store.realtime(site["id"], rl.now))) if path == "/api/realtime"
+      return json(unfeed.call(store.realtime(site["id"], @rl.now))) if path == "/api/realtime"
 
+      # Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+      @rl.freshen_statistics
       read = read_query(url, site)
       return read if read.is_a?(Http::Response)
 

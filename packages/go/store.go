@@ -206,23 +206,48 @@ func (s *Store) upgrade(ctx context.Context, db Db, postgres bool) error {
 }
 
 // Optimize keeps SQLite's planner statistics current, which it never
-// gathers by itself. A sample of each index is enough, so this takes
-// milliseconds even on a large database. Postgres gathers its own.
-func (s *Store) Optimize(ctx context.Context, onlyWhenMissing bool) {
+// gathers by itself. A sample of each index is enough, so this takes a few
+// seconds at most even on a large database. Postgres gathers its own.
+//
+// With onlyWhenStale, only when there are none, or the events have more than
+// doubled since they were gathered. Statistics gathered on a new, empty
+// database say every table is empty, and a goal over a million visits then
+// took a minute rather than milliseconds.
+func (s *Store) Optimize(ctx context.Context, onlyWhenStale bool) {
 	if s.dialect() != "sqlite" {
 		return
 	}
-	// Some hosted SQLite services refuse these, and gather statistics themselves.
-	if onlyWhenMissing {
-		rows, err := s.db.All(ctx, `SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'`)
-		if err != nil || len(rows) > 0 {
-			return
-		}
-	}
-	if s.db.Run(ctx, "PRAGMA analysis_limit = 1000") != nil {
+	// Statistics only help; a failure here never stops the app.
+	top, err := s.db.All(ctx, `SELECT MAX(id) AS n FROM rl_events`)
+	if err != nil {
 		return
 	}
-	_ = s.db.Run(ctx, "ANALYZE")
+	events := int64(0)
+	if len(top) > 0 {
+		events = numInt(top[0]["n"])
+	}
+	if onlyWhenStale {
+		seen, err := s.db.All(ctx, `SELECT value FROM rl_meta WHERE "key" = 'statistics_events'`)
+		if err != nil {
+			return
+		}
+		gathered, err := s.db.All(ctx, `SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'`)
+		if err != nil {
+			return
+		}
+		if len(seen) > 0 && len(gathered) > 0 {
+			then, err := strconv.ParseFloat(strings.TrimSpace(str(seen[0]["value"])), 64)
+			if err == nil && !math.IsInf(then, 0) && !math.IsNaN(then) && !(float64(events) > 2*then && float64(events)-then >= 1000) {
+				return
+			}
+		}
+	}
+	// Some hosted SQLite services refuse these, and gather statistics themselves.
+	if s.db.Run(ctx, "PRAGMA analysis_limit = 1000") == nil {
+		_ = s.db.Run(ctx, "ANALYZE")
+	}
+	// Noted even when refused, so a service that refuses is not asked again until the events double.
+	_ = s.db.Run(ctx, upsert(s.dialect(), "rl_meta", []string{`"key"`, "value"}, []string{`"key"`}, []string{"value"}), "statistics_events", strconv.FormatInt(events, 10))
 }
 
 // Close closes the database, when it has a Close.
@@ -856,7 +881,11 @@ func nullableTime(rows []Row) *int64 {
 
 // LastSeen is when the site last recorded a visit, or nil if it never has.
 func (s *Store) LastSeen(ctx context.Context, site string) (*int64, error) {
-	rows, err := s.db.All(ctx, `SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')`, site)
+	// One MAX for each kind, which every database reads from the end of its
+	// (site, kind, ts) index. Asked for both kinds at once, MySQL read every
+	// pageview and event of the site: 2 s on a million visits.
+	rows, err := s.db.All(ctx, `SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x`, site, site)
 	return nullableTime(rows), err
 }
 
@@ -1651,7 +1680,106 @@ func (s *Store) revenueValue(goal GoalRow) sqlPart {
 // instead of a query per goal: each goal adds a conditional count, distinct
 // count, and sum.
 func (s *Store) GoalTotalsAll(ctx context.Context, query Query, goals []GoalRow) (map[string]GoalTotals, error) {
+	// A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page
+	// by its whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a
+	// day, so each day's visitors add up, as they do for every other report. A pattern or a value sent with
+	// each event needs the events themselves.
+	rollable := func(goal GoalRow) bool {
+		return goal.ValueMode != "prop" && !(goal.Kind == "page" && strings.Contains(goal.Match, "*"))
+	}
+	var rolled, others []GoalRow
+	for _, goal := range goals {
+		if rollable(goal) {
+			rolled = append(rolled, goal)
+		} else {
+			others = append(others, goal)
+		}
+	}
+	var plan *rollupPlan
+	if len(rolled) > 0 {
+		var err error
+		if plan, err = s.rollupPlan(ctx, query.Site, query.Filters, query.From, query.To); err != nil {
+			return nil, err
+		}
+	}
+	if plan == nil || len(plan.days) == 0 {
+		return s.rawGoalTotalsAll(ctx, query, goals)
+	}
+	out, err := s.rawGoalTotalsAll(ctx, query, others)
+	if err != nil {
+		return nil, err
+	}
+	type counted struct{ visitors, n int64 }
+	counts := map[string]counted{}
+	for _, read := range []struct{ dim, column string }{{"page", "pageviews"}, {"event", "events"}} {
+		var values []string
+		seen := map[string]bool{}
+		for _, goal := range rolled {
+			if (goal.Kind == "page") != (read.dim == "page") {
+				continue
+			}
+			value := goal.Match
+			if goal.Kind == "click" {
+				value = goal.Name
+			}
+			if !seen[value] {
+				seen[value] = true
+				values = append(values, value)
+			}
+		}
+		for i := 0; i < len(values); i += valuesPerQuery {
+			piece := values[i:min(i+valuesPerQuery, len(values))]
+			params := []any{query.Site, query.Site, query.From, query.To}
+			for _, value := range piece {
+				params = append(params, value)
+			}
+			rows, err := s.db.All(ctx, `SELECT value, SUM(visitors) AS visitors, SUM(`+read.column+`) AS n FROM rl_rollups
+           WHERE site = ? AND dim = '`+read.dim+`' AND day IN (`+builtDays+`) AND value IN (`+placeholders(len(piece))+`) GROUP BY value`, params...)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				counts[read.dim+":"+str(row["value"])] = counted{numInt(row["visitors"]), numInt(row["n"])}
+			}
+		}
+	}
+	rest := make([]map[string]GoalTotals, len(plan.rest))
+	reads := make([]func() error, len(plan.rest))
+	for i, stretch := range plan.rest {
+		reads[i] = func() (err error) {
+			rest[i], err = s.rawGoalTotalsAll(ctx, Query{Site: query.Site, From: stretch[0], To: stretch[1], Filters: query.Filters}, rolled)
+			return
+		}
+	}
+	if err := sideBySide(reads...); err != nil {
+		return nil, err
+	}
+	for _, goal := range rolled {
+		key := "page:" + goal.Match
+		if goal.Kind == "click" {
+			key = "event:" + goal.Name
+		} else if goal.Kind != "page" {
+			key = "event:" + goal.Match
+		}
+		sum := GoalTotals{Conversions: counts[key].n, Visitors: counts[key].visitors}
+		for _, part := range rest {
+			sum.Visitors += part[goal.ID].Visitors
+			sum.Conversions += part[goal.ID].Conversions
+		}
+		if goal.ValueMode == "fixed" {
+			sum.Revenue = round2(float64(sum.Conversions) * goal.Value)
+		}
+		out[goal.ID] = sum
+	}
+	return out, nil
+}
+
+// rawGoalTotalsAll is every goal's totals read from the events of the range's visits.
+func (s *Store) rawGoalTotalsAll(ctx context.Context, query Query, goals []GoalRow) (map[string]GoalTotals, error) {
 	out := map[string]GoalTotals{}
+	if len(goals) == 0 {
+		return out, nil
+	}
 	v := visitRows(query.Filters, query.Site, query.From, query.To, s.dialect())
 	// As many goals per query as keep it under D1's parameter limit.
 	chunks := [][]GoalRow{{}}
@@ -1919,6 +2047,14 @@ func (s *Store) FirstSeen(ctx context.Context, site string) (*int64, error) {
 
 // Visitors is just the visitor count from Stats, in one query, for conversion rates.
 func (s *Store) Visitors(ctx context.Context, query Query) (int64, error) {
+	// Built days add up their visitors, as the stats do.
+	rolled, err := s.rolledStats(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	if rolled != nil {
+		return rolled.Visitors, nil
+	}
 	scope := visitScope(query.Filters, query.Site, query.From, query.To, s.dialect())
 	rows, err := s.db.All(ctx, `SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND `+isVisit+scope.sql,
 		append([]any{query.Site, query.From, query.To}, scope.params...)...)
@@ -2357,8 +2493,9 @@ func (s *Store) Realtime(ctx context.Context, site string, now int64) (Realtime,
 	if err != nil {
 		return Realtime{}, err
 	}
-	pages, err := s.db.All(ctx, `SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path`+s.textOrder()+` LIMIT 10`, site, since)
+	// Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+	pages, err := s.db.All(ctx, `SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM `+eventKindTable(s.dialect())+`
+       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path`+s.textOrder()+` LIMIT 10`, site, since)
 	if err != nil {
 		return Realtime{}, err
 	}

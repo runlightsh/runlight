@@ -190,21 +190,37 @@ final class SqlStore
     /**
      * Keeps SQLite's planner statistics current, which it never gathers by itself. Without them it can
      * choose a plan that reads a table once for every row of another. A sample of each index is enough,
-     * so this takes milliseconds even on a large database. Postgres gathers its own.
+     * so this takes a few seconds at most even on a large database. Postgres gathers its own.
+     *
+     * With `$onlyWhenStale`, only when there are none, or the events have more than doubled since they were
+     * gathered. Statistics gathered on a new, empty database say every table is empty, and a goal over a
+     * million visits then took a minute rather than milliseconds.
      */
-    public function optimize(bool $onlyWhenMissing = false): void
+    public function optimize(bool $onlyWhenStale = false): void
     {
         if ($this->db->dialect() !== 'sqlite') {
             return;
         }
         try {
-            if ($onlyWhenMissing && $this->db->all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'")) {
-                return;
+            $events = Sql::num($this->db->all('SELECT MAX(id) AS n FROM rl_events')[0]['n'] ?? null);
+            if ($onlyWhenStale) {
+                $seen = $this->db->all('SELECT value FROM rl_meta WHERE "key" = \'statistics_events\'')[0] ?? null;
+                $then = $seen !== null && is_numeric($seen['value']) ? (float) $seen['value'] : null;
+                $gathered = (bool) $this->db->all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'");
+                if ($gathered && $then !== null && !($events > 2 * $then && $events - $then >= 1000)) {
+                    return;
+                }
             }
-            $this->db->run('PRAGMA analysis_limit = 1000');
-            $this->db->run('ANALYZE');
+            try {
+                $this->db->run('PRAGMA analysis_limit = 1000');
+                $this->db->run('ANALYZE');
+            } catch (\Throwable) {
+                // Some hosted SQLite services refuse these, and gather statistics themselves.
+            }
+            // Noted even when refused, so a service that refuses is not asked again until the events double.
+            $this->db->run(Sql::upsert($this->db->dialect(), 'rl_meta', ['"key"', 'value'], ['"key"'], ['value']), ['statistics_events', (string) $events]);
         } catch (\Throwable) {
-            // Some hosted SQLite services refuse these, and gather statistics themselves.
+            // Statistics only help; a failure here never stops the app.
         }
     }
 
@@ -681,7 +697,13 @@ final class SqlStore
     /** When the site last recorded a visit, or null if it never has. */
     public function lastSeen(string $site): int|float|null
     {
-        $row = $this->db->all("SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')", [$site])[0] ?? null;
+        // One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+        // both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+        $row = $this->db->all(
+            "SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x",
+            [$site, $site],
+        )[0] ?? null;
         return $row === null || $row['t'] === null ? null : Sql::num($row['t']);
     }
 
@@ -1412,7 +1434,69 @@ final class SqlStore
      */
     public function goalTotalsAll(array $query, array $goals): array
     {
+        // A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page
+        // by its whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a
+        // day, so each day's visitors add up, as they do for every other report. A pattern or a value sent with
+        // each event needs the events themselves.
+        $rollable = static fn (array $goal): bool => $goal['valueMode'] !== 'prop' && !($goal['kind'] === 'page' && str_contains($goal['match'], '*'));
+        $plan = array_filter($goals, $rollable) ? $this->rollupPlan($query, $query['from'], $query['to']) : null;
+        if ($plan === null || !$plan['days']) {
+            return $this->rawGoalTotalsAll($query, $goals);
+        }
+        $rolled = array_values(array_filter($goals, $rollable));
+        $out = $this->rawGoalTotalsAll($query, array_values(array_filter($goals, static fn (array $goal): bool => !$rollable($goal))));
+        $counted = [];
+        $pages = [];
+        $events = [];
+        foreach ($rolled as $goal) {
+            if ($goal['kind'] === 'page') {
+                $pages[] = $goal['match'];
+            } else {
+                $events[] = $goal['kind'] === 'click' ? $goal['name'] : $goal['match'];
+            }
+        }
+        foreach ([['page', 'pageviews', $pages], ['event', 'events', $events]] as [$dim, $column, $values]) {
+            // Values are kept beside their sums under a prefixed key, as PHP would turn a key like "12" into a number.
+            $rows = Sql::inPieces(array_values(array_unique($values)), Sql::VALUES_PER_QUERY, fn (array $piece): array => $this->db->all(
+                "SELECT value, SUM(visitors) AS visitors, SUM($column) AS n FROM rl_rollups
+           WHERE site = ? AND dim = '$dim' AND day IN (" . Sql::BUILT_DAYS . ') AND value IN (' . implode(', ', array_fill(0, count($piece), '?')) . ') GROUP BY value',
+                [$query['site'], $query['site'], $query['from'], $query['to'], ...$piece],
+            ));
+            foreach ($rows as $row) {
+                $counted["$dim:" . (string) $row['value']] = ['visitors' => Sql::num($row['visitors']), 'n' => Sql::num($row['n'])];
+            }
+        }
+        $rest = array_map(fn (array $stretch): array => $this->rawGoalTotalsAll(['from' => $stretch[0], 'to' => $stretch[1]] + $query, $rolled), $plan['rest']);
+        foreach ($rolled as $goal) {
+            $key = $goal['kind'] === 'page' ? "page:{$goal['match']}" : 'event:' . ($goal['kind'] === 'click' ? $goal['name'] : $goal['match']);
+            $conversions = $counted[$key]['n'] ?? 0;
+            $visitors = $counted[$key]['visitors'] ?? 0;
+            foreach ($rest as $part) {
+                $visitors += $part[$goal['id']]['visitors'];
+                $conversions += $part[$goal['id']]['conversions'];
+            }
+            $revenue = $goal['valueMode'] === 'fixed' ? self::cents($conversions * $goal['value']) : 0;
+            $out[$goal['id']] = ['conversions' => $conversions, 'visitors' => $visitors, 'revenue' => $revenue];
+        }
+        // In the order the goals came, as the raw path gives them.
+        $ordered = [];
+        foreach ($goals as $goal) {
+            $ordered[$goal['id']] = $out[$goal['id']];
+        }
+        return $ordered;
+    }
+
+    /**
+     * Every goal's totals read from the events of the range's visits.
+     *
+     * @return array<string, array{conversions: int, visitors: int, revenue: int|float}> keyed by goal id
+     */
+    private function rawGoalTotalsAll(array $query, array $goals): array
+    {
         $out = [];
+        if (!$goals) {
+            return $out;
+        }
         $v = Sql::visitRows($query['filters'], $query['site'], $query['from'], $query['to'], $this->db->dialect());
         // As many goals per query as keep it under D1's parameter limit.
         $chunks = [[]];
@@ -1661,6 +1745,12 @@ final class SqlStore
 
     // Reports
 
+    /** The events table, through the kind and time index on SQLite, which otherwise may read a site's whole history by path. */
+    private function eventKindTable(): string
+    {
+        return $this->db->dialect() === 'sqlite' ? 'rl_events e INDEXED BY rl_events_site_kind_ts' : 'rl_events e';
+    }
+
     /**
      * Ties are broken by the value in code point order, the order the rolled-up path sorts in, so a report
      * reads the same before and after its days are built. Postgres would otherwise use its locale's order.
@@ -1693,6 +1783,11 @@ final class SqlStore
     /** Just the visitor count from stats(), in one query, for conversion rates. */
     public function visitors(array $query): int|float
     {
+        // Built days add up their visitors, as the stats do.
+        $rolled = $this->rolledStats($query);
+        if ($rolled !== null) {
+            return $rolled['visitors'];
+        }
         $scope = Sql::visitScope($query['filters'], $query['site'], $query['from'], $query['to'], $this->db->dialect());
         $row = $this->db->all(
             'SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ' . Sql::IS_VISIT . $scope['sql'],
@@ -2017,8 +2112,9 @@ final class SqlStore
             [$site, $since],
         )[0] ?? null;
         $pages = $this->db->all(
-            "SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path{$this->textOrder()} LIMIT 10",
+            // Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+            "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM {$this->eventKindTable()}
+       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path{$this->textOrder()} LIMIT 10",
             [$site, $since],
         );
         $sources = $this->db->all(

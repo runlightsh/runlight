@@ -70,6 +70,11 @@ module Runlight
         a.b <=> b.b
       end
 
+      # The events table, through the kind and time index on SQLite, which otherwise may read a site's whole history.
+      def event_kind_table(dialect)
+        dialect == "sqlite" ? "rl_events e INDEXED BY rl_events_site_kind_ts" : "rl_events e"
+      end
+
       # Runs a query over pieces of a list and joins the answers, in order.
       def in_pieces(items, size)
         out = []

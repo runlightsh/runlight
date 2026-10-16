@@ -430,7 +430,72 @@ public sealed partial class SqlStore
     /// </summary>
     public async Task<Dictionary<string, JsObject>> GoalTotalsAllAsync(JsObject query, IReadOnlyList<JsObject> goals, CancellationToken cancellationToken = default)
     {
+        // A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page
+        // by its whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a
+        // day, so each day's visitors add up, as they do for every other report. A pattern or a value sent with
+        // each event needs the events themselves.
+        static bool Rollable(JsObject goal) => goal.Str("valueMode") != "prop" && !(goal.Str("kind") == "page" && (goal.Str("match") ?? "").Contains('*', StringComparison.Ordinal));
+        var plan = goals.Any(Rollable) ? await RollupPlanAsync(query, query.Num("from"), query.Num("to"), cancellationToken).ConfigureAwait(false) : null;
+        if (plan == null || plan.Days.Count == 0)
+        {
+            return await RawGoalTotalsAllAsync(query, goals, cancellationToken).ConfigureAwait(false);
+        }
+        var rolled = goals.Where(Rollable).ToList();
+        var others = await RawGoalTotalsAllAsync(query, goals.Where(g => !Rollable(g)).ToList(), cancellationToken).ConfigureAwait(false);
         var output = new Dictionary<string, JsObject>(StringComparer.Ordinal);
+        string site = query.Str("site")!;
+        var counted = new Dictionary<string, (double Visitors, double N)>(StringComparer.Ordinal);
+        foreach (var (dim, column, values) in new[]
+        {
+            ("page", "pageviews", rolled.Where(g => g.Str("kind") == "page").Select(g => g.Str("match") ?? "")),
+            ("event", "events", rolled.Where(g => g.Str("kind") != "page").Select(g => (g.Str("kind") == "click" ? g.Str("name") : g.Str("match")) ?? "")),
+        })
+        {
+            var rows = await Sql.InPiecesAsync(values.Distinct(StringComparer.Ordinal).ToList(), Sql.ValuesPerQuery, piece => Db.AllAsync(
+                "SELECT value, SUM(visitors) AS visitors, SUM(" + column + ") AS n FROM rl_rollups\n           WHERE site = ? AND dim = '" + dim + "' AND day IN (" + Sql.BuiltDays + ") AND value IN (" + string.Join(", ", piece.Select(_ => "?")) + ") GROUP BY value",
+                [site, site, query.Get("from"), query.Get("to"), .. piece],
+                cancellationToken)).ConfigureAwait(false);
+            foreach (var row in rows)
+            {
+                counted[dim + ":" + Sql.S(row.Get("value"))] = (Sql.Num(row.Get("visitors")), Sql.Num(row.Get("n")));
+            }
+        }
+        var rest = new List<Dictionary<string, JsObject>>();
+        foreach (var (from, to) in plan.Rest)
+        {
+            rest.Add(await RawGoalTotalsAllAsync(query.With(new JsObject { ["from"] = from, ["to"] = to }), rolled, cancellationToken).ConfigureAwait(false));
+        }
+        foreach (var goal in rolled)
+        {
+            string key = goal.Str("kind") == "page" ? "page:" + goal.Str("match") : "event:" + (goal.Str("kind") == "click" ? goal.Str("name") : goal.Str("match"));
+            counted.TryGetValue(key, out var found);
+            double conversions = found.N;
+            double visitors = found.Visitors;
+            string id = goal.Str("id")!;
+            foreach (var part in rest)
+            {
+                visitors += Sql.Num(part[id].Get("visitors"));
+                conversions += Sql.Num(part[id].Get("conversions"));
+            }
+            double revenue = goal.Str("valueMode") == "fixed" ? Cents(conversions * Js.Num(goal.Get("value"))) : 0;
+            others[id] = new JsObject { ["conversions"] = conversions, ["visitors"] = visitors, ["revenue"] = revenue };
+        }
+        // In the order the goals came.
+        foreach (var goal in goals)
+        {
+            output[goal.Str("id")!] = others[goal.Str("id")!];
+        }
+        return output;
+    }
+
+    /// <summary>Every goal's totals read from the events of the range's visits.</summary>
+    private async Task<Dictionary<string, JsObject>> RawGoalTotalsAllAsync(JsObject query, IReadOnlyList<JsObject> goals, CancellationToken cancellationToken)
+    {
+        var output = new Dictionary<string, JsObject>(StringComparer.Ordinal);
+        if (goals.Count == 0)
+        {
+            return output;
+        }
         var v = Sql.VisitRows(Sql.Filters(query), query.Str("site")!, query.Long("from"), query.Long("to"), Dialect);
         // As many goals per query as keep it under D1's parameter limit.
         var chunks = new List<List<JsObject>> { new() };

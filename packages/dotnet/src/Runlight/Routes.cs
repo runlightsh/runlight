@@ -3193,6 +3193,8 @@ public sealed class Routes
             return JsonResponse(Unfeed(await store.RealtimeAsync(siteId, rl.Now(), cancellationToken).ConfigureAwait(false)));
         }
 
+        // Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+        await rl.FreshenStatisticsAsync(cancellationToken).ConfigureAwait(false);
         object readOrRefusal = await ReadQueryAsync(url, current, cancellationToken).ConfigureAwait(false);
 
         if (readOrRefusal is not Read read)
@@ -3209,8 +3211,11 @@ public sealed class Routes
 
         if (path == "/api/stats")
         {
-            var stats = await store.StatsAsync(query, cancellationToken).ConfigureAwait(false);
-            object? previous = before != null ? await store.StatsAsync(before, cancellationToken).ConfigureAwait(false) : Undefined.Value;
+            // The range and its comparison side by side, which a database with a pool of connections runs at once.
+            var statsTask = store.StatsAsync(query, cancellationToken);
+            var previousTask = before != null ? store.StatsAsync(before, cancellationToken) : null;
+            var stats = await statsTask.ConfigureAwait(false);
+            object? previous = previousTask != null ? await previousTask.ConfigureAwait(false) : Undefined.Value;
             return JsonResponse(new JsObject { ["site"] = siteId, ["range"] = rangeOut, ["compare"] = compareOut, ["stats"] = stats, ["previous"] = previous });
         }
 
@@ -3218,11 +3223,15 @@ public sealed class Routes
         {
             if (parameters.Get("definitions") == "1") return JsonResponse(new JsObject { ["site"] = siteId, ["goals"] = await store.GoalsAsync(siteId, cancellationToken).ConfigureAwait(false) });
             var goals = await store.GoalsAsync(siteId, cancellationToken).ConfigureAwait(false);
-            double visitors = await store.VisitorsAsync(query, cancellationToken).ConfigureAwait(false);
-            double previousVisitors = before != null ? await store.VisitorsAsync(before, cancellationToken).ConfigureAwait(false) : 0;
-            // Every goal in one pass for the range, and one more for the comparison.
-            var nowAll = await store.GoalTotalsAllAsync(query, goals, cancellationToken).ConfigureAwait(false);
-            var beforeAll = before != null ? await store.GoalTotalsAllAsync(before, goals, cancellationToken).ConfigureAwait(false) : null;
+            // Every goal in one pass for the range, and one more for the comparison, side by side.
+            var visitorsTask = store.VisitorsAsync(query, cancellationToken);
+            var previousVisitorsTask = before != null ? store.VisitorsAsync(before, cancellationToken) : null;
+            var nowAllTask = store.GoalTotalsAllAsync(query, goals, cancellationToken);
+            var beforeAllTask = before != null ? store.GoalTotalsAllAsync(before, goals, cancellationToken) : null;
+            double visitors = await visitorsTask.ConfigureAwait(false);
+            double previousVisitors = previousVisitorsTask != null ? await previousVisitorsTask.ConfigureAwait(false) : 0;
+            var nowAll = await nowAllTask.ConfigureAwait(false);
+            var beforeAll = beforeAllTask != null ? await beforeAllTask.ConfigureAwait(false) : null;
             var rows = new List<object?>();
             foreach (var goal in goals)
             {
@@ -3257,9 +3266,11 @@ public sealed class Routes
 
         if (path == "/api/series")
         {
-            var points = await store.SeriesAsync(query, Time.Buckets(range, timezone), cancellationToken).ConfigureAwait(false);
+            var pointsTask = store.SeriesAsync(query, Time.Buckets(range, timezone), cancellationToken);
+            var earlierTask = compared != null ? store.SeriesAsync(query, Time.Buckets(compared, timezone), cancellationToken) : null;
+            var points = await pointsTask.ConfigureAwait(false);
             // Comparison points line up with the main ones by position.
-            object? previous = compared != null ? ToList((await store.SeriesAsync(query, Time.Buckets(compared, timezone), cancellationToken).ConfigureAwait(false)).Take(points.Count)) : Undefined.Value;
+            object? previous = earlierTask != null ? ToList((await earlierTask.ConfigureAwait(false)).Take(points.Count)) : Undefined.Value;
             return JsonResponse(new JsObject { ["site"] = siteId, ["range"] = rangeOut, ["compare"] = compareOut, ["points"] = ToList(points), ["previous"] = previous });
         }
 

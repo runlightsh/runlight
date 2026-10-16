@@ -24,6 +24,7 @@ TS's Map and Set answers are a dict and a set.
 from __future__ import annotations
 
 import functools
+import math
 import re
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -51,6 +52,7 @@ from .sql import (
     code_order,
     div,
     escape_like,
+    event_kind_table,
     glob_pattern,
     goal_row,
     in_pieces,
@@ -208,19 +210,38 @@ class SqlStore:
         if not found or _string(found["value"]) != str(SCHEMA_VERSION):
             db.run(upsert(dialect, "rl_meta", ['"key"', "value"], ['"key"'], ["value"]), ["schema", str(SCHEMA_VERSION)])
 
-    def optimize(self, only_when_missing: bool = False) -> None:
+    def optimize(self, only_when_stale: bool = False) -> None:
         """Keeps SQLite's planner statistics current, which it never gathers by itself. Without them it can choose a
-        plan that reads a table once for every row of another. A sample of each index is enough, so this takes
-        milliseconds even on a large database. Postgres gathers its own."""
+        plan that reads a table once for every row of another. A sample of each index is enough, so this takes a few
+        seconds at most even on a large database. Postgres gathers its own.
+
+        With `only_when_stale`, only when there are none, or the events have more than doubled since they were
+        gathered. Statistics gathered on a new, empty database say every table is empty, and a goal over a million
+        visits then took a minute rather than milliseconds."""
         if self.db.dialect() != "sqlite":
             return
         try:
-            if only_when_missing and self.db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"):
-                return
-            self.db.run("PRAGMA analysis_limit = 1000")
-            self.db.run("ANALYZE")
+            top = self.db.all("SELECT MAX(id) AS n FROM rl_events")
+            events = num(top[0].get("n") if top else None)
+            if only_when_stale:
+                seen = self.db.all('SELECT value FROM rl_meta WHERE "key" = \'statistics_events\'')
+                try:
+                    then = float(seen[0]["value"]) if seen else math.nan
+                except (TypeError, ValueError):
+                    then = math.nan
+                gathered = len(self.db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'")) > 0
+                if gathered and math.isfinite(then) and not (events > 2 * then and events - then >= 1000):
+                    return
+            try:
+                self.db.run("PRAGMA analysis_limit = 1000")
+                self.db.run("ANALYZE")
+            except Exception:
+                # Some hosted SQLite services refuse these, and gather statistics themselves.
+                pass
+            # Noted even when refused, so a service that refuses is not asked again until the events double.
+            self.db.run(upsert(self.db.dialect(), "rl_meta", ['"key"', "value"], ['"key"'], ["value"]), ["statistics_events", _js.string(events)])
         except Exception:
-            # Some hosted SQLite services refuse these, and gather statistics themselves.
+            # Statistics only help; a failure here never stops the app.
             pass
 
     def close(self) -> None:
@@ -614,7 +635,13 @@ class SqlStore:
 
     def last_seen(self, site: str) -> int | float | None:
         """When the site last recorded a visit, or None if it never has."""
-        rows = self.db.all("SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')", [site])
+        # One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+        # both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+        rows = self.db.all(
+            """SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x""",
+            [site, site],
+        )
         return _time(rows[0] if rows else None)
 
     def sites(self) -> list[dict[str, Any]]:
@@ -1142,9 +1169,54 @@ class SqlStore:
         return {"sql": "0", "params": []}
 
     def goal_totals_all(self, query: dict[str, Any], goals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        """Every goal's totals in one pass over the range's events, instead of a query per goal: each goal adds a
-        conditional count, distinct count, and sum."""
+        # A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page by its
+        # whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a day, so each
+        # day's visitors add up, as they do for every other report. A pattern or a value sent with each event needs
+        # the events themselves.
+        def rollable(goal: dict[str, Any]) -> bool:
+            return goal["valueMode"] != "prop" and not (goal["kind"] == "page" and "*" in goal["match"])
+
+        rolled = [g for g in goals if rollable(g)]
+        plan = self._rollup_plan(query, query["from"], query["to"]) if rolled else None
+        if not plan or not plan["days"]:
+            return self._raw_goal_totals_all(query, goals)
+        out = self._raw_goal_totals_all(query, [g for g in goals if not rollable(g)])
+        counted: dict[str, dict[str, int | float]] = {}
+        for dim, column, values in (
+            ("page", "pageviews", [g["match"] for g in rolled if g["kind"] == "page"]),
+            ("event", "events", [g["name"] if g["kind"] == "click" else g["match"] for g in rolled if g["kind"] != "page"]),
+        ):
+            rows = in_pieces(
+                list(dict.fromkeys(values)),
+                VALUES_PER_QUERY,
+                lambda piece, dim=dim, column=column: self.db.all(
+                    f"""SELECT value, SUM(visitors) AS visitors, SUM({column}) AS n FROM rl_rollups
+           WHERE site = ? AND dim = '{dim}' AND day IN ({BUILT_DAYS}) AND value IN ({", ".join("?" for _ in piece)}) GROUP BY value""",
+                    [query["site"], query["site"], query["from"], query["to"], *piece],
+                ),
+            )
+            for row in rows:
+                counted[f"{dim}:{_string(row['value'])}"] = {"visitors": num(row["visitors"]), "n": num(row["n"])}
+        rest = [self._raw_goal_totals_all({**query, "from": a, "to": b}, rolled) for a, b in plan["rest"]]
+        for goal in rolled:
+            key = f"page:{goal['match']}" if goal["kind"] == "page" else f"event:{goal['name'] if goal['kind'] == 'click' else goal['match']}"
+            found = counted.get(key, {})
+            conversions = found.get("n", 0)
+            visitors = found.get("visitors", 0)
+            for part in rest:
+                visitors += part[goal["id"]]["visitors"]
+                conversions += part[goal["id"]]["conversions"]
+            revenue = _round2(conversions * goal["value"]) if goal["valueMode"] == "fixed" else 0
+            out[goal["id"]] = {"conversions": conversions, "visitors": visitors, "revenue": revenue}
+        # In the goals' order, as the raw path answers.
+        return {goal["id"]: out[goal["id"]] for goal in goals}
+
+    def _raw_goal_totals_all(self, query: dict[str, Any], goals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Every goal's totals read from the events of the range's visits, in one pass instead of a query per goal:
+        each goal adds a conditional count, distinct count, and sum."""
         out: dict[str, dict[str, Any]] = {}
+        if not goals:
+            return out
         v = visit_rows(query["filters"], query["site"], query["from"], query["to"], self.db.dialect())
         # As many goals per query as keep it under D1's parameter limit.
         chunks: list[list[dict[str, Any]]] = [[]]
@@ -1330,6 +1402,10 @@ class SqlStore:
 
     def visitors(self, query: dict[str, Any]) -> int | float:
         """Just the visitor count from stats(), in one query, for conversion rates."""
+        # Built days add up their visitors, as the stats do.
+        rolled = self._rolled_stats(query)
+        if rolled:
+            return rolled["visitors"]
         scope = visit_scope(query["filters"], query["site"], query["from"], query["to"], self.db.dialect())
         rows = self.db.all(
             f"SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND {IS_VISIT}{scope['sql']}",
@@ -1618,8 +1694,9 @@ class SqlStore:
             [site, since],
         )
         pages = self.db.all(
-            f"""SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path{self._text_order} LIMIT 10""",
+            # Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+            f"""SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM {event_kind_table(self.db.dialect())}
+       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path{self._text_order} LIMIT 10""",
             [site, since],
         )
         sources = self.db.all(

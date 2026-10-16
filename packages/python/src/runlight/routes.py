@@ -2286,6 +2286,8 @@ class Routes:
 
         from .time import buckets, local_weekday_hour
 
+        # Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+        rl.freshen_statistics()
         read = self._read_query(url, site)
         if isinstance(read, Response):
             return read

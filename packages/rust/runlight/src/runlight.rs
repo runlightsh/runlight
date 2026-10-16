@@ -266,6 +266,8 @@ struct State {
     link_domains: Option<(i64, HashSet<String>)>,
     salts: HashMap<String, (String, String, Option<String>)>,
     optimized_at: i64,
+    /// When statistics were last checked for staleness, which reports do at most hourly.
+    freshened_at: i64,
 }
 
 pub(crate) struct Inner {
@@ -439,6 +441,19 @@ impl Runlight {
     /// Where links on the app's own domain are served, such as "/go".
     pub fn link_path(&self) -> &str {
         &self.0.link_path
+    }
+
+    /// Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app
+    /// that never runs the scheduled check still reads its reports with statistics that fit its data.
+    pub async fn freshen_statistics(&self) {
+        {
+            let mut state = self.state();
+            if self.now() - state.freshened_at < 3_600_000 {
+                return;
+            }
+            state.freshened_at = self.now();
+        }
+        self.0.store.optimize(true).await;
     }
 
     /// Creates tables and records the configured sites. Runs once.
@@ -1706,6 +1721,9 @@ impl Runlight {
         };
         if due {
             store.optimize(false).await;
+        } else {
+            // Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+            store.optimize(true).await;
         }
         self.build_rollups().await?;
         let reports = self.send_reports().await?;

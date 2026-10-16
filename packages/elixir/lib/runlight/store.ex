@@ -237,25 +237,54 @@ defmodule Runlight.Store do
   @doc """
   Keeps SQLite's planner statistics current, which it never gathers by
   itself. A sample of each index is enough. Postgres gathers its own.
+
+  With `only_when_stale`, only when there are none, or the events have more
+  than doubled since they were gathered. Statistics gathered on a new, empty
+  database say every table is empty, and a goal over a million visits then
+  took a minute rather than milliseconds.
   """
   @spec optimize(t(), boolean()) :: :ok
-  def optimize(store, only_when_missing \\ false) do
+  def optimize(store, only_when_stale \\ false) do
     if dialect(store) == "sqlite" do
       try do
-        missing =
-          not only_when_missing or all(store, "SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'") == []
+        events = num(first(store, "SELECT MAX(id) AS n FROM rl_events", [])["n"])
 
-        if missing do
-          run(store, "PRAGMA analysis_limit = 1000")
-          run(store, "ANALYZE")
+        if not only_when_stale or stale?(store, events) do
+          try do
+            run(store, "PRAGMA analysis_limit = 1000")
+            run(store, "ANALYZE")
+          rescue
+            # Some hosted SQLite services refuse these, and gather statistics themselves.
+            _ -> :ok
+          end
+
+          # Noted even when refused, so a service that refuses is not asked again until the events double.
+          run(store, Sql.upsert(dialect(store), "rl_meta", [~s("key"), "value"], [~s("key")], ["value"]), [
+            "statistics_events",
+            Integer.to_string(events)
+          ])
         end
       rescue
-        # Some hosted SQLite services refuse these, and gather statistics themselves.
+        # Statistics only help; a failure here never stops the app.
         _ -> :ok
       end
     end
 
     :ok
+  end
+
+  # Whether there are no statistics, or the events have more than doubled since they were gathered.
+  defp stale?(store, events) do
+    seen = first(store, ~s(SELECT value FROM rl_meta WHERE "key" = 'statistics_events'), [])
+    gathered = all(store, "SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'") != []
+
+    then =
+      case seen && Integer.parse(String.trim(str(seen["value"]))) do
+        {n, ""} -> n
+        _ -> nil
+      end
+
+    not (gathered and then != nil and not (events > 2 * then and events - then >= 1000))
   end
 
   # How many rows an UPDATE or DELETE of rows with an id matched.
@@ -801,7 +830,18 @@ defmodule Runlight.Store do
   @doc "When the site last recorded a visit, or nil if it never has."
   @spec last_seen(t(), String.t()) :: number() | nil
   def last_seen(store, site) do
-    row = first(store, "SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')", [site])
+    # One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+    # both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+    row =
+      first(
+        store,
+        """
+        SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'
+               UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x\
+        """,
+        [site, site]
+      )
+
     if row == nil or row["t"] == nil, do: nil, else: num(row["t"])
   end
 
@@ -1679,9 +1719,83 @@ defmodule Runlight.Store do
 
   defp money(n), do: JS.normalize(JS.round(num(n) * 100) / 100)
 
+  # SQLite can prefer the path index to avoid a sort, reading the site's entire history. Reports bounded by event
+  # kind and time should use the matching range index instead.
+  defp event_kind_table(store),
+    do: if(dialect(store) == "sqlite", do: "rl_events e INDEXED BY rl_events_site_kind_ts", else: "rl_events e")
+
   @doc "Every goal's totals in one pass over the range's events, by goal id."
   @spec goal_totals_all(t(), map(), [Object.t()]) :: %{String.t() => Object.t()}
   def goal_totals_all(store, query, goals) do
+    # A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page by its
+    # whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a day, so each
+    # day's visitors add up, as they do for every other report. A pattern or a value sent with each event needs
+    # the events themselves.
+    rollable? = fn goal ->
+      goal["valueMode"] != "prop" and not (goal["kind"] == "page" and String.contains?(goal["match"], "*"))
+    end
+
+    plan = if Enum.any?(goals, rollable?), do: rollup_plan(store, query, query.from, query.to)
+
+    if plan == nil or plan.days == [] do
+      raw_goal_totals_all(store, query, goals)
+    else
+      rolled = Enum.filter(goals, rollable?)
+      out = raw_goal_totals_all(store, query, Enum.reject(goals, rollable?))
+
+      counted =
+        for {dim, column, values} <- [
+              {"page", "pageviews", for(g <- rolled, g["kind"] == "page", do: g["match"])},
+              {"event", "events",
+               for(g <- rolled, g["kind"] != "page", do: if(g["kind"] == "click", do: g["name"], else: g["match"]))}
+            ],
+            row <-
+              in_pieces(Enum.uniq(values), Sql.values_per_query(), fn piece ->
+                all(
+                  store,
+                  """
+                  SELECT value, SUM(visitors) AS visitors, SUM(#{column}) AS n FROM rl_rollups
+                         WHERE site = ? AND dim = '#{dim}' AND day IN (#{built_days()}) AND value IN (#{Enum.map_join(piece, ", ", fn _ -> "?" end)}) GROUP BY value\
+                  """,
+                  [query.site, query.site, query.from, query.to] ++ piece
+                )
+              end),
+            into: %{},
+            do: {"#{dim}:#{str(row["value"])}", %{visitors: num(row["visitors"]), n: num(row["n"])}}
+
+      rest = Enum.map(plan.rest, fn {from, to} -> raw_goal_totals_all(store, %{query | from: from, to: to}, rolled) end)
+
+      Enum.reduce(rolled, out, fn goal, out ->
+        key =
+          if goal["kind"] == "page",
+            do: "page:#{goal["match"]}",
+            else: "event:#{if goal["kind"] == "click", do: goal["name"], else: goal["match"]}"
+
+        base = %{conversions: counted[key][:n] || 0, visitors: counted[key][:visitors] || 0}
+
+        sum =
+          Enum.reduce(rest, base, fn part, sum ->
+            %{
+              visitors: sum.visitors + part[goal["id"]]["visitors"],
+              conversions: sum.conversions + part[goal["id"]]["conversions"]
+            }
+          end)
+
+        revenue = if goal["valueMode"] == "fixed", do: money(sum.conversions * num(goal["value"])), else: 0
+
+        Map.put(
+          out,
+          goal["id"],
+          JS.obj(conversions: sum.conversions, visitors: sum.visitors, revenue: revenue)
+        )
+      end)
+    end
+  end
+
+  # Every goal's totals read from the events of the range's visits.
+  defp raw_goal_totals_all(_store, _query, []), do: %{}
+
+  defp raw_goal_totals_all(store, query, goals) do
     {v_from, v_sql, v_params} = Sql.visit_rows(query.filters, query.site, query.from, query.to, dialect(store))
 
     # As many goals per query as keep it under D1's parameter limit.
@@ -1961,6 +2075,14 @@ defmodule Runlight.Store do
   @doc "Just the visitor count from stats, in one query, for conversion rates."
   @spec visitors(t(), map()) :: number()
   def visitors(store, query) do
+    # Built days add up their visitors, as the stats do.
+    case rolled_stats(store, query) do
+      nil -> raw_visitors(store, query)
+      rolled -> rolled["visitors"]
+    end
+  end
+
+  defp raw_visitors(store, query) do
     {scope_sql, scope_params} = Sql.visit_scope(query.filters, query.site, query.from, query.to, dialect(store))
 
     row =
@@ -2382,9 +2504,10 @@ defmodule Runlight.Store do
     pages =
       all(
         store,
+        # Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
         """
-        SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events
-               WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path#{order} LIMIT 10\
+        SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM #{event_kind_table(store)}
+               WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path#{order} LIMIT 10\
         """,
         [site, since]
       )
