@@ -269,11 +269,11 @@ defmodule Runlight.PureTest do
 
   defp input_map(%Object{} = o), do: Map.new(Object.to_list(o), fn {k, v} -> {String.to_atom(k), v} end)
 
-  # The fixture came from Node's ICU with time zone data 2025c; tz carries newer data, where Morocco and
-  # British Columbia (and the Mountain zones that follow Alberta) changed their rules since.
+  # The fixture came from Node's ICU with time zone data 2025c; tz carries newer data, where Morocco, British
+  # Columbia, and Manitoba (and the Mountain zones that follow Alberta) changed their rules since.
   defp changed_zones,
     do:
-      ~w(Africa/Casablanca Africa/El_Aaiun America/Vancouver Canada/Pacific America/Edmonton America/Inuvik America/Yellowknife Canada/Mountain)
+      ~w(Africa/Casablanca Africa/El_Aaiun America/Vancouver Canada/Pacific America/Edmonton America/Inuvik America/Yellowknife Canada/Mountain America/Winnipeg America/Rainy_River Canada/Central)
 
   test "zones" do
     f = Fixtures.php("time.json")

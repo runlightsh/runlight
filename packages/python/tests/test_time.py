@@ -112,12 +112,12 @@ SYSTEM_V_SUMMER = [
 # wherever a zone's rules changed since: these zones' later instants are not compared.
 CHANGED_SINCE_2025C = {
     "America/Vancouver", "Canada/Pacific", "America/Edmonton", "America/Inuvik", "America/Yellowknife", "Canada/Mountain",
-    "Africa/Casablanca", "Africa/El_Aaiun",
+    "America/Winnipeg", "America/Rainy_River", "Canada/Central", "Africa/Casablanca", "Africa/El_Aaiun",
 }  # fmt: skip
 
 
 def changed(zone: str, ts: int) -> bool:
-    # The changes since 2025c (British Columbia and Alberta keeping summer time, Morocco's Ramadan dates) start in
+    # The changes since 2025c (British Columbia, Alberta, and Manitoba keeping summer time, Morocco's Ramadan dates) start in
     # 2026.
     return zone in CHANGED_SINCE_2025C and ts >= utc(2026, 0)
 
