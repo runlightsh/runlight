@@ -109,9 +109,22 @@ class TimeTest {
 
   /**
    * The fixture came from Node's ICU with time zone data 2025c. The JDK carries its own copy, which
-   * has British Columbia's later change to permanent summer time from 2026 on.
+   * may be newer, and disagree wherever a zone's rules changed since: British Columbia, Alberta,
+   * and Manitoba keeping summer time from 2026 on, and Morocco's summer time.
    */
-  private static final List<String> NEWER_RULES = List.of("America/Vancouver", "Canada/Pacific");
+  private static final List<String> NEWER_RULES =
+      List.of(
+          "America/Vancouver",
+          "Canada/Pacific",
+          "America/Edmonton",
+          "America/Inuvik",
+          "America/Yellowknife",
+          "Canada/Mountain",
+          "America/Winnipeg",
+          "America/Rainy_River",
+          "Canada/Central",
+          "Africa/Casablanca",
+          "Africa/El_Aaiun");
 
   @Test
   void zones() {

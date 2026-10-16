@@ -15,9 +15,10 @@ class TimeTest < Minitest::Test
   # The fixture came from Node's ICU with time zone data 2025c. TZInfo reads the system's copy of the data (or
   # tzinfo-data's), which disagrees wherever a zone's rules changed between the two. Data from 2025c to 2026a
   # agrees with the fixture everywhere; with newer data, the zones whose rules changed since (Morocco, British
-  # Columbia, and Alberta, in 2026b) are left out of the comparisons, and every other zone must still match.
+  # Columbia, and Alberta in 2026b, then Manitoba) are left out of the comparisons, and every other zone must still match.
   CHANGED_AFTER_2026A = %w[
     Africa/Casablanca Africa/El_Aaiun America/Edmonton America/Vancouver America/Inuvik America/Yellowknife Canada/Mountain Canada/Pacific
+    America/Winnipeg America/Rainy_River Canada/Central
   ].freeze
 
   def self.data_version

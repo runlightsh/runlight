@@ -138,14 +138,14 @@ public sealed class TimeTests
     /// <summary>
     /// The fixture came from Node's ICU with time zone data 2025c; the zones here are read from the
     /// system's database, which is newer where the rules changed since (Morocco from 2026, and
-    /// British Columbia and Alberta keeping summer time), so those zones are left out of the
+    /// British Columbia, Alberta, and Manitoba keeping summer time), so those zones are left out of the
     /// comparisons. Regenerate the fixture to bring them back.
     /// </summary>
     private static readonly string[] NewerData =
     [
         "Africa/Casablanca", "Africa/El_Aaiun", "America/Vancouver", "America/Edmonton", "America/Inuvik", "America/Yellowknife",
         "Canada/Mountain", "Canada/Pacific", "America/Dawson_Creek", "America/Fort_Nelson", "America/Creston",
-        "Mountain", "Pacific", "MST7MDT", "PST8PDT",
+        "Mountain", "Pacific", "MST7MDT", "PST8PDT", "America/Winnipeg", "America/Rainy_River", "Canada/Central",
     ];
 
     private static bool Newer(string zone) => NewerData.Contains(zone, StringComparer.OrdinalIgnoreCase);

@@ -181,9 +181,9 @@ func TestQueries(t *testing.T) {
 var systemVSummer = map[string]bool{"systemv/ast4adt": true, "systemv/est5edt": true, "systemv/cst6cdt": true, "systemv/mst7mdt": true, "systemv/pst8pdt": true, "systemv/yst9ydt": true}
 
 // changedSince2025c are zones whose rules changed after the time zone data the fixture was written
-// with (Morocco's summer time, British Columbia and Alberta keeping summer time), so their answers
+// with (Morocco's summer time, British Columbia, Alberta, and Manitoba keeping summer time), so their answers
 // follow whichever data this machine has, and are not compared.
-var changedSince2025c = map[string]bool{"africa/casablanca": true, "africa/el_aaiun": true, "america/vancouver": true, "america/edmonton": true, "america/yellowknife": true, "america/inuvik": true, "canada/pacific": true, "canada/mountain": true}
+var changedSince2025c = map[string]bool{"africa/casablanca": true, "africa/el_aaiun": true, "america/vancouver": true, "america/edmonton": true, "america/yellowknife": true, "america/inuvik": true, "canada/pacific": true, "canada/mountain": true, "america/winnipeg": true, "america/rainy_river": true, "canada/central": true}
 
 func localOf(ts int64, zone string) string {
 	w, h := LocalWeekdayHour(ts, zone)
