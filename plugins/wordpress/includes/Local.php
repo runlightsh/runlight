@@ -214,7 +214,7 @@ final class Local {
 			'HTTP_AUTHORIZATION', 'HTTP_COOKIE', 'HTTP_USER_AGENT', 'HTTP_ACCEPT_LANGUAGE',
 			'HTTP_IF_NONE_MATCH', 'HTTP_SEC_CH_UA', 'HTTP_SEC_CH_UA_MOBILE', 'HTTP_SEC_CH_UA_PLATFORM',
 			'HTTP_X_FORWARDED_FOR', 'HTTP_CF_CONNECTING_IP', 'HTTP_CF_IPCOUNTRY',
-			'HTTP_CF_REGION_CODE',
+			'HTTP_CF_REGION_CODE', 'HTTP_X_RUNLIGHT_SHARE', 'HTTP_X_RUNLIGHT_EMBED',
 		) as $key ) {
 			if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {
 				$server[ $key ] = sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) );
