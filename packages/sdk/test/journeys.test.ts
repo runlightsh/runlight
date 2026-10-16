@@ -55,3 +55,14 @@ for (const kind of STORES) {
     assert.deepEqual((await t.get("/api/journeys?period=today&steps=3&end=/signup")).paths, [{ pages: ["/", "/pricing", "/signup"], visits: 1 }]);
   });
 }
+
+test("a journey's start, end, and through take a page as written, as filters do", async () => {
+  const t = setup("sqlite", { site: { hostnames: ["example.com"] } });
+  await t.rl.init();
+  await t.send({ k: "pageview", u: "https://example.com/café", i: "a" });
+  t.advance(30_000);
+  await t.send({ k: "pageview", u: "https://example.com/pricing", i: "b" });
+  for (const query of [`start=${encodeURIComponent("/café")}`, `start=${encodeURIComponent("/caf%C3%A9")}`, `end=${encodeURIComponent("/pricing")}&start=${encodeURIComponent("/café")}`, `through=${encodeURIComponent("0:/café")}`]) {
+    assert.equal((await t.get(`/api/journeys?period=today&${query}`)).visits, 1, query);
+  }
+});

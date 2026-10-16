@@ -115,3 +115,12 @@ test("an interval too fine for a long range moves up to one that fits, and no bu
   assert.equal(cut.length, 1000);
   assert.equal(cut.at(-1)!.end - cut.at(-1)!.start, DAY);
 });
+
+test("a day where clocks fall back across midnight begins at the first midnight", () => {
+  // Amman in 2019, Gaza and Hebron in 2020, an hour each, and three hours at Casey station in 2019.
+  for (const [date, zone] of [["2019-10-25", "Asia/Amman"], ["2020-10-24", "Asia/Gaza"], ["2020-10-24", "Asia/Hebron"], ["2019-03-17", "Antarctica/Casey"]] as const) {
+    const start = startOf(date, zone);
+    assert.equal(localDate(start, zone), date, zone);
+    assert.ok(localDate(start - 1, zone) < date, `${zone}: the moment before is the day before`);
+  }
+});

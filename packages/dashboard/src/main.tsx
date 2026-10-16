@@ -2,7 +2,7 @@ import { Loading } from "./loading.js";
 import { Avatar } from "./site-avatar.js";
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
-import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, install, onEmbedExpired, share, shared, viewParams, type Person, type Realtime, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
+import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, forgetReports, install, onEmbedExpired, share, shared, viewParams, type Person, type Realtime, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
 import { Chart, asSeries } from "./chart.js";
 import { change, exact } from "./format.js";
 import { FilterDrawer, MAX_FILTERS, fieldName, opName } from "./filters.js";
@@ -327,7 +327,10 @@ function App() {
         .sites()
         .then((r) => {
           setSites(r.sites);
-          if (r.sites.find((x) => x.id === site?.id)?.lastSeen != null) setView((v) => ({ ...v, filters: [...v.filters] }));
+          if (r.sites.find((x) => x.id === site?.id)?.lastSeen != null) {
+            forgetReports();
+            setView((v) => ({ ...v, filters: [...v.filters] }));
+          }
         })
         .catch(() => {});
     }, 5000);

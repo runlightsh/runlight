@@ -17,12 +17,28 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Security
 
+- An account kept to one site no longer reads the install's mail settings, such as a webhook's address, which is often its own credential, nor changes where its site lives (`site_domains`): it may rename the site, as a connected hub may.
+- Past an account's limit of wrong passwords, every account, with two-factor on or not, and an email with no account, gets the same answer, so a guesser cannot tell which accounts have two-factor. A right password then emails a sign-in link, which leads to the code step when two-factor is on.
+- The AI Assistant carries at most 24,000 characters of earlier turns into a question, oldest dropped first, since the browser sends the history and each tool round sends it again; the limits on questions are there to keep the owner's AI credit safe.
+- A test email goes out at most once a minute through each mail service (`test_soon`), as report samples do. One that failed can be tried again at once.
+- A site's agents key is kept sealed with the server's secret, as the mail service's keys are, so a copied database alone cannot report for the site. One kept before as plain text keeps working, and is sealed the next time it is read.
+- CSV exports quote a value with a semicolon or a tab in it, so Excel in a locale that separates lists with ";" cannot split a formula out of a page path or event name.
+- OAuth's answers carry `X-Content-Type-Options: nosniff`, as every other answer does.
 - A day's salt, which a day's visitor ids are made from, is kept while it is that day in a site's timezone, and after midnight only while a visit that began that day is still going. It used to stay for up to three days whatever the visits did, and as long as almost four for a site in the earliest timezone.
 - New password hashes cost more (scrypt at N=32768, r=8, p=3, one of OWASP's settings) and record their cost, so it can rise again. A password hashed before is checked as before, and hashed again at the new cost the next time it signs in, which signs out that account's other browsers once.
 - Go on MySQL or MariaDB: every session drops `NO_BACKSLASH_ESCAPES`, an app's own pool's as well as the standalone server's, as the other languages already did, and a quote in a value is doubled rather than escaped with a backslash. On a server set to that mode, a quote in a tracker hit could end a value early and run SQL of its own. The standalone server's two-minute statement timeout now applies to every session too, where before it reached only the one that created the tables.
 
 ### Fixed
 
+- A visitor's first two hits reaching two app servers at the same moment open one visit, not two each counted as a bounce: after opening a visit, a server checks for one the other opened just then, and both go on with the earlier. A small window remains, about one race in sixty in a test of two servers on one Postgres.
+- An install with one site can invite an admin again, who is then an admin for the whole install, so ownership can be handed over. Since the invitation form hid its all-sites choice there, everyone invited was kept to the site.
+- The dashboard reads its numbers again once a site's first visit arrives, rather than showing the zeros it read moments before for up to ten seconds.
+- Saving the AI Assistant's daily limit shows the new limit at once, where the old one came back for up to thirty seconds.
+- Hostname suggestions in the filter list every hostname on Postgres with a Linux locale, where `blog.example.com` could go missing beside `blog-staging.example.com`.
+- Keeping visits for N months, from the last days of a month, keeps them from the same day of the month N months back, or its last day, rather than a few days into the next month.
+- A breakdown asked for with a `limit` or `page` that is not a whole number, such as 2.5 or 1e20, answers with the defaults rather than an error.
+- Journeys through the API and the MCP tool take a page as written, as filters do, so `/café` finds the visits to `/caf%C3%A9`.
+- A day where the clocks fall back across midnight, as in Amman in 2019 or at Casey station in Antarctica, begins at the first midnight.
 - Renaming a click goal keeps its conversions on days already added up. The days' totals kept the old name while the goal looked for the new one, so it showed none for them.
 - Text a visit or event stores is cut to its column's width on every database, as MySQL's columns hold it. A tracker hit with a header of thousands of characters, stored as a visit's system, stopped Postgres from adding up that day ever again.
 - On MySQL, two processes adding up the same day at once cannot both add their rows: the day is marked first, so the second waits, then leaves it to the first.

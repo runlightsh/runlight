@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { after, test } from "node:test";
 import { runlight } from "../src/index.js";
-import { agentsKey } from "../src/oauth.js";
+import { agentsKey, openAgentsKey } from "../src/oauth.js";
 import { sqlite } from "../src/stores/sqlite.js";
 import { STORES, cleanup, freshStore } from "./helpers.js";
 
@@ -200,7 +200,26 @@ for (const kind of STORES) {
     await rl.init();
     const agents = await Promise.all(Array.from({ length: 5 }, () => agentsKey(rl, "default")));
     assert.equal(new Set(agents).size, 1);
-    assert.equal(await store.setting("observe-key:default"), agents[0]);
+    assert.equal(await openAgentsKey(rl, (await store.setting("observe-key:default"))!), agents[0]);
     assert.notEqual(await agentsKey(rl, "default", true), agents[0], "replacing it still makes a new one");
   });
 }
+
+test("a site's agents key is kept sealed, and one kept as plain text before still works and is sealed when read", async () => {
+  const { sqlite } = await import("../src/stores/sqlite.js");
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), site: { hostnames: ["example.com"] }, secret: "s".repeat(32) });
+  await rl.init();
+  const key = await agentsKey(rl, "default");
+  const stored = (await rl.store.setting("observe-key:default"))!;
+  assert.ok(!stored.includes(key), "not in the database as it is");
+  const observe = (bearer: string) =>
+    rl.routes({ token: "owner" }).handler(new Request("https://example.com/runlight/api/observe", { method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: JSON.stringify({ url: "https://example.com/", userAgent: "Mozilla/5.0 (compatible; GPTBot/1.2)" }) }));
+  assert.equal((await observe(key)).status, 204);
+  // A key from before, kept as it was.
+  await rl.store.setSetting("observe-key:default", "rlo_legacykeylegacykey00");
+  assert.equal((await observe("rlo_legacykeylegacykey00")).status, 204);
+  assert.equal(await agentsKey(rl, "default"), "rlo_legacykeylegacykey00", "shown as it was");
+  assert.ok(!(await rl.store.setting("observe-key:default"))!.includes("rlo_legacy"), "and sealed now");
+  assert.equal((await observe("rlo_legacykeylegacykey00")).status, 204, "still working");
+  assert.equal((await observe("rlo_wrongkeywrongkeywron")).status, 401);
+});

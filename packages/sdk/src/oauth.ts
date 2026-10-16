@@ -18,6 +18,7 @@
  * the site's agents key, so connecting fills in the plugin's settings.
  */
 import { hmac, randomId, sha256 } from "./hash.js";
+import { seal, unseal } from "./mail/secret.js";
 import { RateLimit } from "./limit.js";
 import type { RequestContext, Runlight } from "./runlight.js";
 import type { TokenRow } from "./store.js";
@@ -44,13 +45,29 @@ interface Code {
 type Scope = "read" | "manage" | "cms";
 const SCOPES: Scope[] = ["read", "manage", "cms"];
 
-/** The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it. */
+/**
+ * The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+ * replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
+ * database alone cannot report for the site; one kept before as plain text is sealed the next time it is read.
+ */
 export async function agentsKey(runlight: Runlight, site: string, replace = false): Promise<string> {
   const name = `observe-key:${site}`;
-  if (!replace) return runlight.store.settingOrAdd(name, () => `rlo_${randomId(20)}`);
+  if (!replace) {
+    const made = await seal(`rlo_${randomId(20)}`, runlight.secret);
+    const stored = await runlight.store.settingOrAdd(name, () => made);
+    const key = await openAgentsKey(runlight, stored);
+    if (key && stored.startsWith("rlo_")) await runlight.store.setSetting(name, await seal(key, runlight.secret));
+    // One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
+    if (key) return key;
+  }
   const key = `rlo_${randomId(20)}`;
-  await runlight.store.setSetting(name, key);
+  await runlight.store.setSetting(name, await seal(key, runlight.secret));
   return key;
+}
+
+/** A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. Null when it cannot be opened. */
+export async function openAgentsKey(runlight: Runlight, stored: string): Promise<string | null> {
+  return stored.startsWith("rlo_") ? stored : unseal(stored, runlight.secret);
 }
 
 /** A redirect address's host as a site's domains are kept: lowercase, with no port and no www. */
@@ -108,7 +125,7 @@ const esc = (value: string) => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;",
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type, mcp-protocol-version", "access-control-allow-methods": "GET, POST, OPTIONS" };
 
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...CORS } });
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", ...CORS } });
 }
 
 const oauthError = (error: string, description: string, status = 400) => json({ error, error_description: description }, status);

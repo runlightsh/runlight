@@ -85,7 +85,9 @@ export function csvRow(values: unknown[]): string {
     .map((v) => {
       let s = v === null || v === undefined ? "" : String(v);
       if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`;
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      // Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an
+      // unquoted cell there, and what follows could start with = and run as a formula.
+      return /[",;\t\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     })
     .join(",");
 }

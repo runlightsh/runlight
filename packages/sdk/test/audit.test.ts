@@ -326,3 +326,27 @@ test("a read token can open a link's stats, and still cannot change it", async (
   assert.equal((await handler(new Request(`https://x.com/runlight/api/links/${made.link.id}?period=7d`, { headers: read }))).status, 200);
   assert.equal((await handler(new Request(`https://x.com/runlight/api/links/${made.link.id}`, { method: "DELETE", headers: read }))).status, 403);
 });
+
+test("audit 2026-10-16: N months back from a month's last days stays in that month, and paging takes whole numbers", async () => {
+  const t = setup("sqlite", { site: { hostnames: ["example.com"] } });
+  await t.rl.init();
+  await t.rl.setRetention("default", 6);
+  for (const [now, cutoff] of [
+    [Date.UTC(2026, 7, 31, 12), Date.UTC(2026, 1, 28, 12)],
+    [Date.UTC(2026, 7, 30, 12), Date.UTC(2026, 1, 28, 12)],
+    [Date.UTC(2028, 7, 31, 12), Date.UTC(2028, 1, 29, 12)],
+    [Date.UTC(2026, 9, 6, 12), Date.UTC(2026, 3, 6, 12)],
+  ]) {
+    t.advance(now! - t.now);
+    assert.equal(await t.rl.retentionCutoff("default"), cutoff, new Date(now!).toISOString());
+  }
+  for (const query of ["limit=2.5", "page=1e20", "limit=-3&page=0", "limit=abc&page=2.5"]) {
+    const response = await t.routes.GET(new Request(`https://example.com/runlight/api/breakdown?period=7d&dimension=page&${query}`, { headers: { authorization: "Bearer secret" } }));
+    assert.equal(response.status, 200, query);
+  }
+});
+
+test("audit 2026-10-16: a CSV value with a semicolon or a tab is quoted, so no locale splits a formula out of it", async () => {
+  const { csvRow } = await import("../src/zip.js");
+  assert.equal(csvRow(["x;=1+1", "a\tb", "=1+1", "plain"]), `"x;=1+1","a\tb",'=1+1,plain`);
+});
