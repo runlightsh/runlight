@@ -147,6 +147,8 @@ final class Runlight
     private bool $checking = false;
     /** When planner statistics were last gathered. */
     private int $optimizedAt = 0;
+    /** When statistics were last checked for staleness, which reports do at most hourly. */
+    private int $freshenedAt = 0;
     /** @var array{at: int, domains: array<string, true>}|null */
     private ?array $linkDomainCache = null;
     /** @var array<string, array{day: string, today: string, yesterday: ?string}> each timezone's salts for its current day, so a lookup is a map read until midnight there */
@@ -1739,6 +1741,19 @@ final class Runlight
         }
     }
 
+    /**
+     * Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app
+     * that never runs the scheduled check still reads its reports with statistics that fit its data.
+     */
+    public function freshenStatistics(): void
+    {
+        if ($this->now() - $this->freshenedAt < 3_600_000) {
+            return;
+        }
+        $this->freshenedAt = $this->now();
+        $this->store->optimize(true);
+    }
+
     /** @return array{ok: true, reports: array{sent: int, failed: int}} */
     private function runCheck(): array
     {
@@ -1765,6 +1780,9 @@ final class Runlight
         if ($this->now() - $this->optimizedAt >= 86_400_000) {
             $this->optimizedAt = $this->now();
             $this->store->optimize();
+        } else {
+            // Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+            $this->store->optimize(true);
         }
         $this->buildRollups();
         return ['ok' => true, 'reports' => $this->sendReports()];

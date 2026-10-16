@@ -256,6 +256,9 @@ type Runlight struct {
 	turnsMu   sync.Mutex
 	turns     map[string]*turn
 	optimized int64
+	// freshenedAt is when statistics were last checked for staleness, which reports do at most hourly.
+	freshenedAt int64
+	freshenMu   sync.Mutex
 	// mailServices are the mail services Settings offers and saves, in the order of mail.Services.
 	mailServices []mail.Service
 	// warnDirect is true until the default trust, never chosen, has been seen
@@ -436,6 +439,21 @@ func firstNonEmpty(values ...string) string {
 
 // Now is the clock, in epoch milliseconds.
 func (r *Runlight) Now() int64 { return r.now() }
+
+// freshenStatistics gathers planner statistics again if the events have
+// outgrown them, at most once an hour, so an app that never runs the
+// scheduled check still reads its reports with statistics that fit its data.
+func (r *Runlight) freshenStatistics(ctx context.Context) {
+	r.freshenMu.Lock()
+	due := r.now()-r.freshenedAt >= 3_600_000
+	if due {
+		r.freshenedAt = r.now()
+	}
+	r.freshenMu.Unlock()
+	if due {
+		r.Store.Optimize(ctx, true)
+	}
+}
 
 // Fetcher is what every outgoing request goes through.
 func (r *Runlight) Fetcher() Fetcher { return r.fetcher }
@@ -2171,6 +2189,9 @@ func (r *Runlight) runCheck(ctx context.Context) (CheckResult, error) {
 	if r.now()-r.optimized >= 86_400_000 {
 		r.optimized = r.now()
 		r.Store.Optimize(ctx, false)
+	} else {
+		// Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+		r.Store.Optimize(ctx, true)
 	}
 	if _, err := r.BuildRollups(ctx); err != nil {
 		return CheckResult{}, err

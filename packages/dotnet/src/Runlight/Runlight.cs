@@ -103,6 +103,9 @@ public sealed partial class Runlight
     /// <summary>When planner statistics were last gathered.</summary>
     private long _optimizedAt;
 
+    /// <summary>When statistics were last checked for staleness, which reports do at most hourly.</summary>
+    private long _freshenedAt;
+
     private (long At, HashSet<string> Domains)? _linkDomainCache;
 
     public Runlight(RunlightOptions options)
@@ -2038,11 +2041,30 @@ public sealed partial class Runlight
             _optimizedAt = Now();
             await Store.OptimizeAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+        else
+        {
+            // Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+            await Store.OptimizeAsync(true, cancellationToken).ConfigureAwait(false);
+        }
         await BuildRollupsAsync(cancellationToken).ConfigureAwait(false);
         return new JsObject { ["ok"] = true, ["reports"] = await SendReportsAsync(cancellationToken).ConfigureAwait(false) };
     }
 
     // ---- helpers
+
+    /// <summary>
+    /// Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app
+    /// that never runs the scheduled check still reads its reports with statistics that fit its data.
+    /// </summary>
+    public async Task FreshenStatisticsAsync(CancellationToken cancellationToken = default)
+    {
+        if (Now() - _freshenedAt < 3_600_000)
+        {
+            return;
+        }
+        _freshenedAt = Now();
+        await Store.OptimizeAsync(true, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>True for a database that could not take a statement just now and may a moment later.</summary>
     private static bool Busy(Exception error) => BusyMessage().IsMatch(error.Message);

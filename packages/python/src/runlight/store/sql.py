@@ -74,6 +74,12 @@ def in_pieces(items: Sequence[T], size: int, run: Callable[[list[T]], list[R]]) 
     return out
 
 
+def event_kind_table(dialect: str) -> str:
+    """The events table as `e`, read through the (site, kind, ts) index on SQLite, which otherwise may read a site's
+    whole history by another index."""
+    return "rl_events e INDEXED BY rl_events_site_kind_ts" if dialect == "sqlite" else "rl_events e"
+
+
 def schema(dialect: str) -> list[str]:
     my = dialect == "mysql"
     id_ = "BIGSERIAL PRIMARY KEY" if dialect == "postgres" else "BIGINT AUTO_INCREMENT PRIMARY KEY" if my else "INTEGER PRIMARY KEY AUTOINCREMENT"

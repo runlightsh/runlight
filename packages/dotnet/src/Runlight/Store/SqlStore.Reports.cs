@@ -27,6 +27,12 @@ public sealed partial class SqlStore
     /// <summary>Just the visitor count from stats, in one query, for conversion rates.</summary>
     public async Task<double> VisitorsAsync(JsObject query, CancellationToken cancellationToken = default)
     {
+        // Built days add up their visitors, as the stats do.
+        var rolled = await RolledStatsAsync(query, cancellationToken).ConfigureAwait(false);
+        if (rolled != null)
+        {
+            return Sql.Num(rolled.Get("visitors"));
+        }
         string site = query.Str("site")!;
         var scope = Sql.VisitScope(Sql.Filters(query), site, query.Long("from"), query.Long("to"), Dialect);
         var row = await Db.FirstAsync(
@@ -374,7 +380,8 @@ public sealed partial class SqlStore
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         var pages = await Db.AllAsync(
-            "SELECT path AS value, COUNT(DISTINCT visitor) AS visitors FROM rl_events\n       WHERE site = ? AND ts >= ? AND kind = 'pageview' GROUP BY path ORDER BY visitors DESC, path" + TextOrder() + " LIMIT 10",
+            // Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
+            "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM " + Sql.EventKindTable(Dialect) + "\n       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path" + TextOrder() + " LIMIT 10",
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         var sources = await Db.AllAsync(

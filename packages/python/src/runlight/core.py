@@ -260,6 +260,8 @@ class Runlight:
         self._check_result: dict[str, Any] | None = None
         # When planner statistics were last gathered.
         self._optimized_at = 0
+        # When statistics were last checked for staleness, which reports do at most hourly.
+        self._freshened_at = 0
         self._link_domain_cache: dict[str, Any] | None = None
         # Each timezone's salts for its current day, so a lookup is a map read until midnight there.
         self._salts: dict[str, dict[str, Any]] = {}
@@ -1511,6 +1513,14 @@ class Runlight:
 
     # The scheduled check
 
+    def freshen_statistics(self) -> None:
+        """Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app that
+        never runs the scheduled check still reads its reports with statistics that fit its data."""
+        if self.now() - self._freshened_at < 3_600_000:
+            return
+        self._freshened_at = self.now()
+        self.store.optimize(True)
+
     def check(self) -> dict[str, Any]:
         """Scheduled upkeep, safe to run every minute. It rotates salts, sends the email reports that are due,
         deletes visits past each site's retention, and builds daily rollups. It also rereads sites, their dashboard
@@ -1564,6 +1574,9 @@ class Runlight:
         if self.now() - self._optimized_at >= 86_400_000:
             self._optimized_at = self.now()
             self.store.optimize()
+        else:
+            # Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+            self.store.optimize(True)
         self.build_rollups()
         return {"ok": True, "reports": self.send_reports()}
 

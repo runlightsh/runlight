@@ -3775,6 +3775,9 @@ public final class Routes {
       return json(live);
     }
 
+    // Statistics that fit the data, for an app that never runs the scheduled check (at most
+    // hourly).
+    rl.freshenStatistics();
     Object read = readQuery(url, site);
     if (read instanceof Response r) {
       return r;

@@ -305,6 +305,9 @@ public final class Runlight
   /** When planner statistics were last gathered. */
   private long optimizedAt;
 
+  /** When statistics were last checked for staleness, which reports do at most hourly. */
+  private long freshenedAt;
+
   private record LinkDomains(long at, Set<String> domains) {}
 
   private volatile LinkDomains linkDomainCache;
@@ -2593,9 +2596,26 @@ public final class Runlight
     if (now() - optimizedAt >= 86_400_000L) {
       optimizedAt = now();
       store.optimize();
+    } else {
+      // Between the daily runs, a large import or a busy first day still gets statistics that fit
+      // it.
+      store.optimize(true);
     }
     buildRollups();
     return Json.object("ok", true, "reports", sendReports());
+  }
+
+  /**
+   * Gathers planner statistics again if the events have outgrown them, at most once an hour, so an
+   * app that never runs the scheduled check still reads its reports with statistics that fit its
+   * data.
+   */
+  public void freshenStatistics() {
+    if (now() - freshenedAt < 3_600_000L) {
+      return;
+    }
+    freshenedAt = now();
+    store.optimize(true);
   }
 
   /** True for a database that could not take a statement just now and may a moment later. */

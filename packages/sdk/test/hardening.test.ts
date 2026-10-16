@@ -73,9 +73,9 @@ for (const kind of STORES) {
     await t.rl.init();
     let gathered = 0;
     const optimize = t.rl.store.optimize.bind(t.rl.store);
-    t.rl.store.optimize = async () => {
-      gathered++;
-      return optimize();
+    t.rl.store.optimize = async (onlyWhenStale?: boolean) => {
+      if (!onlyWhenStale) gathered++;
+      return optimize(onlyWhenStale);
     };
     const [a, b] = [t.rl.check(), t.rl.check()];
     assert.equal(a, b, "one run, shared");
@@ -86,6 +86,37 @@ for (const kind of STORES) {
     await t.rl.check();
     assert.equal(gathered, 2);
     if (kind === "sqlite") assert.ok((await t.rl.store.db.all("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'")).length, "statistics written");
+  });
+
+  test(`${kind}: planner statistics gathered on an empty database are gathered again once the events outgrow them`, async () => {
+    const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
+    await t.rl.init();
+    let analyzed = 0;
+    const run = t.rl.store.db.run.bind(t.rl.store.db);
+    t.rl.store.db.run = async (sql: string, params?: unknown[]) => {
+      if (sql === "ANALYZE") analyzed++;
+      return run(sql, params);
+    };
+    await t.rl.store.optimize(true);
+    assert.equal(analyzed, 0, "fresh enough while still empty");
+    for (let i = 0; i < 1500; i++) {
+      await t.rl.store.db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v', 's', ?, '/', 'example.com')`, [t.now, `p${i}`]);
+    }
+    await t.rl.store.optimize(true);
+    if (t.rl.store.db.dialect !== "sqlite") return assert.equal(analyzed, 0, "only SQLite needs this");
+    assert.equal(analyzed, 1, "gathered again once the events grew");
+    const [stat] = await t.rl.store.db.all<{ stat: string }>(`SELECT stat FROM sqlite_stat1 WHERE idx = 'rl_events_site_ts'`);
+    // A sample, so an estimate of the 1,500 rather than an exact count.
+    assert.ok(Number(stat?.stat.split(" ")[0]) > 1000, `statistics count the events: ${stat?.stat}`);
+    await t.rl.store.optimize(true);
+    assert.equal(analyzed, 1, "not again until they double");
+    // An app that never runs the scheduled check gets them from its reports, at most hourly.
+    for (let i = 0; i < 1600; i++) {
+      await t.rl.store.db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v', 's', ?, '/', 'example.com')`, [t.now, `q${i}`]);
+    }
+    await t.rl.freshenStatistics();
+    await t.rl.freshenStatistics();
+    assert.equal(analyzed, 2, "once for the doubled events, then not again within the hour");
   });
 
   test(`${kind}: events left behind by an older version, whose visit retention removed, are swept once`, async () => {

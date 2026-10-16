@@ -1861,6 +1861,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       return json(unfeed({ ...(await runlight.store.realtime(site.id, runlight.now())) }));
     }
 
+    // Statistics that fit the data, for an app that never runs the scheduled check (at most hourly).
+    await runlight.freshenStatistics();
     const read = await readQuery(url, site);
     if (read instanceof Response) return read;
     const { query, range, compared } = read;
@@ -1868,19 +1870,25 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     const compareOut = compared ? { from: compared.fromDate, to: compared.toDate } : undefined;
 
     if (path === "/api/stats") {
-      const stats = await runlight.store.stats(query);
-      const previous = compared ? await runlight.store.stats({ ...query, from: compared.from, to: compared.to }) : undefined;
+      // The range and its comparison side by side, which a database with a pool of connections runs at once.
+      const [stats, previous] = await Promise.all([
+        runlight.store.stats(query),
+        compared ? runlight.store.stats({ ...query, from: compared.from, to: compared.to }) : undefined,
+      ]);
       return json({ site: site.id, range: rangeOut, compare: compareOut, stats, previous });
     }
 
     if (path === "/api/goals") {
       if (url.searchParams.get("definitions") === "1") return json({ site: site.id, goals: await runlight.store.goals(site.id) });
       const goals = await runlight.store.goals(site.id);
-      const visitors = await runlight.store.visitors(query);
-      const previousVisitors = compared ? await runlight.store.visitors({ ...query, from: compared.from, to: compared.to }) : 0;
-      // Every goal in one pass for the range, and one more for the comparison.
-      const nowAll = await runlight.store.goalTotalsAll(query, goals);
-      const beforeAll = compared ? await runlight.store.goalTotalsAll({ ...query, from: compared.from, to: compared.to }, goals) : null;
+      const earlier = compared ? { ...query, from: compared.from, to: compared.to } : null;
+      // Every goal in one pass for the range, and one more for the comparison, side by side.
+      const [visitors, previousVisitors, nowAll, beforeAll] = await Promise.all([
+        runlight.store.visitors(query),
+        earlier ? runlight.store.visitors(earlier) : 0,
+        runlight.store.goalTotalsAll(query, goals),
+        earlier ? runlight.store.goalTotalsAll(earlier, goals) : null,
+      ]);
       const rows = goals.map((goal) => {
         const now = nowAll.get(goal.id)!;
         const before = beforeAll?.get(goal.id);
@@ -1910,9 +1918,12 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     }
 
     if (path === "/api/series") {
-      const points = await runlight.store.series(query, buckets(range, site.timezone));
+      const [points, earlier] = await Promise.all([
+        runlight.store.series(query, buckets(range, site.timezone)),
+        compared ? runlight.store.series(query, buckets(compared, site.timezone)) : undefined,
+      ]);
       // Comparison points line up with the main ones by position.
-      const previous = compared ? (await runlight.store.series(query, buckets(compared, site.timezone))).slice(0, points.length) : undefined;
+      const previous = earlier?.slice(0, points.length);
       return json({ site: site.id, range: rangeOut, compare: compareOut, points, previous });
     }
 

@@ -1849,6 +1849,21 @@ defmodule Runlight do
   end
 
   @doc """
+  Gathers planner statistics again if the events have outgrown them, at most
+  once an hour, so an app that never runs the scheduled check still reads its
+  reports with statistics that fit its data.
+  """
+  @spec freshen_statistics(t()) :: :ok
+  def freshen_statistics(rl) do
+    if now(rl) - State.get(rl.table, :freshened_at, 0) >= 3_600_000 do
+      State.put(rl.table, :freshened_at, now(rl))
+      Store.optimize(rl.store, true)
+    end
+
+    :ok
+  end
+
+  @doc """
   Scheduled upkeep, safe to run every minute. It rotates salts, sends the
   email reports that are due, deletes visits past each site's retention, and
   builds daily rollups. It also rereads sites, their dashboard settings, and
@@ -1880,6 +1895,9 @@ defmodule Runlight do
     if now(rl) - State.get(rl.table, :optimized_at, 0) >= 86_400_000 do
       State.put(rl.table, :optimized_at, now(rl))
       Store.optimize(rl.store)
+    else
+      # Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+      Store.optimize(rl.store, true)
     end
 
     build_rollups(rl)

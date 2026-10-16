@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -227,9 +228,13 @@ public sealed partial class SqlStore
 
     /// <summary>
     /// Keeps SQLite's planner statistics current, which it never gathers by itself. Without them it
-    /// can choose a plan that reads a table once for every row of another. Postgres gathers its own.
+    /// can choose a plan that reads a table once for every row of another. A sample of each index is
+    /// enough, so this takes a few seconds at most even on a large database. Postgres gathers its own.
+    /// With <paramref name="onlyWhenStale"/>, only when there are none, or the events have more than
+    /// doubled since they were gathered. Statistics gathered on a new, empty database say every table
+    /// is empty, and a goal over a million visits then took a minute rather than milliseconds.
     /// </summary>
-    public async Task OptimizeAsync(bool onlyWhenMissing = false, CancellationToken cancellationToken = default)
+    public async Task OptimizeAsync(bool onlyWhenStale = false, CancellationToken cancellationToken = default)
     {
         if (Dialect != "sqlite")
         {
@@ -237,16 +242,32 @@ public sealed partial class SqlStore
         }
         try
         {
-            if (onlyWhenMissing && (await Db.AllAsync("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'", null, cancellationToken).ConfigureAwait(false)).Count > 0)
+            double events = Sql.Num((await Db.FirstAsync("SELECT MAX(id) AS n FROM rl_events", null, cancellationToken).ConfigureAwait(false))?.Get("n"));
+            if (onlyWhenStale)
             {
-                return;
+                var seen = await Db.FirstAsync("SELECT value FROM rl_meta WHERE \"key\" = 'statistics_events'", null, cancellationToken).ConfigureAwait(false);
+                bool then = double.TryParse(seen == null ? null : Sql.S(seen.Get("value")), NumberStyles.Float, CultureInfo.InvariantCulture, out double before) && double.IsFinite(before);
+                bool gathered = (await Db.AllAsync("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'", null, cancellationToken).ConfigureAwait(false)).Count > 0;
+                if (gathered && then && !(events > 2 * before && events - before >= 1000))
+                {
+                    return;
+                }
             }
-            await Db.RunAsync("PRAGMA analysis_limit = 1000", null, cancellationToken).ConfigureAwait(false);
-            await Db.RunAsync("ANALYZE", null, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await Db.RunAsync("PRAGMA analysis_limit = 1000", null, cancellationToken).ConfigureAwait(false);
+                await Db.RunAsync("ANALYZE", null, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Some hosted SQLite services refuse these, and gather statistics themselves.
+            }
+            // Noted even when refused, so a service that refuses is not asked again until the events double.
+            await Db.RunAsync(Sql.Upsert(Dialect, "rl_meta", ["\"key\"", "value"], ["\"key\""], ["value"]), A("statistics_events", Js.Str((long)events)), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
-            // Some hosted SQLite services refuse these, and gather statistics themselves.
+            // Statistics only help; a failure here never stops the app.
         }
     }
 
@@ -746,7 +767,12 @@ public sealed partial class SqlStore
     /// <summary>When the site last recorded a visit, or null if it never has.</summary>
     public async Task<double?> LastSeenAsync(string site, CancellationToken cancellationToken = default)
     {
-        var row = await Db.FirstAsync("SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind IN ('pageview', 'event')", A(site), cancellationToken).ConfigureAwait(false);
+        // One MAX for each kind, which every database reads from the end of its (site, kind, ts) index. Asked for
+        // both kinds at once, MySQL read every pageview and event of the site: 2 s on a million visits.
+        var row = await Db.FirstAsync(
+            "SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'pageview'\n       UNION ALL SELECT MAX(ts) AS t FROM rl_events WHERE site = ? AND kind = 'event') x",
+            A(site, site),
+            cancellationToken).ConfigureAwait(false);
         return row == null || row.Get("t") == null ? null : Sql.Num(row.Get("t"));
     }
 

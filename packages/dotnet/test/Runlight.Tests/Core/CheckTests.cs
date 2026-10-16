@@ -78,6 +78,18 @@ public sealed class CheckTests : CoreTestCase
         }
         t.Advance(start - t.Now + 2 * HOUR);
 
+        // Goals by a whole path or a name, worth nothing or a fixed amount, come from rollups; a pattern or a sent value reads events.
+        var kinds = new (string Kind, string Match, string Mode)[] { ("page", "/pricing", "none"), ("page", "/blog/*", "fixed"), ("event", "Signup", "fixed"), ("event", "Signup", "prop"), ("click", "button", "none") };
+        for (int i = 0; i < kinds.Length; i++)
+        {
+            await t.Store.SaveGoalAsync(new JsObject { ["id"] = i.ToString().PadLeft(24, '0'), ["site"] = "default", ["name"] = "Signup", ["kind"] = kinds[i].Kind, ["match"] = kinds[i].Match, ["clickBy"] = "selector", ["valueMode"] = kinds[i].Mode, ["value"] = 1.25, ["valueProp"] = "revenue", ["currency"] = "USD", ["createdAt"] = t.Now });
+        }
+        async Task<string> GoalsAsync()
+        {
+            var totals = await t.Store.GoalTotalsAllAsync(t.Query("2026-09-07", "2026-10-06"), await t.Store.GoalsAsync("default"));
+            return Loose(JsObject.From(totals.Select(e => new KeyValuePair<string, object?>(e.Key, e.Value))));
+        }
+        string goalsBefore = await GoalsAsync();
         string before = Loose(await EverythingAsync(t));
         int built = 0;
         for (int made = await t.Rl.BuildRollupsAsync(); made > 0; made = await t.Rl.BuildRollupsAsync())
@@ -87,6 +99,7 @@ public sealed class CheckTests : CoreTestCase
         Assert.True(built >= 8);
         Assert.Equal(0, await t.Rl.BuildRollupsAsync()); // a built day is not built again
         Assert.Equal(before, Loose(await EverythingAsync(t)));
+        Assert.Equal(goalsBefore, await GoalsAsync());
     }
 
     [Theory]
@@ -270,6 +283,52 @@ public sealed class CheckTests : CoreTestCase
         await t.Rl.CheckAsync();
         Assert.Equal(3, analyzed);
         Assert.NotEmpty(await t.Store.Db.AllAsync("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'")); // statistics written
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task Planner_statistics_gathered_on_an_empty_database_are_gathered_again_once_the_events_outgrow_them(string kind)
+    {
+        var watched = new WatchedDb((await Databases.FreshAsync(kind)).Db);
+        int analyzed = 0;
+        watched.Before = (sql, _) =>
+        {
+            if (sql == "ANALYZE")
+            {
+                analyzed++;
+            }
+            return Task.CompletedTask;
+        };
+        var t = Harness.Create(new SqlStore(watched), Site("UTC"));
+        await t.Rl.InitAsync();
+        analyzed = 0;
+        await t.Store.OptimizeAsync(true);
+        Assert.Equal(0, analyzed); // fresh enough while still empty
+        async Task AddAsync(int count, string prefix)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                await t.Store.Db.RunAsync("INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v', 's', ?, '/', 'example.com')", [t.Now, prefix + i]);
+            }
+        }
+        await AddAsync(1500, "p");
+        await t.Store.OptimizeAsync(true);
+        if (t.Store.Db.Dialect != "sqlite")
+        {
+            Assert.Equal(0, analyzed); // only SQLite needs this
+            return;
+        }
+        Assert.Equal(1, analyzed); // gathered again once the events grew
+        var stat = (await t.Store.Db.AllAsync("SELECT stat FROM sqlite_stat1 WHERE idx = 'rl_events_site_ts'"))[0];
+        // A sample, so an estimate of the 1,500 rather than an exact count.
+        Assert.True(double.Parse(Js.String(stat.Get("stat")).Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture) > 1000);
+        await t.Store.OptimizeAsync(true);
+        Assert.Equal(1, analyzed); // not again until they double
+        // An app that never runs the scheduled check gets them from its reports, at most hourly.
+        await AddAsync(1600, "q");
+        await t.Rl.FreshenStatisticsAsync();
+        await t.Rl.FreshenStatisticsAsync();
+        Assert.Equal(2, analyzed); // once for the doubled events, then not again within the hour
     }
 
     [Fact]

@@ -17,6 +17,11 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Fixed
 
+- SQLite gathers its planner statistics again once the events have more than doubled since they were last gathered, at startup, in the scheduled check, and at most hourly before reports. Statistics gathered on a new, empty database stayed until the daily check, and an app that never runs the check kept them for good, so goals on a million visits took a minute rather than milliseconds.
+- Goals for a whole page path or an event or click, worth nothing or a fixed amount, are counted from the daily rollups, and so is the visitor count behind every conversion rate. A year of goals no longer reads every pageview and event.
+- Finding a site's last visit reads the newest pageview and the newest event separately, which took 2 s on MySQL with a million visits and now takes about a millisecond.
+- The pages in the live view on SQLite come from the latest few minutes of events, rather than the site's whole history read by path, on every refresh.
+- Stats, the chart, and goals work out a range and its comparison side by side, which Postgres and MySQL run at once.
 - Link detail charts show clicks only, prefetch on hover or focus, reuse recent responses, and show a spinner while loading.
 - Hostname suggestions avoid counting every matching event, and assistant setup state is prefetched before heavy reports.
 - Live counts load ahead of heavy reports, and chart comparisons finish before conversion calculations. SQLite uses a covering index for exact visitor counts.

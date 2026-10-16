@@ -287,6 +287,9 @@ public static class Sql
             + (update.Count > 0 ? "UPDATE SET " + string.Join(", ", update.Select(c => c + " = excluded." + c)) : "NOTHING");
     }
 
+    /// <summary>The events table, read through its kind and time index on SQLite, which otherwise reads a site's whole history by path.</summary>
+    public static string EventKindTable(string dialect) => dialect == "sqlite" ? "rl_events e INDEXED BY rl_events_site_kind_ts" : "rl_events e";
+
     /// <summary>Whole-number division, which MySQL's <c>/</c> is not.</summary>
     public static string Div(string dialect, string a, long b) => dialect == "mysql" ? "(" + a + " DIV " + b + ")" : "(" + a + " / " + b + ")";
 

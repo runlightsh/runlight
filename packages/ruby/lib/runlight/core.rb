@@ -180,6 +180,8 @@ module Runlight
       @checking = false
       # When planner statistics were last gathered.
       @optimized_at = 0
+      # When statistics were last checked for staleness, which reports do at most hourly.
+      @freshened_at = 0
       @link_domain_cache = nil
       # Each timezone's salts for its current day, so a lookup is a map read until midnight there.
       @salts = {}
@@ -191,6 +193,15 @@ module Runlight
 
     def managed_sites?
       @managed_sites
+    end
+
+    # Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app
+    # that never runs the scheduled check still reads its reports with statistics that fit its data.
+    def freshen_statistics
+      return if now - @freshened_at < 3_600_000
+
+      @freshened_at = now
+      @store.optimize(true)
     end
 
     # The clock, in milliseconds.
@@ -1455,6 +1466,9 @@ module Runlight
       if now - @optimized_at >= 86_400_000
         @optimized_at = now
         @store.optimize
+      else
+        # Between the daily runs, a large import or a busy first day still gets statistics that fit it.
+        @store.optimize(true)
       end
       build_rollups
       { "ok" => true, "reports" => send_reports }

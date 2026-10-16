@@ -375,6 +375,53 @@ class CheckTest {
         "statistics written");
   }
 
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void plannerStatisticsGatheredOnAnEmptyDatabaseAreGatheredAgainOnceTheEventsOutgrowThem(
+      String kind) {
+    WatchedDb watched = new WatchedDb(Databases.fresh(kind).db());
+    AtomicInteger analyzed = new AtomicInteger();
+    watched.before =
+        sql -> {
+          if (sql.equals("ANALYZE")) {
+            analyzed.incrementAndGet();
+          }
+        };
+    Harness t = new Harness(new SqlStore(watched), site("UTC"));
+    t.rl.init();
+    boolean sqlite = watched.dialect().equals("sqlite");
+    int start = analyzed.get();
+    t.store().optimize(true);
+    assertEquals(start, analyzed.get(), "fresh enough while still empty");
+    String insert =
+        "INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v', 's', ?, '/', 'example.com')";
+    for (int i = 0; i < 1500; i++) {
+      watched.run(insert, List.of(t.now, "p" + i));
+    }
+    t.store().optimize(true);
+    if (!sqlite) {
+      assertEquals(0, analyzed.get(), "only SQLite needs this");
+      return;
+    }
+    assertEquals(start + 1, analyzed.get(), "gathered again once the events grew");
+    List<Map<String, Object>> stat =
+        watched.all("SELECT stat FROM sqlite_stat1 WHERE idx = 'rl_events_site_ts'");
+    // A sample, so an estimate of the 1,500 rather than an exact count.
+    assertTrue(
+        !stat.isEmpty() && Long.parseLong(Js.string(stat.get(0).get("stat")).split(" ")[0]) > 1000,
+        "statistics count the events: " + stat);
+    t.store().optimize(true);
+    assertEquals(start + 1, analyzed.get(), "not again until they double");
+    // An app that never runs the scheduled check gets them from its reports, at most hourly.
+    for (int i = 0; i < 1600; i++) {
+      watched.run(insert, List.of(t.now, "q" + i));
+    }
+    t.rl.freshenStatistics();
+    t.rl.freshenStatistics();
+    assertEquals(
+        start + 2, analyzed.get(), "once for the doubled events, then not again within the hour");
+  }
+
   @Test
   void shortLinkClicksAreNotVisitsInTheHeatmapRawOrRolledUpNorTheFirstVisit() {
     AtomicLong clock = new AtomicLong(utc(2026, 10, 7, 12));
