@@ -15,6 +15,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - AI agents shows live fetches in green, so they stand apart from crawls in blue.
 - The first-visit waiting status is more prominent, invitation access hints sit closer to their checkbox, and loading placeholders wait briefly to avoid flashing on quick responses.
 
+### Security
+
+- Go on MySQL or MariaDB: every session drops `NO_BACKSLASH_ESCAPES`, an app's own pool's as well as the standalone server's, as the other languages already did, and a quote in a value is doubled rather than escaped with a backslash. On a server set to that mode, a quote in a tracker hit could end a value early and run SQL of its own. The standalone server's two-minute statement timeout now applies to every session too, where before it reached only the one that created the tables.
+
 ### Fixed
 
 - The WordPress plugin running Runlight itself hands it the headers a share link and an embedded dashboard send, so both open again. Since 0.1.7 it left them out, and everyone but a signed-in WordPress admin was refused.

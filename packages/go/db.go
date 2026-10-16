@@ -99,6 +99,10 @@ type SQLDB struct {
 	statementTimeout int
 	mariadb          *bool
 
+	// MySQL: the pooled connections already set up for Runlight, by their driver connection.
+	prepMu   sync.Mutex
+	prepared map[any]bool
+
 	// How long Exclusive waits for the lock: LockWait when zero.
 	lockWait time.Duration
 }
@@ -149,6 +153,13 @@ func (d *SQLDB) DB() *sql.DB { return d.db }
 func (d *SQLDB) target(ctx context.Context) (querier, func(), error) {
 	if d.q != nil {
 		return d.q, func() {}, nil
+	}
+	if d.dialect == "mysql" {
+		conn, err := d.mysqlConn(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, func() { conn.Close() }, nil
 	}
 	if d.dialect != "sqlite" {
 		return d.db, func() {}, nil
@@ -367,7 +378,7 @@ func (d *SQLDB) Transaction(ctx context.Context, fn func(Db) error) error {
 		_, err = q.ExecContext(ctx, "COMMIT")
 		return err
 	}
-	conn, err := d.db.Conn(ctx)
+	conn, err := d.ownConn(ctx)
 	if err != nil {
 		return err
 	}
@@ -400,7 +411,7 @@ func (d *SQLDB) Exclusive(ctx context.Context, fn func(Db) error) error {
 	if d.dialect == "sqlite" || d.q != nil {
 		return fn(d)
 	}
-	conn, err := d.db.Conn(ctx)
+	conn, err := d.ownConn(ctx)
 	if err != nil {
 		return err
 	}
@@ -469,6 +480,59 @@ func (d *SQLDB) Exclusive(ctx context.Context, fn func(Db) error) error {
 		return d.limitStatements(ctx, conn, d.statementTimeout)
 	}
 	return nil
+}
+
+// noBackslashEscapesOff is the session's SQL mode as it was, less NO_BACKSLASH_ESCAPES, wherever it sits in the list.
+const noBackslashEscapesOff = "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))"
+
+// ownConn is a connection of its own from the pool: on MySQL, set up as every Runlight session is.
+func (d *SQLDB) ownConn(ctx context.Context) (*sql.Conn, error) {
+	if d.dialect == "mysql" {
+		return d.mysqlConn(ctx)
+	}
+	return d.db.Conn(ctx)
+}
+
+// mysqlConn is a connection from the pool, set up on its first use: an app's own pool's as well as one
+// Runlight opened.
+func (d *SQLDB) mysqlConn(ctx context.Context) (*sql.Conn, error) {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var core any
+	_ = conn.Raw(func(dc any) error {
+		core = dc
+		return nil
+	})
+	d.prepMu.Lock()
+	ready := d.prepared[core]
+	d.prepMu.Unlock()
+	if ready {
+		return conn, nil
+	}
+	// Values are written into the statement escaped with backslashes, which a server set to
+	// NO_BACKSLASH_ESCAPES reads as text, so a quote could end a value early. Every session drops that one
+	// mode, as the TypeScript SDK's does, and takes Runlight's statement timeout when Runlight owns the pool.
+	_, err = conn.ExecContext(ctx, noBackslashEscapesOff)
+	if err == nil && d.owned && d.statementTimeout > 0 {
+		err = d.limitStatements(ctx, conn, d.statementTimeout)
+	}
+	if err != nil {
+		// Half set up, it never goes back to the pool.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		conn.Close()
+		return nil, err
+	}
+	d.prepMu.Lock()
+	if d.prepared == nil || len(d.prepared) >= 1024 {
+		// Connections the pool has since closed are never seen again; starting over now and then keeps this
+		// small, at the cost of setting a live one up a second time.
+		d.prepared = map[any]bool{}
+	}
+	d.prepared[core] = true
+	d.prepMu.Unlock()
+	return conn, nil
 }
 
 // limitStatements sets MySQL's statement timeout for a session, which MySQL
@@ -614,7 +678,8 @@ func mysqlEscape(value any) string {
 			case '"':
 				b.WriteString(`\"`)
 			case '\'':
-				b.WriteString(`\'`)
+				// Doubled rather than escaped with a backslash, so it cannot end the value early in any mode.
+				b.WriteString(`''`)
 			case '\\':
 				b.WriteString(`\\`)
 			default:

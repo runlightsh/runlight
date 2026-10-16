@@ -2,6 +2,8 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -260,5 +262,65 @@ func TestAVisitsPlatformLocationCountsOnlyBehindATrustedProxy(t *testing.T) {
 	}
 	if got := countries(false); !strings.Contains(got, `"US"`) {
 		t.Errorf("behind one the platform's header comes first: %s", got)
+	}
+}
+
+// On a server set to NO_BACKSLASH_ESCAPES, a value with a quote and a backslash in it reads back as itself:
+// every session drops that mode, an app's own pool's too, so a quote never ends a value early.
+func TestAValueReadsBackAsItselfOnAServerSetToNoBackslashEscapes(t *testing.T) {
+	ctx := context.Background()
+	for _, kind := range Kinds() {
+		if kind.Name != "mysql" && kind.Name != "mariadb" {
+			continue
+		}
+		t.Run(kind.Name, func(t *testing.T) {
+			lock, _ := mysqlLocks.LoadOrStore(kind.URL, &sync.Mutex{})
+			lock.(*sync.Mutex).Lock()
+			defer lock.(*sync.Mutex).Unlock()
+			dsn, err := MySQLDSN(kind.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			admin, err := sql.Open("mysql", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer admin.Close()
+			var before string
+			if err := admin.QueryRowContext(ctx, "SELECT @@GLOBAL.sql_mode").Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			mode := "NO_BACKSLASH_ESCAPES"
+			if before != "" {
+				mode = before + ",NO_BACKSLASH_ESCAPES"
+			}
+			if _, err := admin.ExecContext(ctx, "SET GLOBAL sql_mode = ?", mode); err != nil {
+				t.Skipf("cannot set the server's sql_mode: %v", err)
+			}
+			defer admin.ExecContext(context.WithoutCancel(ctx), "SET GLOBAL sql_mode = ?", before)
+			// A pool opened after the change, as an app's own would be.
+			pool, err := sql.Open("mysql", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Close()
+			d := runlight.MySQL(pool)
+			rows, err := d.All(ctx, "SELECT @@SESSION.sql_mode AS mode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := rows[0]["mode"].(string); strings.Contains(got, "NO_BACKSLASH_ESCAPES") {
+				t.Fatalf("session still has NO_BACKSLASH_ESCAPES: %s", got)
+			}
+			for _, value := range []string{`x\' OR '1'='1`, `it's`, `back\slash`, `\`, `'`, `\\'`} {
+				rows, err := d.All(ctx, "SELECT ? AS v", value)
+				if err != nil {
+					t.Fatalf("%q: %v", value, err)
+				}
+				if got := fmt.Sprint(rows[0]["v"]); got != value {
+					t.Fatalf("%q read back as %q", value, got)
+				}
+			}
+		})
 	}
 }
