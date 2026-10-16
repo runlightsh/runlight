@@ -247,3 +247,87 @@ for (const kind of STORES) {
     assert.deepEqual((await t.get("/api/stats?period=30d&compare=off")).stats, before);
   });
 }
+
+for (const kind of STORES) {
+  test(`${kind}: renaming a click goal keeps its conversions on built days, even onto a name with events of its own`, async () => {
+    const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
+    t.advance(-3 * 24 * HOUR);
+    for (let i = 0; i < 3; i++) {
+      await t.send({ k: "pageview", u: "https://example.com/", i: `c${i}` }, { ip: `203.0.113.${60 + i}` });
+      await t.send({ k: "event", u: "https://example.com/", i: `c${i}`, n: "Buy click" }, { ip: `203.0.113.${60 + i}` });
+      // One visit also sends a plain event under the name the goal is renamed to.
+      if (i === 0) await t.send({ k: "event", u: "https://example.com/", i: `c${i}`, n: "Purchase" }, { ip: `203.0.113.${60 + i}` });
+      t.advance(HOUR);
+    }
+    t.advance(3 * 24 * HOUR - 3 * HOUR);
+    const goal = { id: "c".padStart(24, "0"), site: "default", name: "Buy click", kind: "click" as const, match: "button.buy", clickBy: "selector" as const, valueMode: "none" as const, value: 0, valueProp: "", currency: "USD", createdAt: t.now };
+    await t.rl.store.saveGoal(goal);
+    for (let made = await t.rl.buildRollups(); made > 0; made = await t.rl.buildRollups());
+    const read = async () => ({
+      goals: (await t.get(`/api/goals?period=7d&compare=off`)).goals.map((g: any) => [g.name, g.conversions, g.visitors]),
+      events: (await t.get(`/api/breakdown?period=7d&dimension=event`)).rows.map((r: any) => [r.value, r.events]),
+    });
+    assert.deepEqual((await read()).goals, [["Buy click", 3, 3]]);
+    for (const name of ["Checkout click", "Purchase"]) {
+      const before = (await t.rl.store.goals("default"))[0]!;
+      await t.rl.store.saveGoal({ ...before, name }, before);
+      const rolled = await read();
+      assert.deepEqual(rolled.goals, [[name, name === "Purchase" ? 4 : 3, 3]], `renamed to ${name}`);
+      // Days built again where both names met, then every built day read the same as the raw events.
+      for (let made = await t.rl.buildRollups(); made > 0; made = await t.rl.buildRollups());
+      const built = await read();
+      await t.rl.store.clearRollups("default");
+      assert.deepEqual(built, await read(), `rollups agree with the raw events after renaming to ${name}`);
+      for (let made = await t.rl.buildRollups(); made > 0; made = await t.rl.buildRollups());
+    }
+  });
+}
+
+for (const kind of STORES) {
+  test(`${kind}: a header longer than its column is cut to fit, so the day's rollup still builds`, async () => {
+    const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
+    t.advance(-2 * 24 * HOUR);
+    const long = `"${"Windows ".repeat(400)}"`;
+    await t.send({ k: "pageview", u: `https://example.com/${"a".repeat(1500)}`, i: "long1" }, {
+      ip: "203.0.113.70",
+      // A browser whose user agent names no system, so the platform hint is what is stored.
+      ua: "Mozilla/5.0 (Unknown) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+      headers: { "sec-ch-ua-platform": long, "sec-ch-ua": `"${"B".repeat(3000)}";v="1"` },
+    });
+    t.advance(2 * 24 * HOUR);
+    const [row] = await t.rl.store.db.all<{ os: string; entry_path: string }>(`SELECT os, entry_path FROM rl_sessions`);
+    assert.ok(row!.os.length > 50 && row!.os.length <= 100, `os is ${row!.os.length} characters`);
+    assert.ok(row!.entry_path.length <= 1000);
+    let built = 0;
+    for (let made = await t.rl.buildRollups(); made > 0; made = await t.rl.buildRollups()) built += made;
+    assert.ok(built >= 1, "the day builds");
+    assert.equal((await t.get(`/api/stats?period=7d&compare=off`)).stats.visits, 1);
+  });
+}
+
+test("on MySQL, two processes building one day at once add its rows once", { skip: !process.env.RUNLIGHT_TEST_MYSQL && "RUNLIGHT_TEST_MYSQL is not set" }, async () => {
+  const { runlight } = await import("../src/index.js");
+  const { mysql } = await import("../src/stores/mysql.js");
+  const { freshMysqlDatabase } = await import("./helpers.js");
+  const { url, ready } = freshMysqlDatabase();
+  await ready;
+  let now = Date.UTC(2026, 9, 3, 12);
+  const site = { hostnames: ["example.com"], timezone: "UTC" };
+  const one = runlight({ store: mysql({ url, max: 3 }), site, now: () => now });
+  const other = runlight({ store: mysql({ url, max: 3 }), site, now: () => now });
+  const routes = one.routes({ token: "secret" });
+  for (let i = 0; i < 5; i++) {
+    await routes.POST(new Request("https://example.com/runlight/e", { method: "POST", body: JSON.stringify({ k: "pageview", u: `https://example.com/p${i}` }), headers: { "x-forwarded-for": `203.0.113.${80 + i}`, "user-agent": SAFARI_IPHONE } }));
+  }
+  await other.init();
+  const start = Date.UTC(2026, 9, 3);
+  for (let round = 0; round < 5; round++) {
+    const both = await Promise.allSettled([one.store.buildRollupDay("default", "2026-10-03", start, start + 86_400_000), other.store.buildRollupDay("default", "2026-10-03", start, start + 86_400_000)]);
+    assert.ok(both.some((b) => b.status === "fulfilled"), "one of them builds it");
+    const [totals] = await one.store.db.all<{ n: unknown; visits: unknown }>(`SELECT COUNT(*) AS n, SUM(visits) AS visits FROM rl_rollups WHERE site = 'default' AND day = '2026-10-03' AND dim = ''`);
+    assert.deepEqual([Number(totals!.n), Number(totals!.visits)], [1, 5], `round ${round}`);
+  }
+  now += 1;
+  await one.store.close();
+  await other.store.close();
+});

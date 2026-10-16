@@ -154,10 +154,6 @@ export const RETENTION_MONTHS = [6, 12, 24, 36, 60];
 /** Thirty minutes without a request ends a session. */
 export const SESSION_IDLE_MS = 30 * 60 * 1000;
 
-function utcDay(ts: number): string {
-  return new Date(ts).toISOString().slice(0, 10);
-}
-
 function siteRow(options: SiteOptions, index: number): SiteRow {
   const timezone = options.timezone ?? "UTC";
   if (!isTimezone(timezone)) throw new Error(`Runlight: unknown timezone "${timezone}"`);
@@ -885,12 +881,27 @@ export class Runlight {
   }
 
   /**
-   * Deletes salts whose day has ended everywhere. The earliest timezone is a
-   * day behind UTC and still needs its yesterday, so a salt goes two UTC days
-   * after its date.
+   * Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
+   * site's timezone, and after midnight only while a visit that began that day there is still going, since
+   * it carries on under the visitor it began with. So a salt lasts its day and the visits that run past it.
    */
   private async dropOldSalts(now: number): Promise<void> {
-    await this.store.dropSaltsBefore(utcDay(now - 2 * 86_400_000));
+    const zones = new Map<string, string[]>();
+    for (const site of this.sites) zones.set(site.timezone, [...(zones.get(site.timezone) ?? []), site.id]);
+    if (!zones.size) return;
+    const needed = new Set<string>();
+    for (const [timezone, sites] of zones) {
+      const today = localDate(now, timezone);
+      needed.add(today);
+      const yesterday = addDays(today, -1);
+      if (await this.store.visitOpen(sites, startOf(yesterday, timezone), startOf(today, timezone), now - SESSION_IDLE_MS)) needed.add(yesterday);
+      else {
+        // Nor is it kept here: no visit is left for it to find.
+        const cached = this.salts.get(timezone);
+        if (cached?.day === today) cached.yesterday = null;
+      }
+    }
+    await this.store.dropSaltsExcept([...needed]);
   }
 
   /** Handles one tracker request. Always resolves; bad input is dropped quietly. */

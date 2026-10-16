@@ -41,6 +41,38 @@ test("passwords hashed before, with scrypt, still check, and a PBKDF2 hash made 
   assert.match(await hashPassword("a long password"), /^scrypt\$/, "Node has scrypt, so new hashes use it");
 });
 
+test("new password hashes record their scrypt cost, and a cost out of bounds is refused, not run", async () => {
+  const made = await hashPassword("a long password");
+  assert.match(made, /^scrypt\$32768\$8\$3\$[\w-]+\$[\w-]+$/);
+  assert.equal(await checkPassword("a long password", made), true);
+  assert.equal(await checkPassword("a long passwore", made), false);
+  // The same bytes any language's scrypt gives for that cost, so every port can check them.
+  const [, , , , salt, key] = made.split("$");
+  const again = scryptSync("a long password", Buffer.from(salt!, "base64url"), 32, { N: 32768, r: 8, p: 3, maxmem: 256 * 32768 * 8 });
+  assert.equal(again.toString("base64url"), key);
+  for (const cost of ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1"]) {
+    assert.equal(await checkPassword("a long password", `scrypt$${cost}$${salt}$${key}`), false, cost);
+  }
+});
+
+for (const kind of STORES) {
+  test(`${kind}: signing in hashes a password made at the old cost again, and a wrong password changes nothing`, async () => {
+    const store = freshStore(kind);
+    const { Accounts } = await import("../src/accounts/auth.js");
+    const accounts = new Accounts(store, "a server secret long enough");
+    const user = await accounts.setPassword("owner@example.com", "a long password", Date.UTC(2026, 9, 14, 12));
+    const salt = randomBytes(16);
+    const old = `scrypt$${salt.toString("base64url")}$${scryptSync("a long password", salt, 32, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }).toString("base64url")}`;
+    await store.db.run(`UPDATE rl_users SET hash = ? WHERE id = ?`, [old, user.id]);
+    assert.equal(await accounts.signIn("owner@example.com", "a wrong password"), null);
+    assert.equal((await accounts.byId(user.id))!.hash, old);
+    const signedIn = await accounts.signIn("owner@example.com", "a long password");
+    assert.match(signedIn!.hash, /^scrypt\$32768\$8\$3\$/, "made again at the new cost");
+    assert.equal((await accounts.byId(user.id))!.hash, signedIn!.hash);
+    assert.notEqual((await accounts.signIn("owner@example.com", "a long password")), null, "and it still signs in");
+  });
+}
+
 test("two-factor secrets sealed by the server open here, and the other way round", async () => {
   const secret = "s".repeat(64);
   const key = createHash("sha256").update(`totp:${secret}`).digest();

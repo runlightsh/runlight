@@ -17,10 +17,15 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Security
 
+- A day's salt, which a day's visitor ids are made from, is kept while it is that day in a site's timezone, and after midnight only while a visit that began that day is still going. It used to stay for up to three days whatever the visits did, and as long as almost four for a site in the earliest timezone.
+- New password hashes cost more (scrypt at N=32768, r=8, p=3, one of OWASP's settings) and record their cost, so it can rise again. A password hashed before is checked as before, and hashed again at the new cost the next time it signs in, which signs out that account's other browsers once.
 - Go on MySQL or MariaDB: every session drops `NO_BACKSLASH_ESCAPES`, an app's own pool's as well as the standalone server's, as the other languages already did, and a quote in a value is doubled rather than escaped with a backslash. On a server set to that mode, a quote in a tracker hit could end a value early and run SQL of its own. The standalone server's two-minute statement timeout now applies to every session too, where before it reached only the one that created the tables.
 
 ### Fixed
 
+- Renaming a click goal keeps its conversions on days already added up. The days' totals kept the old name while the goal looked for the new one, so it showed none for them.
+- Text a visit or event stores is cut to its column's width on every database, as MySQL's columns hold it. A tracker hit with a header of thousands of characters, stored as a visit's system, stopped Postgres from adding up that day ever again.
+- On MySQL, two processes adding up the same day at once cannot both add their rows: the day is marked first, so the second waits, then leaves it to the first.
 - The WordPress plugin running Runlight itself hands it the headers a share link and an embedded dashboard send, so both open again. Since 0.1.7 it left them out, and everyone but a signed-in WordPress admin was refused.
 - The tracker standing down (an automated browser, Do Not Track with `data-dnt`, the owner's ignore flag, or the goal picker) still answers every call a site makes and sends nothing. It used to replace `runlight` with a function that had no `pageview`, so a site using `data-manual` threw on every route change there, its own end-to-end tests included.
 - SQLite gathers its planner statistics again once the events have more than doubled since they were last gathered, at startup, in the scheduled check, and at most hourly before reports. Statistics gathered on a new, empty database stayed until the daily check, and an app that never runs the check kept them for good, so goals on a million visits took a minute rather than milliseconds.

@@ -3,7 +3,7 @@
  * signed in. The standalone server always has them, and an app turns them on with routes({ accounts: true }).
  */
 import { MYSQL_COLLATION, type SqlStore } from "../store.js";
-import { base64url, checkPassword, hashPassword, hex, hmac, randomBytes, sameText, sealText, sha256, unsealText } from "./crypto.js";
+import { base64url, checkPassword, hashPassword, hex, hmac, randomBytes, sameText, sealText, sha256, unsealText, weakerThanNow } from "./crypto.js";
 
 export { checkPassword, hashPassword };
 
@@ -584,7 +584,12 @@ export class Accounts {
       await slot(() => checkPassword(password, hash));
       return null;
     }
-    return (await slot(() => checkPassword(password, user.hash))) ? user : null;
+    if (!(await slot(() => checkPassword(password, user.hash)))) return null;
+    if (!(await weakerThanNow(user.hash))) return user;
+    // A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+    const hash = await slot(() => hashPassword(password));
+    await this.store.db.run(`UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?`, [hash, user.id, user.hash]);
+    return (await this.byId(user.id)) ?? user;
   }
 
   /**
