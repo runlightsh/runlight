@@ -137,6 +137,23 @@ test("WordPress validates request fields and excludes unrelated server data", (t
   ]);
 });
 
+test("WordPress hands Runlight a share link's id and an embedded dashboard's session", (t) => {
+  // Without them, anyone opening a share link, or a dashboard embedded with a ticket, is refused as signed out.
+  const answer = wordpressPhp(t, `
+    require ${JSON.stringify(WORDPRESS + "includes/Library.php")};
+    require ${JSON.stringify(WORDPRESS + "includes/Local.php")};
+    $_SERVER = [
+      "REQUEST_METHOD" => "GET", "HTTP_HOST" => "example.com", "REQUEST_URI" => "/runlight/api/stats?site=default",
+      "REMOTE_ADDR" => "203.0.113.5",
+      "HTTP_X_RUNLIGHT_SHARE" => "0123456789abcdef0123456789abcdef", "HTTP_X_RUNLIGHT_EMBED" => "embed-session-1",
+    ];
+    $request = \\Runlight\\WordPress\\Local::request();
+    echo json_encode([$request->headers->get("x-runlight-share"), $request->headers->get("x-runlight-embed")]);
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), ["0123456789abcdef0123456789abcdef", "embed-session-1"]);
+});
+
 test("every CMS plugin's PHP parses", (t) => {
   const root = new URL("../../../plugins/", import.meta.url).pathname;
   const files = execFileSync("find", [root, "-name", "*.php", "-not", "-path", "*/vendor/*"], { encoding: "utf8" }).trim().split("\n");
