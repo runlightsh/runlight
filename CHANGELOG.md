@@ -17,6 +17,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Security
 
+- Deleting a site in the dashboard removes the accounts and invitations kept to it. A site made later is often given the same id, from its domain, and they reached it.
 - An account kept to one site no longer reads the install's mail settings, such as a webhook's address, which is often its own credential, nor changes where its site lives (`site_domains`): it may rename the site, as a connected hub may.
 - Past an account's limit of wrong passwords, every account, with two-factor on or not, and an email with no account, gets the same answer, so a guesser cannot tell which accounts have two-factor. A right password then emails a sign-in link, which leads to the code step when two-factor is on.
 - The AI Assistant carries at most 24,000 characters of earlier turns into a question, oldest dropped first, since the browser sends the history and each tool round sends it again; the limits on questions are there to keep the owner's AI credit safe.

@@ -445,6 +445,21 @@ export class Accounts {
     });
   }
 
+  /**
+   * Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+   * same id, from its domain, and they must not find their way into it.
+   */
+  async forgetSite(site: string): Promise<void> {
+    await this.init();
+    return this.turn(async () => {
+      for (const user of (await this.list()).filter((u) => u.site === site)) {
+        await this.store.db.run(`DELETE FROM rl_users WHERE id = ?`, [user.id]);
+        await this.store.setSetting(`login-link-used:${user.id}`, null);
+      }
+      await this.store.db.run(`DELETE FROM rl_invites WHERE site = ?`, [site]);
+    });
+  }
+
   /** Removes an account. The owner cannot be removed. */
   async remove(id: string): Promise<void> {
     // The tables first: making them takes the same lock as a turn.

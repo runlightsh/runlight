@@ -1739,6 +1739,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       }
       try {
         await runlight.deleteSite(id);
+        // Those kept to the site go with it, so a site made later with the same id is not theirs.
+        if (web) await web.accounts.forgetSite(id);
         return json({ ok: true });
       } catch (error) {
         if (error instanceof RangeError) return error.message === "Unknown site" ? coded(error.message, "unknown_site", 404) : refused(error, "site_invalid");
