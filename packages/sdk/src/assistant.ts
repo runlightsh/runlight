@@ -66,6 +66,8 @@ export interface ChatContext {
   language: string;
 }
 
+/** The most text of earlier turns a question carries, about six thousand tokens. */
+const MAX_HISTORY_CHARS = 24_000;
 const MAX_ROUNDS = 8;
 /** However many rounds a question takes, the answer comes within this long or the assistant stops. */
 const DEADLINE_MS = 120_000;
@@ -199,6 +201,13 @@ export async function chat(
     const last = history[history.length - 1];
     if (last && last.role === m.role) last.content += `\n\n${content}`;
     else history.push({ role: m.role, content });
+  }
+  // The browser sends the history, so its whole length is held too, the oldest turns dropped first: each
+  // tool round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+  const size = () => history.reduce((n, h) => n + h.content.length, 0);
+  while (history.length > 1 && size() > MAX_HISTORY_CHARS) {
+    history.shift();
+    while (history.length > 1 && history[0]!.role !== "user") history.shift();
   }
 
   if (provider.protocol === "anthropic") {

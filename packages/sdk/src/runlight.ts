@@ -773,9 +773,12 @@ export class Runlight {
   async retentionCutoff(site: string): Promise<number | null> {
     const months = await this.retention(site);
     if (months === null) return null;
-    const cutoff = new Date(this.now());
-    cutoff.setUTCMonth(cutoff.getUTCMonth() - months);
-    return cutoff.getTime();
+    // Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
+    const now = new Date(this.now());
+    const year = now.getUTCFullYear();
+    const month = now.getUTCMonth() - months;
+    const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    return Date.UTC(year, month, Math.min(now.getUTCDate(), last), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds());
   }
 
   /** Deletes visits older than each site's retention allows. Cheap when there is nothing to delete. */
@@ -1042,7 +1045,8 @@ export class Runlight {
         screen: client.screen,
         language: client.language,
       });
-      return session;
+      // Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+      return this.store.settleOpenSession(site.id, candidates, now - SESSION_IDLE_MS, session);
     });
   }
 

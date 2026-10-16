@@ -355,7 +355,8 @@ test("the app's own mailer sends until a service saved in the dashboard takes it
   assert.match(sent[1]!.headers!["List-Unsubscribe"]!, /^<https:\/\/stats\.example\.com\/runlight\/unsubscribe\/[a-f0-9]{32}>$/);
   assert.equal(sent[1]!.headers!["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
 
-  // A failure comes back as a mail error naming the mailer.
+  // A failure comes back as a mail error naming the mailer. (A test through one mailer goes at most once a minute.)
+  now += 60_000;
   fail = "SMTP connect() failed";
   const failed = await call("POST", "/api/mail/test", { to: "jon@example.com" });
   assert.equal(failed.status, 400);
@@ -375,6 +376,10 @@ test("the app's own mailer sends until a service saved in the dashboard takes it
   assert.equal((await call("DELETE", "/api/mail")).status, 200);
   assert.equal((await (await call("GET", "/api/mail")).json()).source, "app");
   assert.equal((await call("POST", "/api/mail/test", { to: "jon@example.com" })).status, 200);
+  assert.equal(sent.length, 3);
+  // Another test through it straight away waits a minute, so the button cannot flood an inbox.
+  const again = await call("POST", "/api/mail/test", { to: "jon@example.com" });
+  assert.deepEqual([again.status, (await again.json()).code], [429, "test_soon"]);
   assert.equal(sent.length, 3);
 });
 

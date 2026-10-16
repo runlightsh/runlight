@@ -184,3 +184,26 @@ for (const kind of STORES) {
     assert.equal(await count("viewer-4"), "1");
   });
 }
+
+test("a question carries at most 24,000 characters of earlier turns, however much history the browser sends", async () => {
+  const model = await fakeModel();
+  try {
+    const rl = runlight({ store: sqlite({ path: ":memory:" }), site: { hostnames: ["example.com"] }, secret: "s".repeat(32) });
+    const { handler } = rl.routes({ token: "owner" });
+    const call = async (method: string, path: string, data: unknown) =>
+      handler(new Request(`https://example.com/runlight${path}`, { method, headers: { authorization: "Bearer owner", "content-type": "application/json" }, body: JSON.stringify(data) }));
+    await call("PUT", "/api/assistant", { provider: "anthropic", key: "sk-ant-secret", baseUrl: model.url, model: "claude-opus-5-5" });
+    // Twenty made-up turns of 8,000 characters each, then the question.
+    const history = Array.from({ length: 19 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `${i} ${"x".repeat(7998)}` }));
+    const answer = await call("POST", "/api/assistant/chat", { site: "default", messages: [...history, { role: "user", content: "How many visitors?" }], view: "today", language: "en" });
+    assert.equal(answer.status, 200);
+    for (const sent of model.seen.filter((s) => s.path === "/v1/messages")) {
+      const text = sent.body.messages.filter((m: any) => typeof m.content === "string").reduce((n: number, m: any) => n + m.content.length, 0);
+      assert.ok(text <= 24_000, `${text} characters sent`);
+      assert.equal(sent.body.messages[0].role, "user", "still starting with a question");
+      assert.match(sent.body.messages.find((m: any) => typeof m.content === "string" && m.content.includes("How many visitors?"))?.content ?? "", /How many visitors\?/);
+    }
+  } finally {
+    model.close();
+  }
+});

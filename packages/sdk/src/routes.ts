@@ -9,9 +9,9 @@ import { hmac, randomId, sha256 } from "./hash.js";
 import { DIMENSIONS, isDimension, isSessionDimension, MAX_FILTERS, parseFilter, type Filter, type Query } from "./query.js";
 import { EMAIL, LINK_DOMAIN_CHECK, RETENTION_MONTHS, envValue as env, type RequestContext, type Runlight } from "./runlight.js";
 import { mcpResponse } from "./mcp.js";
-import { readablePath } from "./sources.js";
+import { readablePath, recordedPath } from "./sources.js";
 import { decodePart } from "./path.js";
-import { agentsKey, oauthResponse, resourceMetadataUrl } from "./oauth.js";
+import { agentsKey, oauthResponse, openAgentsKey, resourceMetadataUrl } from "./oauth.js";
 import { csv, zip } from "./zip.js";
 import { GoalError, clickRules, goalFrom } from "./goals.js";
 import { FunnelError, funnelFrom } from "./funnels.js";
@@ -392,6 +392,12 @@ const SHARE_HEADER = "x-runlight-share";
 const EMBED_HEADER = "x-runlight-embed";
 /** What a share, or the dashboard inside a CMS, can read: one site's reports, nothing that changes anything. */
 const SHARED_PATHS = new Set(["/api/sites", "/api/icon", "/api/realtime", "/api/stats", "/api/series", "/api/rhythm", "/api/breakdown", "/api/goals", "/api/event-props", "/api/export", "/api/funnels", "/api/journeys"]);
+/** A whole number from a query, within 1 and `max`, or `fallback` for anything else: a fraction, a huge number, or text. */
+function whole(value: string | null, fallback: number, max: number): number {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n >= 1 ? Math.min(n, max) : fallback;
+}
+
 const sharedPath = (path: string) => SHARED_PATHS.has(path) || /^\/api\/goals\/[a-f0-9]{24}$/.test(path);
 
 /**
@@ -486,7 +492,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     (path === "/api/assistant/limits" && method === "PUT") ||
     (path === "/api/assistant/models" && method === "POST") ||
     (/^\/api\/sites\/[^/]+$/.test(path) && method === "DELETE");
-  // When each report's last sample went out.
+  // When each report's last sample went out, and the last test email.
   const sampleSent = new Map<string, number>();
   // Each person's questions to the assistant in the last hour, and how many are being answered now.
   const asked = new Map<string, { at: number[]; open: number }>();
@@ -945,8 +951,9 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
               if (settings?.[f.name]) saved.push(f.name);
             } else fields[f.name] = String(settings?.[f.name] ?? "");
           }
-          // A hub with a manage token learns which service sends the reports and from where, nothing more.
-          const viaManage = managed.has(request);
+          // A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+          // from where, nothing more: a webhook's address is often its own credential.
+          const viaManage = managed.has(request) || (await sessionScope(request))?.site !== undefined;
           // The app's own mailer, named only when there is one, so the answer without it stays as it was.
           const app = runlight.appMailer;
           return json({
@@ -981,9 +988,15 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (!EMAIL.test(to)) return coded("Enter an email address to send the test to", "test_email", 400);
         const settings = await runlight.mailSettings();
         if (!settings) return coded("Set up a mail service first", "mail_unset", 400);
+        // One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+        // or use up a service's quota; one just set up can be tried at once.
+        const tested = `test:${settings.source ?? ""}:${settings.service ?? ""}`;
+        if (runlight.now() - (sampleSent.get(tested) ?? 0) < 60_000) return coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429);
         const { t } = translator(String(body.lang ?? "en"));
         const name = settings.source === "app" ? (settings.via ?? "") : (SERVICES.find((x) => x.id === settings.service)?.name ?? "");
         await runlight.sendMail({ to, subject: t("email.test.subject"), text: t("email.test.body", { service: name }), html: `${EMAIL_LOGO}<p style="font-family:sans-serif;font-size:15px">${escapeHtml(t("email.test.body", { service: name }))}</p>` });
+        // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+        sampleSent.set(tested, runlight.now());
         return json({ ok: true });
       }
 
@@ -1221,6 +1234,12 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
         if (!body || body.site !== scoped.site) return coded("Unknown site", "unknown_site", 404);
       }
+      if (sitePath && isJson(request)) {
+        // Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+        // a hub may, never move it.
+        const body = (await request.clone().json().catch(() => null)) as Record<string, unknown> | null;
+        if (body && body.hostnames !== undefined) return coded("Your account cannot change a site's domains", "site_domains", 403);
+      }
       url = new URL(url);
       url.searchParams.set("site", scoped.site);
     }
@@ -1347,7 +1366,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         await runlight.init();
         for (const { key, value } of await runlight.store.settingsStartingWith("observe-key:")) {
           const id = key.slice("observe-key:".length);
-          if (id && constantTimeEqual(given, value) && runlight.site(id)) keySite = id;
+          const opened = await openAgentsKey(runlight, value);
+          if (id && opened && constantTimeEqual(given, opened) && runlight.site(id)) keySite = id;
         }
         if (!keySite) return coded("Unauthorized", "unauthorized", 401);
       }
@@ -1955,9 +1975,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       const { rows, sampled } = await runlight.store.journeyPages(query, PAGES_PER_VISIT);
       const answer = journeys(rows, {
         steps: Number(q.get("steps") ?? 5),
-        ...(q.get("start") ? { start: q.get("start")! } : {}),
-        ...(q.get("end") ? { end: q.get("end")! } : {}),
-        ...(through ? { through: { step: Number(through[1]), value: through[2]! } } : {}),
+        // Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+        ...(q.get("start") ? { start: recordedPath(q.get("start")!) ?? q.get("start")! } : {}),
+        ...(q.get("end") ? { end: recordedPath(q.get("end")!) ?? q.get("end")! } : {}),
+        ...(through ? { through: { step: Number(through[1]), value: recordedPath(through[2]!) ?? through[2]! } } : {}),
       });
       return json({ site: site.id, range: rangeOut, ...answer, ...(sampled ? { sampled: JOURNEY_VISITS } : {}) });
     }
@@ -1984,7 +2005,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       const safe = (name: string) => /^[^"\\]{1,64}$/.test(name);
       if (asked !== null && !safe(asked)) return coded("Bad property name", "property_bad", 400);
       const key = asked ?? keys.find((k) => safe(k.key))?.key ?? null;
-      const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+      const limit = whole(url.searchParams.get("limit"), 100, 1000);
       const rows = key ? await runlight.store.eventPropValues(query, event, key, limit) : [];
       return json({ site: site.id, range: rangeOut, event, keys, key, rows });
     }
@@ -1992,8 +2013,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (path === "/api/breakdown") {
       const dimension = url.searchParams.get("dimension") ?? "";
       if (!isDimension(dimension)) return coded(`Unknown dimension "${dimension}"`, "unknown_dimension", 400, { dimension });
-      const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit")) || 10));
-      const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      const limit = whole(url.searchParams.get("limit"), 10, 1000);
+      const page = whole(url.searchParams.get("page"), 1, 100_000);
       if (dimension === "hostname" && url.searchParams.get("suggestions") === "1" && url.searchParams.get("format") !== "csv") {
         const rows = await runlight.store.hostnameSuggestions(query, Math.min(limit, 50));
         return json({ site: site.id, range: rangeOut, dimension, rows });

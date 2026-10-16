@@ -351,21 +351,9 @@ export class Accounts {
     return this.ticket("pending", user, now + 5 * 60_000);
   }
 
-  /**
-   * A ticket that looks and acts like pendingFor's, except that no code ever
-   * passes with it. A wrong password gets one once an account with
-   * two-factor has had too many, so the answer never tells a right password.
-   */
-  decoyFor(user: User, now: number): Promise<string> {
-    return this.ticket("decoy", user, now + 5 * 60_000);
-  }
-
-  /** The account a code-step ticket names, and whether a right code may sign in with it. */
-  async fromPending(value: string, now: number): Promise<{ user: User; real: boolean } | null> {
-    const user = await this.fromTicket("pending", value, now);
-    if (user) return { user, real: true };
-    const decoy = await this.fromTicket("decoy", value, now);
-    return decoy ? { user: decoy, real: false } : null;
+  /** The account a code-step ticket names. */
+  fromPending(value: string, now: number): Promise<User | null> {
+    return this.fromTicket("pending", value, now);
   }
 
   /** A ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it. */

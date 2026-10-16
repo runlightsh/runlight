@@ -346,7 +346,8 @@ export function People({ me, site, multiSite, onDemoted }: { site: Site; me: Per
     setError("");
     setSending(true);
     api
-      .addPerson(email.trim(), role, multiSite && allSites ? undefined : site.id)
+      // An admin is always for every site; with only one, everyone else is kept to it, as before.
+      .addPerson(email.trim(), role, role === "admin" || (multiSite && allSites) ? undefined : site.id)
       .then((r) => {
         setEmail("");
         return done(r);
@@ -517,7 +518,7 @@ export function People({ me, site, multiSite, onDemoted }: { site: Site; me: Per
       <form class="domain-add token-add" onSubmit={add}>
         <input class="value" type="email" required placeholder={t("people.emailPlaceholder")} value={email} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
         <select class="value" value={role} aria-label={t("people.role")} onChange={(e) => setRole((e.target as HTMLSelectElement).value as Person["role"])}>
-          {ROLES.filter((r) => allSites || r !== "admin").map((r) => (
+          {ROLES.filter((r) => allSites || !multiSite || r !== "admin").map((r) => (
             <option value={r}>{roleName(r)}</option>
           ))}
         </select>

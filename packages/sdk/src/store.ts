@@ -1295,6 +1295,23 @@ export class SqlStore {
     return rows[0] ?? null;
   }
 
+  /**
+   * After opening a visit: the visitor's earliest visit still going, which is this one unless another
+   * process opened one for the same visitor at the same moment. Then both settle on the earliest, and the
+   * one that is not drops its own, before anything is counted into it.
+   */
+  async settleOpenSession(site: string, visitors: string[], since: number, opened: { id: string; visitor: string }): Promise<{ id: string; visitor: string }> {
+    const rows = await this.db.all<{ id: string; visitor: string }>(
+      // One already counting a hit first: the other process went on with it.
+      `SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
+       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1`,
+      [site, ...visitors, since],
+    );
+    const first = rows[0] ?? opened;
+    if (first.id !== opened.id) await this.db.run(`DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0`, [opened.id]);
+    return { id: String(first.id), visitor: String(first.visitor) };
+  }
+
   async insertSession(row: SessionRow): Promise<void> {
     const c = clip;
     await this.db.run(
@@ -2209,7 +2226,7 @@ export class SqlStore {
     while (rows.length < limit) {
       const [row] = await this.db.all<{ value: string }>(
         `SELECT e.hostname AS value FROM ${table} CROSS JOIN rl_sessions s
-         WHERE ${v.sql} AND e.kind = 'pageview'${within.sql}${after === undefined ? "" : " AND e.hostname > ?"}
+         WHERE ${v.sql} AND e.kind = 'pageview'${within.sql}${after === undefined ? "" : ` AND e.hostname${this.textOrder} > ?`}
          ORDER BY e.hostname${this.textOrder} LIMIT 1`,
         [...v.params, ...within.params, ...(after === undefined ? [] : [after])],
       );

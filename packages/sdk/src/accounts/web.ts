@@ -89,8 +89,6 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
   // Password re-checks in Account: ten.
   const codeTries = new Throttle(5);
-  // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-  const decoyTries = new Throttle(5);
   const confirmTries = new Throttle(5);
   const rechecks = new Throttle(10);
   // When each account was last sent a sign-in link, at most one a minute.
@@ -275,23 +273,21 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
           const known = await accounts.byEmail(account);
           const trusted = Boolean(known && (await accounts.trustsDevice(readCookie(request, DEVICE_COOKIE), known)));
           const over = !trusted && !(await perAccount.take(account, now()));
-          // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-          // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-          // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-          if (over && !known?.twoFactor) {
+          // Past the account's limit, a right password and a wrong one get the same answer, and so does every
+          // account, with two-factor on or not, and an email with no account, so guessing from many addresses
+          // learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+          // leads to the code step when two-factor is on.
+          if (over) {
             if (!(await rl.mailSettings()) || !(await options.home?.())) return tooMany();
             const user = await accounts.signIn(email, password);
             if (user) void sendLink(user, next).catch((error) => console.error("Runlight: could not send a sign-in link", error));
             return html(login({ error: "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email }), 429);
           }
           const user = await accounts.signIn(email, password);
-          if (!user) {
-            if (over && known) return html(codePage(base, { pending: await accounts.decoyFor(known, now()), next }));
-            return html(login({ error: "That email and password do not match an account.", email }), 401);
-          }
+          if (!user) return html(login({ error: "That email and password do not match an account.", email }), 401);
           await perAddress.clear(pair);
           if (ip) await perIp.forgive(ip);
-          if (!over && !trusted) await perAccount.forgive(account);
+          if (!trusted) await perAccount.forgive(account);
           // With two-factor on, the password only earns the second step.
           if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }));
           return signedInTo(request, user, next);
@@ -315,12 +311,11 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     if (path === "/login/code" && method === "POST") {
       const form = new URLSearchParams(await request.text());
       const next = safeNext(form.get("next"));
-      const pending = await accounts.fromPending(form.get("pending") ?? "", now());
-      if (!pending) return redirect(`${base}/login?next=${encodeURIComponent(next)}`);
-      const { user, real } = pending;
+      const user = await accounts.fromPending(form.get("pending") ?? "", now());
+      if (!user) return redirect(`${base}/login?next=${encodeURIComponent(next)}`);
       // Counted before the check, so a burst cannot get past five.
-      if (!(await (real ? codeTries : decoyTries).take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "Too many tries. Wait fifteen minutes and try again." }), 429);
-      if (!real || !(await accounts.checkSecondFactor(user.id, form.get("code") ?? "", now()))) {
+      if (!(await codeTries.take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "Too many tries. Wait fifteen minutes and try again." }), 429);
+      if (!(await accounts.checkSecondFactor(user.id, form.get("code") ?? "", now()))) {
         return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "That code is not right. Check the time on your phone, or use a recovery code." }), 401);
       }
       await codeTries.clear(user.id);

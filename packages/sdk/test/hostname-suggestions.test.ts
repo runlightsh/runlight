@@ -27,3 +27,16 @@ for (const kind of STORES) {
     assert.equal(denied.status, 401);
   });
 }
+
+for (const kind of STORES) {
+  test(`${kind}: hostname suggestions step through hostnames in the order they are sorted in`, async () => {
+    // A locale's own order puts blog-staging after blog. where byte order puts it before, so suggestions taken
+    // one after another in byte order must compare in byte order too, or one is skipped (Postgres on Linux).
+    const t = setup(kind, { sites: [{ id: "a", hostnames: ["blog.example.com", "blog-staging.example.com", "shop.example.com"] }] });
+    await t.send({ s: "a", k: "pageview", u: "https://blog.example.com/", i: "a" }, { ip: "203.0.113.2" });
+    await t.send({ s: "a", k: "pageview", u: "https://blog-staging.example.com/", i: "b" }, { ip: "203.0.113.3" });
+    await t.send({ s: "a", k: "pageview", u: "https://shop.example.com/", i: "c" }, { ip: "203.0.113.4" });
+    const rows = (await t.get("/api/breakdown?site=a&period=today&dimension=hostname&suggestions=1")).rows;
+    assert.deepEqual(rows.map((r: { value: string }) => r.value), ["blog-staging.example.com", "blog.example.com", "shop.example.com"]);
+  });
+}

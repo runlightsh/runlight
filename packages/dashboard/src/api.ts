@@ -340,6 +340,11 @@ const liveReports = reportCache(1000);
 const assistantReports = reportCache(30_000, 1);
 const REPORT_PATHS = new Set(["stats", "series", "breakdown", "goals", "funnels", "rhythm"]);
 
+/** Forgets reports read before, so the next asks again: once a site has its first visit, the zeros read before it are out of date. */
+export function forgetReports(): void {
+  reports.clear();
+}
+
 function get<T>(path: string, params: URLSearchParams): Promise<T> {
   const load = () => fetchReport<T>(path, params);
   if (path === "realtime") return liveReports.read(`${base}/${path}?${params}:${JSON.stringify(readHeaders())}`, load);
@@ -399,7 +404,7 @@ export function viewParams(view: View): URLSearchParams {
 
 async function send<T>(method: string, path: string, body: unknown): Promise<T> {
   reports.clear();
-  if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+  if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   try {
     const response = await fetch(`${base}/api/${path}`, {
       method,
@@ -411,19 +416,19 @@ async function send<T>(method: string, path: string, body: unknown): Promise<T> 
     return await response.json() as T;
   } finally {
     reports.clear();
-    if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+    if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   }
 }
 
 const del = async (path: string) => {
   reports.clear();
-  if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+  if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   try {
     const response = await fetch(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin" });
     if (!response.ok) throw await failure(response);
   } finally {
     reports.clear();
-    if (path === "assistant" || path.startsWith("account")) assistantReports.clear();
+    if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   }
 };
 

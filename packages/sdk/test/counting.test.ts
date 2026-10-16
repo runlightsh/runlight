@@ -217,3 +217,22 @@ for (const kind of STORES) {
     assert.deepEqual((await t.get("/api/stats?period=7d&compare=off")).stats, before);
   });
 }
+
+for (const kind of STORES) {
+  test(`${kind}: two visits opened for one visitor at once, by two processes, settle on one`, async () => {
+    const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
+    await t.rl.init();
+    const row = (id: string) => ({
+      id, site: "default", visitor: "v1", startedAt: t.now, hostname: "example.com", referrerHost: "", referrerPath: "", source: "", channel: "Direct",
+      utmSource: "", utmMedium: "", utmCampaign: "", utmTerm: "", utmContent: "", country: "", region: "", city: "",
+      browser: "", browserVersion: "", os: "", osVersion: "", device: "", screen: "", language: "",
+    });
+    await t.rl.store.insertSession(row("bbbb"));
+    await t.rl.store.insertSession(row("aaaa"));
+    // Each process asks after opening its own; both settle on the same one, and the other is gone.
+    const one = await t.rl.store.settleOpenSession("default", ["v1"], t.now - 60_000, { id: "bbbb", visitor: "v1" });
+    const other = await t.rl.store.settleOpenSession("default", ["v1"], t.now - 60_000, { id: "aaaa", visitor: "v1" });
+    assert.deepEqual([one.id, other.id], ["aaaa", "aaaa"]);
+    assert.deepEqual((await t.rl.store.db.all<{ id: string }>(`SELECT id FROM rl_sessions`)).map((r) => r.id), ["aaaa"]);
+  });
+}

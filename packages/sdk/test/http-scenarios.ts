@@ -1248,7 +1248,7 @@ const ACCOUNTS: Scenario[] = [
     ],
   },
   {
-    name: "accounts: a decoy code step has tries of its own",
+    name: "accounts: past an account's limit, every account answers alike",
     site: { hostnames: ["example.com"], timezone: "UTC" },
     start: Date.UTC(2026, 9, 6, 12, 0),
     token: "conformance",
@@ -1258,12 +1258,15 @@ const ACCOUNTS: Scenario[] = [
       { ...post("/api/account/2fa/start", { password: OWNER.password }, { "content-type": "application/json" }), capture: { totp: "secret" } },
       post("/api/account/2fa/confirm", { code: "{{totp:totp}}" }, { "content-type": "application/json" }),
       { method: "GET", path: "/logout" },
-      // Fifty wrong passwords from fifty addresses hold the account up; the next wrong one gets a decoy code step.
+      // Fifty wrong passwords from fifty addresses hold an account up, and an email with no account the same way.
       ...Array.from({ length: 50 }, (_, i) => ({ ...signIn(OWNER.email, "wrong password", {}, "guesser"), headers: { "x-forwarded-for": `203.0.113.${i}` } })),
-      { ...signIn(OWNER.email, "wrong password", {}, "guesser"), headers: { "x-forwarded-for": "203.0.113.200" }, capture: { decoy: 'text~name="pending" value="([^"]+)"' } },
-      ...Array.from({ length: 6 }, () => ({ method: "POST", path: "/login/code", jar: "guesser", form: { pending: "{{decoy}}", code: "{{totp:totp}}", next: "/runlight/" } })),
-      // The owner's right password and code still get in.
-      later(30_000, { ...signIn(OWNER.email, OWNER.password, {}, "owner"), headers: { "x-forwarded-for": "192.0.2.77" }, capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
+      ...Array.from({ length: 50 }, (_, i) => ({ ...signIn("nobody@example.com", "wrong password", {}, "guesser"), headers: { "x-forwarded-for": `203.0.114.${i}` } })),
+      // Then the account with two-factor and the email with none answer alike, so neither says which is which.
+      { ...signIn(OWNER.email, "wrong password", {}, "guesser"), headers: { "x-forwarded-for": "203.0.113.200" }, look: ["Too many tries"] },
+      { ...signIn("nobody@example.com", "wrong password", {}, "guesser"), headers: { "x-forwarded-for": "203.0.114.200" }, look: ["Too many tries"] },
+      // With no mail service to send a sign-in link, the owner's right password waits too, then gets in.
+      { ...signIn(OWNER.email, OWNER.password, {}, "owner"), headers: { "x-forwarded-for": "192.0.2.77" }, look: ["Too many tries"] },
+      later(16 * 60_000, { ...signIn(OWNER.email, OWNER.password, {}, "owner"), headers: { "x-forwarded-for": "192.0.2.77" }, capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
       { method: "POST", path: "/login/code", jar: "owner", form: { pending: "{{pending}}", code: "{{totp:totp}}", next: "/runlight/" } },
       { method: "GET", path: "/api/account", jar: "owner" },
       // One address trying thirty made-up emails waits, whichever email comes next.

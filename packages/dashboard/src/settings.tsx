@@ -171,7 +171,8 @@ function General({ site, admin, requirePassword, onSaved, onLanguage, onDeleted 
   const [error, setError] = useState("");
   const [theme, setThemeChoice] = useState<ThemeChoice>(themeChoice());
   const zones = timezones();
-  const hostsChanged = install.managed && hostnames.split(/[\s,]+/).filter(Boolean).join(",") !== site.hostnames.join(",");
+  // Where a site lives is for an admin to change; an account kept to the site may rename it only.
+  const hostsChanged = install.managed && admin && hostnames.split(/[\s,]+/).filter(Boolean).join(",") !== site.hostnames.join(",");
   const changed = name.trim() !== site.name || timezone !== site.timezone || hostsChanged;
 
   const save = (e: Event) => {
@@ -197,7 +198,7 @@ function General({ site, admin, requirePassword, onSaved, onLanguage, onDeleted 
         <Field label={t("settings.siteName")}>
           <input class="value" type="text" maxLength={80} value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
         </Field>
-        {install.managed && !site.remote ? (
+        {install.managed && !site.remote && admin ? (
           <Field label={t("sites.domains")} hint={t("sites.domainsHint")}>
             <input class="value" type="text" value={hostnames} onInput={(e) => setHostnames((e.target as HTMLInputElement).value)} />
           </Field>
