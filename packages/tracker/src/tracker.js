@@ -44,12 +44,11 @@
 
   // ?runlight=pick with a ticket, opened from the dashboard, loads the element picker and counts nothing. The
   // dashboard leaves this tab no handle on itself, so the ticket, which the install checks, is what tells.
-  if (/[?&]runlight=pick\b/.test(location.search) && /[?&]runlight_ticket=/.test(location.search)) {
+  var pick = /[?&]runlight=pick\b/.test(location.search) && /[?&]runlight_ticket=/.test(location.search);
+  if (pick) {
     var picker = d.createElement("script");
     picker.src = script.src.replace(/s\.js(\?.*)?$/, "pick.js") + location.search;
     d.head.appendChild(picker);
-    w.runlight = function () {};
-    return;
   }
 
   // ?runlight=ignore stops counting this browser on this site;
@@ -60,13 +59,12 @@
     if (flag) flag[1] === "ignore" ? localStorage.setItem("runlight_ignore", "1") : localStorage.removeItem("runlight_ignore");
     ignored = localStorage.getItem("runlight_ignore") === "1";
   } catch (e) {}
-  if (n.webdriver || ignored || (attr("dnt") !== null && (n.doNotTrack === "1" || w.doNotTrack === "1"))) {
-    w.runlight = function () {};
-    return;
-  }
+  // Standing down sends nothing, but the script still sets up, so every call a site makes, runlight.pageview()
+  // included, still works.
+  var off = pick || n.webdriver || ignored || (attr("dnt") !== null && (n.doNotTrack === "1" || w.doNotTrack === "1"));
 
   var send = function (kind, extra) {
-    if (skip) return;
+    if (skip || off) return;
     var body = { k: kind, u: pageUrl };
     if (site) body.s = site;
     for (var key in extra) body[key] = extra[key];
