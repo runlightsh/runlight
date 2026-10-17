@@ -5,6 +5,7 @@ import { TRACKER } from "../src/generated/tracker.js";
 
 function browser(hook: string, beacon = true, configured = true, stand: { webdriver?: boolean; manual?: boolean; ignored?: boolean } = {}) {
   const sent: string[] = [];
+  const later: Array<() => void> = [];
   const listeners: Record<string, () => void> = {};
   let clock = 1000;
   const location = new URL("https://app.example.com/s/private-token?token=secret#private");
@@ -13,7 +14,8 @@ function browser(hook: string, beacon = true, configured = true, stand: { webdri
     Date: { now: () => clock },
     navigator: { language: "en", webdriver: stand.webdriver ?? false, sendBeacon: (_url: string, body: string) => { if (beacon) sent.push(body); return beacon; } },
     localStorage: { getItem: (key: string) => (key === "runlight_ignore" && stand.ignored ? "1" : null), setItem() {}, removeItem() {} },
-    history: { pushState() {}, replaceState() {} },
+    history: { pushState(_s: unknown, _t: string, to: string) { location.href = new URL(to, location.href).href; }, replaceState() {} },
+    setTimeout: (fn: () => void) => { later.push(fn); },
     document: {
       title: "Private note title", referrer: "https://app.example.com/notes/secret-id?key=secret",
       currentScript: { src: "https://analytics.example.com/s.js?site=example.com", getAttribute: (key: string) => key === "data-before-send" && configured ? "scrub" : key === "data-site" ? "example.com" : key === "data-manual" && stand.manual ? "" : null },
@@ -26,7 +28,7 @@ function browser(hook: string, beacon = true, configured = true, stand: { webdri
   };
   context.window = context;
   runInNewContext(hook + "\n" + TRACKER, context);
-  return { sent, context, leave: () => { clock += 2000; listeners.pagehide!(); } };
+  return { sent, context, leave: () => { clock += 2000; listeners.pagehide!(); }, wait: () => later.splice(0).forEach((fn) => fn()) };
 }
 
 test("the before-send hook scrubs pageviews, SPA referrers, events, and engagement on both transports", () => {
@@ -75,4 +77,16 @@ test("a tracker standing down still answers every call, runlight.pageview() incl
     b.leave();
     assert.equal(b.sent.length, 0, JSON.stringify(stand));
   }
+});
+
+test("a single page app's pageview carries the title the new page sets, not the one before", () => {
+  const b = browser("", true, false);
+  const doc = b.context.document as { title: string };
+  const history = b.context.history as { pushState: (s: unknown, t: string, to: string) => void };
+  // A router changes the address first, then renders the page, which sets its title.
+  history.pushState({}, "", "/pricing");
+  doc.title = "Pricing";
+  b.wait();
+  const last = JSON.parse(b.sent[b.sent.length - 1]!);
+  assert.deepEqual([last.k, new URL(last.u).pathname, last.t], ["pageview", "/pricing", "Pricing"]);
 });

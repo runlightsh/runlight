@@ -164,7 +164,8 @@
     var original = history[method];
     history[method] = function () {
       var result = original.apply(this, arguments);
-      pageview();
+      // The router sets the new page's title after the address, so the pageview waits a turn for it.
+      setTimeout(pageview);
       return result;
     };
   };
