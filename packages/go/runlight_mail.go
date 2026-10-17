@@ -300,8 +300,13 @@ func (rt *Routes) mailView(c *call) (*Response, error) {
 	if settings != nil {
 		source = settings.Value("source")
 	}
-	// A hub with a manage token learns which service sends the reports and from where, nothing more.
-	if c.managed != nil {
+	// A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+	// from where, nothing more: a webhook's address is often its own credential.
+	scoped, err := rt.sessionScope(c)
+	if err != nil {
+		return nil, err
+	}
+	if c.managed != nil || (scoped != nil && scoped.Site != "") {
 		fields = &js.Object{}
 		saved = []string{}
 	}

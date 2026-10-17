@@ -84,6 +84,7 @@ jobs:
       - run: node --import tsx scripts/go-assets.mts --check
       - run: node scripts/go-casing.mjs --check
       - run: node scripts/go-intl.mjs --check
+      - run: node scripts/go-idna.mjs --check
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}

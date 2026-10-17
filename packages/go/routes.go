@@ -1166,6 +1166,14 @@ func reportView(r ReportRow) *js.Object {
 
 var reportPath = regexp.MustCompile(`^/api/reports/([a-f0-9]{24})(/send)?$`)
 
+// textOrEmpty is a JSON value as `value ?? ""` writes it in a template.
+func textOrEmpty(v any) string {
+	if v == nil {
+		return ""
+	}
+	return js.String(v)
+}
+
 func (rt *Routes) mailAPI(c *call, path string, u *whatwg.URL) (*Response, error) {
 	if err := rt.r.Init(c.ctx); err != nil {
 		return nil, err
@@ -1219,6 +1227,16 @@ func (rt *Routes) mailRoutes(c *call, path string, u *whatwg.URL) (*Response, er
 		if settings == nil {
 			return Coded("Set up a mail service first", "mail_unset", 400, nil), nil
 		}
+		// One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+		// or use up a service's quota; one just set up can be tried at once.
+		tested := "test:" + textOrEmpty(settings.Value("source")) + ":" + textOrEmpty(settings.Value("service"))
+		rt.mu.Lock()
+		last, sent := rt.sampleSent[tested]
+		soon := sent && rt.r.now()-last < 60_000
+		rt.mu.Unlock()
+		if soon {
+			return Coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429, nil), nil
+		}
 		lang := "en"
 		if v, ok := body.Get("lang"); ok && v != nil {
 			lang = js.String(v)
@@ -1232,6 +1250,10 @@ func (rt *Routes) mailRoutes(c *call, path string, u *whatwg.URL) (*Response, er
 		if err := rt.r.SendMail(ctx, MailMessage{To: to, Subject: tr.T("email.test.subject", nil), Text: text, HTML: `<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">` + escapeHTML(text) + `</p>`}); err != nil {
 			return nil, err
 		}
+		// Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+		rt.mu.Lock()
+		rt.sampleSent[tested] = rt.r.now()
+		rt.mu.Unlock()
 		return jsonAnswer(js.NewObject("ok", true), 200), nil
 	}
 

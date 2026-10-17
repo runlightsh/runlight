@@ -112,7 +112,9 @@ type Model struct {
 }
 
 const (
-	maxRounds = 8
+	// maxHistoryChars is the most text of earlier turns a question carries, about six thousand tokens.
+	maxHistoryChars = 24_000
+	maxRounds       = 8
 	// DeadlineMS is how long a question may take: however many rounds it
 	// takes, the answer comes within this long or the assistant stops.
 	DeadlineMS = 120_000
@@ -431,6 +433,21 @@ func Chat(ctx context.Context, fetcher web.Fetcher, settings Settings, messages 
 			history[n-1].content += "\n\n" + content
 		} else {
 			history = append(history, turn{m.Role, content})
+		}
+	}
+	// The browser sends the history, so its whole length is held too, the oldest turns dropped first: each
+	// tool round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+	size := func() int {
+		n := 0
+		for _, h := range history {
+			n += js.Length16(h.content)
+		}
+		return n
+	}
+	for len(history) > 1 && size() > maxHistoryChars {
+		history = history[1:]
+		for len(history) > 1 && history[0].role != "user" {
+			history = history[1:]
 		}
 	}
 	convo := []any{}

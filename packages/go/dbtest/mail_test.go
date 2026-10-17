@@ -110,7 +110,8 @@ func TestTheAppsOwnMailerSendsUntilAServiceSavedInTheDashboardTakesItsPlace(t *t
 		t.Errorf("List-Unsubscribe-Post: %s", v)
 	}
 
-	// A failure comes back as a mail error naming the mailer.
+	// A failure comes back as a mail error naming the mailer. (A test through one mailer goes at most once a minute.)
+	now += 60_000
 	fail = "SMTP connect() failed"
 	failed := call("POST", "/api/mail/test", `{"to":"jon@example.com"}`)
 	if want := `{"error":"WordPress (WP Mail SMTP) could not send it: SMTP connect() failed","code":"mail_app_failed","params":{"via":"WordPress (WP Mail SMTP)","detail":"SMTP connect() failed"}}`; failed.Status != 400 || string(failed.Body) != want {
@@ -146,6 +147,10 @@ func TestTheAppsOwnMailerSendsUntilAServiceSavedInTheDashboardTakesItsPlace(t *t
 	}
 	if r := call("POST", "/api/mail/test", `{"to":"jon@example.com"}`); r.Status != 200 || len(sent) != 3 {
 		t.Errorf("the test email after: %d %s, %d sent", r.Status, r.Body, len(sent))
+	}
+	// Another test through it straight away waits a minute, so the button cannot flood an inbox.
+	if again := call("POST", "/api/mail/test", `{"to":"jon@example.com"}`); again.Status != 429 || bodyOf(again).Value("code") != "test_soon" || len(sent) != 3 {
+		t.Errorf("a second test at once: %d %s, %d sent", again.Status, again.Body, len(sent))
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"runlight.sh/go/internal/assistant"
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/mail"
 	"runlight.sh/go/internal/web"
@@ -160,8 +161,6 @@ var RetentionMonths = []int64{6, 12, 24, 36, 60}
 
 // SessionIdleMs is thirty minutes without a request, which ends a session.
 const SessionIdleMs = 30 * 60 * 1000
-
-func utcDay(ts int64) string { return js.ISOString(ts)[:10] }
 
 var siteID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
@@ -814,7 +813,7 @@ func (r *Runlight) installFetch(ctx context.Context, url string, init FetchInit)
 
 // sortSites keeps sites by name, as localeCompare orders them.
 func sortSites(sites []SiteRow) {
-	sort.SliceStable(sites, func(i, j int) bool { return localeCompare(sites[i].Name, sites[j].Name) < 0 })
+	sort.SliceStable(sites, func(i, j int) bool { return assistant.LocaleCompare(sites[i].Name, sites[j].Name) < 0 })
 }
 
 // addRemoteSite connects a site counted by another Runlight (an app's own
@@ -1427,12 +1426,14 @@ func (r *Runlight) RetentionCutoff(ctx context.Context, site string) (*int64, er
 	if err != nil || months == nil {
 		return nil, err
 	}
-	// setUTCMonth(getUTCMonth() - months), which may roll the day over into the next month.
+	// Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
 	now := r.now()
 	days := js.FloorDiv(now, 86_400_000)
 	rest := now - days*86_400_000
 	y, m, d := js.CivilFromDays(days)
-	return i64(js.DateUTC(y, m-1-*months, d, 0, 0, 0, 0) + rest), nil
+	month := m - 1 - *months
+	_, _, last := js.CivilFromDays(js.FloorDiv(js.DateUTC(y, month+1, 0, 0, 0, 0, 0), 86_400_000))
+	return i64(js.DateUTC(y, month, min(d, last), 0, 0, 0, 0) + rest), nil
 }
 
 // applyRetention deletes visits older than each site's retention allows. Cheap when there is nothing to delete.
@@ -1641,11 +1642,48 @@ func (r *Runlight) currentSalts(ctx context.Context, now int64, timezone string)
 	return s, nil
 }
 
-// dropOldSalts deletes salts whose day has ended everywhere. The earliest
-// timezone is a day behind UTC and still needs its yesterday, so a salt goes
-// two UTC days after its date.
+// dropOldSalts deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
+// site's timezone, and after midnight only while a visit that began that day there is still going, since it
+// carries on under the visitor it began with. So a salt lasts its day and the visits that run past it.
 func (r *Runlight) dropOldSalts(ctx context.Context, now int64) error {
-	return r.Store.DropSaltsBefore(ctx, utcDay(now-2*86_400_000))
+	var zones []string
+	sitesOf := map[string][]string{}
+	for _, site := range r.Sites() {
+		if _, seen := sitesOf[site.Timezone]; !seen {
+			zones = append(zones, site.Timezone)
+		}
+		sitesOf[site.Timezone] = append(sitesOf[site.Timezone], site.ID)
+	}
+	if len(zones) == 0 {
+		return nil
+	}
+	needed := []string{}
+	need := func(day string) {
+		if !slices.Contains(needed, day) {
+			needed = append(needed, day)
+		}
+	}
+	for _, timezone := range zones {
+		today := LocalDate(now, timezone)
+		need(today)
+		yesterday := AddDays(today, -1)
+		open, err := r.Store.VisitOpen(ctx, sitesOf[timezone], StartOf(yesterday, timezone, 0), StartOf(today, timezone, 0), now-SessionIdleMs)
+		if err != nil {
+			return err
+		}
+		if open {
+			need(yesterday)
+			continue
+		}
+		// Nor is it kept here: no visit is left for it to find.
+		r.mu.Lock()
+		if cached, ok := r.salts[timezone]; ok && cached.day == today {
+			cached.yesterday, cached.hasYest = "", false
+			r.salts[timezone] = cached
+		}
+		r.mu.Unlock()
+	}
+	return r.Store.DropSaltsExcept(ctx, needed)
 }
 
 // forwardedHost is the host a proxy says the request was for, read only
@@ -1806,7 +1844,11 @@ func (r *Runlight) sessionFor(ctx context.Context, site SiteRow, request *Reques
 		Browser: parsed.Browser, BrowserVersion: parsed.BrowserVersion, OS: parsed.OS, OSVersion: parsed.OSVersion, Device: parsed.Device,
 		Screen: screen, Language: language,
 	})
-	return session, err
+	if err != nil {
+		return session, err
+	}
+	// Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+	return r.Store.SettleOpenSession(ctx, site.ID, candidates, now-SessionIdleMs, *session)
 }
 
 // linkDomainSet is the link domains, read at most every 30 seconds.

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"runlight.sh/go/internal/js"
 )
@@ -480,6 +481,18 @@ func (s *Store) BuildRollupDay(ctx context.Context, site, day string, start, end
 	window := []any{site, start, end + EventTailMs, start, end}
 	return s.Transaction(ctx, func(store *Store) error {
 		db := store.db
+		// MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two processes
+		// building one day could each add its rows. There the day is marked first: the second waits on that
+		// mark until the first commits, then fails, and the day counts as built elsewhere. Elsewhere the rows'
+		// own key refuses a second set, and a database without transactions (D1) must not mark a day first.
+		if dialect == "mysql" {
+			if err := db.Run(ctx, `DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, site, day); err != nil {
+				return err
+			}
+			if err := db.Run(ctx, `INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)`, site, day, start, end); err != nil {
+				return err
+			}
+		}
 		if err := db.Run(ctx, `DELETE FROM rl_rollups WHERE site = ? AND day = ?`, site, day); err != nil {
 			return err
 		}
@@ -509,6 +522,9 @@ func (s *Store) BuildRollupDay(ctx context.Context, site, day string, start, end
          SELECT ?, ?, 'event', e.name, COUNT(DISTINCT e.visitor), COUNT(*) `+ofDay("event")+` GROUP BY e.name`,
 			append([]any{site, day}, window...)...); err != nil {
 			return err
+		}
+		if dialect == "mysql" {
+			return nil
 		}
 		if err := db.Run(ctx, `DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, site, day); err != nil {
 			return err
@@ -936,12 +952,53 @@ func (s *Store) SaltIfExists(ctx context.Context, day string) (string, bool, err
 	return str(rows[0]["salt"]), true, nil
 }
 
-// DropSaltsBefore deletes every salt older than day, so old hashes can never be recomputed.
-func (s *Store) DropSaltsBefore(ctx context.Context, day string) error {
-	return s.db.Run(ctx, `DELETE FROM rl_salts WHERE day < ?`, day)
+// DropSaltsExcept deletes every salt but those of these days, so the hashes made with them can never be made again.
+func (s *Store) DropSaltsExcept(ctx context.Context, days []string) error {
+	params := make([]any, len(days))
+	for i, d := range days {
+		params[i] = d
+	}
+	return s.db.Run(ctx, `DELETE FROM rl_salts WHERE day NOT IN (`+placeholders(len(days))+`)`, params...)
+}
+
+// VisitOpen is whether a visit to one of these sites that started in a stretch of time was still going at since.
+func (s *Store) VisitOpen(ctx context.Context, sites []string, from, to, since int64) (bool, error) {
+	// As many sites a statement as keep it under D1's 100.
+	size := max(1, maxParams-3)
+	for i := 0; i < len(sites); i += size {
+		piece := sites[i:min(i+size, len(sites))]
+		params := []any{}
+		for _, site := range piece {
+			params = append(params, site)
+		}
+		params = append(params, from, to, since)
+		rows, err := s.db.All(ctx, `SELECT 1 AS open FROM rl_sessions WHERE site IN (`+placeholders(len(piece))+`) AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1`, params...)
+		if err != nil {
+			return false, err
+		}
+		if len(rows) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Ingest
+
+// fitColumn is text cut to at most max characters, as a VARCHAR(max) holds it, never through the middle of one.
+func fitColumn(text string, max int) string {
+	if utf8.RuneCountInString(text) <= max {
+		return text
+	}
+	n := 0
+	for i := range text {
+		if n == max {
+			return text[:i]
+		}
+		n++
+	}
+	return text
+}
 
 // OpenSession is the visitor's open session: any of their hashes, active since since.
 func (s *Store) OpenSession(ctx context.Context, site string, visitors []string, since int64) (*OpenSession, error) {
@@ -967,10 +1024,39 @@ func (s *Store) InsertSession(ctx context.Context, row SessionRow) error {
         source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, country, region, city,
         browser, browser_version, os, os_version, device, screen, language)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.ID, row.Site, row.Visitor, row.StartedAt, row.StartedAt, row.Hostname, row.ReferrerHost, row.ReferrerPath,
-		row.Source, row.Channel, row.UtmSource, row.UtmMedium, row.UtmCampaign, row.UtmTerm, row.UtmContent,
-		row.Country, row.Region, row.City, row.Browser, row.BrowserVersion, row.OS, row.OSVersion, row.Device,
-		row.Screen, row.Language)
+		// Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps the
+		// same, and no header, however long, can make a row Postgres's indexes refuse.
+		row.ID, row.Site, row.Visitor, row.StartedAt, row.StartedAt, fitColumn(row.Hostname, 255), fitColumn(row.ReferrerHost, 255), fitColumn(row.ReferrerPath, 500),
+		fitColumn(row.Source, 200), fitColumn(row.Channel, 100), fitColumn(row.UtmSource, 200), fitColumn(row.UtmMedium, 200), fitColumn(row.UtmCampaign, 200), fitColumn(row.UtmTerm, 200), fitColumn(row.UtmContent, 200),
+		fitColumn(row.Country, 16), fitColumn(row.Region, 100), fitColumn(row.City, 100), fitColumn(row.Browser, 100), fitColumn(row.BrowserVersion, 100), fitColumn(row.OS, 100), fitColumn(row.OSVersion, 100), fitColumn(row.Device, 50),
+		fitColumn(row.Screen, 50), fitColumn(row.Language, 50))
+}
+
+// SettleOpenSession is, after opening a visit, the visitor's earliest visit still going, which is this one
+// unless another process opened one for the same visitor at the same moment. Then both settle on the earliest,
+// and the one that is not drops its own, before anything is counted into it.
+func (s *Store) SettleOpenSession(ctx context.Context, site string, visitors []string, since int64, opened OpenSession) (*OpenSession, error) {
+	params := []any{site}
+	for _, v := range visitors {
+		params = append(params, v)
+	}
+	params = append(params, since)
+	// One already counting a hit first: the other process went on with it.
+	rows, err := s.db.All(ctx, `SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN (`+placeholders(len(visitors))+`) AND last_at >= ?
+       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1`, params...)
+	if err != nil {
+		return nil, err
+	}
+	first := opened
+	if len(rows) > 0 {
+		first = OpenSession{ID: str(rows[0]["id"]), Visitor: str(rows[0]["visitor"])}
+	}
+	if first.ID != opened.ID {
+		if err := s.db.Run(ctx, `DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0`, opened.ID); err != nil {
+			return nil, err
+		}
+	}
+	return &first, nil
 }
 
 // TouchSession counts a row into its session. An event with reopen false,
@@ -982,7 +1068,7 @@ func (s *Store) TouchSession(ctx context.Context, id string, ts int64, kind, pat
 		return s.db.Run(ctx, `UPDATE rl_sessions SET last_at = ? WHERE id = ?`, ts, id)
 	case kind == "pageview":
 		return s.db.Run(ctx, `UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,
-           entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?`, ts, path, path, id)
+           entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?`, ts, fitColumn(path, 1000), fitColumn(path, 1000), id)
 	case reopen:
 		return s.db.Run(ctx, `UPDATE rl_sessions SET events = events + 1, last_at = ? WHERE id = ?`, ts, id)
 	}
@@ -1029,8 +1115,8 @@ func (s *Store) InsertEvent(ctx context.Context, row EventRow) error {
 	}
 	return s.db.Run(ctx, `INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname, title, name, props, engaged_ms, scroll, link)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.Site, row.Ts, row.Kind, row.Visitor, row.Session, row.Pageview, row.Path, row.Hostname, row.Title,
-		row.Name, props, row.EngagedMs, scroll, row.Link)
+		row.Site, row.Ts, row.Kind, row.Visitor, row.Session, row.Pageview, fitColumn(row.Path, 1000), fitColumn(row.Hostname, 255), fitColumn(row.Title, 500),
+		fitColumn(row.Name, 255), props, row.EngagedMs, scroll, row.Link)
 }
 
 // Links
@@ -1515,18 +1601,44 @@ func (s *Store) GoalByID(ctx context.Context, id string) (*GoalRow, error) {
 
 // SaveGoal records a goal, new or changed (before is what it was).
 func (s *Store) SaveGoal(ctx context.Context, g GoalRow, before *GoalRow) error {
+	write := func(db Db) error {
+		return db.Run(ctx, upsert(db.Dialect(), "rl_goals",
+			[]string{"id", "site", "name", "kind", `"match"`, "click_by", "value_mode", "value", "value_prop", "currency", "created_at"},
+			[]string{"id"},
+			[]string{"name", "kind", `"match"`, "click_by", "value_mode", "value", "value_prop", "currency"}),
+			g.ID, g.Site, g.Name, g.Kind, g.Match, g.ClickBy, g.ValueMode, g.Value, g.ValueProp, g.Currency, g.CreatedAt)
+	}
 	// A click goal is counted by its name, which the tracker sends as the event
 	// name. Renaming one renames its past clicks too, so its history stays.
-	if before != nil && before.Kind == "click" && g.Kind == "click" && before.Name != g.Name {
-		if err := s.db.Run(ctx, `UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?`, g.Name, g.Site, before.Name); err != nil {
+	if before == nil || before.Kind != "click" || g.Kind != "click" || before.Name == g.Name {
+		return write(s.db)
+	}
+	return s.Transaction(ctx, func(store *Store) error {
+		db := store.db
+		if err := db.Run(ctx, `UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?`, g.Name, g.Site, before.Name); err != nil {
 			return err
 		}
-	}
-	return s.db.Run(ctx, upsert(s.dialect(), "rl_goals",
-		[]string{"id", "site", "name", "kind", `"match"`, "click_by", "value_mode", "value", "value_prop", "currency", "created_at"},
-		[]string{"id"},
-		[]string{"name", "kind", `"match"`, "click_by", "value_mode", "value", "value_prop", "currency"}),
-		g.ID, g.Site, g.Name, g.Kind, g.Match, g.ClickBy, g.ValueMode, g.Value, g.ValueProp, g.Currency, g.CreatedAt)
+		// The daily rollups count events by name too, and goals read them, so they take the new name as well.
+		// A day that already has events under the new name counts both together now, so it is built again.
+		both, err := db.All(ctx, `SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?
+         AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)`, g.Site, before.Name, g.Site, g.Name)
+		if err != nil {
+			return err
+		}
+		for _, row := range both {
+			day := str(row["day"])
+			if err := db.Run(ctx, `DELETE FROM rl_rollup_days WHERE site = ? AND day = ?`, g.Site, day); err != nil {
+				return err
+			}
+			if err := db.Run(ctx, `DELETE FROM rl_rollups WHERE site = ? AND day = ?`, g.Site, day); err != nil {
+				return err
+			}
+		}
+		if err := db.Run(ctx, `UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?`, g.Name, g.Site, before.Name); err != nil {
+			return err
+		}
+		return write(db)
+	})
 }
 
 // DeleteGoal deletes a goal.
@@ -2252,6 +2364,40 @@ func (s *Store) Series(ctx context.Context, site string, filters []Filter, bucke
 		out[i] = p
 	}
 	return out, nil
+}
+
+// HostnameSuggestions seeks one matching pageview's hostname at a time, in byte order, skipping the rest of
+// a hostname's rows before the next seek, so it never counts totals.
+func (s *Store) HostnameSuggestions(ctx context.Context, query Query, limit int) ([]HostnameSuggestion, error) {
+	v := visitRows(query.Filters, query.Site, query.From, query.To, s.dialect())
+	within := rowScope(query.Filters, []string{"page", "hostname"}, s.dialect())
+	table := "rl_events e"
+	if s.dialect() == "sqlite" {
+		table = "rl_events e INDEXED BY rl_events_hostname_suggest"
+	}
+	rows := []HostnameSuggestion{}
+	var after *string
+	for len(rows) < limit {
+		seek := ""
+		params := append(append([]any{}, v.params...), within.params...)
+		if after != nil {
+			seek = " AND e.hostname" + s.textOrder() + " > ?"
+			params = append(params, *after)
+		}
+		found, err := s.db.All(ctx, `SELECT e.hostname AS value FROM `+table+` CROSS JOIN rl_sessions s
+         WHERE `+v.sql+` AND e.kind = 'pageview'`+within.sql+seek+`
+         ORDER BY e.hostname`+s.textOrder()+` LIMIT 1`, params...)
+		if err != nil {
+			return nil, err
+		}
+		if len(found) == 0 {
+			break
+		}
+		value := str(found[0]["value"])
+		after = &value
+		rows = append(rows, HostnameSuggestion{Value: value})
+	}
+	return rows, nil
 }
 
 // Breakdown is a dimension's values for a range, most visited first.

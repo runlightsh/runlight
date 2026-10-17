@@ -97,7 +97,7 @@ func schema(dialect string) []string {
 		}
 		return b
 	}
-	return []string{
+	statements := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS rl_meta ("key" %s PRIMARY KEY, value %s NOT NULL)%s`, strCol(100), medium, table),
 		`CREATE TABLE IF NOT EXISTS rl_sites (
       id ` + site + ` PRIMARY KEY, name ` + text(200) + `, hostnames ` + long("[]") + `,
@@ -182,6 +182,11 @@ func schema(dialect string) []string {
       events BIGINT NOT NULL DEFAULT 0,
       ` + pick(my, "KEY rl_rollups_day (site, dim, day)", "PRIMARY KEY (site, dim, day, value)") + `)` + table,
 	}
+	if dialect == "sqlite" {
+		// Hostname suggestions seek one pageview per hostname through this, rather than reading every row of a range.
+		statements = append(statements, `CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'`)
+	}
+	return statements
 }
 
 // globPattern is a * pattern as SQLite GLOB, everything else taken literally ([ and ? are GLOB's own).

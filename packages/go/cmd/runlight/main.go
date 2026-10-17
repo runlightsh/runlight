@@ -4,6 +4,7 @@
 //	HOST              which address to listen on (0.0.0.0)
 //	DATA_DIR          where the SQLite file and the secret live (./runlight-data)
 //	DATABASE_URL      a postgres://, mysql://, or mariadb:// URL, to use that database instead of SQLite
+//	                  (a MySQL URL's ?tls= or ?ssl-mode= sets its TLS; a host other than this machine is offered it)
 //	RUNLIGHT_SECRET   signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
 //	RUNLIGHT_TOKEN    also accepted as a bearer token on the API
 //	RUNLIGHT_URL      the dashboard's public address, which can never become a link domain
@@ -136,7 +137,9 @@ func openStore(dataDir string) (*runlight.Store, runlight.Db, error) {
 	return runlight.NewStore(d), d, nil
 }
 
-// mysqlDSN is a mysql:// or mariadb:// URL as go-sql-driver/mysql's DSN.
+// mysqlDSN is a mysql:// or mariadb:// URL as go-sql-driver/mysql's DSN. The URL's ?tls= (true, false, skip-verify,
+// or preferred) or ?ssl-mode= (as MySQL's own clients name them) carries over; with neither, a host that is not
+// this machine is asked for TLS where it has it, so a password does not cross a network in the clear when it need not.
 func mysqlDSN(raw string) (string, error) {
 	u, err := url.Parse(strings.Replace(raw, "mariadb://", "mysql://", 1))
 	if err != nil {
@@ -147,7 +150,55 @@ func mysqlDSN(raw string) (string, error) {
 	if u.Port() == "" {
 		host = net.JoinHostPort(u.Hostname(), "3306")
 	}
-	return fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&loc=UTC", u.User.Username(), pass, host, strings.TrimPrefix(u.Path, "/")), nil
+	tls, err := mysqlTLS(u)
+	if err != nil {
+		return "", err
+	}
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&loc=UTC", u.User.Username(), pass, host, strings.TrimPrefix(u.Path, "/"))
+	if tls != "" {
+		dsn += "&tls=" + tls
+	}
+	return dsn, nil
+}
+
+// mysqlTLS is the driver's tls setting for a URL: "" for the driver's own (no TLS).
+func mysqlTLS(u *url.URL) (string, error) {
+	query := u.Query()
+	if given := query.Get("tls"); given != "" {
+		switch strings.ToLower(given) {
+		case "true", "false", "skip-verify", "preferred":
+			return strings.ToLower(given), nil
+		}
+		return "", fmt.Errorf("Runlight: tls=%s is not one MySQL's driver knows (true, false, skip-verify, or preferred)", given)
+	}
+	for _, name := range []string{"ssl-mode", "sslmode", "ssl_mode"} {
+		if given := query.Get(name); given != "" {
+			switch strings.ToUpper(given) {
+			case "DISABLED", "DISABLE":
+				return "false", nil
+			case "PREFERRED", "PREFER":
+				return "preferred", nil
+			case "REQUIRED", "REQUIRE":
+				return "skip-verify", nil
+			case "VERIFY_CA", "VERIFY_IDENTITY", "VERIFY-CA", "VERIFY-FULL":
+				return "true", nil
+			}
+			return "", fmt.Errorf("Runlight: %s=%s is not a mode MySQL knows (DISABLED, PREFERRED, REQUIRED, VERIFY_CA, or VERIFY_IDENTITY)", name, given)
+		}
+	}
+	if isLoopback(u.Hostname()) {
+		return "", nil
+	}
+	return "preferred", nil
+}
+
+// isLoopback is whether a host is this machine: localhost, or a loopback address.
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // secretFor is RUNLIGHT_SECRET, or one made on first run and kept beside the data, readable only by this user.
