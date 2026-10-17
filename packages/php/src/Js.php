@@ -188,7 +188,7 @@ final class Js
         if ($text === '') {
             return 0;
         }
-        if (preg_match('/^0([xob])([0-9a-f]+)$/i', $text, $m)) {
+        if (preg_match('/^0([xob])([0-9a-f]+)$/iD', $text, $m)) {
             $base = ['x' => 16, 'o' => 8, 'b' => 2][strtolower($m[1])];
             $digits = strtolower($m[2]);
             $valid = ['x' => '/^[0-9a-f]+$/', 'o' => '/^[0-7]+$/', 'b' => '/^[01]+$/'][strtolower($m[1])];
@@ -201,10 +201,10 @@ final class Js
             }
             return self::whole($n);
         }
-        if (preg_match('/^[+-]?Infinity$/', $text)) {
+        if (preg_match('/^[+-]?Infinity$/D', $text)) {
             return $text[0] === '-' ? -INF : INF;
         }
-        if (!preg_match('/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i', $text)) {
+        if (!preg_match('/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/iD', $text)) {
             return NAN;
         }
         return self::whole((float) $text);

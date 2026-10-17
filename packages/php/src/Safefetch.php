@@ -29,7 +29,7 @@ final class Safefetch
             return null;
         }
         foreach ($parts as $p) {
-            if (!preg_match('/^\d{1,3}$/', $p) || (int) $p > 255) {
+            if (!preg_match('/^\d{1,3}$/D', $p) || (int) $p > 255) {
                 return null;
             }
         }
@@ -77,9 +77,9 @@ final class Safefetch
      */
     private static function v6(string $text): ?array
     {
-        $address = strtolower(explode('%', (string) preg_replace('/^\[|\]$/', '', $text))[0]);
+        $address = strtolower(explode('%', (string) preg_replace('/^\[|\]$/D', '', $text))[0]);
         // A trailing IPv4 address becomes the last two groups.
-        if (preg_match('/(\d{1,3}(?:\.\d{1,3}){3})$/', $address, $tail)) {
+        if (preg_match('/(\d{1,3}(?:\.\d{1,3}){3})$/D', $address, $tail)) {
             $four = self::v4($tail[1]);
             if ($four === null) {
                 return null;
@@ -98,7 +98,7 @@ final class Safefetch
         }
         $groups = [...$head, ...array_fill(0, count($halves) === 2 ? $missing : 0, '0'), ...$rest];
         foreach ($groups as $g) {
-            if (!preg_match('/^[0-9a-f]{1,4}$/', $g)) {
+            if (!preg_match('/^[0-9a-f]{1,4}$/D', $g)) {
                 return null;
             }
         }
@@ -209,7 +209,7 @@ final class Safefetch
      */
     public static function lookup(string $name): array
     {
-        $bare = (string) preg_replace('/^\[|\]$/', '', $name);
+        $bare = (string) preg_replace('/^\[|\]$/D', '', $name);
         if (self::v4($bare) !== null || self::v6($bare) !== null) {
             return [$bare];
         }
@@ -301,7 +301,7 @@ final class Safefetch
             if ($url->protocol !== 'https:') {
                 throw new PrivateAddressError($url->href());
             }
-            $host = strtolower((string) preg_replace('/^\[|\]$/', '', $url->hostname));
+            $host = strtolower((string) preg_replace('/^\[|\]$/D', '', $url->hostname));
             $literal = self::v4($host) !== null || self::v6($host) !== null;
             if ($literal && !self::publicAddress($host)) {
                 throw new PrivateAddressError($host);

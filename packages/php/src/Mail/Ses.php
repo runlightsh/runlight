@@ -72,7 +72,7 @@ final class Ses
     public static function send(array $config, array $m, string $from, ?Fetcher $fetcher = null, ?int $now = null): void
     {
         $region = Transports::trim((string) $config['region']);
-        if (!preg_match('/^[a-z]{2}(-[a-z]+)+-\d$/', $region)) {
+        if (!preg_match('/^[a-z]{2}(-[a-z]+)+-\d$/D', $region)) {
             throw new MailError('That is not an AWS region, like us-east-1', 'mail_region', []);
         }
         $url = new Url("https://email.$region.amazonaws.com/v2/email/outbound-emails");

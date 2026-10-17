@@ -64,7 +64,7 @@ final class Settings {
 			return '';
 		}
 		// The script's own address works too.
-		$value = preg_replace( '#/s\.js$#', '', $value );
+		$value = preg_replace( '#/s\.js$#D', '', $value );
 		$url   = esc_url_raw( untrailingslashit( (string) $value ), array( 'https', 'http' ) );
 		return $url ? $url : '';
 	}

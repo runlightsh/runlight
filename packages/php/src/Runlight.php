@@ -16,6 +16,7 @@ use Runlight\Http\Url;
 use Runlight\Mail\MailError;
 use Runlight\Mail\Secret;
 use Runlight\Mail\Transports;
+use Runlight\Store\Sql;
 use Runlight\Store\SqlStore;
 
 /**
@@ -147,8 +148,6 @@ final class Runlight
     private bool $checking = false;
     /** When planner statistics were last gathered. */
     private int $optimizedAt = 0;
-    /** When statistics were last checked for staleness, which reports do at most hourly. */
-    private int $freshenedAt = 0;
     /** @var array{at: int, domains: array<string, true>}|null */
     private ?array $linkDomainCache = null;
     /** @var array<string, array{day: string, today: string, yesterday: ?string}> each timezone's salts for its current day, so a lookup is a map read until midnight there */
@@ -199,7 +198,7 @@ final class Runlight
         $this->fetcher = $options['fetcher'] ?? new CurlFetcher();
         $this->localInstalls = (bool) ($options['localInstalls'] ?? false);
         $this->links = new Links($this);
-        $this->linkPath = '/' . preg_replace('#^/+|/+$#', '', (string) ($options['linkPath'] ?? '/go'));
+        $this->linkPath = '/' . preg_replace('#^/+|/+$#D', '', (string) ($options['linkPath'] ?? '/go'));
         $mail = $options['mail'] ?? null;
         if (is_array($mail) && isset($mail['send']) && is_callable($mail['send'])) {
             if (!preg_match(self::EMAIL, Js::string($mail['from'] ?? ''))) {
@@ -649,7 +648,7 @@ final class Runlight
      */
     private function addRemoteSite(array $input): array
     {
-        $url = (string) preg_replace('#/+$#', '', Js::trim(Js::string($input['url'] ?? '')));
+        $url = (string) preg_replace('#/+$#D', '', Js::trim(Js::string($input['url'] ?? '')));
         if (!Safefetch::installAddress($url, $this->localInstalls)) {
             throw new SettingsError("Enter the install's address, like https://example.com/runlight", 'connect_url');
         }
@@ -1090,7 +1089,7 @@ final class Runlight
         if ($provider === null) {
             throw new SettingsError('Choose a provider', 'assistant_provider');
         }
-        $baseUrl = (string) preg_replace('#/+$#', '', Js::trim(Js::string($input['baseUrl'] ?? '')));
+        $baseUrl = (string) preg_replace('#/+$#D', '', Js::trim(Js::string($input['baseUrl'] ?? '')));
         if ($baseUrl !== '') {
             $parsed = Url::parse($baseUrl);
             if ($parsed === null || ($parsed->protocol !== 'https:' && $parsed->protocol !== 'http:')) {
@@ -1128,11 +1127,15 @@ final class Runlight
         if ($months === null) {
             return null;
         }
-        // setUTCMonth: the same day and time that many months back, a day past the month's end running on.
+        // Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
         $now = $this->now();
         $ms = (($now % 1000) + 1000) % 1000;
         $at = (new \DateTimeImmutable('@' . intdiv($now - $ms, 1000)))->setTimezone(new \DateTimeZone('UTC'));
-        $back = $at->setDate((int) $at->format('Y'), (int) $at->format('n') - $months, (int) $at->format('j'));
+        $year = (int) $at->format('Y');
+        $month = (int) $at->format('n') - $months;
+        $first = $at->setDate($year, $month, 1);
+        $day = min((int) $at->format('j'), (int) $first->format('t'));
+        $back = $first->setDate((int) $first->format('Y'), (int) $first->format('n'), $day);
         return (int) $back->format('U') * 1000 + $ms;
     }
 
@@ -1312,13 +1315,33 @@ final class Runlight
     }
 
     /**
-     * Deletes salts whose day has ended everywhere. The earliest timezone is a
-     * day behind UTC and still needs its yesterday, so a salt goes two UTC days
-     * after its date.
+     * Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
+     * site's timezone, and after midnight only while a visit that began that day there is still going, since
+     * it carries on under the visitor it began with. So a salt lasts its day and the visits that run past it.
      */
     private function dropOldSalts(int $now): void
     {
-        $this->store->dropSaltsBefore(gmdate('Y-m-d', intdiv($now - 2 * 86_400_000, 1000)));
+        $zones = [];
+        foreach ($this->sites() as $site) {
+            $zones[$site['timezone']][] = $site['id'];
+        }
+        if (!$zones) {
+            return;
+        }
+        $needed = [];
+        foreach ($zones as $timezone => $sites) {
+            $timezone = (string) $timezone;
+            $today = Time::localDate($now, $timezone);
+            $needed[$today] = true;
+            $yesterday = Time::addDays($today, -1);
+            if ($this->store->visitOpen($sites, Time::startOf($yesterday, $timezone), Time::startOf($today, $timezone), $now - self::SESSION_IDLE_MS)) {
+                $needed[$yesterday] = true;
+            } elseif (($this->salts[$timezone]['day'] ?? null) === $today) {
+                // Nor is it kept here: no visit is left for it to find.
+                $this->salts[$timezone]['yesterday'] = null;
+            }
+        }
+        $this->store->dropSaltsExcept(array_map('strval', array_keys($needed)));
     }
 
     /** The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is. */
@@ -1488,7 +1511,8 @@ final class Runlight
             'screen' => $client['screen'],
             'language' => $client['language'],
         ]);
-        return $session;
+        // Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+        return $this->store->settleOpenSession($site['id'], $candidates, $now - self::SESSION_IDLE_MS, $session);
     }
 
     /**
@@ -1747,10 +1771,23 @@ final class Runlight
      */
     public function freshenStatistics(): void
     {
-        if ($this->now() - $this->freshenedAt < 3_600_000) {
+        // Only SQLite needs them. A PHP process serves one request, so when they were last checked is kept in
+        // the database, where every process sees it.
+        $db = $this->store->db;
+        if ($db->dialect() !== 'sqlite') {
             return;
         }
-        $this->freshenedAt = $this->now();
+        $now = $this->now();
+        try {
+            $seen = $db->all('SELECT value FROM rl_meta WHERE "key" = \'statistics_checked\'')[0] ?? null;
+            if ($seen !== null && is_numeric($seen['value']) && $now - (float) $seen['value'] < 3_600_000) {
+                return;
+            }
+            $db->run(Sql::upsert($db->dialect(), 'rl_meta', ['"key"', 'value'], ['"key"'], ['value']), ['statistics_checked', (string) $now]);
+        } catch (\Throwable) {
+            // Statistics only help; a failure here never stops a report.
+            return;
+        }
         $this->store->optimize(true);
     }
 

@@ -53,7 +53,9 @@ final class Request
     public static function fromServer(array $server, $input = null): self
     {
         $https = ($server['HTTPS'] ?? '') !== '' && strtolower((string) $server['HTTPS']) !== 'off';
-        $scheme = $https ? 'https' : 'http';
+        // A proxy that ends TLS says so in the first of x-forwarded-proto, as the Node adapter reads it.
+        $forwarded = strtolower(trim(explode(',', (string) ($server['HTTP_X_FORWARDED_PROTO'] ?? ''), 2)[0], " \t"));
+        $scheme = ($forwarded !== '' ? $forwarded === 'https' : $https) ? 'https' : 'http';
         $host = (string) ($server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? 'localhost');
         $uri = (string) ($server['REQUEST_URI'] ?? '/');
         $headers = [];

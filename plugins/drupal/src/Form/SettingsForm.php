@@ -73,7 +73,7 @@ final class SettingsForm extends ConfigFormBase {
    */
   public static function tidy(string $value): string {
     $value = trim($value);
-    $value = (string) preg_replace('#/s\.js$#', '', $value);
+    $value = (string) preg_replace('#/s\.js$#D', '', $value);
     return rtrim($value, '/');
   }
 

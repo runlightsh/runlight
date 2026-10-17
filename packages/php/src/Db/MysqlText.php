@@ -16,12 +16,14 @@ final class MysqlText
 {
     /**
      * `$sql` as MySQL reads it. With `$params`, each `?` outside quotes becomes its value through `$escape`
-     * (literal() by default), as mysql2 fills them in; without, the placeholders stay for the driver.
+     * (literal() by default), as mysql2 fills them in; without, the placeholders stay for the driver. A backslash
+     * inside 'text' is doubled unless `$backslashEscapes` is false, for a session in NO_BACKSLASH_ESCAPES mode,
+     * where a backslash is only itself.
      *
      * @param list<mixed>|null $params
      * @param (callable(mixed): string)|null $escape
      */
-    public static function of(string $sql, ?array $params = null, ?callable $escape = null): string
+    public static function of(string $sql, ?array $params = null, ?callable $escape = null, bool $backslashEscapes = true): string
     {
         $out = '';
         $n = 0;
@@ -33,7 +35,7 @@ final class MysqlText
                 if ($ch === $quote) {
                     $quote = null;
                     $out .= $ch === '"' ? '`' : $ch;
-                } elseif ($quote === "'" && $ch === '\\') {
+                } elseif ($quote === "'" && $ch === '\\' && $backslashEscapes) {
                     $out .= '\\\\';
                 } elseif ($quote === '"' && $ch === '`') {
                     $out .= '``';

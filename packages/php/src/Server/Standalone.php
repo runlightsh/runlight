@@ -62,7 +62,7 @@ final class Standalone
      *     now?: callable(): int,
      *     fetcher?: \Runlight\Http\Fetcher,
      *     setupCode?: string,
-     *     setupWhere?: string,
+     *     setupWhere?: string|bool,
      *     dataDir?: string|null,
      *     cronSecret?: string|null,
      *     observeKey?: string|null,
@@ -73,7 +73,7 @@ final class Standalone
      *   account is made with it instead.
      * - url: the dashboard's public address, such as https://stats.example.com. It can never become a link
      *   domain, short links never answer on it, and emails link to it whatever Host header a request carries.
-     * - setupCode: the one-time code that unlocks /setup while no account exists; setupWhere says where it is
+     * - setupCode: the one-time code that unlocks /setup while no account exists; setupWhere says it is in setup.txt, not in a log
      *   written down, for the page that asks for it.
      * - cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
      * - dataDir: the server's data folder, where the files requests share go rather than the system's temporary folder.

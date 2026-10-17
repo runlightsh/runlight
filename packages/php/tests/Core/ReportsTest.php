@@ -64,14 +64,17 @@ final class ReportsTest extends TestCase
         foreach ($set['currency'] as [$n, $currency, $text]) {
             self::assertSame($text, Intl::currency($lang, $n, $currency, is_int($n) ? 0 : 2), "$lang $n $currency");
         }
-        // Region names change between ICU releases; the fixture's are ICU 78's, as Node 24 has it.
-        if ((int) INTL_ICU_VERSION !== 78) {
-            self::markTestSkipped('ICU ' . INTL_ICU_VERSION . ' names regions in its own words; the fixture holds ICU 78\'s');
-        }
+        // Region names change between ICU releases; the fixture's are ICU 78's, as Node 24 has it. With another
+        // release, the names that changed are left out and every other must still match, so this runs everywhere.
+        $current = (int) INTL_ICU_VERSION === 78;
         $differ = [];
         foreach ($set['region'] as [$code, $name]) {
-            if (Intl::region($lang, $code) !== $name) {
-                $differ[] = "$code: " . Intl::region($lang, $code) . " (Node: $name)";
+            $got = Intl::region($lang, $code);
+            if ($got === $name) {
+                continue;
+            }
+            if ($current || $got === '' || $got === $code) {
+                $differ[] = "$code: $got (Node: $name)";
             }
         }
         self::assertSame([], $differ, "$lang region names");

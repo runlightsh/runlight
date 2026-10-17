@@ -396,6 +396,14 @@ final class SqlStore
         $liveViews = Sql::LIVE_VIEWS;
         $this->transaction(function (SqlStore $store) use ($site, $day, $start, $end, $cols, $pieces, $ofDay, $window, $isVisit, $liveViews): void {
             $db = $store->db;
+            // MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two processes
+            // building one day could each add its rows. There the day is marked first: the second waits on that
+            // mark until the first commits, then fails, and the day counts as built elsewhere. Elsewhere the rows'
+            // own key refuses a second set, and a database without transactions (D1) must not mark a day first.
+            if ($db->dialect() === 'mysql') {
+                $db->run('DELETE FROM rl_rollup_days WHERE site = ? AND day = ?', [$site, $day]);
+                $db->run('INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)', [$site, $day, $start, $end]);
+            }
             $db->run('DELETE FROM rl_rollups WHERE site = ? AND day = ?', [$site, $day]);
             // The WITH goes after INSERT INTO, the one place every database takes it.
             $params = [$site, $start, $end];
@@ -425,8 +433,10 @@ final class SqlStore
          SELECT ?, ?, 'event', e.name, COUNT(DISTINCT e.visitor), COUNT(*) {$ofDay('event')} GROUP BY e.name",
                 [$site, $day, ...$window],
             );
-            $db->run('DELETE FROM rl_rollup_days WHERE site = ? AND day = ?', [$site, $day]);
-            $db->run('INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)', [$site, $day, $start, $end]);
+            if ($db->dialect() !== 'mysql') {
+                $db->run('DELETE FROM rl_rollup_days WHERE site = ? AND day = ?', [$site, $day]);
+                $db->run('INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)', [$site, $day, $start, $end]);
+            }
         });
     }
 
@@ -735,10 +745,29 @@ final class SqlStore
         return isset($rows[0]['salt']) ? (string) $rows[0]['salt'] : null;
     }
 
-    /** Deletes every salt older than `day`, so old hashes can never be recomputed. */
-    public function dropSaltsBefore(string $day): void
+    /**
+     * Deletes every salt but those of these days, so the hashes made with them can never be made again.
+     *
+     * @param list<string> $days
+     */
+    public function dropSaltsExcept(array $days): void
     {
-        $this->db->run('DELETE FROM rl_salts WHERE day < ?', [$day]);
+        $this->db->run('DELETE FROM rl_salts WHERE day NOT IN (' . implode(', ', array_fill(0, count($days), '?')) . ')', array_values($days));
+    }
+
+    /**
+     * Whether a visit to one of these sites that started in a stretch of time was still going at `since`.
+     *
+     * @param list<string> $sites
+     */
+    public function visitOpen(array $sites, int $from, int $to, int $since): bool
+    {
+        // As many sites a statement as keep it under D1's 100.
+        $open = Sql::inPieces($sites, Sql::MAX_PARAMS - 3, fn (array $piece): array => $this->db->all(
+            'SELECT 1 AS open FROM rl_sessions WHERE site IN (' . implode(', ', array_fill(0, count($piece), '?')) . ') AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1',
+            [...$piece, $from, $to, $since],
+        ));
+        return $open !== [];
     }
 
     // Ingest
@@ -762,18 +791,51 @@ final class SqlStore
         return isset($rows[0]) ? ['id' => (string) $rows[0]['id'], 'visitor' => (string) $rows[0]['visitor']] : null;
     }
 
+    /** Text cut to at most `$max` characters, as a VARCHAR($max) holds it, never through the middle of one. */
+    private static function clip(string $text, int $max): string
+    {
+        return mb_strlen($text, 'UTF-8') <= $max ? $text : mb_substr($text, 0, $max, 'UTF-8');
+    }
+
+    /**
+     * After opening a visit: the visitor's earliest visit still going, which is this one unless another
+     * process opened one for the same visitor at the same moment. Then both settle on the earliest, and the
+     * one that is not drops its own, before anything is counted into it.
+     *
+     * @param list<string> $visitors
+     * @param array{id: string, visitor: string} $opened
+     * @return array{id: string, visitor: string}
+     */
+    public function settleOpenSession(string $site, array $visitors, int $since, array $opened): array
+    {
+        $rows = $this->db->all(
+            // One already counting a hit first: the other process went on with it.
+            'SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN (' . implode(', ', array_fill(0, count($visitors), '?')) . ') AND last_at >= ?
+       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1',
+            [$site, ...array_values($visitors), $since],
+        );
+        $first = isset($rows[0]) ? ['id' => (string) $rows[0]['id'], 'visitor' => (string) $rows[0]['visitor']] : $opened;
+        if ($first['id'] !== $opened['id']) {
+            $this->db->run('DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0', [$opened['id']]);
+        }
+        return $first;
+    }
+
     public function insertSession(array $row): void
     {
+        $c = self::clip(...);
         $this->db->run(
             'INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, engaged_ms, hostname, referrer_host, referrer_path,
         source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, country, region, city,
         browser, browser_version, os, os_version, device, screen, language)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                $row['id'], $row['site'], $row['visitor'], $row['startedAt'], $row['startedAt'], $row['hostname'], $row['referrerHost'], $row['referrerPath'],
-                $row['source'], $row['channel'], $row['utmSource'], $row['utmMedium'], $row['utmCampaign'], $row['utmTerm'], $row['utmContent'],
-                $row['country'], $row['region'], $row['city'], $row['browser'], $row['browserVersion'], $row['os'], $row['osVersion'], $row['device'],
-                $row['screen'], $row['language'],
+                // Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps the
+                // same, and no header, however long, can make a row Postgres's indexes refuse.
+                $row['id'], $row['site'], $row['visitor'], $row['startedAt'], $row['startedAt'], $c($row['hostname'], 255), $c($row['referrerHost'], 255), $c($row['referrerPath'], 500),
+                $c($row['source'], 200), $c($row['channel'], 100), $c($row['utmSource'], 200), $c($row['utmMedium'], 200), $c($row['utmCampaign'], 200), $c($row['utmTerm'], 200), $c($row['utmContent'], 200),
+                $c($row['country'], 16), $c($row['region'], 100), $c($row['city'], 100), $c($row['browser'], 100), $c($row['browserVersion'], 100), $c($row['os'], 100), $c($row['osVersion'], 100), $c($row['device'], 50),
+                $c($row['screen'], 50), $c($row['language'], 50),
             ],
         );
     }
@@ -790,7 +852,7 @@ final class SqlStore
             $this->db->run(
                 "UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,
            entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?",
-                [$ts, $path, $path, $id],
+                [$ts, self::clip($path, 1000), self::clip($path, 1000), $id],
             );
         } elseif ($reopen) {
             $this->db->run('UPDATE rl_sessions SET events = events + 1, last_at = ? WHERE id = ?', [$ts, $id]);
@@ -845,8 +907,8 @@ final class SqlStore
             'INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname, title, name, props, engaged_ms, scroll, link)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                $row['site'], $row['ts'], $row['kind'], $row['visitor'], $row['session'], $row['pageview'], $row['path'], $row['hostname'], $row['title'],
-                $row['name'], $props === null ? null : Json::encode(is_array($props) ? Json::object($props) : $props), $row['engagedMs'], $row['scroll'] ?? null, $row['link'],
+                $row['site'], $row['ts'], $row['kind'], $row['visitor'], $row['session'], $row['pageview'], self::clip($row['path'], 1000), self::clip($row['hostname'], 255), self::clip($row['title'], 500),
+                self::clip($row['name'], 255), $props === null ? null : Json::encode(is_array($props) ? Json::object($props) : $props), $row['engagedMs'], $row['scroll'] ?? null, $row['link'],
             ],
         );
     }
@@ -1263,14 +1325,9 @@ final class SqlStore
 
     public function saveGoal(array $g, ?array $before = null): void
     {
-        // A click goal is counted by its name, which the tracker sends as the event
-        // name. Renaming one renames its past clicks too, so its history stays.
-        if ($before !== null && $before['kind'] === 'click' && $g['kind'] === 'click' && $before['name'] !== $g['name']) {
-            $this->db->run("UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", [$g['name'], $g['site'], $before['name']]);
-        }
-        $this->db->run(
+        $write = static fn (Db $db) => $db->run(
             Sql::upsert(
-                $this->db->dialect(),
+                $db->dialect(),
                 'rl_goals',
                 ['id', 'site', 'name', 'kind', '"match"', 'click_by', 'value_mode', 'value', 'value_prop', 'currency', 'created_at'],
                 ['id'],
@@ -1278,6 +1335,29 @@ final class SqlStore
             ),
             [$g['id'], $g['site'], $g['name'], $g['kind'], $g['match'], $g['clickBy'], $g['valueMode'], $g['value'], $g['valueProp'], $g['currency'], $g['createdAt']],
         );
+        // A click goal is counted by its name, which the tracker sends as the event
+        // name. Renaming one renames its past clicks too, so its history stays.
+        if (!($before !== null && $before['kind'] === 'click' && $g['kind'] === 'click' && $before['name'] !== $g['name'])) {
+            $write($this->db);
+            return;
+        }
+        $this->transaction(static function (SqlStore $store) use ($g, $before, $write): void {
+            $db = $store->db;
+            $db->run("UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", [$g['name'], $g['site'], $before['name']]);
+            // The daily rollups count events by name too, and goals read them, so they take the new name as well.
+            // A day that already has events under the new name counts both together now, so it is built again.
+            $both = array_map(static fn (array $r): string => (string) $r['day'], $db->all(
+                "SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?
+         AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)",
+                [$g['site'], $before['name'], $g['site'], $g['name']],
+            ));
+            foreach ($both as $day) {
+                $db->run('DELETE FROM rl_rollup_days WHERE site = ? AND day = ?', [$g['site'], $day]);
+                $db->run('DELETE FROM rl_rollups WHERE site = ? AND day = ?', [$g['site'], $day]);
+            }
+            $db->run("UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?", [$g['name'], $g['site'], $before['name']]);
+            $write($db);
+        });
     }
 
     public function deleteGoal(string $id): void
@@ -1922,6 +2002,37 @@ final class SqlStore
             ];
         }
         return $out;
+    }
+
+    /**
+     * Seek one matching event per hostname, skipping its remaining events before the next seek.
+     *
+     * @param array{site: string, from: int, to: int, filters: list<array{dimension: string, op: string, value: string}>} $query
+     * @return list<array{value: string}>
+     */
+    public function hostnameSuggestions(array $query, int $limit): array
+    {
+        $dialect = $this->db->dialect();
+        $v = Sql::visitRows($query['filters'], $query['site'], $query['from'], $query['to'], $dialect);
+        $within = Sql::rowScope($query['filters'], ['page', 'hostname'], $dialect);
+        $table = $dialect === 'sqlite' ? 'rl_events e INDEXED BY rl_events_hostname_suggest' : 'rl_events e';
+        $order = $this->textOrder();
+        $rows = [];
+        $after = null;
+        while (count($rows) < $limit) {
+            $row = $this->db->all(
+                "SELECT e.hostname AS value FROM $table CROSS JOIN rl_sessions s
+         WHERE {$v['sql']} AND e.kind = 'pageview'{$within['sql']}" . ($after === null ? '' : " AND e.hostname$order > ?") . "
+         ORDER BY e.hostname$order LIMIT 1",
+                [...$v['params'], ...$within['params'], ...($after === null ? [] : [$after])],
+            )[0] ?? null;
+            if ($row === null) {
+                break;
+            }
+            $after = (string) $row['value'];
+            $rows[] = ['value' => $after];
+        }
+        return $rows;
     }
 
     /** @return list<array<string, mixed>> BreakdownRow */

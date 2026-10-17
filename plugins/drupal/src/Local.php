@@ -211,7 +211,7 @@ final class Local implements DestructableInterface {
   public static function fromCloudflare(string $address): bool {
     // An IPv4 address written as IPv6, as some servers give it, is the IPv4
     // address.
-    if (preg_match('/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i', $address, $mapped)) {
+    if (preg_match('/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/iD', $address, $mapped)) {
       $address = $mapped[1];
     }
     $bytes = @inet_pton($address);

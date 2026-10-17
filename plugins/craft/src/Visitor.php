@@ -131,13 +131,13 @@ final class Visitor
     private static function ip(string $value): string
     {
         $value = trim($value);
-        if (preg_match('/^\[([^\]]+)\](?::\d+)?$/', $value, $bracketed)) {
+        if (preg_match('/^\[([^\]]+)\](?::\d+)?$/D', $value, $bracketed)) {
             $value = $bracketed[1];
-        } elseif (preg_match('/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/', $value, $withPort)) {
+        } elseif (preg_match('/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/D', $value, $withPort)) {
             $value = $withPort[1];
         }
         // An IPv4 address written as IPv6, as some servers give it, is the IPv4 address.
-        if (preg_match('/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i', $value, $mapped)) {
+        if (preg_match('/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/iD', $value, $mapped)) {
             $value = $mapped[1];
         }
         return filter_var($value, FILTER_VALIDATE_IP) !== false ? $value : '';

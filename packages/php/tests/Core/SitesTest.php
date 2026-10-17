@@ -162,14 +162,14 @@ final class SitesTest extends CoreTestCase
         self::assertSame(0, $visits(), 'a change that passes prunes once saved');
     }
 
-    public function testRetentionCountsBackCalendarMonthsAsSetUtcMonthDoes(): void
+    public function testRetentionCountsBackCalendarMonthsAndKeepsTheDayWithinItsMonth(): void
     {
         $t = new Harness('sqlite');
         $t->rl->init();
         $t->rl->setRetention('default', 6);
         $t->now = self::utc(2026, 8, 31, 10, 30) + 123;
-        // February 31st runs on to March 3rd, as JavaScript's dates do.
-        self::assertSame(self::utc(2026, 3, 3, 10, 30) + 123, $t->rl->retentionCutoff('default'));
+        // Six months before August 31st is February 28th: the day is kept within its month.
+        self::assertSame(self::utc(2026, 2, 28, 10, 30) + 123, $t->rl->retentionCutoff('default'));
     }
 
     public function testDeletingASiteForgetsItsRetentionItsPluginKeyAndItsUmamiImportProgress(): void

@@ -12,6 +12,7 @@ use Runlight\Http\Url;
 use Runlight\Js;
 use Runlight\Json;
 use Runlight\Log;
+use Runlight\Messages;
 use Runlight\Store\SqlStore;
 use Runlight\Undefined;
 
@@ -56,7 +57,8 @@ final class Web
     /** @var (callable(): ?string)|null */
     private $home;
     private string $forgot;
-    private ?string $setupWhere;
+    /** Whether the setup link is in the file setup.txt, which the standalone server writes, rather than in a log. */
+    private bool $setupFile;
     private string $cookiePath;
     private string $homePath;
     private bool $asksForToken;
@@ -76,16 +78,14 @@ final class Web
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
     private Throttle $codeTries;
-    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-    private Throttle $decoyTries;
     private Throttle $confirmTries;
     private Throttle $rechecks;
     // PHP's scrypt takes most of a second of CPU, so only a few password checks run at once on a machine.
     private Slots $checks;
 
     /**
-     * @param array{runlight: object, secret: string, base: string, now: callable(): int, firstAccount: 'open'|'locked'|array{code: string}|array{token: string}, home?: callable(): ?string, forgot: string, setupWhere?: string} $options
-     *     setupWhere says where to find the setup link with the one-time code, when it is not in a log (HTML)
+     * @param array{runlight: object, secret: string, base: string, now: callable(): int, firstAccount: 'open'|'locked'|array{code: string}|array{token: string}, home?: callable(): ?string, forgot: string, setupWhere?: string|bool} $options
+     *     setupWhere, when set, says the setup link with the one-time code is in the file setup.txt, not in a log
      */
     public function __construct(array $options)
     {
@@ -96,7 +96,7 @@ final class Web
         $this->first = $options['firstAccount'];
         $this->home = $options['home'] ?? null;
         $this->forgot = $options['forgot'];
-        $this->setupWhere = $options['setupWhere'] ?? null;
+        $this->setupFile = !empty($options['setupWhere']);
         $this->accounts = new Accounts($this->store, $options['secret']);
         $this->cookiePath = $this->base !== '' ? $this->base : '/';
         $this->homePath = "$this->base/";
@@ -106,7 +106,6 @@ final class Web
         $this->perAccount = new Throttle($this->store, 'account', 50, clock: $clock);
         $this->perIp = new Throttle($this->store, 'ip', 30, clock: $clock);
         $this->codeTries = new Throttle($this->store, 'code', 5, clock: $clock);
-        $this->decoyTries = new Throttle($this->store, 'decoy', 5, clock: $clock);
         $this->confirmTries = new Throttle($this->store, 'confirm', 5, clock: $clock);
         $this->rechecks = new Throttle($this->store, 'recheck', 10, clock: $clock);
         $this->checks = new Slots($this->rl->dataDir ?? null);
@@ -312,9 +311,19 @@ final class Web
     }
 
     /** Why there is no setup form. */
-    private function setupLocked(): Response
+    private function setupLocked(string $lang): Response
     {
-        return self::html($this->first === 'locked' ? Pages::setupNeedsTokenPage($this->base) : Pages::setupLockedPage($this->base, $this->setupWhere), 403);
+        return self::html($this->first === 'locked' ? Pages::setupNeedsTokenPage($this->base, $lang) : Pages::setupLockedPage($this->base, $this->setupFile, $lang), 403);
+    }
+
+    /**
+     * An account's problem in the visitor's language, where the dashboard has words for it; English as it was thrown.
+     */
+    private static function reason(\RangeException $error, string $lang): string
+    {
+        $t = Messages::translator($lang)['t'];
+        $key = 'error.' . ($error instanceof AccountError ? $error->code : '');
+        return $lang === 'en' || $t($key) === $key ? $error->getMessage() : $t($key, $error instanceof AccountError ? $error->params : []);
     }
 
     /**
@@ -390,11 +399,13 @@ final class Web
         $query = $url->searchParams();
         $method = $request->method;
         $base = $this->base;
+        $lang = Messages::acceptedLanguage($request);
+        $t = Messages::translator($lang)['t'];
         if ($path === '/auth.css') {
             return new Response(Pages::AUTH_CSS, 200, ['content-type' => 'text/css; charset=utf-8', 'cache-control' => 'public, max-age=3600']);
         }
         if ($path === '/auth.js') {
-            return new Response(Pages::AUTH_JS, 200, ['content-type' => 'application/javascript; charset=utf-8', 'cache-control' => 'public, max-age=3600']);
+            return new Response(Pages::authJs($query->get('lang') ?? 'en'), 200, ['content-type' => 'application/javascript; charset=utf-8', 'cache-control' => 'public, max-age=3600']);
         }
 
         if ($path === '/setup') {
@@ -404,34 +415,34 @@ final class Web
             if ($method === 'GET') {
                 $code = $query->get('code') ?? '';
                 if ($this->first === 'locked') {
-                    return $this->setupLocked();
+                    return $this->setupLocked($lang);
                 }
                 // The app's token is typed in; the server's code comes in the link it printed.
                 if ($this->asksForToken || $this->first === 'open') {
-                    return self::html(Pages::setupPage($base, ['code' => '', 'askCode' => $this->asksForToken]));
+                    return self::html(Pages::setupPage($base, ['code' => '', 'askCode' => $this->asksForToken], $lang));
                 }
-                return $this->setupOk($code) ? self::html(Pages::setupPage($base, ['code' => $code])) : $this->setupLocked();
+                return $this->setupOk($code) ? self::html(Pages::setupPage($base, ['code' => $code], $lang)) : $this->setupLocked($lang);
             }
             if ($method === 'POST') {
                 $form = new SearchParams($request->text());
                 $code = $form->get('code') ?? '';
                 if (!$this->setupOk($code)) {
                     if ($this->asksForToken) {
-                        return self::html(Pages::setupPage($base, ['code' => '', 'askCode' => true, 'error' => "That is not this app's RUNLIGHT_TOKEN.", 'email' => $form->get('email') ?? '']), 403);
+                        return self::html(Pages::setupPage($base, ['code' => '', 'askCode' => true, 'error' => $t('auth.tokenWrong'), 'email' => $form->get('email') ?? ''], $lang), 403);
                     }
-                    return $this->setupLocked();
+                    return $this->setupLocked($lang);
                 }
                 $again = fn (string $error): array => ['code' => $this->asksForToken ? '' : $code, 'askCode' => $this->asksForToken, 'error' => $error, 'email' => $form->get('email') ?? ''];
                 // Asked twice, since a typo here would lock the first owner out.
                 if (($form->get('password') ?? '') !== ($form->get('again') ?? '')) {
-                    return self::html(Pages::setupPage($base, $again('The two passwords are not the same.')), 400);
+                    return self::html(Pages::setupPage($base, $again($t('auth.mismatch')), $lang), 400);
                 }
                 try {
                     $user = $this->accounts->setPassword($form->get('email') ?? '', $form->get('password') ?? '', $this->now());
                     $this->existing = true;
                     return self::redirect($this->homePath, ['set-cookie' => $this->sessionCookie($request, $this->accounts->sessionFor($user, $this->now()), intdiv(Accounts::SESSION_MS, 1000))]);
                 } catch (\RangeException $error) {
-                    return self::html(Pages::setupPage($base, $again($error->getMessage())), 400);
+                    return self::html(Pages::setupPage($base, $again(self::reason($error, $lang)), $lang), 400);
                 }
             }
         }
@@ -439,12 +450,12 @@ final class Web
         if ($path === '/login') {
             if (!$this->hasAccount()) {
                 if ($this->first === 'locked') {
-                    return $this->setupLocked();
+                    return $this->setupLocked($lang);
                 }
-                return $this->first === 'open' || $this->asksForToken ? self::redirect("$base/setup") : $this->setupLocked();
+                return $this->first === 'open' || $this->asksForToken ? self::redirect("$base/setup") : $this->setupLocked($lang);
             }
             if ($method === 'GET') {
-                return self::html(Pages::loginPage($base, ['next' => $this->safeNext($query->get('next')), 'forgot' => $this->forgot]));
+                return self::html(Pages::loginPage($base, ['next' => $this->safeNext($query->get('next')), 'forgot' => $this->forgot], $lang));
             }
             if ($method === 'POST') {
                 return $this->login($request, $context);
@@ -456,10 +467,10 @@ final class Web
             $next = $this->safeNext($query->get('next'));
             $user = $this->accounts->fromLink($query->get('ticket') ?? '', $this->now());
             if ($user === null) {
-                return self::html(Pages::loginPage($base, ['error' => 'That sign-in link has run out. Sign in again.', 'next' => $next, 'forgot' => $this->forgot]), 410);
+                return self::html(Pages::loginPage($base, ['error' => $t('auth.linkExpired'), 'next' => $next, 'forgot' => $this->forgot], $lang), 410);
             }
             if ($user['twoFactor']) {
-                return self::html(Pages::codePage($base, ['pending' => $this->accounts->pendingFor($user, $this->now()), 'next' => $next]));
+                return self::html(Pages::codePage($base, ['pending' => $this->accounts->pendingFor($user, $this->now()), 'next' => $next], $lang));
             }
             return $this->signedInTo($request, $user, $next);
         }
@@ -467,17 +478,16 @@ final class Web
         if ($path === '/login/code' && $method === 'POST') {
             $form = new SearchParams($request->text());
             $next = $this->safeNext($form->get('next'));
-            $pending = $this->accounts->fromPending($form->get('pending') ?? '', $this->now());
-            if ($pending === null) {
+            $user = $this->accounts->fromPending($form->get('pending') ?? '', $this->now());
+            if ($user === null) {
                 return self::redirect("$base/login?next=" . Js::encodeURIComponent($next));
             }
-            ['user' => $user, 'real' => $real] = $pending;
             // Counted before the check, so a burst cannot get past five.
-            if (!($real ? $this->codeTries : $this->decoyTries)->take($user['id'], $this->now())) {
-                return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => 'Too many tries. Wait fifteen minutes and try again.']), 429);
+            if (!$this->codeTries->take($user['id'], $this->now())) {
+                return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => $t('error.too_many_tries')], $lang), 429);
             }
-            if (!$real || !$this->accounts->checkSecondFactor($user['id'], $form->get('code') ?? '', $this->now())) {
-                return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => 'That code is not right. Check the time on your phone, or use a recovery code.']), 401);
+            if (!$this->accounts->checkSecondFactor($user['id'], $form->get('code') ?? '', $this->now())) {
+                return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => $t('auth.codeWrong')], $lang), 401);
             }
             $this->codeTries->clear($user['id']);
             return $this->signedInTo($request, $user, $next);
@@ -492,19 +502,19 @@ final class Web
                 $code = $query->get('code') ?? '';
                 $invite = $this->accounts->inviteByCode($code, $this->now());
                 return $invite !== null
-                    ? self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'site' => $invite['site'] ?? null, 'host' => $url->host()]))
-                    : self::html(Pages::inviteGonePage($base), 410);
+                    ? self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'site' => $invite['site'] ?? null, 'host' => $url->host()], $lang))
+                    : self::html(Pages::inviteGonePage($base, $lang), 410);
             }
             if ($method === 'POST') {
                 $form = new SearchParams($request->text());
                 $code = $form->get('code') ?? '';
                 $invite = $this->accounts->inviteByCode($code, $this->now());
                 if ($invite === null) {
-                    return self::html(Pages::inviteGonePage($base), 410);
+                    return self::html(Pages::inviteGonePage($base, $lang), 410);
                 }
-                $again = static fn (string $error): Response => self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'site' => $invite['site'] ?? null, 'host' => $url->host(), 'error' => $error]), 400);
+                $again = static fn (string $error): Response => self::html(Pages::invitePage($base, ['code' => $code, 'email' => $invite['email'], 'role' => $invite['role'], 'site' => $invite['site'] ?? null, 'host' => $url->host(), 'error' => $error], $lang), 400);
                 if (($form->get('password') ?? '') !== ($form->get('again') ?? '')) {
-                    return $again('The two passwords are not the same.');
+                    return $again($t('auth.mismatch'));
                 }
                 try {
                     $user = $this->accounts->acceptInvite($code, $form->get('password') ?? '', $this->now());
@@ -512,9 +522,9 @@ final class Web
                     return self::redirect($this->homePath, ['set-cookie' => $this->sessionCookie($request, $this->accounts->sessionFor($user, $this->now()), intdiv(Accounts::SESSION_MS, 1000))]);
                 } catch (\RangeException $error) {
                     if ($error instanceof AccountError && $error->code === 'invite_gone') {
-                        return self::html(Pages::inviteGonePage($base), 410);
+                        return self::html(Pages::inviteGonePage($base, $lang), 410);
                     }
-                    return $again($error->getMessage());
+                    return $again(self::reason($error, $lang));
                 }
             }
         }
@@ -534,6 +544,8 @@ final class Web
     private function login(Request $request, array $context): Response
     {
         $base = $this->base;
+        $lang = Messages::acceptedLanguage($request);
+        $t = Messages::translator($lang)['t'];
         $form = new SearchParams($request->text());
         $email = $form->get('email') ?? '';
         $password = $form->get('password') ?? '';
@@ -541,9 +553,9 @@ final class Web
         $account = Js::lower(Js::trim($email));
         $ip = $this->rl->clientIp($request, $context);
         $pair = "$account\n" . ($ip !== '' ? $ip : 'unknown');
-        $login = fn (array $opts): string => Pages::loginPage($base, $opts + ['next' => $next, 'forgot' => $this->forgot]);
-        $tooMany = static fn (): Response => self::html($login(['error' => 'Too many tries. Wait fifteen minutes and try again.', 'email' => $email]), 429);
-        $busy = static fn (): Response => self::html($login(['error' => self::BUSY, 'email' => $email]), 503, ['retry-after' => '5']);
+        $login = fn (array $opts): string => Pages::loginPage($base, $opts + ['next' => $next, 'forgot' => $this->forgot], $lang);
+        $tooMany = static fn (): Response => self::html($login(['error' => $t('error.too_many_tries'), 'email' => $email]), 429);
+        $busy = static fn (): Response => self::html($login(['error' => $lang === 'en' ? self::BUSY : $t('error.busy'), 'email' => $email]), 503, ['retry-after' => '5']);
         if ($ip !== '' && !$this->perIp->take($ip, $this->now())) {
             return $tooMany();
         }
@@ -554,10 +566,11 @@ final class Web
         $known = $this->accounts->byEmail($account);
         $trusted = $known !== null && $this->accounts->trustsDevice(self::readCookie($request, self::DEVICE_COOKIE), $known);
         $over = !$trusted && !$this->perAccount->take($account, $this->now());
-        // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-        // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-        // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-        if ($over && !($known['twoFactor'] ?? false)) {
+        // Past the account's limit, a right password and a wrong one get the same answer, and so does every
+        // account, with two-factor on or not, and an email with no account, so guessing from many addresses
+        // learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+        // leads to the code step when two-factor is on.
+        if ($over) {
             $home = $this->homeOrigin();
             if (!$this->rl->mailSettings() || $home === null || $home === '') {
                 return $tooMany();
@@ -577,33 +590,30 @@ final class Web
                     }
                 });
             }
-            return self::html($login(['error' => 'Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.', 'email' => $email]), 429);
+            return self::html($login(['error' => $t('auth.tooManyLink'), 'email' => $email]), 429);
         }
         $user = $this->checkPassword($email, $password);
         if ($user === false) {
             // Not checked, so not counted.
             $this->forgiveTry($pair, $ip);
-            if (!$over && !$trusted) {
+            if (!$trusted) {
                 $this->perAccount->forgive($account);
             }
             return $busy();
         }
         if ($user === null) {
-            if ($over && $known !== null) {
-                return self::html(Pages::codePage($base, ['pending' => $this->accounts->decoyFor($known, $this->now()), 'next' => $next]));
-            }
-            return self::html($login(['error' => 'That email and password do not match an account.', 'email' => $email]), 401);
+            return self::html($login(['error' => $t('auth.wrongPassword'), 'email' => $email]), 401);
         }
         $this->perAddress->clear($pair);
         if ($ip !== '') {
             $this->perIp->forgive($ip);
         }
-        if (!$over && !$trusted) {
+        if (!$trusted) {
             $this->perAccount->forgive($account);
         }
         // With two-factor on, the password only earns the second step.
         if ($user['twoFactor']) {
-            return self::html(Pages::codePage($base, ['pending' => $this->accounts->pendingFor($user, $this->now()), 'next' => $next]));
+            return self::html(Pages::codePage($base, ['pending' => $this->accounts->pendingFor($user, $this->now()), 'next' => $next], $lang));
         }
         return $this->signedInTo($request, $user, $next);
     }
@@ -896,7 +906,7 @@ final class Web
         // The dashboard itself: straight to sign-in, or to setting up the first account.
         if (($path === '/' || $path === '') && $request->method === 'GET' && $this->signedIn($request) === null) {
             if (!$this->hasAccount()) {
-                return $this->first === 'open' || $this->asksForToken ? self::redirect("$this->base/setup") : $this->setupLocked();
+                return $this->first === 'open' || $this->asksForToken ? self::redirect("$this->base/setup") : $this->setupLocked(Messages::acceptedLanguage($request));
             }
             $search = (new Url($request->url))->search;
             return self::redirect("$this->base/login" . ($search !== '' ? '?next=' . Js::encodeURIComponent("$this->homePath$search") : ''));

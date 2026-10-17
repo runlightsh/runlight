@@ -137,6 +137,16 @@ final class TimeTest extends TestCase
         }
     }
 
+    public function testADayWhereClocksFallBackAcrossMidnightBeginsAtTheFirstMidnight(): void
+    {
+        // Amman in 2019, Gaza and Hebron in 2020, an hour each, and three hours at Casey station in 2019.
+        foreach ([['2019-10-25', 'Asia/Amman'], ['2020-10-24', 'Asia/Gaza'], ['2020-10-24', 'Asia/Hebron'], ['2019-03-17', 'Antarctica/Casey']] as [$date, $zone]) {
+            $start = Time::startOf($date, $zone);
+            $this->assertSame($date, Time::localDate($start, $zone), $zone);
+            $this->assertLessThan($date, Time::localDate($start - 1, $zone), "$zone: the moment before is the day before");
+        }
+    }
+
     public function testADateWithAMonthOrDayThatDoesNotExistIsNotADate(): void
     {
         foreach (['2026-13-01', '2026-00-05', '2026-02-30', '2026-04-31', '2026-1-01', '9999-12-31', '0001-01-01'] as $bad) {
@@ -152,22 +162,22 @@ final class TimeTest extends TestCase
     private const SYSTEM_V_SUMMER = ['systemv/ast4adt', 'systemv/est5edt', 'systemv/cst6cdt', 'systemv/mst7mdt', 'systemv/pst8pdt', 'systemv/yst9ydt'];
 
     /**
-     * The fixture came from Node's ICU with time zone data 2025c. PHP carries its own copy of the data, which
-     * disagrees wherever a zone's rules changed between the two: older data misses changes, and newer data
-     * has ones Node did not (Morocco and British Columbia since). These comparisons run on the versions known
-     * to agree with the fixture, and are skipped on others; regenerate the fixture to move them on.
+     * The fixture came from Node's ICU with time zone data 2025c. PHP's copy of the data may be newer, and
+     * disagree wherever a zone's rules changed since (British Columbia, Alberta, and Manitoba keeping summer time,
+     * Morocco's Ramadan dates): these zones' instants from 2026 on are not compared, and every other zone must match.
      */
-    private static function needCurrentZones(): void
+    private const CHANGED_SINCE_2025C = [
+        'America/Vancouver', 'Canada/Pacific', 'America/Edmonton', 'America/Inuvik', 'America/Yellowknife', 'Canada/Mountain',
+        'America/Winnipeg', 'America/Rainy_River', 'Canada/Central', 'Africa/Casablanca', 'Africa/El_Aaiun',
+    ];
+
+    private static function changed(string $zone, int $ts): bool
     {
-        $version = timezone_version_get();
-        if (version_compare($version, '2025.3', '<') || version_compare($version, '2026.1', '>')) {
-            self::markTestSkipped("PHP time zone data $version is not one the fixture's 2025c agrees with (2025.3 to 2026.1)");
-        }
+        return in_array($zone, self::CHANGED_SINCE_2025C, true) && $ts >= self::utc(2026, 0);
     }
 
     public function testZones(): void
     {
-        self::needCurrentZones();
         $fixture = Fixture::load('time');
         $failures = [];
         // Before 1970 ICU follows the time zone database's backzone history, where zones that are now
@@ -184,6 +194,9 @@ final class TimeTest extends TestCase
                 continue;
             }
             foreach ($since1970 as $i => $ts) {
+                if (self::changed($zone['name'], $ts)) {
+                    continue;
+                }
                 $local = Time::localDate($ts, $zone['name']) . ' ' . implode(' ', Time::localWeekdayHour($ts, $zone['name']));
                 if ($local !== $zone['local'][$i]) {
                     $failures[] = "{$zone['name']} at $ts: $local not {$zone['local'][$i]}";
@@ -196,10 +209,12 @@ final class TimeTest extends TestCase
 
     public function testInstantsAroundEveryOffsetChange(): void
     {
-        self::needCurrentZones();
         $failures = [];
         $instants = Fixture::load('time')['instants'];
         foreach ($instants as [$zone, $ts, $date, $weekday, $hour]) {
+            if (self::changed($zone, $ts)) {
+                continue;
+            }
             $got = [Time::localDate($ts, $zone), ...Time::localWeekdayHour($ts, $zone)];
             if ($got !== [$date, $weekday, $hour]) {
                 $failures[] = "$zone $ts: " . implode(' ', $got) . " not $date $weekday $hour";
@@ -211,16 +226,21 @@ final class TimeTest extends TestCase
 
     public function testDayStarts(): void
     {
-        self::needCurrentZones();
         $fixture = Fixture::load('time');
         $failures = [];
         foreach ($fixture['starts'] as [$zone, $date, $hour, $start]) {
+            if (self::changed($zone, $start)) {
+                continue;
+            }
             $got = Time::startOf($date, $zone, $hour);
             if ($got !== $start) {
                 $failures[] = "$zone $date $hour: $got not $start";
             }
         }
         foreach ($fixture['dayStarts'] as [$zone, $year, $sha]) {
+            if (self::changed($zone, self::utc($year, 11, 31))) {
+                continue;
+            }
             $days = [];
             for ($d = "$year-01-01"; strcmp($d, ($year + 1) . '-01-01') < 0; $d = Time::addDays($d, 1)) {
                 $days[] = Time::startOf($d, $zone);

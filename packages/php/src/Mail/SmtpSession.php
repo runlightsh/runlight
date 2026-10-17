@@ -126,7 +126,7 @@ final class SmtpSession
                 $this->lines[] = (string) substr($line, 4);
                 if (($line[3] ?? '') !== '-') {
                     $head = substr($line, 0, 3);
-                    $reply = ['code' => preg_match('/^\d+$/', $head) ? (int) $head : -1, 'text' => implode(' ', $this->lines)];
+                    $reply = ['code' => preg_match('/^\d+$/D', $head) ? (int) $head : -1, 'text' => implode(' ', $this->lines)];
                     $this->lines = [];
                     return $reply;
                 }

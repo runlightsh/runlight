@@ -8,6 +8,7 @@ use Runlight\Http\Request;
 use Runlight\Http\Response;
 use Runlight\Http\SearchParams;
 use Runlight\Http\Url;
+use Runlight\Mail\Secret;
 
 /**
  * OAuth for the MCP server, so apps that connect only through OAuth (the
@@ -56,16 +57,35 @@ final class OAuth
         'access-control-allow-methods' => 'GET, POST, OPTIONS',
     ];
 
-    /** The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it. */
+    /**
+     * The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+     * replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
+     * database alone cannot report for the site; one kept before as plain text is sealed the next time it is read.
+     */
     public static function agentsKey(Runlight $runlight, string $site, bool $replace = false): string
     {
         $name = "observe-key:$site";
         if (!$replace) {
-            return $runlight->store->settingOrAdd($name, static fn (): string => 'rlo_' . Hash::randomId(20));
+            $made = Secret::seal('rlo_' . Hash::randomId(20), $runlight->secret);
+            $stored = $runlight->store->settingOrAdd($name, static fn (): string => $made);
+            $key = self::openAgentsKey($runlight, $stored);
+            if ($key !== null && str_starts_with($stored, 'rlo_')) {
+                $runlight->store->setSetting($name, Secret::seal($key, $runlight->secret));
+            }
+            // One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
+            if ($key !== null) {
+                return $key;
+            }
         }
         $key = 'rlo_' . Hash::randomId(20);
-        $runlight->store->setSetting($name, $key);
+        $runlight->store->setSetting($name, Secret::seal($key, $runlight->secret));
         return $key;
+    }
+
+    /** A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. Null when it cannot be opened. */
+    public static function openAgentsKey(Runlight $runlight, string $stored): ?string
+    {
+        return str_starts_with($stored, 'rlo_') ? $stored : Secret::unseal($stored, $runlight->secret);
     }
 
     /** A redirect address's host as a site's domains are kept: lowercase, with no port and no www. */
@@ -133,7 +153,7 @@ final class OAuth
 
     private static function json(mixed $body, int $status = 200): Response
     {
-        return new Response(Json::encode($body), $status, ['content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store'] + self::CORS);
+        return new Response(Json::encode($body), $status, ['content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store', 'x-content-type-options' => 'nosniff'] + self::CORS);
     }
 
     private static function oauthError(string $error, string $description, int $status = 400): Response
@@ -217,13 +237,14 @@ final class OAuth
 
         if ($path === '/oauth/authorize' && ($request->method === 'GET' || $request->method === 'POST')) {
             $runlight->init();
+            ['html' => $h, 'lang' => $lang] = Messages::translator(Messages::acceptedLanguage($request));
             $form = $request->method === 'POST' ? new SearchParams($request->text()) : $url->searchParams();
             $clientId = $form->get('client_id') ?? '';
             $client = self::clientFor($runlight, $clientId)['client'] ?? null;
             $redirect = $form->get('redirect_uri') ?? '';
             // Without a known client and one of its own addresses there is nowhere safe to send an answer.
             if ($client === null || !in_array($redirect, $client['redirects'], true)) {
-                return self::page('This app is not registered', '<p>Start connecting again from the app.</p>', 400);
+                return self::page($lang, $h('oauth.unregisteredTitle'), '<p>' . $h('oauth.startAgain') . '</p>', 400);
             }
             $back = static function (array $params) use ($redirect, $form): Response {
                 $to = new Url($redirect);
@@ -242,7 +263,7 @@ final class OAuth
             // it got wrong ends on a page here rather than sending a visitor who is not signed in on to it.
             $refuse = static fn (array $params): Response => isset($client['usedAt']) && Js::truthy($client['usedAt'])
                 ? $back($params)
-                : self::page('This app asked in a way Runlight does not support', '<p>' . self::esc((string) $client['name']) . ' sent ' . self::esc($params['error_description'] ?? $params['error']) . '. Start connecting again from the app.</p>', 400);
+                : self::page($lang, $h('oauth.unsupportedTitle'), '<p>' . $h('oauth.unsupported', ['app' => self::esc((string) $client['name']), 'error' => self::esc($params['error_description'] ?? $params['error'])]) . '</p>', 400);
             if ($form->get('response_type') !== 'code') {
                 return $refuse(['error' => 'unsupported_response_type']);
             }
@@ -263,7 +284,7 @@ final class OAuth
             if (!($ctx['isOwner'])($request)) {
                 // Someone signed in who may only read would be sent to sign in again and again.
                 if (isset($ctx['isReader']) && ($ctx['isReader'])($request)) {
-                    return self::page('Ask an owner to connect this', '<p>You are signed in as a viewer, and only an owner of this Runlight can connect ' . self::esc($name) . '.</p>', 403);
+                    return self::page($lang, $h('oauth.viewerTitle'), '<p>' . $h('oauth.viewer', ['app' => self::esc($name)]) . '</p>', 403);
                 }
                 // The site stays, since on the way in it only says which one to offer first.
                 $kept = new SearchParams();
@@ -277,7 +298,7 @@ final class OAuth
                     return new Response('', 303, ['location' => $ctx['signIn'] . '?next=' . Js::encodeURIComponent($here), 'cache-control' => 'no-store']);
                 }
                 $home = $base !== '' ? $base : '/';
-                return self::page('Sign in first', '<p>Open your Runlight dashboard at <a href="' . self::esc($home) . '">' . self::esc($url->host() . $home) . '</a> and sign in, then connect ' . self::esc($name) . ' again.</p>', 401);
+                return self::page($lang, $h('oauth.signInTitle'), '<p>' . $h('oauth.signIn', ['link' => '<a href="' . self::esc($home) . '">' . self::esc($url->host() . $home) . '</a>', 'app' => self::esc($name)]) . '</p>', 401);
             }
 
             if ($request->method === 'GET') {
@@ -288,28 +309,30 @@ final class OAuth
                     }
                 }
                 // The app names itself, so the page also shows where the answer goes, which it cannot fake.
-                $sendsTo = '<p class="note">Allowing sends you back to <strong>' . self::esc((new Url($redirect))->host()) . '</strong>. Only allow it if you started connecting there.</p>';
+                $sendsTo = '<p class="note">' . $h('oauth.sendsTo', ['host' => '<strong>' . self::esc((new Url($redirect))->host()) . '</strong>']) . '</p>';
+                $buttons = '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">' . $h('oauth.deny') . '</button><button type="submit" name="decision" value="allow">' . $h('oauth.allow') . '</button></div></form>';
                 $sites = $runlight->sites();
                 if ($cms) {
                     if ($counting === [] && !$runlight->managedSites) {
-                        return self::page('Add this site first', '<p>No site in this Runlight counts <strong>' . self::esc($host) . "</strong>. Add it to a site's domains in your code, then connect again from " . self::esc($name) . '.</p>', 400);
+                        return self::page($lang, $h('oauth.addSiteTitle'), '<p>' . $h('oauth.addSite', ['host' => '<strong>' . self::esc($host) . '</strong>', 'app' => self::esc($name)]) . '</p>', 400);
                     }
                     $choices = '';
                     foreach ($counting as $s) {
                         $choices .= '<option value="' . self::esc($s['id']) . '">' . self::esc($s['name']) . '</option>';
                     }
                     if ($runlight->managedSites && $counting === []) {
-                        $choices .= '<option value="new">A new site for ' . self::esc($host) . '</option>';
+                        $choices .= '<option value="new">' . $h('oauth.newSite', ['host' => self::esc($host)]) . '</option>';
                     }
                     return self::page(
-                        'Connect ' . self::esc($name),
-                        '<p><strong>' . self::esc($name) . '</strong> wants to count <strong>' . self::esc($host) . "</strong> in this Runlight.</p>\n"
-                        . "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>\n"
+                        $lang,
+                        $h('oauth.connectTitle', ['app' => self::esc($name)]),
+                        '<p>' . $h('oauth.cmsIntro', ['app' => '<strong>' . self::esc($name) . '</strong>', 'host' => '<strong>' . self::esc($host) . '</strong>']) . "</p>\n"
+                        . '<p>' . $h('oauth.cmsDetail') . "</p>\n"
                         . "$sendsTo\n"
                         . '<form method="post" action="' . self::esc($base) . "/oauth/authorize\">$hidden\n"
-                        . "<label>Site<select name=\"site\">$choices</select></label>\n"
-                        . '<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in ' . self::esc($name) . ".</p>\n"
-                        . '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                        . '<label>' . $h('app.site') . "<select name=\"site\">$choices</select></label>\n"
+                        . '<p class="note">' . $h('oauth.cmsNote', ['app' => self::esc($name)]) . "</p>\n"
+                        . $buttons,
                     );
                 }
                 if ($manage) {
@@ -322,34 +345,36 @@ final class OAuth
                         }
                     }
                     return self::page(
-                        'Connect ' . self::esc($name),
-                        '<p><strong>' . self::esc($name) . "</strong> wants to show this site\u{2019}s stats and change its settings, so you can manage it from there.</p>\n"
-                        . "<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>\n"
+                        $lang,
+                        $h('oauth.connectTitle', ['app' => self::esc($name)]),
+                        '<p>' . $h('oauth.manageIntro', ['app' => '<strong>' . self::esc($name) . '</strong>']) . "</p>\n"
+                        . '<p>' . $h('oauth.manageDetail') . "</p>\n"
                         . "$sendsTo\n"
                         . '<form method="post" action="' . self::esc($base) . "/oauth/authorize\">$hidden\n"
-                        . "<label>Site<select name=\"site\">$choices</select></label>\n"
-                        . '<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects ' . self::esc($name) . ".</p>\n"
-                        . '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                        . '<label>' . $h('app.site') . "<select name=\"site\">$choices</select></label>\n"
+                        . '<p class="note">' . $h('oauth.manageNote', ['app' => self::esc($name)]) . "</p>\n"
+                        . $buttons,
                     );
                 }
                 $options = '';
                 foreach ($sites as $s) {
-                    $options .= '<option value="' . self::esc($s['id']) . '">' . self::esc($s['name']) . ' only</option>';
+                    $options .= '<option value="' . self::esc($s['id']) . '">' . $h('oauth.siteOnly', ['site' => self::esc($s['name'])]) . '</option>';
                 }
                 return self::page(
-                    'Connect ' . self::esc($name),
-                    '<p><strong>' . self::esc($name) . "</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>\n"
+                    $lang,
+                    $h('oauth.connectTitle', ['app' => self::esc($name)]),
+                    '<p>' . $h('oauth.readIntro', ['app' => '<strong>' . self::esc($name) . '</strong>']) . "</p>\n"
                     . "$sendsTo\n"
                     . '<form method="post" action="' . self::esc($base) . "/oauth/authorize\">$hidden\n"
-                    . '<label>Which sites it can read<select name="site"><option value="">Every site</option>' . (count($sites) > 1 ? $options : '') . "</select></label>\n"
-                    . "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>\n"
-                    . '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                    . '<label>' . $h('oauth.readSites') . '<select name="site"><option value="">' . $h('tokens.allSites') . '</option>' . (count($sites) > 1 ? $options : '') . "</select></label>\n"
+                    . '<p class="note">' . $h('oauth.readNote') . "</p>\n"
+                    . $buttons,
                 );
             }
             // The consent form posts here from this page only; a form from another site is refused.
             $origin = $request->headers->get('origin');
             if ($origin !== null && $origin !== '' && $origin !== $url->origin()) {
-                return self::page('This request came from another site', '<p>Start connecting again from the app.</p>', 403);
+                return self::page($lang, $h('oauth.anotherSiteTitle'), '<p>' . $h('oauth.startAgain') . '</p>', 403);
             }
             if ($form->get('decision') !== 'allow') {
                 return $back(['error' => 'access_denied']);
@@ -542,10 +567,11 @@ final class OAuth
         return self::json(['client_id' => $id, 'client_name' => $clientName, 'redirect_uris' => $redirects, 'token_endpoint_auth_method' => 'none', 'grant_types' => ['authorization_code'], 'response_types' => ['code']], 201);
     }
 
-    private static function page(string $title, string $body, int $status = 200): Response
+    /** A page in the visitor's language, with a title already written as HTML. */
+    private static function page(string $lang, string $title, string $body, int $status = 200): Response
     {
         return new Response(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>$title | Runlight</title>\n"
+            "<!doctype html><html lang=\"$lang\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>$title | Runlight</title>\n"
             . '<style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 16 16\'%3E%3Cpath d=\'M4 6l4 4 4-4\' fill=\'none\' stroke=\'%238a8a93\' stroke-width=\'1.6\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style></head><body><main><h1>'
             . "$title</h1>$body</main></body></html>",
             $status,

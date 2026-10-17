@@ -111,4 +111,14 @@ final class UrlTest extends TestCase
         $this->assertSame('{"a":[],"b":{},"c":1,"d":0.5,"e":"/café ' . "\u{1F600}" . '","f":null}', Json::encode(['a' => [], 'b' => Json::object(), 'c' => 1.0, 'd' => 0.5, 'e' => "/caf\u{e9} \u{1F600}", 'f' => NAN]));
         $this->assertSame("\"\u{2028}\\n\\u0001\"", Json::encode("\u{2028}\n\x01"));
     }
+
+    public function testAnIpv4HostWithMoreThanFourPartsOrAnInvalidOctalDigitIsRefusedAsNewUrlRefusesIt(): void
+    {
+        foreach (['1.2.3.4.5', '1.2.3.4.5.', '08.1.1.1', '1.2.3.09', '09', '0xg.1.1.1', 'a.b.c.d.5', '256.1.1.1'] as $host) {
+            $this->assertNull(Url::parse("http://$host/"), $host);
+        }
+        foreach (['0x7f.1' => '127.0.0.1', '127.1' => '127.0.0.1', '1.2.3.4.' => '1.2.3.4', '1.2.3.0x' => '1.2.3.0', '0177.0.0.1' => '127.0.0.1'] as $host => $address) {
+            $this->assertSame($address, Url::parse("http://$host/")?->hostname, $host);
+        }
+    }
 }

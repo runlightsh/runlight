@@ -15,7 +15,7 @@ final class Smtp
 
     private static function encodeWord(string $text): string
     {
-        return preg_match('/^[\x20-\x7e]*$/', $text) ? $text : '=?UTF-8?B?' . base64_encode($text) . '?=';
+        return preg_match('/^[\x20-\x7e]*$/D', $text) ? $text : '=?UTF-8?B?' . base64_encode($text) . '?=';
     }
 
     /** Base64 in lines of 76, each ending in CRLF, as `.replace(/.{1,76}/g, "$&\r\n")` writes it. */
@@ -47,7 +47,7 @@ final class Smtp
         $now ??= (int) floor(microtime(true) * 1000);
         $boundary = 'rl-' . $uuid();
         $domain = explode('@', (string) $m['from'])[1] ?? 'runlight.local';
-        $fromHeader = preg_match('/^(.*)<(.+)>$/', $from, $named) ? self::encodeWord(Transports::trim($named[1])) . " <{$named[2]}>" : $from;
+        $fromHeader = preg_match('/^(.*)<(.+)>$/D', $from, $named) ? self::encodeWord(Transports::trim($named[1])) . " <{$named[2]}>" : $from;
         $headers = [
             "From: $fromHeader",
             "To: {$m['to']}",
@@ -117,7 +117,7 @@ final class Smtp
             return $reply;
         };
         $expect([220], 'greeting');
-        $name = (string) preg_replace('/>$/', '', explode('@', $from)[1] ?? '');
+        $name = (string) preg_replace('/>$/D', '', explode('@', $from)[1] ?? '');
         $name = $name !== '' ? $name : 'localhost';
         $s->write("EHLO $name");
         $ehlo = $expect([250], 'EHLO');
@@ -162,19 +162,19 @@ final class Smtp
         if ($text === '') {
             return 0;
         }
-        if (preg_match('/^0[xX][0-9a-fA-F]+$/', $text)) {
+        if (preg_match('/^0[xX][0-9a-fA-F]+$/D', $text)) {
             return (float) hexdec(substr($text, 2));
         }
-        if (preg_match('/^0[oO][0-7]+$/', $text)) {
+        if (preg_match('/^0[oO][0-7]+$/D', $text)) {
             return (float) octdec(substr($text, 2));
         }
-        if (preg_match('/^0[bB][01]+$/', $text)) {
+        if (preg_match('/^0[bB][01]+$/D', $text)) {
             return (float) bindec(substr($text, 2));
         }
-        if (preg_match('/^[+-]?Infinity$/', $text)) {
+        if (preg_match('/^[+-]?Infinity$/D', $text)) {
             return $text[0] === '-' ? -INF : INF;
         }
-        if (preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/', $text)) {
+        if (preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/D', $text)) {
             return (float) $text;
         }
         return NAN;

@@ -422,18 +422,6 @@ final class Routes
         );
     }
 
-    /** The first language a browser asks for that the dashboard speaks, else English. */
-    private static function acceptedLanguage(Request $request): string
-    {
-        foreach (explode(',', $request->headers->get('accept-language') ?? '') as $part) {
-            $code = Js::lower(Js::slice(Js::trim(explode(';', $part)[0]), 0, 2));
-            if (in_array($code, Messages::languages(), true)) {
-                return $code;
-            }
-        }
-        return 'en';
-    }
-
     /**
      * Rows of objects as CSV, with a column for every key the first row has, in the units a spreadsheet reads.
      *
@@ -675,12 +663,18 @@ final class Routes
         return $out;
     }
 
-    /** `Math.min(1000, Math.max(1, Number(value) || fallback))`. */
-    private static function limit(?string $value, int $fallback): int|float
+    /** A whole number from a query, within 1 and `$max`, or `$fallback` for anything else: a fraction, a huge number, or text. */
+    private static function whole(?string $value, int $fallback, int $max): int
     {
         $n = Js::number($value);
-        $n = is_float($n) && is_nan($n) || $n == 0 ? $fallback : $n;
-        return min(1000, max(1, $n));
+        if (is_float($n) && ($n !== floor($n) || abs($n) > 9007199254740991.0)) {
+            return $fallback;
+        }
+        if (!is_int($n) && !is_float($n)) {
+            return $fallback;
+        }
+        $n = (int) $n;
+        return $n >= 1 ? min($n, $max) : $fallback;
     }
 
     // The routes.
@@ -1377,8 +1371,9 @@ final class Routes
                             $fields[$f['name']] = $value === null ? '' : Js::string($value);
                         }
                     }
-                    // A hub with a manage token learns which service sends the reports and from where, nothing more.
-                    $viaManage = isset($this->managed[$request]);
+                    // A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+                    // from where, nothing more: a webhook's address is often its own credential.
+                    $viaManage = isset($this->managed[$request]) || isset($this->sessionScope($request)['site']);
                     // The app's own mailer, named only when there is one, so the answer without it stays as it was.
                     $app = $this->rl->appMailer;
                     return self::json([
@@ -1421,6 +1416,13 @@ final class Routes
                 if ($settings === null) {
                     return self::coded('Set up a mail service first', 'mail_unset', 400);
                 }
+                // One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+                // or use up a service's quota; one just set up can be tried at once. PHP forgets memory between
+                // requests, so when the last went out is kept in the install's settings.
+                $tested = 'test-sent:' . ($settings['source'] ?? '') . ':' . ($settings['service'] ?? '');
+                if ($this->rl->now() - (int) Js::number($this->store()->setting($tested) ?? 0) < 60_000) {
+                    return self::coded('A test went out a moment ago. Wait a minute and try again.', 'test_soon', 429);
+                }
                 $t = Messages::translator(self::text($body, 'lang', 'en'))['t'];
                 $name = $settings['source'] === 'app' ? $settings['via'] : '';
                 foreach ($settings['source'] === 'app' ? [] : Transports::SERVICES as $s) {
@@ -1435,6 +1437,8 @@ final class Routes
                     'text' => $t('email.test.body', ['service' => $name]),
                     'html' => '<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
                 ]);
+                // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+                $this->store()->setSetting($tested, (string) $this->rl->now());
                 return self::json(['ok' => true]);
             }
 
@@ -1755,7 +1759,7 @@ final class Routes
             $site = $scoped['site'];
             if ($rl->site($site) === null) return self::coded('Unknown site', 'unknown_site', 404);
             $asked = $url->searchParams()->get('site');
-            $sitePath = preg_match('~^/api/sites/([^/]+)$~', $path, $match) ? $match : null;
+            $sitePath = preg_match('~^/api/sites/([^/]+)$~D', $path, $match) ? $match : null;
             if (($asked !== null && $asked !== $site) || ($sitePath && self::decodePart($sitePath[1]) !== $site)) return self::coded('Unknown site', 'unknown_site', 404);
             $read = $method === 'GET' && self::sharedPath($path);
             $assistant = ($path === '/api/assistant' && $method === 'GET') || ($path === '/api/assistant/chat' && $method === 'POST');
@@ -1764,6 +1768,12 @@ final class Routes
             if ($path === '/api/assistant/chat') {
                 $body = json_decode($request->text(), true);
                 if (!is_array($body) || ($body['site'] ?? null) !== $site) return self::coded('Unknown site', 'unknown_site', 404);
+            }
+            if ($sitePath && self::isJson($request)) {
+                // Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+                // a hub may, never move it.
+                $body = json_decode($request->text(), true);
+                if (is_array($body) && array_key_exists('hostnames', $body)) return self::coded("Your account cannot change a site's domains", 'site_domains', 403);
             }
             $url = new Url($url->href());
             $query = $url->searchParams();
@@ -2288,6 +2298,8 @@ final class Routes
             }
             try {
                 $rl->deleteSite($id);
+                // Those kept to the site go with it, so a site made later with the same id is not theirs.
+                $this->web?->accounts->forgetSite($id);
                 return self::json(['ok' => true]);
             } catch (\RangeException $error) {
                 return $error->getMessage() === 'Unknown site' ? self::coded($error->getMessage(), 'unknown_site', 404) : self::refused($error, 'site_invalid');
@@ -2321,7 +2333,8 @@ final class Routes
             $rl->init();
             foreach ($this->store()->settingsStartingWith('observe-key:') as ['key' => $key, 'value' => $value]) {
                 $id = substr($key, strlen('observe-key:'));
-                if ($id !== '' && self::constantTimeEqual($given, (string) $value) && $rl->site($id) !== null) {
+                $opened = OAuth::openAgentsKey($rl, (string) $value);
+                if ($id !== '' && $opened !== null && self::constantTimeEqual($given, $opened) && $rl->site($id) !== null) {
                     $keySite = $id;
                 }
             }
@@ -2744,13 +2757,14 @@ final class Routes
             ['rows' => $rows, 'sampled' => $sampled] = $store->journeyPages($query, Journeys::PAGES_PER_VISIT);
             $options = ['steps' => Js::number($params->get('steps') ?? 5)];
             if (Js::truthy($params->get('start'))) {
-                $options['start'] = $params->get('start');
+                // Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+                $options['start'] = Sources::recordedPath($params->get('start')) ?? $params->get('start');
             }
             if (Js::truthy($params->get('end'))) {
-                $options['end'] = $params->get('end');
+                $options['end'] = Sources::recordedPath($params->get('end')) ?? $params->get('end');
             }
             if ($through !== null) {
-                $options['through'] = ['step' => Js::number($through[1]), 'value' => $through[2]];
+                $options['through'] = ['step' => Js::number($through[1]), 'value' => Sources::recordedPath($through[2]) ?? $through[2]];
             }
             $answer = ['site' => $site['id'], 'range' => $rangeOut] + Journeys::journeys($rows, $options);
             if ($sampled) {
@@ -2793,8 +2807,8 @@ final class Routes
                     }
                 }
             }
-            $limit = self::limit($params->get('limit'), 100);
-            $rows = $key !== null && $key !== '' ? $store->eventPropValues($query, $event, $key, (int) $limit) : [];
+            $limit = self::whole($params->get('limit'), 100, 1000);
+            $rows = $key !== null && $key !== '' ? $store->eventPropValues($query, $event, $key, $limit) : [];
             return self::json(['site' => $site['id'], 'range' => $rangeOut, 'event' => $event, 'keys' => $keys, 'key' => $key, 'rows' => $rows]);
         }
 
@@ -2803,10 +2817,12 @@ final class Routes
             if (!Query::isDimension($dimension)) {
                 return self::coded("Unknown dimension \"$dimension\"", 'unknown_dimension', 400, ['dimension' => $dimension]);
             }
-            $limit = self::limit($params->get('limit'), 10);
-            $page = Js::number($params->get('page'));
-            $page = max(1, is_float($page) && is_nan($page) || $page == 0 ? 1 : $page);
-            $rows = $store->breakdown($query, $dimension, (int) $limit, (int) (($page - 1) * $limit));
+            $limit = self::whole($params->get('limit'), 10, 1000);
+            $page = self::whole($params->get('page'), 1, 100_000);
+            if ($dimension === 'hostname' && $params->get('suggestions') === '1' && $params->get('format') !== 'csv') {
+                return self::json(['site' => $site['id'], 'range' => $rangeOut, 'dimension' => $dimension, 'rows' => $store->hostnameSuggestions($query, min($limit, 50))]);
+            }
+            $rows = $store->breakdown($query, $dimension, $limit, ($page - 1) * $limit);
             if ($params->get('format') === 'csv') {
                 return self::download("{$site['id']}-$dimension-{$range['fromDate']}-{$range['toDate']}.csv", self::rowsCsv($rows, ['timezone' => $site['timezone'], 'dimension' => $dimension]), 'text/csv; charset=utf-8');
             }
@@ -2945,7 +2961,7 @@ final class Routes
         // The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
         // script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
         if ($path === '/pick-return' && $method === 'GET') {
-            ['t' => $t, 'lang' => $lang] = Messages::translator(self::acceptedLanguage($request));
+            ['t' => $t, 'lang' => $lang] = Messages::translator(Messages::acceptedLanguage($request));
             return self::smallPage(
                 $lang,
                 '<div id="done" hidden><h1>' . self::escapeHtml($t('pick.doneTitle')) . '</h1><p>' . self::escapeHtml($t('pick.done')) . '</p></div><div id="gone" hidden><h1>' . self::escapeHtml($t('pick.goneTitle')) . '</h1><p>' . self::escapeHtml($t('pick.gone')) . '</p></div>',
@@ -3031,7 +3047,7 @@ final class Routes
             $rl->init();
             $found = $this->redeemEmbed($url->searchParams()->get('ticket') ?? '');
             if ($found === null) {
-                ['t' => $t, 'lang' => $lang] = Messages::translator(self::acceptedLanguage($request));
+                ['t' => $t, 'lang' => $lang] = Messages::translator(Messages::acceptedLanguage($request));
                 return self::smallPage($lang, '<h1>' . self::escapeHtml($t('embed.goneTitle')) . '</h1><p>' . self::escapeHtml($t('embed.gone')) . '</p>', 404);
             }
             $session = $found['token'] !== null ? $this->embedSession($found['token']['id']) : '';
@@ -3049,7 +3065,7 @@ final class Routes
             $id = $sharePage[1];
             $share = preg_match(self::SHARE_ID, $id) ? $this->store()->shareById($id) : null;
             if ($share === null) {
-                ['t' => $t, 'lang' => $lang] = Messages::translator(self::acceptedLanguage($request));
+                ['t' => $t, 'lang' => $lang] = Messages::translator(Messages::acceptedLanguage($request));
                 return self::smallPage($lang, '<h1>' . self::escapeHtml($t('share.goneTitle')) . '</h1><p>' . self::escapeHtml($t('share.gone')) . '</p>', 404);
             }
             return new Response(self::dashboard($base, $share['id'], '', !empty($this->options['geoCredit'])), 200, [

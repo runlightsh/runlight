@@ -274,7 +274,7 @@ namespace DrupalTest {
       return new class ($db) {
         public function __construct(private Database $db) {}
         public function findTables(string $expression): array {
-          $pattern = '/^' . str_replace(['%', '_'], ['.*?', '.'], preg_quote($expression, '/')) . '$/i';
+          $pattern = '/^' . str_replace(['%', '_'], ['.*?', '.'], preg_quote($expression, '/')) . '$/iD';
           return array_values(preg_grep($pattern, $this->db->tables));
         }
         public function dropTable(string $table): bool {
@@ -311,7 +311,7 @@ namespace DrupalTest {
       return $path !== FALSE && (is_dir($path) || mkdir($path, 0700, TRUE));
     }
     public function realpath(string $uri): string|false {
-      return preg_match('#^(\w+)://(.*)$#', $uri, $m) ? $this->root . '/' . $m[1] . '/' . $m[2] : FALSE;
+      return preg_match('#^(\w+)://(.*)$#D', $uri, $m) ? $this->root . '/' . $m[1] . '/' . $m[2] : FALSE;
     }
     public function deleteRecursive(string $uri): bool {
       return TRUE;
