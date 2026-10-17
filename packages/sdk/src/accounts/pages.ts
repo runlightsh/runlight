@@ -3,6 +3,7 @@
  * Each takes the base path the routes answer under: "" on the standalone server, and "/runlight" in an app.
  */
 import { RUNLIGHT_ICON } from "../brand.js";
+import { translator } from "../messages.js";
 
 const esc = (value: string) => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
@@ -50,8 +51,15 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
 .eye:hover, .eye[aria-pressed="true"] { color: var(--ink); }
 .eye svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }`;
 
-/** Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D). */
-export const AUTH_JS = `(() => {
+/**
+ * Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D), with its
+ * words in a language the dashboard speaks. English is served as auth.js, the others as auth.js?lang=fr and so on.
+ */
+export function authJs(lang = "en"): string {
+  const { t, lang: code } = translator(lang);
+  const q = (key: string) => JSON.stringify(t(key));
+  const theme = code === "en" ? `"Theme: " + c` : `c === "dark" ? ${q("auth.themeDark")} : ${q("auth.themeLight")}`;
+  return `(() => {
   const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
   function strength(password, avoid = []) {
     if (password.length < 10) return 0;
@@ -93,7 +101,7 @@ export const AUTH_JS = `(() => {
     const button = document.querySelector(".theme");
     if (!button) return;
     for (const icon of button.querySelectorAll("svg")) icon.classList.toggle("on", icon.dataset.choice === c);
-    button.title = c === "system" ? "Theme: device setting" : "Theme: " + c;
+    button.title = c === "system" ? ${q("auth.themeSystem")} : ${theme};
   };
   const set = (c) => { try { localStorage.setItem(KEY, c); } catch {} show(); };
   show();
@@ -112,8 +120,8 @@ export const AUTH_JS = `(() => {
       const set = (shown) => {
         input.type = shown ? "text" : "password";
         eye.setAttribute("aria-pressed", String(shown));
-        eye.setAttribute("aria-label", shown ? "Hide password" : "Show password");
-        eye.title = shown ? "Hide password" : "Show password";
+        eye.setAttribute("aria-label", shown ? ${q("auth.hidePassword")} : ${q("auth.showPassword")});
+        eye.title = shown ? ${q("auth.hidePassword")} : ${q("auth.showPassword")};
         eye.innerHTML = shown ? SHUT : EYE;
       };
       set(false);
@@ -135,7 +143,7 @@ export const AUTH_JS = `(() => {
         const score = strength(password.value, [address, address.split("@")[0]]);
         meter.hidden = !password.value;
         meter.dataset.score = String(score);
-        meter.querySelector(".strength-label").textContent = ["Too short", "Weak", "Fair", "Good", "Strong"][score];
+        meter.querySelector(".strength-label").textContent = [${[0, 1, 2, 3, 4].map((n) => q(`account.strength${n}`)).join(", ")}][score];
         meter.querySelectorAll(".strength-bar span").forEach((bar, i) => bar.classList.toggle("on", score > i));
       };
       password.addEventListener("input", update);
@@ -151,12 +159,16 @@ export const AUTH_JS = `(() => {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "d") { e.preventDefault(); set(dark() ? "light" : "dark"); }
   });
 })();`;
+}
 
-const THEME_BUTTON = `<button type="button" class="theme" aria-label="Switch theme"><svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg></button>`;
+export const AUTH_JS = authJs();
 
-function page(base: string, title: string, body: string): string {
+const THEME_ICONS = `<svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg>`;
+
+function page(base: string, lang: string, title: string, body: string): string {
+  const { t, lang: code } = translator(lang);
   return `<!doctype html>
-<html lang="en">
+<html lang="${code}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -164,124 +176,139 @@ function page(base: string, title: string, body: string): string {
 <title>${esc(title)} | Runlight</title>
 <link rel="icon" href="${RUNLIGHT_ICON}">
 <link rel="stylesheet" href="${esc(base)}/auth.css">
-<script src="${esc(base)}/auth.js"></script>
+<script src="${esc(base)}/auth.js${code === "en" ? "" : `?lang=${code}`}"></script>
 </head>
 <body>
 <main>
 <p class="brand">${MARK}Runlight</p>
 ${body}
 </main>
-${THEME_BUTTON}
+<button type="button" class="theme" aria-label="${esc(t("auth.switchTheme"))}">${THEME_ICONS}</button>
 </body>
 </html>
 `;
 }
 
-export function loginPage(base: string, opts: { error?: string; email?: string; next?: string; forgot: string }): string {
+export function loginPage(base: string, opts: { error?: string; email?: string; next?: string; forgot: string }, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "Sign in",
-    `<h1>Sign in</h1>
-<p>Sign in to see your sites.</p>
+    lang,
+    t("auth.signIn"),
+    `<h1>${html("auth.signIn")}</h1>
+<p>${html("auth.signInIntro")}</p>
 ${opts.error ? `<p class="error" role="alert">${esc(opts.error)}</p>` : ""}
 <form method="post" action="${esc(base)}/login">
 <input type="hidden" name="next" value="${esc(opts.next ?? `${base}/`)}">
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="${esc(opts.email ?? "")}"></label>
-<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
+<label>${html("auth.email")}<input type="email" name="email" autocomplete="username" required autofocus value="${esc(opts.email ?? "")}"></label>
+<label>${html("auth.password")}<input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">${html("auth.signIn")}</button>
 </form>
-<p class="hint">If you have forgotten your password, <a href="${esc(opts.forgot)}" target="_blank" rel="noopener">the docs say how to set a new one</a>.</p>`,
+<p class="hint">${html("auth.forgot", { link: `<a href="${esc(opts.forgot)}" target="_blank" rel="noopener">${html("auth.forgotLink")}</a>` })}</p>`,
   );
 }
 
 /** The second step of signing in, for an account with two-factor on. */
-export function codePage(base: string, opts: { pending: string; next: string; error?: string }): string {
+export function codePage(base: string, opts: { pending: string; next: string; error?: string }, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "Enter your code",
-    `<h1>Enter your code</h1>
-<p>Open your authenticator app and enter the six-digit code for Runlight.</p>
+    lang,
+    t("auth.codeTitle"),
+    `<h1>${html("auth.codeTitle")}</h1>
+<p>${html("auth.codeIntro")}</p>
 ${opts.error ? `<p class="error" role="alert">${esc(opts.error)}</p>` : ""}
 <form method="post" action="${esc(base)}/login/code">
 <input type="hidden" name="pending" value="${esc(opts.pending)}">
 <input type="hidden" name="next" value="${esc(opts.next)}">
-<label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
-<button type="submit">Sign in</button>
+<label>${html("auth.code")}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
+<button type="submit">${html("auth.signIn")}</button>
 </form>
-<p class="hint">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>`,
+<p class="hint">${html("auth.codeHint")}</p>`,
   );
 }
 
 /** What someone invited with a role can do, after "as". */
-export function roleText(role: string, site?: string): string {
-  if (site !== undefined) return role === "viewer" ? `a viewer, who can read the stats for ${site} only` : `a member, who can change the settings of ${site} only`;
-  if (role === "viewer") return "a viewer, who can read every site's stats";
-  if (role === "member") return "a member, who can change the settings of every site";
-  return "an admin, who can change everything and manage people";
+export function roleText(role: string, site?: string, lang = "en"): string {
+  const { t } = translator(lang);
+  if (site !== undefined) return role === "viewer" ? t("auth.roleViewerSite", { site }) : t("auth.roleMemberSite", { site });
+  if (role === "viewer") return t("auth.roleViewer");
+  if (role === "member") return t("auth.roleMember");
+  return t("auth.roleAdmin");
 }
 
 /** Where an invited person chooses a password and joins. */
-export function invitePage(base: string, opts: { code: string; email: string; role: string; host: string; site?: string; error?: string }): string {
+export function invitePage(base: string, opts: { code: string; email: string; role: string; host: string; site?: string; error?: string }, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "Join Runlight",
-    `<h1>Join Runlight</h1>
-<p>You were invited to ${esc(opts.host)} as ${esc(roleText(opts.role, opts.site))}. Choose a password to finish.</p>
+    lang,
+    t("auth.joinTitle"),
+    `<h1>${html("auth.joinTitle")}</h1>
+<p>${html("auth.joinIntro", { host: esc(opts.host), role: esc(roleText(opts.role, opts.site, lang)) })}</p>
 ${opts.error ? `<p class="error" role="alert">${esc(opts.error)}</p>` : ""}
 <form method="post" action="${esc(base)}/invite">
 <input type="hidden" name="code" value="${esc(opts.code)}">
-<label>Email<input type="email" value="${esc(opts.email)}" disabled></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Join</button>
+<label>${html("auth.email")}<input type="email" value="${esc(opts.email)}" disabled></label>
+<label>${html("auth.password")}<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
+<label>${html("auth.passwordAgain")}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">${html("auth.join")}</button>
 </form>
-<p class="hint">Use at least ten characters.</p>`,
+<p class="hint">${html("auth.passwordHint")}</p>`,
   );
 }
 
-export function inviteGonePage(base: string): string {
+export function inviteGonePage(base: string, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "This invite no longer works",
-    `<h1>This invite no longer works</h1>
-<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>`,
+    lang,
+    t("auth.inviteGoneTitle"),
+    `<h1>${html("auth.inviteGoneTitle")}</h1>
+<p>${html("auth.inviteGone")}</p>`,
   );
 }
 
-export function setupPage(base: string, opts: { code: string; error?: string; email?: string; askCode?: boolean }): string {
+export function setupPage(base: string, opts: { code: string; error?: string; email?: string; askCode?: boolean }, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "Create your account",
-    `<h1>Create your account</h1>
-<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>
+    lang,
+    t("auth.setupTitle"),
+    `<h1>${html("auth.setupTitle")}</h1>
+<p>${html("auth.setupIntro")}</p>
 ${opts.error ? `<p class="error" role="alert">${esc(opts.error)}</p>` : ""}
 <form method="post" action="${esc(base)}/setup">
-${opts.askCode ? `<label>Your RUNLIGHT_TOKEN<input type="password" name="code" autocomplete="off" required value="${esc(opts.code)}"></label>` : `<input type="hidden" name="code" value="${esc(opts.code)}">`}
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="${esc(opts.email ?? "")}"></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Create account</button>
+${opts.askCode ? `<label>${html("auth.setupToken")}<input type="password" name="code" autocomplete="off" required value="${esc(opts.code)}"></label>` : `<input type="hidden" name="code" value="${esc(opts.code)}">`}
+<label>${html("auth.email")}<input type="email" name="email" autocomplete="username" required autofocus value="${esc(opts.email ?? "")}"></label>
+<label>${html("auth.password")}<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+<label>${html("auth.passwordAgain")}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">${html("auth.createAccount")}</button>
 </form>
-<p class="hint">Use at least ten characters.</p>`,
+<p class="hint">${html("auth.passwordHint")}</p>`,
   );
 }
 
 /** For a server with no account yet, which prints a setup link with a one-time code in its log. */
-export function setupLockedPage(base: string): string {
+export function setupLockedPage(base: string, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "Finish setting up",
-    `<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Open the setup link printed in the server's log when it started, which carries a one-time code, to create the first account.</p>`,
+    lang,
+    t("auth.finishTitle"),
+    `<h1>${html("auth.finishTitle")}</h1>
+<p>${html("auth.setupLocked")}</p>`,
   );
 }
 
 /** For an app with accounts on but nothing to prove the first account with. */
-export function setupNeedsTokenPage(base: string): string {
+export function setupNeedsTokenPage(base: string, lang = "en"): string {
+  const { t, html } = translator(lang);
   return page(
     base,
-    "Finish setting up",
-    `<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>`,
+    lang,
+    t("auth.finishTitle"),
+    `<h1>${html("auth.finishTitle")}</h1>
+<p>${html("auth.setupNeedsToken")}</p>`,
   );
 }

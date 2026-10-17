@@ -145,7 +145,8 @@ export function Copy({ text, label, class: extra, iconOnly }: { text: string; la
 export function Code({ children }: { children: string }) {
   return (
     <div class="code">
-      <pre>
+      {/* Focusable, so a keyboard can scroll a long line sideways. */}
+      <pre tabIndex={0}>
         <code>{children}</code>
       </pre>
       <Copy text={children} />

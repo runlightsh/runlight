@@ -355,7 +355,12 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
           setWantedDetail("");
         }
       })
-      .catch((e: Error) => live && setError(e.message))
+      .catch((e: Error) => {
+        if (!live) return;
+        // Rows from the view before would read as this one's.
+        setRows(null);
+        setError(e.message);
+      })
       .finally(() => {
         clearTimeout(timer);
         if (live) setSlow(false);

@@ -16,7 +16,7 @@ import { csv, zip } from "./zip.js";
 import { GoalError, clickRules, goalFrom } from "./goals.js";
 import { FunnelError, funnelFrom } from "./funnels.js";
 import { MailError, SERVICES } from "./mail/transports.js";
-import { languages, translator } from "./messages.js";
+import { acceptedLanguage, languages, translator } from "./messages.js";
 import { fetchIcon } from "./icon.js";
 import { installFetch, publicAddresses, publicFetch, resolvesPrivately } from "./safefetch.js";
 import { readJsonCapped, readTextCapped } from "./body.js";
@@ -276,15 +276,6 @@ function smallPage(lang: string, body: string, status = 200, script = ""): Respo
       },
     },
   );
-}
-
-/** The first language a browser asks for that the dashboard speaks, else English. */
-function acceptedLanguage(request: Request): string {
-  for (const part of (request.headers.get("accept-language") ?? "").split(",")) {
-    const code = part.split(";")[0]!.trim().slice(0, 2).toLowerCase();
-    if (languages().includes(code)) return code;
-  }
-  return "en";
 }
 
 /** Rows of objects as CSV, with a column for every key the first row has, in the units a spreadsheet reads. */

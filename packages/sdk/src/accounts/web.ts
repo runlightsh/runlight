@@ -7,7 +7,8 @@ import type { Runlight, RequestContext } from "../runlight.js";
 import type { TokenRow } from "../store.js";
 import { AccountError, Accounts, SESSION_COOKIE, SESSION_MS, Throttle, otpauthUri, type Invite, type Role, type User } from "./auth.js";
 import { randomBytes, base64url, sameText } from "./crypto.js";
-import { AUTH_CSS, AUTH_JS, codePage, inviteGonePage, invitePage, loginPage, roleText, setupLockedPage, setupNeedsTokenPage, setupPage } from "./pages.js";
+import { acceptedLanguage, translator } from "../messages.js";
+import { AUTH_CSS, authJs, codePage, inviteGonePage, invitePage, loginPage, roleText, setupLockedPage, setupNeedsTokenPage, setupPage } from "./pages.js";
 
 /** Who may create the first account: the server's printed one-time code, the app's token, or anyone (development). */
 export type FirstAccount = { code: string } | { token: string } | "open" | "locked";
@@ -167,7 +168,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     if (first === "locked") return false;
     return sameText(given, "code" in first ? first.code : first.token);
   };
-  const setupLocked = () => html(first === "locked" ? setupNeedsTokenPage(base) : setupLockedPage(base), 403);
+  const setupLocked = (lang: string) => html(first === "locked" ? setupNeedsTokenPage(base, lang) : setupLockedPage(base, lang), 403);
   const asksForToken = typeof first === "object" && "token" in first;
 
   /**
@@ -219,43 +220,50 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   async function pages(request: Request, path: string, context: RequestContext): Promise<Response | null> {
     const url = new URL(request.url);
     const method = request.method;
+    const lang = acceptedLanguage(request);
+    const { t } = translator(lang);
+    // An account's problem in the visitor's language, where the dashboard has words for it; English as it was thrown.
+    const reason = (error: RangeError) => {
+      const key = `error.${error instanceof AccountError ? error.code : ""}`;
+      return lang === "en" || t(key) === key ? error.message : t(key, error instanceof AccountError ? (error.params ?? {}) : {});
+    };
     if (path === "/auth.css") return new Response(AUTH_CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
-    if (path === "/auth.js") return new Response(AUTH_JS, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600" } });
+    if (path === "/auth.js") return new Response(authJs(url.searchParams.get("lang") ?? "en"), { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600" } });
 
     if (path === "/setup") {
       if (await hasAccount()) return redirect(`${base}/login`);
       if (method === "GET") {
         const code = url.searchParams.get("code") ?? "";
-        if (first === "locked") return setupLocked();
+        if (first === "locked") return setupLocked(lang);
         // The app's token is typed in; the server's code comes in the link it printed.
-        if (asksForToken || first === "open") return html(setupPage(base, { code: "", askCode: asksForToken }));
-        return setupOk(code) ? html(setupPage(base, { code })) : setupLocked();
+        if (asksForToken || first === "open") return html(setupPage(base, { code: "", askCode: asksForToken }, lang));
+        return setupOk(code) ? html(setupPage(base, { code }, lang)) : setupLocked(lang);
       }
       if (method === "POST") {
         const form = new URLSearchParams(await request.text());
         const code = form.get("code") ?? "";
         if (!setupOk(code)) {
-          if (asksForToken) return html(setupPage(base, { code: "", askCode: true, error: "That is not this app's RUNLIGHT_TOKEN.", email: form.get("email") ?? "" }), 403);
-          return setupLocked();
+          if (asksForToken) return html(setupPage(base, { code: "", askCode: true, error: t("auth.tokenWrong"), email: form.get("email") ?? "" }, lang), 403);
+          return setupLocked(lang);
         }
         // Asked twice, since a typo here would lock the first owner out.
         if ((form.get("password") ?? "") !== (form.get("again") ?? "")) {
-          return html(setupPage(base, { code: asksForToken ? "" : code, askCode: asksForToken, error: "The two passwords are not the same.", email: form.get("email") ?? "" }), 400);
+          return html(setupPage(base, { code: asksForToken ? "" : code, askCode: asksForToken, error: t("auth.mismatch"), email: form.get("email") ?? "" }, lang), 400);
         }
         try {
           const user = await accounts.setPassword(form.get("email") ?? "", form.get("password") ?? "", now());
           existing = true;
           return redirect(home, { "set-cookie": sessionCookie(request, await accounts.sessionFor(user, now()), SESSION_MS / 1000) });
         } catch (error) {
-          if (error instanceof RangeError) return html(setupPage(base, { code: asksForToken ? "" : code, askCode: asksForToken, error: error.message, email: form.get("email") ?? "" }), 400);
+          if (error instanceof RangeError) return html(setupPage(base, { code: asksForToken ? "" : code, askCode: asksForToken, error: reason(error), email: form.get("email") ?? "" }, lang), 400);
           throw error;
         }
       }
     }
 
     if (path === "/login") {
-      if (!(await hasAccount())) return first === "locked" ? setupLocked() : first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked();
-      if (method === "GET") return html(loginPage(base, { next: safeNext(url.searchParams.get("next")), forgot: options.forgot }));
+      if (!(await hasAccount())) return first === "locked" ? setupLocked(lang) : first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked(lang);
+      if (method === "GET") return html(loginPage(base, { next: safeNext(url.searchParams.get("next")), forgot: options.forgot }, lang));
       if (method === "POST") {
         const form = new URLSearchParams(await request.text());
         const email = form.get("email") ?? "";
@@ -264,8 +272,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
         const account = email.trim().toLowerCase();
         const ip = rl.clientIp(request, context);
         const pair = `${account}\n${ip || "unknown"}`;
-        const login = (opts: { error?: string; email?: string }) => loginPage(base, { ...opts, next, forgot: options.forgot });
-        const tooMany = () => html(login({ error: "Too many tries. Wait fifteen minutes and try again.", email }), 429);
+        const login = (opts: { error?: string; email?: string }) => loginPage(base, { ...opts, next, forgot: options.forgot }, lang);
+        const tooMany = () => html(login({ error: t("error.too_many_tries"), email }), 429);
         if (ip && !(await perIp.take(ip, now()))) return tooMany();
         if (!(await perAddress.take(pair, now()))) return tooMany();
         try {
@@ -281,19 +289,19 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
             if (!(await rl.mailSettings()) || !(await options.home?.())) return tooMany();
             const user = await accounts.signIn(email, password);
             if (user) void sendLink(user, next).catch((error) => console.error("Runlight: could not send a sign-in link", error));
-            return html(login({ error: "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email }), 429);
+            return html(login({ error: t("auth.tooManyLink"), email }), 429);
           }
           const user = await accounts.signIn(email, password);
-          if (!user) return html(login({ error: "That email and password do not match an account.", email }), 401);
+          if (!user) return html(login({ error: t("auth.wrongPassword"), email }), 401);
           await perAddress.clear(pair);
           if (ip) await perIp.forgive(ip);
           if (!trusted) await perAccount.forgive(account);
           // With two-factor on, the password only earns the second step.
-          if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }));
+          if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }, lang));
           return signedInTo(request, user, next);
         } catch (error) {
           // Too many password checks already waiting, so this one was never run: try again in a moment.
-          if (error instanceof AccountError && error.code === "busy") return html(login({ error: error.message, email }), 503, { "retry-after": "5" });
+          if (error instanceof AccountError && error.code === "busy") return html(login({ error: reason(error), email }), 503, { "retry-after": "5" });
           throw error;
         }
       }
@@ -303,8 +311,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     if (path === "/login/link" && method === "GET") {
       const next = safeNext(url.searchParams.get("next"));
       const user = await accounts.fromLink(url.searchParams.get("ticket") ?? "", now());
-      if (!user) return html(loginPage(base, { error: "That sign-in link has run out. Sign in again.", next, forgot: options.forgot }), 410);
-      if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }));
+      if (!user) return html(loginPage(base, { error: t("auth.linkExpired"), next, forgot: options.forgot }, lang), 410);
+      if (user.twoFactor) return html(codePage(base, { pending: await accounts.pendingFor(user, now()), next }, lang));
       return signedInTo(request, user, next);
     }
 
@@ -314,9 +322,9 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       const user = await accounts.fromPending(form.get("pending") ?? "", now());
       if (!user) return redirect(`${base}/login?next=${encodeURIComponent(next)}`);
       // Counted before the check, so a burst cannot get past five.
-      if (!(await codeTries.take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "Too many tries. Wait fifteen minutes and try again." }), 429);
+      if (!(await codeTries.take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: t("error.too_many_tries") }, lang), 429);
       if (!(await accounts.checkSecondFactor(user.id, form.get("code") ?? "", now()))) {
-        return html(codePage(base, { pending: form.get("pending") ?? "", next, error: "That code is not right. Check the time on your phone, or use a recovery code." }), 401);
+        return html(codePage(base, { pending: form.get("pending") ?? "", next, error: t("auth.codeWrong") }, lang), 401);
       }
       await codeTries.clear(user.id);
       return signedInTo(request, user, next);
@@ -328,22 +336,22 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (method === "GET") {
         const code = url.searchParams.get("code") ?? "";
         const invite = await accounts.inviteByCode(code, now());
-        return invite ? html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host })) : html(inviteGonePage(base), 410);
+        return invite ? html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host }, lang)) : html(inviteGonePage(base, lang), 410);
       }
       if (method === "POST") {
         const form = new URLSearchParams(await request.text());
         const code = form.get("code") ?? "";
         const invite = await accounts.inviteByCode(code, now());
-        if (!invite) return html(inviteGonePage(base), 410);
-        const again = (error: string) => html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host, error }), 400);
-        if ((form.get("password") ?? "") !== (form.get("again") ?? "")) return again("The two passwords are not the same.");
+        if (!invite) return html(inviteGonePage(base, lang), 410);
+        const again = (error: string) => html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host, error }, lang), 400);
+        if ((form.get("password") ?? "") !== (form.get("again") ?? "")) return again(t("auth.mismatch"));
         try {
           const user = await accounts.acceptInvite(code, form.get("password") ?? "", now());
           existing = true;
           return redirect(home, { "set-cookie": sessionCookie(request, await accounts.sessionFor(user, now()), SESSION_MS / 1000) });
         } catch (error) {
-          if (error instanceof AccountError && error.code === "invite_gone") return html(inviteGonePage(base), 410);
-          if (error instanceof RangeError) return again(error.message);
+          if (error instanceof AccountError && error.code === "invite_gone") return html(inviteGonePage(base, lang), 410);
+          if (error instanceof RangeError) return again(reason(error));
           throw error;
         }
       }
@@ -550,7 +558,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (page) return page;
       // The dashboard itself: straight to sign-in, or to setting up the first account.
       if ((path === "/" || path === "") && request.method === "GET" && !(await signedIn(request))) {
-        if (!(await hasAccount())) return first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked();
+        if (!(await hasAccount())) return first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked(acceptedLanguage(request));
         const search = new URL(request.url).search;
         return redirect(`${base}/login${search ? `?next=${encodeURIComponent(`${home}${search}`)}` : ""}`);
       }

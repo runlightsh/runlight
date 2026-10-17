@@ -332,7 +332,20 @@ export class ApiError extends Error {
 /** The error a failed response carries, in the dashboard's language when its code is one the dashboard knows. */
 async function failure(response: Response): Promise<ApiError> {
   const body = (await response.json().catch(() => null)) as { error?: string; code?: string; params?: Record<string, string> } | null;
-  return new ApiError(response.status, (body?.code && errorText(body.code, body.params)) || body?.error || response.statusText, body?.code ?? "");
+  // A proxy's own error page has no code: say what happened in the dashboard's language, with its status, as
+  // HTTP/2 brings no reason phrase to fall back on.
+  const text = (body?.code && errorText(body.code, body.params)) || body?.error || errorText("http", { status: String(response.status) })!;
+  return new ApiError(response.status, text, body?.code ?? "");
+}
+
+/** fetch, with a request that never reaches the server answered in the dashboard's language rather than the browser's. */
+async function reach(input: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if ((error as Error)?.name === "AbortError") throw error;
+    throw new ApiError(0, errorText("network")!, "network");
+  }
 }
 
 const reports = reportCache();
@@ -352,7 +365,7 @@ function get<T>(path: string, params: URLSearchParams): Promise<T> {
 }
 
 async function fetchReport<T>(path: string, params: URLSearchParams): Promise<T> {
-  const response = await fetch(`${base}/api/${path}?${params}`, {
+  const response = await reach(`${base}/api/${path}?${params}`, {
     credentials: "same-origin",
     headers: readHeaders(),
   });
@@ -365,7 +378,7 @@ async function fetchReport<T>(path: string, params: URLSearchParams): Promise<T>
 
 /** Fetches a file from the API (with a share's or an embed's header when there is one) and saves it under the server's name. */
 export async function download(path: string, params: URLSearchParams): Promise<void> {
-  const response = await fetch(`${base}/api/${path}?${params}`, {
+  const response = await reach(`${base}/api/${path}?${params}`, {
     credentials: "same-origin",
     headers: readHeaders(),
   });
@@ -406,7 +419,7 @@ async function send<T>(method: string, path: string, body: unknown): Promise<T> 
   reports.clear();
   if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   try {
-    const response = await fetch(`${base}/api/${path}`, {
+    const response = await reach(`${base}/api/${path}`, {
       method,
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
@@ -424,7 +437,7 @@ const del = async (path: string) => {
   reports.clear();
   if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   try {
-    const response = await fetch(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin" });
+    const response = await reach(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin" });
     if (!response.ok) throw await failure(response);
   } finally {
     reports.clear();

@@ -7,8 +7,9 @@
   --card: #ffffff;
   --sunk: #fafafa;
   --ink: #000000;
-  --muted: #6b6b73;
-  --faint: #a1a1aa;
+  /* Both text greys reach WCAG AA's 4.5:1 on every surface they sit on, the faint one too. */
+  --muted: #52525b;
+  --faint: #6b6b73;
   --line: #e4e4e7;
   --bar: #f1f1f3;
   --bar-hover: #e7e7ea;
@@ -43,7 +44,7 @@
     --sunk: #1a1a1e;
     --ink: #ffffff;
     --muted: #a1a1aa;
-    --faint: #6b6b73;
+    --faint: #8a8a94;
     --line: #27272a;
     --bar: #1f1f23;
     --bar-hover: #29292e;
@@ -76,7 +77,7 @@
   --sunk: #1a1a1e;
   --ink: #ffffff;
   --muted: #a1a1aa;
-  --faint: #6b6b73;
+  --faint: #8a8a94;
   --line: #27272a;
   --bar: #1f1f23;
   --bar-hover: #29292e;
