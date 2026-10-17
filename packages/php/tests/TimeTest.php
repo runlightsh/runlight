@@ -171,8 +171,17 @@ final class TimeTest extends TestCase
         'America/Winnipeg', 'America/Rainy_River', 'Canada/Central', 'Africa/Casablanca', 'Africa/El_Aaiun',
     ];
 
+    /**
+     * 2025c corrected Baja California's clocks in the 1970s, so with older data (as PECL timezonedb 2025.2 has)
+     * these zones' instants before 1980 are not compared.
+     */
+    private const HISTORY_FIXED_IN_2025C = ['America/Tijuana', 'America/Ensenada', 'America/Santa_Isabel', 'Mexico/BajaNorte'];
+
     private static function changed(string $zone, int $ts): bool
     {
+        if (in_array($zone, self::HISTORY_FIXED_IN_2025C, true) && $ts < self::utc(1980, 0) && version_compare(timezone_version_get(), '2025.3', '<')) {
+            return true;
+        }
         return in_array($zone, self::CHANGED_SINCE_2025C, true) && $ts >= self::utc(2026, 0);
     }
 
