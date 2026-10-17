@@ -495,4 +495,45 @@ public sealed class CountingTests : StoreTestCase
         // Rolled up.
         Assert.Equal(1, Sum(await store.HourlyAsync(query)));
     }
+
+    [Theory]
+    [MemberData(nameof(Databases.StoreKindData), MemberType = typeof(Databases))]
+    public async Task Two_visits_opened_for_one_visitor_at_once_by_two_processes_settle_on_one(string kind)
+    {
+        var store = await StoreAsync(kind);
+        JsObject Row(string id) => new()
+        {
+            ["id"] = id,
+            ["site"] = "default",
+            ["visitor"] = "v1",
+            ["startedAt"] = NOW,
+            ["hostname"] = "example.com",
+            ["referrerHost"] = "",
+            ["referrerPath"] = "",
+            ["source"] = "",
+            ["channel"] = "Direct",
+            ["utmSource"] = "",
+            ["utmMedium"] = "",
+            ["utmCampaign"] = "",
+            ["utmTerm"] = "",
+            ["utmContent"] = "",
+            ["country"] = "",
+            ["region"] = "",
+            ["city"] = "",
+            ["browser"] = "",
+            ["browserVersion"] = "",
+            ["os"] = "",
+            ["osVersion"] = "",
+            ["device"] = "",
+            ["screen"] = "",
+            ["language"] = "",
+        };
+        await store.InsertSessionAsync(Row("bbbb"));
+        await store.InsertSessionAsync(Row("aaaa"));
+        // Each process asks after opening its own; both settle on the same one, and the other is gone.
+        var one = await store.SettleOpenSessionAsync("default", ["v1"], NOW - MIN, new JsObject { ["id"] = "bbbb", ["visitor"] = "v1" });
+        var other = await store.SettleOpenSessionAsync("default", ["v1"], NOW - MIN, new JsObject { ["id"] = "aaaa", ["visitor"] = "v1" });
+        Assert.Equal(["aaaa", "aaaa"], [one.Str("id"), other.Str("id")]);
+        Assert.Equal(["aaaa"], (await store.Db.AllAsync("SELECT id FROM rl_sessions")).Select(r => Sql.S(r.Get("id"))));
+    }
 }

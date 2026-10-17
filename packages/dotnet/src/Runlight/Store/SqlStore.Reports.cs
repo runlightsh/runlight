@@ -35,8 +35,9 @@ public sealed partial class SqlStore
         }
         string site = query.Str("site")!;
         var scope = Sql.VisitScope(Sql.Filters(query), site, query.Long("from"), query.Long("to"), Dialect);
+        string table = Dialect == "sqlite" && Sql.Filters(query).Count == 0 ? "rl_sessions s INDEXED BY rl_sessions_visit_visitors" : "rl_sessions s";
         var row = await Db.FirstAsync(
-            "SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND " + Sql.IsVisit + scope.Sql,
+            "SELECT COUNT(DISTINCT s.visitor) AS visitors FROM " + table + " WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND " + Sql.IsVisit + scope.Sql,
             [site, query.Get("from"), query.Get("to"), .. scope.Params],
             cancellationToken).ConfigureAwait(false);
         return Sql.Num(row?.Get("visitors"));
@@ -190,6 +191,31 @@ public sealed partial class SqlStore
     }
 
     /// <summary>A BreakdownRow for each value of a dimension, a page of them.</summary>
+    /// <summary>Seek one matching event per hostname, skipping its remaining events before the next seek.</summary>
+    public async Task<List<JsObject>> HostnameSuggestionsAsync(JsObject query, int limit, CancellationToken cancellationToken = default)
+    {
+        var filters = Sql.Filters(query);
+        var v = Sql.VisitRows(filters, query.Str("site")!, query.Long("from"), query.Long("to"), Dialect);
+        var within = Sql.RowScope(filters, ["page", "hostname"], Dialect);
+        string table = Dialect == "sqlite" ? "rl_events e INDEXED BY rl_events_hostname_suggest" : "rl_events e";
+        var rows = new List<JsObject>();
+        string? after = null;
+        while (rows.Count < limit)
+        {
+            var found = await Db.AllAsync(
+                "SELECT e.hostname AS value FROM " + table + " CROSS JOIN rl_sessions s\n         WHERE " + v.Sql + " AND e.kind = 'pageview'" + within.Sql + (after == null ? "" : " AND e.hostname" + TextOrder() + " > ?") + "\n         ORDER BY e.hostname" + TextOrder() + " LIMIT 1",
+                [.. v.Params, .. within.Params, .. (after == null ? [] : new object?[] { after })],
+                cancellationToken).ConfigureAwait(false);
+            if (found.Count == 0)
+            {
+                break;
+            }
+            after = Sql.S(found[0].Get("value"));
+            rows.Add(new JsObject { ["value"] = after });
+        }
+        return rows;
+    }
+
     public async Task<List<JsObject>> BreakdownAsync(JsObject query, string dimension, int limit, int offset, CancellationToken cancellationToken = default)
     {
         string site = query.Str("site")!;

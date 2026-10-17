@@ -114,9 +114,9 @@ public sealed class HardeningTests : IAsyncLifetime
         Assert.Contains(keys[0], made);
         Assert.Equal(keys[0], await store.SettingAsync("pick-key"));
 
-        var agents = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => OAuth.AgentsKeyAsync(store, "blog"))));
+        var agents = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => OAuth.AgentsKeyAsync(store, Secret, "blog"))));
         Assert.Single(agents.Distinct());
-        Assert.NotEqual(agents[0], await OAuth.AgentsKeyAsync(store, "blog", true)); // a new one replaces it
+        Assert.NotEqual(agents[0], await OAuth.AgentsKeyAsync(store, Secret, "blog", true)); // a new one replaces it
     }
 
     [Theory]

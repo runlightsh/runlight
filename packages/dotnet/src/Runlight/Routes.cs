@@ -228,6 +228,7 @@ public sealed class Routes
         _oauth = new OAuthContext
         {
             Store = runlight.Store,
+            Secret = runlight.Secret,
             Base = _base,
             Now = runlight.Now,
             Init = ct => runlight.InitAsync(ct),
@@ -367,6 +368,8 @@ public sealed class Routes
     /// <summary>What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets.</summary>
     private static bool IsEmail(string value) => Email.IsMatch(value);
 
+    private const long MaxPassThroughBytes = 100L * 1024 * 1024;
+
     /// <summary>
     /// Answers a read for a site counted by another install by asking that install,
     /// with its token and its own id for the site, and handing back what it says.
@@ -399,8 +402,9 @@ public sealed class Routes
                 // A long report or an export is worked out in full before the install sends a byte, so reads get
                 // two minutes.
                 TimeoutMs = write ? 30_000 : 120_000,
-                // An answer this server reads itself, rather than hands on, is read only so far.
-                MaxBytes = maxBytes,
+                // An answer is read only so far, 100 MiB unless a caller asks for less, enough for an install's largest
+                // export, so no install can stream an answer into memory without end. Past it, the answer is a 502.
+                MaxBytes = maxBytes ?? MaxPassThroughBytes,
             };
             if (write)
             {
@@ -507,20 +511,6 @@ public sealed class Routes
                 : "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
             ["referrer-policy"] = "no-referrer",
         });
-
-    /// <summary>The first language a browser asks for that the dashboard speaks, else English.</summary>
-    private static string AcceptedLanguage(Request request)
-    {
-        foreach (string part in (request.Headers.Get("accept-language") ?? "").Split(','))
-        {
-            string code = Js.Lower(Js.Slice(Js.Trim(part.Split(';')[0]), 0, 2));
-            if (Messages.Languages().Contains(code))
-            {
-                return code;
-            }
-        }
-        return "en";
-    }
 
     /// <summary>Rows of objects as CSV, with a column for every key the first row has, in the units a spreadsheet reads.</summary>
     private static string RowsCsv(IReadOnlyList<JsObject> rows, string timezone, string? interval = null, string? dimension = null)
@@ -734,15 +724,11 @@ public sealed class Routes
         return output;
     }
 
-    /// <summary><c>Math.min(1000, Math.max(1, Number(value) || fallback))</c>.</summary>
-    private static double Limit(string? value, double fallback)
+    /// <summary>A whole number from a query, within 1 and <paramref name="max"/>, or <paramref name="fallback"/> for anything else: a fraction, a huge number, or text.</summary>
+    private static double WholeParam(string? value, double fallback, double max)
     {
         double n = value == null ? 0 : Js.Number(value);
-        if (double.IsNaN(n) || n == 0)
-        {
-            n = fallback;
-        }
-        return Math.Min(1000, Math.Max(1, n));
+        return Js.IsInteger(n) && Math.Abs(n) <= 9007199254740991d && n >= 1 ? Math.Min(n, max) : fallback;
     }
 
     /// <summary>A number as a whole int, as PHP's (int) cast and a store's LIMIT read it, kept within int.</summary>
@@ -1563,8 +1549,9 @@ public sealed class Routes
                             fields[name] = value == null ? "" : Js.String(value);
                         }
                     }
-                    // A hub with a manage token learns which service sends the reports and from where, nothing more.
-                    bool viaManage = _managed.TryGetValue(request, out _);
+                    // A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+                    // from where, nothing more: a webhook's address is often its own credential.
+                    bool viaManage = _managed.TryGetValue(request, out _) || (await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false))?.Str("site") != null;
                     var answer = new JsObject
                     {
                         ["source"] = Or(settings, "source", null),
@@ -1618,6 +1605,13 @@ public sealed class Routes
                 {
                     return Coded("Set up a mail service first", "mail_unset", 400);
                 }
+                // One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+                // or use up a service's quota; one just set up can be tried at once.
+                string tested = "test-sent:" + (settings.Str("source") ?? "") + ":" + (settings.Str("service") ?? "");
+                if (_rl.Now() - Js.Number(await Store.SettingAsync(tested, cancellationToken).ConfigureAwait(false) ?? "0") < 60_000)
+                {
+                    return Coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429);
+                }
                 var t = Messages.Translator(Text(body, "lang", "en"));
                 bool viaApp = settings.Str("source") == "app";
                 string name = viaApp ? settings.Str("via") ?? "" : "";
@@ -1636,6 +1630,8 @@ public sealed class Routes
                     ["text"] = t.T("email.test.body", new JsObject { ["service"] = name }),
                     ["html"] = "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
                 }, cancellationToken).ConfigureAwait(false);
+                // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+                await Store.SetSettingAsync(tested, Js.Str(_rl.Now()), cancellationToken).ConfigureAwait(false);
                 return JsonResponse(new JsObject { ["ok"] = true });
             }
 
@@ -2075,6 +2071,12 @@ public sealed class Routes
                 bool manage = scopedAccount.Str("role") == "member" && ManagePath(method, path);
                 if (!read && !assistant && !manage) return Coded("Your account only has access to its assigned site", "site_access", 403);
                 if (path == "/api/assistant/chat" && (!Json.TryParse(request.Text(), out var input) || input is not JsObject body || body.Str("site") != allowedSite)) return Coded("Unknown site", "unknown_site", 404);
+                if (sitePath.Success && IsJson(request))
+                {
+                    // Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+                    // a hub may, never move it.
+                    if (Json.TryParse(request.Text(), out var siteInput) && siteInput is JsObject siteBody && siteBody.Has("hostnames")) return Coded("Your account cannot change a site's domains", "site_domains", 403);
+                }
                 url = new Url(url.Href); var query = url.SearchParams; query.Set("site", allowedSite); url.SetSearchParams(query);
             }
         }
@@ -2378,7 +2380,7 @@ public sealed class Routes
             {
                 return (Response)siteOrRefusal;
             }
-            return JsonResponse(new JsObject { ["key"] = await OAuth.AgentsKeyAsync(Store, site.Str("id")!, path.EndsWith("/new", StringComparison.Ordinal), cancellationToken).ConfigureAwait(false) });
+            return JsonResponse(new JsObject { ["key"] = await OAuth.AgentsKeyAsync(Store, rl.Secret, site.Str("id")!, path.EndsWith("/new", StringComparison.Ordinal), cancellationToken).ConfigureAwait(false) });
         }
 
         // Making, changing, and deleting funnels; reading them is with the other reports.
@@ -2730,6 +2732,11 @@ public sealed class Routes
             try
             {
                 await rl.DeleteSiteAsync(id, cancellationToken).ConfigureAwait(false);
+                // Those kept to the site go with it, so a site made later with the same id is not theirs.
+                if (_web != null)
+                {
+                    await _web.Accounts.ForgetSiteAsync(id, cancellationToken).ConfigureAwait(false);
+                }
                 return JsonResponse(new JsObject { ["ok"] = true });
             }
             catch (Exception error) when (IsRange(error))
@@ -2772,7 +2779,7 @@ public sealed class Routes
             foreach (var setting in await Store.SettingsStartingWithAsync("observe-key:", cancellationToken).ConfigureAwait(false))
             {
                 string id = setting.Str("key")!["observe-key:".Length..];
-                string? key = setting.Str("value");
+                string? key = setting.Str("value") is { } stored ? OAuth.OpenAgentsKey(stored, rl.Secret) : null;
                 if (id.Length > 0 && key != null && ConstantTimeEqual(given, key) && rl.Site(id) != null)
                 {
                     keySite = id;
@@ -3316,15 +3323,16 @@ public sealed class Routes
             var options = new JsObject { ["steps"] = parameters.Get("steps") is string steps ? Js.Number(steps) : 5L };
             if (Js.Truthy(parameters.Get("start")))
             {
-                options["start"] = parameters.Get("start");
+                // Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+                options["start"] = Sources.RecordedPath(parameters.Get("start")!) ?? parameters.Get("start");
             }
             if (Js.Truthy(parameters.Get("end")))
             {
-                options["end"] = parameters.Get("end");
+                options["end"] = Sources.RecordedPath(parameters.Get("end")!) ?? parameters.Get("end");
             }
             if (through.Success)
             {
-                options["through"] = new JsObject { ["step"] = Js.Number(through.Groups[1].Value), ["value"] = through.Groups[2].Value };
+                options["through"] = new JsObject { ["step"] = Js.Number(through.Groups[1].Value), ["value"] = Sources.RecordedPath(through.Groups[2].Value) ?? through.Groups[2].Value };
             }
             var answer = new JsObject { ["site"] = siteId, ["range"] = rangeOut };
             foreach (var (k, v) in Journeys.Of(rows, options))
@@ -3378,7 +3386,7 @@ public sealed class Routes
                 return Coded("Bad property name", "property_bad", 400);
             }
             string? key = asked ?? keys.Select(k => k.Str("key")).FirstOrDefault(k => k != null && PropertyName.IsMatch(k));
-            double limit = Limit(parameters.Get("limit"), 100);
+            double limit = WholeParam(parameters.Get("limit"), 100, 1000);
             var rows = !string.IsNullOrEmpty(key) ? await store.EventPropValuesAsync(query, evt, key, Whole(limit), cancellationToken).ConfigureAwait(false) : [];
             return JsonResponse(new JsObject { ["site"] = siteId, ["range"] = rangeOut, ["event"] = evt, ["keys"] = ToList(keys), ["key"] = key, ["rows"] = ToList(rows) });
         }
@@ -3390,9 +3398,13 @@ public sealed class Routes
             {
                 return Coded("Unknown dimension \"" + dimension + "\"", "unknown_dimension", 400, new JsObject { ["dimension"] = dimension });
             }
-            double limit = Limit(parameters.Get("limit"), 10);
-            double page = parameters.Get("page") is string p ? Js.Number(p) : 0;
-            page = Math.Max(1, double.IsNaN(page) || page == 0 ? 1 : page);
+            double limit = WholeParam(parameters.Get("limit"), 10, 1000);
+            double page = WholeParam(parameters.Get("page"), 1, 100_000);
+            if (dimension == "hostname" && parameters.Get("suggestions") == "1" && parameters.Get("format") != "csv")
+            {
+                var suggested = await store.HostnameSuggestionsAsync(query, (int)Math.Min(limit, 50), cancellationToken).ConfigureAwait(false);
+                return JsonResponse(new JsObject { ["site"] = siteId, ["range"] = rangeOut, ["dimension"] = dimension, ["rows"] = ToList(suggested) });
+            }
             var rows = await store.BreakdownAsync(query, dimension, Whole(limit), Whole((page - 1) * limit), cancellationToken).ConfigureAwait(false);
             if (parameters.Get("format") == "csv")
             {
@@ -3561,7 +3573,7 @@ public sealed class Routes
         // script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
         if (path == "/pick-return" && method == "GET")
         {
-            var t = Messages.Translator(AcceptedLanguage(request));
+            var t = Messages.Translator(Messages.AcceptedLanguage(request));
             return SmallPage(
                 t.Lang,
                 "<div id=\"done\" hidden><h1>" + EscapeHtml(t.T("pick.doneTitle")) + "</h1><p>" + EscapeHtml(t.T("pick.done")) + "</p></div><div id=\"gone\" hidden><h1>" + EscapeHtml(t.T("pick.goneTitle")) + "</h1><p>" + EscapeHtml(t.T("pick.gone")) + "</p></div>",
@@ -3669,7 +3681,7 @@ public sealed class Routes
             var found = await RedeemEmbedAsync(url.SearchParams.Get("ticket") ?? "", cancellationToken).ConfigureAwait(false);
             if (found is not { } embed)
             {
-                var t = Messages.Translator(AcceptedLanguage(request));
+                var t = Messages.Translator(Messages.AcceptedLanguage(request));
                 return SmallPage(t.Lang, "<h1>" + EscapeHtml(t.T("embed.goneTitle")) + "</h1><p>" + EscapeHtml(t.T("embed.gone")) + "</p>", 404);
             }
             string session = embed.Token != null ? await EmbedSessionAsync(embed.Token.Str("id")!, cancellationToken).ConfigureAwait(false) : "";
@@ -3691,7 +3703,7 @@ public sealed class Routes
             var share = ShareId.IsMatch(id) ? await Store.ShareByIdAsync(id, cancellationToken).ConfigureAwait(false) : null;
             if (share == null)
             {
-                var t = Messages.Translator(AcceptedLanguage(request));
+                var t = Messages.Translator(Messages.AcceptedLanguage(request));
                 return SmallPage(t.Lang, "<h1>" + EscapeHtml(t.T("share.goneTitle")) + "</h1><p>" + EscapeHtml(t.T("share.gone")) + "</p>", 404);
             }
             return new Response(Dashboard(@base, share.Str("id")!, "", _options.GeoCredit), 200, new Headers

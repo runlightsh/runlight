@@ -126,14 +126,24 @@ public sealed class SitesTests : CoreTestCase
     }
 
     [Fact]
-    public async Task Retention_counts_back_calendar_months_as_setUTCMonth_does()
+    public async Task Retention_counts_back_calendar_months_and_keeps_the_day_within_its_month()
     {
         var t = await Harness.CreateAsync("sqlite");
         await t.Rl.InitAsync();
         await t.Rl.SetRetentionAsync("default", 6);
-        t.Now = Utc(2026, 8, 31, 10, 30) + 123;
-        // February 31st runs on to March 3rd, as JavaScript's dates do.
-        Assert.Equal(Utc(2026, 3, 3, 10, 30) + 123, await t.Rl.RetentionCutoffAsync("default"));
+        // Six months before August 31st is February 28th (or 29th), not March 2nd.
+        foreach (var (now, cutoff) in new[]
+        {
+            (Utc(2026, 8, 31, 12), Utc(2026, 2, 28, 12)),
+            (Utc(2026, 8, 30, 12), Utc(2026, 2, 28, 12)),
+            (Utc(2028, 8, 31, 12), Utc(2028, 2, 29, 12)),
+            (Utc(2026, 10, 6, 12), Utc(2026, 4, 6, 12)),
+            (Utc(2026, 8, 31, 10, 30) + 123, Utc(2026, 2, 28, 10, 30) + 123),
+        })
+        {
+            t.Now = now;
+            Assert.Equal(cutoff, await t.Rl.RetentionCutoffAsync("default"));
+        }
     }
 
     [Fact]

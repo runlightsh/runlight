@@ -1325,11 +1325,13 @@ public sealed partial class Runlight
         {
             return null;
         }
-        // setUTCMonth: the same day and time that many months back, a day past the month's end running on.
+        // Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
         long now = Now();
         long ms = ((now % 1000) + 1000) % 1000;
         var at = DateTimeOffset.FromUnixTimeMilliseconds(now - ms).UtcDateTime;
-        return Time.Utc(at.Year, at.Month - 1 - months.Value, at.Day, at.Hour, at.Minute, at.Second) + ms;
+        long month = at.Month - 1 - months.Value;
+        long lastDay = (Time.Utc(at.Year, month + 1, 1) - Time.Utc(at.Year, month, 1)) / 86_400_000;
+        return Time.Utc(at.Year, month, Math.Min(at.Day, lastDay), at.Hour, at.Minute, at.Second) + ms;
     }
 
     /// <summary>Deletes visits older than each site's retention allows. Cheap when there is nothing to delete.</summary>
@@ -1485,11 +1487,44 @@ public sealed partial class Runlight
     }
 
     /// <summary>
-    /// Deletes salts whose day has ended everywhere. The earliest timezone is a day behind UTC and still
-    /// needs its yesterday, so a salt goes two UTC days after its date.
+    /// Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a site's
+    /// timezone, and after midnight only while a visit that began that day there is still going, since it carries
+    /// on under the visitor it began with. So a salt lasts its day and the visits that run past it.
     /// </summary>
-    private Task DropOldSaltsAsync(long now, CancellationToken cancellationToken) =>
-        Store.DropSaltsBeforeAsync(Js.IsoString(now - 2 * 86_400_000)[..10], cancellationToken);
+    private async Task DropOldSaltsAsync(long now, CancellationToken cancellationToken)
+    {
+        var zones = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var site in Sites())
+        {
+            string zone = Zone(site);
+            if (!zones.TryGetValue(zone, out var ids))
+            {
+                zones[zone] = ids = [];
+            }
+            ids.Add(Id(site));
+        }
+        if (zones.Count == 0)
+        {
+            return;
+        }
+        var needed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (timezone, sites) in zones)
+        {
+            string today = Time.LocalDate(now, timezone);
+            needed.Add(today);
+            string yesterday = Time.AddDays(today, -1);
+            if (await Store.VisitOpenAsync(sites, Time.StartOf(yesterday, timezone), Time.StartOf(today, timezone), now - SessionIdleMs, cancellationToken).ConfigureAwait(false))
+            {
+                needed.Add(yesterday);
+            }
+            else if (_salts.TryGetValue(timezone, out var cached) && cached.Day == today)
+            {
+                // Nor is it kept here: no visit is left for it to find.
+                _salts[timezone] = (cached.Day, cached.Today, null);
+            }
+        }
+        await Store.DropSaltsExceptAsync([.. needed], cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.</summary>
     private string? ForwardedHost(Request request) => _trustProxy.On ? request.Headers.Get("x-forwarded-host") : null;
@@ -1693,7 +1728,9 @@ public sealed partial class Runlight
                 .With(parsed)
                 .With(new JsObject { ["screen"] = screen, ["language"] = language });
             await Store.InsertSessionAsync(row, cancellationToken).ConfigureAwait(false);
-            return (id, today);
+            // Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+            var settled = await Store.SettleOpenSessionAsync(Id(site), candidates, now - SessionIdleMs, new JsObject { ["id"] = id, ["visitor"] = today }, cancellationToken).ConfigureAwait(false);
+            return (settled.Str("id")!, settled.Str("visitor")!);
         }).ConfigureAwait(false);
     }
 

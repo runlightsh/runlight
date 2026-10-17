@@ -452,6 +452,15 @@ public sealed partial class SqlStore
             async store =>
             {
                 var db = store.Db;
+                // MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two processes
+                // building one day could each add its rows. There the day is marked first: the second waits on that
+                // mark until the first commits, then fails, and the day counts as built elsewhere. Elsewhere the rows'
+                // own key refuses a second set, and a database without transactions (D1) must not mark a day first.
+                if (dialect == "mysql")
+                {
+                    await db.RunAsync("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", A(site, day), cancellationToken).ConfigureAwait(false);
+                    await db.RunAsync("INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", A(site, day, start, end), cancellationToken).ConfigureAwait(false);
+                }
                 await db.RunAsync("DELETE FROM rl_rollups WHERE site = ? AND day = ?", A(site, day), cancellationToken).ConfigureAwait(false);
                 // The WITH goes after INSERT INTO, the one place every database takes it.
                 var parameters = A(site, start, end);
@@ -480,8 +489,11 @@ public sealed partial class SqlStore
                     "INSERT INTO rl_rollups (site, day, dim, value, visitors, events)\n         SELECT ?, ?, 'event', e.name, COUNT(DISTINCT e.visitor), COUNT(*) " + OfDay("event") + " GROUP BY e.name",
                     [site, day, .. window],
                     cancellationToken).ConfigureAwait(false);
-                await db.RunAsync("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", A(site, day), cancellationToken).ConfigureAwait(false);
-                await db.RunAsync("INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", A(site, day, start, end), cancellationToken).ConfigureAwait(false);
+                if (dialect != "mysql")
+                {
+                    await db.RunAsync("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", A(site, day), cancellationToken).ConfigureAwait(false);
+                    await db.RunAsync("INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", A(site, day, start, end), cancellationToken).ConfigureAwait(false);
+                }
             },
             cancellationToken).ConfigureAwait(false);
     }
@@ -804,11 +816,42 @@ public sealed partial class SqlStore
         return row?.Get("salt") != null ? Sql.S(row.Get("salt")) : null;
     }
 
-    /// <summary>Deletes every salt older than <paramref name="day"/>, so old hashes can never be recomputed.</summary>
-    public Task DropSaltsBeforeAsync(string day, CancellationToken cancellationToken = default) =>
-        Db.RunAsync("DELETE FROM rl_salts WHERE day < ?", A(day), cancellationToken);
+    /// <summary>Deletes every salt but those of these days, so the hashes made with them can never be made again.</summary>
+    public Task DropSaltsExceptAsync(IReadOnlyList<string> days, CancellationToken cancellationToken = default) =>
+        Db.RunAsync("DELETE FROM rl_salts WHERE day NOT IN (" + string.Join(", ", days.Select(_ => "?")) + ")", [.. days], cancellationToken);
+
+    /// <summary>Whether a visit to one of these sites that started in a stretch of time was still going at <paramref name="since"/>.</summary>
+    public async Task<bool> VisitOpenAsync(IReadOnlyList<string> sites, long from, long to, long since, CancellationToken cancellationToken = default)
+    {
+        // As many sites a statement as keep it under D1's 100.
+        var open = await Sql.InPiecesAsync(
+            sites,
+            Sql.MaxParams - 3,
+            piece => Db.AllAsync(
+                "SELECT 1 AS open FROM rl_sessions WHERE site IN (" + string.Join(", ", piece.Select(_ => "?")) + ") AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1",
+                [.. piece, from, to, since],
+                cancellationToken)).ConfigureAwait(false);
+        return open.Count > 0;
+    }
 
     // Ingest
+
+    /// <summary>Text cut to at most <paramref name="max"/> characters, as a VARCHAR(max) holds it, never through the middle of one.</summary>
+    private static object? Clip(object? value, int max)
+    {
+        if (value is not string text || text.Length <= max)
+        {
+            return value;
+        }
+        int count = 0;
+        int end = 0;
+        while (end < text.Length && count < max)
+        {
+            end += char.IsHighSurrogate(text[end]) && end + 1 < text.Length && char.IsLowSurrogate(text[end + 1]) ? 2 : 1;
+            count++;
+        }
+        return text[..end];
+    }
 
     /// <summary>The visitor's open session: any of their hashes, active since <paramref name="since"/>; { id, visitor } or null.</summary>
     public async Task<JsObject?> OpenSessionAsync(string site, IReadOnlyList<string> visitors, long since, CancellationToken cancellationToken = default)
@@ -824,12 +867,34 @@ public sealed partial class SqlStore
         return row == null ? null : new JsObject { ["id"] = Sql.S(row.Get("id")), ["visitor"] = Sql.S(row.Get("visitor")) };
     }
 
+    /// <summary>
+    /// After opening a visit: the visitor's earliest visit still going, which is this one unless another
+    /// process opened one for the same visitor at the same moment. Then both settle on the earliest, and the
+    /// one that is not drops its own, before anything is counted into it.
+    /// </summary>
+    public async Task<JsObject> SettleOpenSessionAsync(string site, IReadOnlyList<string> visitors, long since, JsObject opened, CancellationToken cancellationToken = default)
+    {
+        var row = await Db.FirstAsync(
+            // One already counting a hit first: the other process went on with it.
+            "SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN (" + string.Join(", ", visitors.Select(_ => "?")) + ") AND last_at >= ?\n       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1",
+            [site, .. visitors, since],
+            cancellationToken).ConfigureAwait(false);
+        var first = row ?? opened;
+        if (Sql.S(first.Get("id")) != Sql.S(opened.Get("id")))
+        {
+            await Db.RunAsync("DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0", A(opened.Get("id")), cancellationToken).ConfigureAwait(false);
+        }
+        return new JsObject { ["id"] = Sql.S(first.Get("id")), ["visitor"] = Sql.S(first.Get("visitor")) };
+    }
+
     public Task InsertSessionAsync(JsObject row, CancellationToken cancellationToken = default) => Db.RunAsync(
         "INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, engaged_ms, hostname, referrer_host, referrer_path,\n        source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, country, region, city,\n        browser, browser_version, os, os_version, device, screen, language)\n       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        A(row.Get("id"), row.Get("site"), row.Get("visitor"), row.Get("startedAt"), row.Get("startedAt"), row.Get("hostname"), row.Get("referrerHost"), row.Get("referrerPath"),
-            row.Get("source"), row.Get("channel"), row.Get("utmSource"), row.Get("utmMedium"), row.Get("utmCampaign"), row.Get("utmTerm"), row.Get("utmContent"),
-            row.Get("country"), row.Get("region"), row.Get("city"), row.Get("browser"), row.Get("browserVersion"), row.Get("os"), row.Get("osVersion"), row.Get("device"),
-            row.Get("screen"), row.Get("language")),
+        // Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps the
+        // same, and no header, however long, can make a row Postgres's indexes refuse.
+        A(row.Get("id"), row.Get("site"), row.Get("visitor"), row.Get("startedAt"), row.Get("startedAt"), Clip(row.Get("hostname"), 255), Clip(row.Get("referrerHost"), 255), Clip(row.Get("referrerPath"), 500),
+            Clip(row.Get("source"), 200), Clip(row.Get("channel"), 100), Clip(row.Get("utmSource"), 200), Clip(row.Get("utmMedium"), 200), Clip(row.Get("utmCampaign"), 200), Clip(row.Get("utmTerm"), 200), Clip(row.Get("utmContent"), 200),
+            Clip(row.Get("country"), 16), Clip(row.Get("region"), 100), Clip(row.Get("city"), 100), Clip(row.Get("browser"), 100), Clip(row.Get("browserVersion"), 100), Clip(row.Get("os"), 100), Clip(row.Get("osVersion"), 100), Clip(row.Get("device"), 50),
+            Clip(row.Get("screen"), 50), Clip(row.Get("language"), 50)),
         cancellationToken);
 
     /// <summary>
@@ -846,7 +911,7 @@ public sealed partial class SqlStore
         {
             return Db.RunAsync(
                 "UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,\n           entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?",
-                A(ts, path, path, id),
+                A(ts, Clip(path, 1000), Clip(path, 1000), id),
                 cancellationToken);
         }
         if (reopen)
@@ -895,8 +960,8 @@ public sealed partial class SqlStore
         object? props = row.Get("props");
         return Db.RunAsync(
             "INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname, title, name, props, engaged_ms, scroll, link)\n       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            A(row.Get("site"), row.Get("ts"), row.Get("kind"), row.Get("visitor"), row.Get("session"), row.Get("pageview"), row.Get("path"), row.Get("hostname"), row.Get("title"),
-                row.Get("name"), props == null ? null : Json.Stringify(props), row.Get("engagedMs"), row.Get("scroll"), row.Get("link")),
+            A(row.Get("site"), row.Get("ts"), row.Get("kind"), row.Get("visitor"), row.Get("session"), row.Get("pageview"), Clip(row.Get("path"), 1000), Clip(row.Get("hostname"), 255), Clip(row.Get("title"), 500),
+                Clip(row.Get("name"), 255), props == null ? null : Json.Stringify(props), row.Get("engagedMs"), row.Get("scroll"), row.Get("link")),
             cancellationToken);
     }
 

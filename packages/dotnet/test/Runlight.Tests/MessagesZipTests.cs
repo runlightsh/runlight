@@ -94,6 +94,12 @@ public sealed class MessagesZipTests
     }
 
     [Fact]
+    public void A_value_with_a_semicolon_or_a_tab_is_quoted_so_no_locale_splits_a_formula_out_of_it()
+    {
+        Assert.Equal("\"x;=1+1\",\"a\tb\",'=1+1,plain", Zip.CsvRow(["x;=1+1", "a\tb", "=1+1", "plain"]));
+    }
+
+    [Fact]
     public void Rows()
     {
         foreach (JsObject c in Load("zip").Arr("rows")!)

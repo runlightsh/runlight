@@ -175,7 +175,7 @@ public sealed class RecordsTests : StoreTestCase
         // Two racing callers agree on one.
         Assert.Equal("first", await store.SaltAsync("2026-10-06", "second"));
         await store.SaltAsync("2026-10-05", "old");
-        await store.DropSaltsBeforeAsync("2026-10-06");
+        await store.DropSaltsExceptAsync(["2026-10-06"]);
         Assert.Null(await store.SaltIfExistsAsync("2026-10-05"));
         Assert.Equal("first", await store.SaltIfExistsAsync("2026-10-06"));
 

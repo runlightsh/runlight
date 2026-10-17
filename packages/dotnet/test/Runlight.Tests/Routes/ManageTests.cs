@@ -209,6 +209,42 @@ public sealed class ManageTests : RoutesTestCase
         Assert.Equal("link_taken", said.Str("code"));
         Assert.Equal("{\"slug\":\"a\"}", Json.Stringify(said.Get("params")));
     }
+
+    /// <summary>An install whose answers are too long to read, recording the limit each read was given.</summary>
+    private sealed class Endless : IFetcher
+    {
+        public List<long?> Limits { get; } = [];
+
+        public Task<Response> FetchAsync(string url, FetchInit? init = null, CancellationToken cancellationToken = default)
+        {
+            string path = new Url(url).Pathname;
+            if (path.StartsWith("/runlight/api/sites", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new Response(Json.Stringify(new JsObject { ["sites"] = L(new JsObject { ["id"] = "x", ["name"] = "X", ["timezone"] = "UTC", ["hostnames"] = L("x.example.com") }) }), 200, H(("content-type", "application/json"))));
+            }
+            Limits.Add(init?.MaxBytes);
+            throw new BodyTooLongException("Body over " + init?.MaxBytes + " bytes");
+        }
+    }
+
+    [Fact]
+    public async Task A_read_passed_on_to_a_connected_install_has_a_byte_ceiling_and_a_longer_answer_is_a_502()
+    {
+        var fetcher = new Endless();
+        var hub = await RunlightAsync(managedSites: true, secret: new string('k', 32), fetcher: fetcher, localInstalls: true);
+        var routes = hub.Routes(new RoutesOptions { Token = "owner" });
+        Task<Response> Call(string path, string method = "GET", string? body = null) =>
+            routes.HandleAsync(new Request("https://hub.example.com/runlight" + path, method, H(("authorization", "Bearer owner"), ("content-type", "application/json")), body ?? ""));
+        var added = await Call("/api/sites", "POST", Json.Stringify(new JsObject { ["remote"] = new JsObject { ["url"] = "http://127.0.0.1:9/runlight", ["token"] = "rl_x" } }));
+        string id = Obj(added).Obj("site")!.Str("id")!;
+        fetcher.Limits.Clear();
+        foreach (string path in new[] { "/api/stats", "/api/export", "/api/breakdown?dimension=page" })
+        {
+            string joined = path + (path.Contains('?', StringComparison.Ordinal) ? "&" : "?") + "site=" + id + "&period=7d";
+            Assert.Equal(502, (await Call(joined)).Status);
+        }
+        Assert.Equal([100L * 1024 * 1024, 100L * 1024 * 1024, 100L * 1024 * 1024], fetcher.Limits);
+    }
 }
 
 /// <summary>A mail webhook that keeps what it is sent, standing in for the small HTTP server manage.test.ts starts.</summary>

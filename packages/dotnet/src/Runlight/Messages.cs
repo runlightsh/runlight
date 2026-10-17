@@ -16,6 +16,7 @@ public static class Messages
 {
     private static JsObject? _raw;
     private static readonly ConcurrentDictionary<string, JsObject> Parsed = new(StringComparer.Ordinal);
+    internal static readonly Regex Placeholders = new("\\{([A-Za-z0-9_]+)\\}", RegexOptions.CultureInvariant);
     private static readonly Regex Placeholder = new("\\{([A-Za-z0-9_]+)\\}", RegexOptions.CultureInvariant);
     private static readonly Regex Exponent = new("^([0-9]+)(?:\\.([0-9]+))?e([+-][0-9]+)\\z", RegexOptions.CultureInvariant);
 
@@ -33,6 +34,20 @@ public static class Messages
     /// English when the one asked for is not known.
     /// </summary>
     public static Translator Translator(string lang) => new(Languages().Contains(lang) ? lang : "en");
+
+    /// <summary>The first language a browser asks for that the dashboard speaks, else English.</summary>
+    public static string AcceptedLanguage(Http.Request request)
+    {
+        foreach (string part in (request.Headers.Get("accept-language") ?? "").Split(','))
+        {
+            string code = Js.Lower(Js.Slice(Js.Trim(part.Split(';')[0]), 0, 2));
+            if (Languages().Contains(code))
+            {
+                return code;
+            }
+        }
+        return "en";
+    }
 
     internal static string Fill(string text, JsObject? vars) =>
         vars == null ? text : Placeholder.Replace(text, m => vars.Has(m.Groups[1].Value) ? Js.String(vars.Get(m.Groups[1].Value)) : m.Value);
@@ -159,6 +174,15 @@ public sealed class Translator
     {
         string text = Messages.Table(Lang).Get(key) as string ?? Messages.Table("en").Get(key) as string ?? key;
         return Messages.Fill(text, vars);
+    }
+
+    /// <summary>
+    /// A message for a page: its own text escaped, then each {name} filled with HTML the caller made safe.
+    /// </summary>
+    public string Html(string key, JsObject? vars = null)
+    {
+        string text = T(key).Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal);
+        return Messages.Placeholders.Replace(text, m => vars != null && vars.Has(m.Groups[1].Value) ? Js.String(vars.Get(m.Groups[1].Value)) : m.Value);
     }
 
     /// <summary>The text for a count: the plural form the language uses for n, else the "other" form.</summary>

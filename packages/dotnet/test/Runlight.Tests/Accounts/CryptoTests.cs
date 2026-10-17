@@ -66,9 +66,39 @@ public sealed class CryptoTests
     public void New_hashes_use_scrypt_and_check()
     {
         string hash = Crypto.HashPassword("a long password");
-        Assert.Matches(new Regex("^scrypt\\$[A-Za-z0-9_-]{22}\\$[A-Za-z0-9_-]{43}\\z"), hash);
+        Assert.Matches(new Regex("^scrypt\\$32768\\$8\\$3\\$[A-Za-z0-9_-]{22}\\$[A-Za-z0-9_-]{43}\\z"), hash);
         Assert.True(Crypto.CheckPassword("a long password", hash));
+        Assert.False(Crypto.CheckPassword("a long passwore", hash));
         Assert.NotEqual(hash, Crypto.HashPassword("a long password"));
+        // The same bytes any language's scrypt gives for that cost, so every port can check them.
+        string[] parts = hash.Split('$');
+        byte[] again = Scrypt.Derive(Js.Utf8("a long password"), Crypto.FromBase64url(parts[4]), 32768, 8, 3, 32);
+        Assert.Equal(parts[5], Crypto.Base64url(again));
+    }
+
+    [Fact]
+    public void A_scrypt_cost_out_of_bounds_is_refused_not_run()
+    {
+        string[] parts = Crypto.HashPassword("a long password").Split('$');
+        foreach (string cost in new[] { "2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1" })
+        {
+            Assert.False(Crypto.CheckPassword("a long password", "scrypt$" + cost + "$" + parts[4] + "$" + parts[5]), cost);
+        }
+    }
+
+    [Fact]
+    public void A_hash_made_at_the_old_cost_still_checks_and_is_weaker_than_now()
+    {
+        byte[] salt = Crypto.RandomBytes(16);
+        string old = "scrypt$" + Crypto.Base64url(salt) + "$" + Crypto.Base64url(Scrypt.Derive(Js.Utf8("a long password"), salt, 16384, 8, 1, 32));
+        Assert.True(Crypto.CheckPassword("a long password", old));
+        Assert.False(Crypto.CheckPassword("a wrong password", old));
+        Assert.True(Crypto.WeakerThanNow(old));
+        Assert.True(Crypto.WeakerThanNow("scrypt$16384$8$1$" + Crypto.Base64url(salt) + "$" + Crypto.Base64url(Scrypt.Derive(Js.Utf8("a long password"), salt, 16384, 8, 1, 32))));
+        Assert.True(Crypto.WeakerThanNow("pbkdf2$100000$AAAA$BBBB"));
+        Assert.False(Crypto.WeakerThanNow(Crypto.HashPassword("a long password")));
+        Assert.False(Crypto.WeakerThanNow("scrypt$65536$8$3$AAAA$BBBB"));
+        Assert.False(Crypto.WeakerThanNow("nonsense"));
     }
 
     [Fact]

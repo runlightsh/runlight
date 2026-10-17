@@ -48,6 +48,8 @@ public static class Assistant
         new("custom", "Another OpenAI-compatible service", "openai", "", "", "optional"),
     ];
 
+    /// <summary>The most text of earlier turns a question carries, about six thousand tokens.</summary>
+    private const int MaxHistoryChars = 24_000;
     private const int MaxRounds = 8;
 
     /// <summary>However many rounds a question takes, the answer comes within this long or the assistant stops.</summary>
@@ -386,6 +388,16 @@ public static class Assistant
             else
             {
                 history.Add(new JsObject { ["role"] = role, ["content"] = content });
+            }
+        }
+        // The browser sends the history, so its whole length is held too, the oldest turns dropped first: each
+        // tool round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+        while (history.Count > 1 && history.Sum(h => ((string)h.Get("content")!).Length) > MaxHistoryChars)
+        {
+            history.RemoveAt(0);
+            while (history.Count > 1 && !Equals(history[0].Get("role"), "user"))
+            {
+                history.RemoveAt(0);
             }
         }
 

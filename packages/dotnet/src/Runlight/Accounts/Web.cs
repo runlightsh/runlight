@@ -132,8 +132,6 @@ public sealed class Web
     // Password re-checks in Account: ten.
     private readonly Throttle _codeTries;
 
-    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-    private readonly Throttle _decoyTries;
     private readonly Throttle _confirmTries;
     private readonly Throttle _rechecks;
 
@@ -151,7 +149,6 @@ public sealed class Web
         _perAccount = new Throttle(_store, "account", 50);
         _perIp = new Throttle(_store, "ip", 30);
         _codeTries = new Throttle(_store, "code", 5);
-        _decoyTries = new Throttle(_store, "decoy", 5);
         _confirmTries = new Throttle(_store, "confirm", 5);
         _rechecks = new Throttle(_store, "recheck", 10);
     }
@@ -357,8 +354,25 @@ public sealed class Web
     }
 
     /// <summary>Why there is no setup form.</summary>
-    private Response SetupLocked() =>
-        Html(_first.Kind == "locked" ? Pages.SetupNeedsTokenPage(_base) : Pages.SetupLockedPage(_base, _o.SetupWhere), 403);
+    private Response SetupLocked(string lang) =>
+        Html(_first.Kind == "locked" ? Pages.SetupNeedsTokenPage(_base, lang) : Pages.SetupLockedPage(_base, _o.SetupWhere != null, lang), 403);
+
+    /// <summary>An account's problem in the visitor's language, where the dashboard has words for it; English as it was thrown.</summary>
+    private static string Reason(AccountError error, string lang)
+    {
+        string key = "error." + error.Code;
+        var t = Messages.Translator(lang);
+        if (lang == "en" || t.T(key) == key)
+        {
+            return error.Message;
+        }
+        var vars = new JsObject();
+        foreach (var (name, value) in error.Params)
+        {
+            vars[name] = value;
+        }
+        return t.T(key, vars);
+    }
 
     /// <summary>
     /// Emails an invite through the mail service when there is one. The link always comes back too, for the
@@ -479,13 +493,15 @@ public sealed class Web
         var query = url.SearchParams;
         string method = request.Method;
         string b = _base;
+        string lang = Messages.AcceptedLanguage(request);
+        var t = Messages.Translator(lang);
         if (path == "/auth.css")
         {
             return new Response(Pages.AuthCss, 200, new Headers { ["content-type"] = "text/css; charset=utf-8", ["cache-control"] = "public, max-age=3600" });
         }
         if (path == "/auth.js")
         {
-            return new Response(Pages.AuthJs, 200, new Headers { ["content-type"] = "application/javascript; charset=utf-8", ["cache-control"] = "public, max-age=3600" });
+            return new Response(Pages.AuthJs(query.Get("lang") ?? "en"), 200, new Headers { ["content-type"] = "application/javascript; charset=utf-8", ["cache-control"] = "public, max-age=3600" });
         }
 
         if (path == "/setup")
@@ -499,14 +515,14 @@ public sealed class Web
                 string code = query.Get("code") ?? "";
                 if (_first.Kind == "locked")
                 {
-                    return SetupLocked();
+                    return SetupLocked(lang);
                 }
                 // The app's token is typed in; the server's code comes in the link it printed.
                 if (_asksForToken || _first.Kind == "open")
                 {
-                    return Html(Pages.SetupPage(b, "", askCode: _asksForToken));
+                    return Html(Pages.SetupPage(b, "", askCode: _asksForToken, lang: lang));
                 }
-                return SetupOk(code) ? Html(Pages.SetupPage(b, code)) : SetupLocked();
+                return SetupOk(code) ? Html(Pages.SetupPage(b, code, lang: lang)) : SetupLocked(lang);
             }
             if (method == "POST")
             {
@@ -517,15 +533,15 @@ public sealed class Web
                 {
                     if (_asksForToken)
                     {
-                        return Html(Pages.SetupPage(b, "", "That is not this app's RUNLIGHT_TOKEN.", email, askCode: true), 403);
+                        return Html(Pages.SetupPage(b, "", t.T("auth.tokenWrong"), email, askCode: true, lang: lang), 403);
                     }
-                    return SetupLocked();
+                    return SetupLocked(lang);
                 }
-                string Again(string error) => Pages.SetupPage(b, _asksForToken ? "" : code, error, email, _asksForToken);
+                string Again(string error) => Pages.SetupPage(b, _asksForToken ? "" : code, error, email, _asksForToken, lang);
                 // Asked twice, since a typo here would lock the first owner out.
                 if ((form.Get("password") ?? "") != (form.Get("again") ?? ""))
                 {
-                    return Html(Again("The two passwords are not the same."), 400);
+                    return Html(Again(t.T("auth.mismatch")), 400);
                 }
                 try
                 {
@@ -535,7 +551,7 @@ public sealed class Web
                 }
                 catch (AccountError error)
                 {
-                    return Html(Again(error.Message), 400);
+                    return Html(Again(Reason(error, lang)), 400);
                 }
             }
         }
@@ -546,13 +562,13 @@ public sealed class Web
             {
                 if (_first.Kind == "locked")
                 {
-                    return SetupLocked();
+                    return SetupLocked(lang);
                 }
-                return _first.Kind == "open" || _asksForToken ? Redirect(b + "/setup") : SetupLocked();
+                return _first.Kind == "open" || _asksForToken ? Redirect(b + "/setup") : SetupLocked(lang);
             }
             if (method == "GET")
             {
-                return Html(Pages.LoginPage(b, _o.Forgot, next: SafeNext(query.Get("next"))));
+                return Html(Pages.LoginPage(b, _o.Forgot, next: SafeNext(query.Get("next")), lang: lang));
             }
             if (method == "POST")
             {
@@ -567,11 +583,11 @@ public sealed class Web
             var user = await Accounts.FromLinkAsync(query.Get("ticket") ?? "", Now(), cancellationToken).ConfigureAwait(false);
             if (user == null)
             {
-                return Html(Pages.LoginPage(b, _o.Forgot, "That sign-in link has run out. Sign in again.", next: next), 410);
+                return Html(Pages.LoginPage(b, _o.Forgot, t.T("auth.linkExpired"), next: next, lang: lang), 410);
             }
             if (user.Bool("twoFactor"))
             {
-                return Html(Pages.CodePage(b, Accounts.PendingFor(user, Now()), next));
+                return Html(Pages.CodePage(b, Accounts.PendingFor(user, Now()), next, lang: lang));
             }
             return SignedInTo(request, user, next);
         }
@@ -580,21 +596,20 @@ public sealed class Web
         {
             var form = new SearchParams(request.Text());
             string next = SafeNext(form.Get("next"));
-            var pending = await Accounts.FromPendingAsync(form.Get("pending") ?? "", Now(), cancellationToken).ConfigureAwait(false);
-            if (pending == null)
+            var user = await Accounts.FromPendingAsync(form.Get("pending") ?? "", Now(), cancellationToken).ConfigureAwait(false);
+            if (user == null)
             {
                 return Redirect(b + "/login?next=" + Js.EncodeURIComponent(next));
             }
-            var (user, real) = pending.Value;
             string id = user.Str("id")!;
             // Counted before the check, so a burst cannot get past five.
-            if (!await (real ? _codeTries : _decoyTries).TakeAsync(id, Now(), cancellationToken).ConfigureAwait(false))
+            if (!await _codeTries.TakeAsync(id, Now(), cancellationToken).ConfigureAwait(false))
             {
-                return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, "Too many tries. Wait fifteen minutes and try again."), 429);
+                return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, t.T("error.too_many_tries"), lang), 429);
             }
-            if (!real || !await Accounts.CheckSecondFactorAsync(id, form.Get("code") ?? "", Now(), cancellationToken).ConfigureAwait(false))
+            if (!await Accounts.CheckSecondFactorAsync(id, form.Get("code") ?? "", Now(), cancellationToken).ConfigureAwait(false))
             {
-                return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, "That code is not right. Check the time on your phone, or use a recovery code."), 401);
+                return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, t.T("auth.codeWrong"), lang), 401);
             }
             await _codeTries.ClearAsync(id, Now(), cancellationToken).ConfigureAwait(false);
             return SignedInTo(request, user, next);
@@ -612,8 +627,8 @@ public sealed class Web
                 string code = query.Get("code") ?? "";
                 var invite = await Accounts.InviteByCodeAsync(code, Now(), cancellationToken).ConfigureAwait(false);
                 return invite != null
-                    ? Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, site: invite.Str("site")))
-                    : Html(Pages.InviteGonePage(b), 410);
+                    ? Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, site: invite.Str("site"), lang: lang))
+                    : Html(Pages.InviteGonePage(b, lang), 410);
             }
             if (method == "POST")
             {
@@ -622,12 +637,12 @@ public sealed class Web
                 var invite = await Accounts.InviteByCodeAsync(code, Now(), cancellationToken).ConfigureAwait(false);
                 if (invite == null)
                 {
-                    return Html(Pages.InviteGonePage(b), 410);
+                    return Html(Pages.InviteGonePage(b, lang), 410);
                 }
-                Response Again(string error) => Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, error, invite.Str("site")), 400);
+                Response Again(string error) => Html(Pages.InvitePage(b, code, invite.Str("email")!, invite.Str("role")!, url.Host, error, invite.Str("site"), lang), 400);
                 if ((form.Get("password") ?? "") != (form.Get("again") ?? ""))
                 {
-                    return Again("The two passwords are not the same.");
+                    return Again(t.T("auth.mismatch"));
                 }
                 try
                 {
@@ -637,11 +652,11 @@ public sealed class Web
                 }
                 catch (AccountError error) when (error.Code == "invite_gone")
                 {
-                    return Html(Pages.InviteGonePage(b), 410);
+                    return Html(Pages.InviteGonePage(b, lang), 410);
                 }
                 catch (AccountError error)
                 {
-                    return Again(error.Message);
+                    return Again(Reason(error, lang));
                 }
             }
         }
@@ -651,6 +666,8 @@ public sealed class Web
     private async Task<Response> LoginAsync(Request request, string? ip, CancellationToken cancellationToken)
     {
         string b = _base;
+        string lang = Messages.AcceptedLanguage(request);
+        var t = Messages.Translator(lang);
         var form = new SearchParams(request.Text());
         string email = form.Get("email") ?? "";
         string password = form.Get("password") ?? "";
@@ -658,7 +675,7 @@ public sealed class Web
         string account = Js.Lower(Js.Trim(email));
         string address = _o.ClientIp(request, ip);
         string pair = account + "\n" + (address.Length > 0 ? address : "unknown");
-        Response TooMany() => Html(Pages.LoginPage(b, _o.Forgot, "Too many tries. Wait fifteen minutes and try again.", email, next), 429);
+        Response TooMany() => Html(Pages.LoginPage(b, _o.Forgot, t.T("error.too_many_tries"), email, next, lang), 429);
         if (address.Length > 0 && !await _perIp.TakeAsync(address, Now(), cancellationToken).ConfigureAwait(false))
         {
             return TooMany();
@@ -673,10 +690,11 @@ public sealed class Web
             var known = await Accounts.ByEmailAsync(account, cancellationToken).ConfigureAwait(false);
             bool trusted = known != null && Accounts.TrustsDevice(ReadCookie(request, DeviceCookie), known);
             bool over = !trusted && !await _perAccount.TakeAsync(account, Now(), cancellationToken).ConfigureAwait(false);
-            // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-            // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-            // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-            if (over && !(known?.Bool("twoFactor") ?? false))
+            // Past the account's limit, a right password and a wrong one get the same answer, and so does every
+            // account, with two-factor on or not, and an email with no account, so guessing from many addresses
+            // learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+            // leads to the code step when two-factor is on.
+            if (over)
             {
                 string? home = HomeOrigin();
                 if (!await HasMailAsync(cancellationToken).ConfigureAwait(false) || string.IsNullOrEmpty(home))
@@ -699,37 +717,33 @@ public sealed class Web
                         }
                     });
                 }
-                return Html(Pages.LoginPage(b, _o.Forgot, "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", email, next), 429);
+                return Html(Pages.LoginPage(b, _o.Forgot, t.T("auth.tooManyLink"), email, next, lang), 429);
             }
             var user = await Accounts.SignInAsync(email, password, cancellationToken).ConfigureAwait(false);
             if (user == null)
             {
-                if (over && known != null)
-                {
-                    return Html(Pages.CodePage(b, Accounts.DecoyFor(known, Now()), next));
-                }
-                return Html(Pages.LoginPage(b, _o.Forgot, "That email and password do not match an account.", email, next), 401);
+                return Html(Pages.LoginPage(b, _o.Forgot, t.T("auth.wrongPassword"), email, next, lang), 401);
             }
             await _perAddress.ClearAsync(pair, Now(), cancellationToken).ConfigureAwait(false);
             if (address.Length > 0)
             {
                 await _perIp.ForgiveAsync(address, Now(), cancellationToken).ConfigureAwait(false);
             }
-            if (!over && !trusted)
+            if (!trusted)
             {
                 await _perAccount.ForgiveAsync(account, Now(), cancellationToken).ConfigureAwait(false);
             }
             // With two-factor on, the password only earns the second step.
             if (user.Bool("twoFactor"))
             {
-                return Html(Pages.CodePage(b, Accounts.PendingFor(user, Now()), next));
+                return Html(Pages.CodePage(b, Accounts.PendingFor(user, Now()), next, lang: lang));
             }
             return SignedInTo(request, user, next);
         }
         catch (AccountError error) when (error.Code == "busy")
         {
             // Too many password checks already waiting, so this one was never run: try again in a moment.
-            var busy = Html(Pages.LoginPage(b, _o.Forgot, error.Message, email, next), 503);
+            var busy = Html(Pages.LoginPage(b, _o.Forgot, Reason(error, lang), email, next, lang), 503);
             busy.Headers["retry-after"] = "5";
             return busy;
         }
@@ -1099,7 +1113,7 @@ public sealed class Web
         {
             if (!await HasAccountAsync(cancellationToken).ConfigureAwait(false))
             {
-                return _first.Kind == "open" || _asksForToken ? Redirect(_base + "/setup") : SetupLocked();
+                return _first.Kind == "open" || _asksForToken ? Redirect(_base + "/setup") : SetupLocked(Messages.AcceptedLanguage(request));
             }
             string search = new Url(request.Url).Search;
             return Redirect(_base + "/login" + (search.Length > 0 ? "?next=" + Js.EncodeURIComponent(_homePath + search) : ""));

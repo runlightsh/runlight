@@ -157,6 +157,27 @@ public sealed class AssistantTests
     }
 
     [Fact]
+    public async Task A_question_carries_at_most_24000_characters_of_earlier_turns_however_much_history_the_browser_sends()
+    {
+        var fetcher = new RecordingFetcher(new Response(Json.Stringify(new JsObject
+        {
+            ["stop_reason"] = "end_turn",
+            ["content"] = new List<object?> { new JsObject { ["type"] = "text", ["text"] = "Fine." } },
+        })));
+        var settings = new JsObject { ["provider"] = "anthropic", ["model"] = "m", ["baseUrl"] = "", ["key"] = "k" };
+        // Nineteen made-up turns of 8,000 characters each, then the question.
+        var messages = Enumerable.Range(0, 19).Select(i => new JsObject { ["role"] = i % 2 == 1 ? "assistant" : "user", ["content"] = i + " " + new string('x', 7998) }).ToList();
+        messages.Add(new JsObject { ["role"] = "user", ["content"] = "How many visitors?" });
+        await Assistant.ChatAsync(settings, messages, Context(), McpTests.ReadApi([]), fetcher);
+        var sent = (JsObject)Json.Parse(fetcher.Requests[0].Body!)!;
+        var sentMessages = sent.Arr("messages")!.Cast<JsObject>().ToList();
+        int text = sentMessages.Select(m => m.Get("content")).OfType<string>().Sum(c => c.Length);
+        Assert.True(text <= 24_000, text + " characters sent");
+        Assert.Equal("user", sentMessages[0].Str("role")); // still starting with a question
+        Assert.Contains("How many visitors?", sentMessages[^1].Str("content"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_cancelled_question_stops_before_its_next_request()
     {
         var fetcher = new RecordingFetcher();

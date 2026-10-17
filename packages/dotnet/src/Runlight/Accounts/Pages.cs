@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace Runlight.Accounts;
 
 /// <summary>
@@ -52,8 +54,10 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
 .eye svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 """;
 
-    /// <summary>Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D).</summary>
-    public const string AuthJs = """
+    /// <summary>
+    /// The script with its words left as markers: the theme's, the password button's, and the strength meter's.
+    /// </summary>
+    private const string AuthJsTemplate = """
 (() => {
   const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
   function strength(password, avoid = []) {
@@ -96,7 +100,7 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
     const button = document.querySelector(".theme");
     if (!button) return;
     for (const icon of button.querySelectorAll("svg")) icon.classList.toggle("on", icon.dataset.choice === c);
-    button.title = c === "system" ? "Theme: device setting" : "Theme: " + c;
+    button.title = c === "system" ? @@THEMESYSTEM@@ : @@THEME@@;
   };
   const set = (c) => { try { localStorage.setItem(KEY, c); } catch {} show(); };
   show();
@@ -115,8 +119,8 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
       const set = (shown) => {
         input.type = shown ? "text" : "password";
         eye.setAttribute("aria-pressed", String(shown));
-        eye.setAttribute("aria-label", shown ? "Hide password" : "Show password");
-        eye.title = shown ? "Hide password" : "Show password";
+        eye.setAttribute("aria-label", shown ? @@HIDE@@ : @@SHOW@@);
+        eye.title = shown ? @@HIDE@@ : @@SHOW@@;
         eye.innerHTML = shown ? SHUT : EYE;
       };
       set(false);
@@ -138,7 +142,7 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
         const score = strength(password.value, [address, address.split("@")[0]]);
         meter.hidden = !password.value;
         meter.dataset.score = String(score);
-        meter.querySelector(".strength-label").textContent = ["Too short", "Weak", "Fair", "Good", "Strong"][score];
+        meter.querySelector(".strength-label").textContent = [@@STRENGTH@@][score];
         meter.querySelectorAll(".strength-bar span").forEach((bar, i) => bar.classList.toggle("on", score > i));
       };
       password.addEventListener("input", update);
@@ -156,7 +160,24 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
 })();
 """;
 
-    private const string ThemeButton = "<button type=\"button\" class=\"theme\" aria-label=\"Switch theme\"><svg data-choice=\"light\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"3\"/><path d=\"M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1\"/></svg><svg data-choice=\"dark\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z\"/></svg><svg data-choice=\"system\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"12\" height=\"8.5\" rx=\"1.5\"/><path d=\"M5.5 14h5M8 11.5V14\"/></svg></button>";
+    /// <summary>
+    /// Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D), with its
+    /// words in a language the dashboard speaks. English is served as auth.js, the others as auth.js?lang=fr and so on.
+    /// </summary>
+    public static string AuthJs(string lang = "en")
+    {
+        var tr = Messages.Translator(lang);
+        string Q(string key) => Json.Stringify(tr.T(key));
+        string theme = tr.Lang == "en" ? "\"Theme: \" + c" : "c === \"dark\" ? " + Q("auth.themeDark") + " : " + Q("auth.themeLight");
+        return AuthJsTemplate
+            .Replace("@@THEMESYSTEM@@", Q("auth.themeSystem"), System.StringComparison.Ordinal)
+            .Replace("@@THEME@@", theme, System.StringComparison.Ordinal)
+            .Replace("@@HIDE@@", Q("auth.hidePassword"), System.StringComparison.Ordinal)
+            .Replace("@@SHOW@@", Q("auth.showPassword"), System.StringComparison.Ordinal)
+            .Replace("@@STRENGTH@@", string.Join(", ", Enumerable.Range(0, 5).Select(n => Q("account.strength" + n))), System.StringComparison.Ordinal);
+    }
+
+    private const string ThemeIcons = "<svg data-choice=\"light\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"3\"/><path d=\"M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1\"/></svg><svg data-choice=\"dark\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z\"/></svg><svg data-choice=\"system\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"12\" height=\"8.5\" rx=\"1.5\"/><path d=\"M5.5 14h5M8 11.5V14\"/></svg>";
 
     /// <summary>HTML escaping for text and attribute values.</summary>
     public static string Esc(string value) =>
@@ -166,101 +187,121 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
             .Replace("\"", "&quot;", System.StringComparison.Ordinal)
             .Replace("'", "&#39;", System.StringComparison.Ordinal);
 
-    private static string Page(string basePath, string title, string body)
+    private static string Page(string basePath, string lang, string title, string body)
     {
+        var tr = Messages.Translator(lang);
+        string code = tr.Lang;
         string b = Esc(basePath);
-        return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>"
-            + Esc(title) + " | Runlight</title>\n<link rel=\"icon\" href=\"" + Brand.RunlightIcon + "\">\n<link rel=\"stylesheet\" href=\"" + b + "/auth.css\">\n<script src=\"" + b + "/auth.js\"></script>\n</head>\n<body>\n<main>\n<p class=\"brand\">"
-            + Mark + "Runlight</p>\n" + body + "\n</main>\n" + ThemeButton + "\n</body>\n</html>\n";
+        return "<!doctype html>\n<html lang=\"" + code + "\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>"
+            + Esc(title) + " | Runlight</title>\n<link rel=\"icon\" href=\"" + Brand.RunlightIcon + "\">\n<link rel=\"stylesheet\" href=\"" + b + "/auth.css\">\n<script src=\"" + b + "/auth.js" + (code == "en" ? "" : "?lang=" + code) + "\"></script>\n</head>\n<body>\n<main>\n<p class=\"brand\">"
+            + Mark + "Runlight</p>\n" + body + "\n</main>\n<button type=\"button\" class=\"theme\" aria-label=\"" + Esc(tr.T("auth.switchTheme")) + "\">" + ThemeIcons + "</button>\n</body>\n</html>\n";
     }
 
     private static string Error(string? error) =>
         !string.IsNullOrEmpty(error) ? "<p class=\"error\" role=\"alert\">" + Esc(error) + "</p>" : "";
 
-    public static string LoginPage(string basePath, string forgot, string? error = null, string? email = null, string? next = null)
+    public static string LoginPage(string basePath, string forgot, string? error = null, string? email = null, string? next = null, string lang = "en")
     {
+        var tr = Messages.Translator(lang);
         string b = Esc(basePath);
+        string link = "<a href=\"" + Esc(forgot) + "\" target=\"_blank\" rel=\"noopener\">" + tr.Html("auth.forgotLink") + "</a>";
         return Page(
             basePath,
-            "Sign in",
-            "<h1>Sign in</h1>\n<p>Sign in to see your sites.</p>\n" + Error(error) + "\n<form method=\"post\" action=\"" + b + "/login\">\n<input type=\"hidden\" name=\"next\" value=\""
-                + Esc(next ?? basePath + "/") + "\">\n<label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\"" + Esc(email ?? "")
-                + "\"></label>\n<label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required></label>\n<button type=\"submit\">Sign in</button>\n</form>\n<p class=\"hint\">If you have forgotten your password, <a href=\""
-                + Esc(forgot) + "\" target=\"_blank\" rel=\"noopener\">the docs say how to set a new one</a>.</p>");
+            lang,
+            tr.T("auth.signIn"),
+            "<h1>" + tr.Html("auth.signIn") + "</h1>\n<p>" + tr.Html("auth.signInIntro") + "</p>\n" + Error(error) + "\n<form method=\"post\" action=\"" + b + "/login\">\n<input type=\"hidden\" name=\"next\" value=\""
+                + Esc(next ?? basePath + "/") + "\">\n<label>" + tr.Html("auth.email") + "<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\"" + Esc(email ?? "")
+                + "\"></label>\n<label>" + tr.Html("auth.password") + "<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required></label>\n<button type=\"submit\">" + tr.Html("auth.signIn") + "</button>\n</form>\n<p class=\"hint\">"
+                + tr.Html("auth.forgot", new JsObject { ["link"] = link }) + "</p>");
     }
 
     /// <summary>The second step of signing in, for an account with two-factor on.</summary>
-    public static string CodePage(string basePath, string pending, string next, string? error = null)
+    public static string CodePage(string basePath, string pending, string next, string? error = null, string lang = "en")
     {
+        var tr = Messages.Translator(lang);
         string b = Esc(basePath);
         return Page(
             basePath,
-            "Enter your code",
-            "<h1>Enter your code</h1>\n<p>Open your authenticator app and enter the six-digit code for Runlight.</p>\n" + Error(error) + "\n<form method=\"post\" action=\"" + b
+            lang,
+            tr.T("auth.codeTitle"),
+            "<h1>" + tr.Html("auth.codeTitle") + "</h1>\n<p>" + tr.Html("auth.codeIntro") + "</p>\n" + Error(error) + "\n<form method=\"post\" action=\"" + b
                 + "/login/code\">\n<input type=\"hidden\" name=\"pending\" value=\"" + Esc(pending) + "\">\n<input type=\"hidden\" name=\"next\" value=\"" + Esc(next)
-                + "\">\n<label>Code<input type=\"text\" name=\"code\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"12\" required autofocus></label>\n<button type=\"submit\">Sign in</button>\n</form>\n<p class=\"hint\">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>");
+                + "\">\n<label>" + tr.Html("auth.code") + "<input type=\"text\" name=\"code\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"12\" required autofocus></label>\n<button type=\"submit\">" + tr.Html("auth.signIn") + "</button>\n</form>\n<p class=\"hint\">" + tr.Html("auth.codeHint") + "</p>");
     }
 
     /// <summary>What someone invited with a role can do, after "as".</summary>
-    public static string RoleText(string role, string? site = null)
+    public static string RoleText(string role, string? site = null, string lang = "en")
     {
-        if (site != null) return role == "viewer" ? "a viewer, who can read the stats for " + site + " only" : "a member, who can change the settings of " + site + " only";
+        var tr = Messages.Translator(lang);
+        if (site != null)
+        {
+            return tr.T(role == "viewer" ? "auth.roleViewerSite" : "auth.roleMemberSite", new JsObject { ["site"] = site });
+        }
         if (role == "viewer")
         {
-            return "a viewer, who can read every site's stats";
+            return tr.T("auth.roleViewer");
         }
-        if (role == "member")
-        {
-            return "a member, who can change the settings of every site";
-        }
-        return "an admin, who can change everything and manage people";
+        return tr.T(role == "member" ? "auth.roleMember" : "auth.roleAdmin");
     }
 
     /// <summary>Where an invited person chooses a password and joins.</summary>
-    public static string InvitePage(string basePath, string code, string email, string role, string host, string? error = null, string? site = null)
+    public static string InvitePage(string basePath, string code, string email, string role, string host, string? error = null, string? site = null, string lang = "en")
     {
+        var tr = Messages.Translator(lang);
         string b = Esc(basePath);
         return Page(
             basePath,
-            "Join Runlight",
-            "<h1>Join Runlight</h1>\n<p>You were invited to " + Esc(host) + " as " + Esc(RoleText(role, site)) + ". Choose a password to finish.</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
-                + b + "/invite\">\n<input type=\"hidden\" name=\"code\" value=\"" + Esc(code) + "\">\n<label>Email<input type=\"email\" value=\"" + Esc(email)
-                + "\" disabled></label>\n<label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required autofocus></label>\n<label>Password again<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<button type=\"submit\">Join</button>\n</form>\n<p class=\"hint\">Use at least ten characters.</p>");
+            lang,
+            tr.T("auth.joinTitle"),
+            "<h1>" + tr.Html("auth.joinTitle") + "</h1>\n<p>" + tr.Html("auth.joinIntro", new JsObject { ["host"] = Esc(host), ["role"] = Esc(RoleText(role, site, lang)) }) + "</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
+                + b + "/invite\">\n<input type=\"hidden\" name=\"code\" value=\"" + Esc(code) + "\">\n<label>" + tr.Html("auth.email") + "<input type=\"email\" value=\"" + Esc(email)
+                + "\" disabled></label>\n<label>" + tr.Html("auth.password") + "<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required autofocus></label>\n<label>" + tr.Html("auth.passwordAgain")
+                + "<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<button type=\"submit\">" + tr.Html("auth.join") + "</button>\n</form>\n<p class=\"hint\">" + tr.Html("auth.passwordHint") + "</p>");
     }
 
-    public static string InviteGonePage(string basePath) => Page(
-        basePath,
-        "This invite no longer works",
-        "<h1>This invite no longer works</h1>\n<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>");
-
-    public static string SetupPage(string basePath, string code, string? error = null, string? email = null, bool askCode = false)
+    public static string InviteGonePage(string basePath, string lang = "en")
     {
+        var tr = Messages.Translator(lang);
+        return Page(
+            basePath,
+            lang,
+            tr.T("auth.inviteGoneTitle"),
+            "<h1>" + tr.Html("auth.inviteGoneTitle") + "</h1>\n<p>" + tr.Html("auth.inviteGone") + "</p>");
+    }
+
+    public static string SetupPage(string basePath, string code, string? error = null, string? email = null, bool askCode = false, string lang = "en")
+    {
+        var tr = Messages.Translator(lang);
         string b = Esc(basePath);
         string c = Esc(code);
         string field = askCode
-            ? "<label>Your RUNLIGHT_TOKEN<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\"" + c + "\"></label>"
+            ? "<label>" + tr.Html("auth.setupToken") + "<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\"" + c + "\"></label>"
             : "<input type=\"hidden\" name=\"code\" value=\"" + c + "\">";
         return Page(
             basePath,
-            "Create your account",
-            "<h1>Create your account</h1>\n<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
-                + b + "/setup\">\n" + field + "\n<label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\"" + Esc(email ?? "")
-                + "\"></label>\n<label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<label>Password again<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<button type=\"submit\">Create account</button>\n</form>\n<p class=\"hint\">Use at least ten characters.</p>");
+            lang,
+            tr.T("auth.setupTitle"),
+            "<h1>" + tr.Html("auth.setupTitle") + "</h1>\n<p>" + tr.Html("auth.setupIntro") + "</p>\n" + Error(error) + "\n<form method=\"post\" action=\""
+                + b + "/setup\">\n" + field + "\n<label>" + tr.Html("auth.email") + "<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\"" + Esc(email ?? "")
+                + "\"></label>\n<label>" + tr.Html("auth.password") + "<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<label>" + tr.Html("auth.passwordAgain")
+                + "<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n<button type=\"submit\">" + tr.Html("auth.createAccount") + "</button>\n</form>\n<p class=\"hint\">" + tr.Html("auth.passwordHint") + "</p>");
     }
 
-    /// <summary>For a server with no account yet, which prints a setup link with a one-time code in its log.</summary>
-    public static string SetupLockedPage(string basePath, string? where = null)
+    /// <summary>
+    /// For a server with no account yet, which prints a setup link with a one-time code in its log, or keeps it in
+    /// the file setup.txt when <paramref name="inFile"/> is true.
+    /// </summary>
+    public static string SetupLockedPage(string basePath, bool inFile = false, string lang = "en")
     {
-        where ??= "printed in the server's log when it started";
-        return Page(
-            basePath,
-            "Finish setting up",
-            "<h1>Finish setting up</h1>\n<p>Runlight has no account yet. Open the setup link " + where + ", which carries a one-time code, to create the first account.</p>");
+        var tr = Messages.Translator(lang);
+        string text = inFile ? tr.Html("auth.setupLockedFile", new JsObject { ["command"] = "<code>runlight setup</code>" }) : tr.Html("auth.setupLocked");
+        return Page(basePath, lang, tr.T("auth.finishTitle"), "<h1>" + tr.Html("auth.finishTitle") + "</h1>\n<p>" + text + "</p>");
     }
 
     /// <summary>For an app with accounts on but nothing to prove the first account with.</summary>
-    public static string SetupNeedsTokenPage(string basePath) => Page(
-        basePath,
-        "Finish setting up",
-        "<h1>Finish setting up</h1>\n<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>");
+    public static string SetupNeedsTokenPage(string basePath, string lang = "en")
+    {
+        var tr = Messages.Translator(lang);
+        return Page(basePath, lang, tr.T("auth.finishTitle"), "<h1>" + tr.Html("auth.finishTitle") + "</h1>\n<p>" + tr.Html("auth.setupNeedsToken") + "</p>");
+    }
 }

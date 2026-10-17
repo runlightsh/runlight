@@ -18,6 +18,9 @@ public sealed class OAuthContext
 {
     public required SqlStore Store { get; init; }
 
+    /// <summary>The server's secret, which seals what is kept in the database (the Runlight's secret).</summary>
+    public string? Secret { get; init; }
+
     /// <summary>The base path the routes answer at.</summary>
     public required string Base { get; init; }
 
@@ -122,19 +125,38 @@ public static class OAuth
 
     private static readonly Regex TrailingDots = new("\\.+\\z", RegexOptions.CultureInvariant);
 
-    /// <summary>The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.</summary>
-    public static async Task<string> AgentsKeyAsync(SqlStore store, string site, bool replace = false, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+    /// replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
+    /// database alone cannot report for the site; one kept before as plain text is sealed the next time it is read.
+    /// </summary>
+    public static async Task<string> AgentsKeyAsync(SqlStore store, string? secret, string site, bool replace = false, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
         string name = "observe-key:" + site;
         if (!replace)
         {
-            return await store.SettingOrAddAsync(name, () => "rlo_" + Hash.RandomId(20), cancellationToken).ConfigureAwait(false);
+            string made = Mail.Secret.Seal("rlo_" + Hash.RandomId(20), secret);
+            string stored = await store.SettingOrAddAsync(name, () => made, cancellationToken).ConfigureAwait(false);
+            string? opened = OpenAgentsKey(stored, secret);
+            if (opened != null && stored.StartsWith("rlo_", StringComparison.Ordinal))
+            {
+                await store.SetSettingAsync(name, Mail.Secret.Seal(opened, secret), cancellationToken).ConfigureAwait(false);
+            }
+            // One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
+            if (opened != null)
+            {
+                return opened;
+            }
         }
         string key = "rlo_" + Hash.RandomId(20);
-        await store.SetSettingAsync(name, key, cancellationToken).ConfigureAwait(false);
+        await store.SetSettingAsync(name, Mail.Secret.Seal(key, secret), cancellationToken).ConfigureAwait(false);
         return key;
     }
+
+    /// <summary>A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. Null when it cannot be opened.</summary>
+    public static string? OpenAgentsKey(string stored, string? secret) =>
+        stored.StartsWith("rlo_", StringComparison.Ordinal) ? stored : Mail.Secret.Unseal(stored, secret);
 
     /// <summary>A redirect address's host as a site's domains are kept: lowercase, with no port and no www.</summary>
     private static string SiteHost(string redirect)
@@ -191,7 +213,7 @@ public static class OAuth
 
     private static Response JsonAnswer(object? body, int status = 200)
     {
-        var headers = new Headers { ["content-type"] = "application/json; charset=utf-8", ["cache-control"] = "no-store" };
+        var headers = new Headers { ["content-type"] = "application/json; charset=utf-8", ["cache-control"] = "no-store", ["x-content-type-options"] = "nosniff" };
         foreach (var e in Cors)
         {
             headers.Set(e.Key, e.Value);
@@ -293,6 +315,8 @@ public static class OAuth
     {
         string basePath = ctx.Base;
         await ctx.Init(cancellationToken).ConfigureAwait(false);
+        var tr = Messages.Translator(Messages.AcceptedLanguage(request));
+        string lang = tr.Lang;
         var form = request.Method == "POST" ? new SearchParams(request.Text()) : url.SearchParams;
         string clientId = form.Get("client_id") ?? "";
         var client = (await ClientForAsync(ctx, clientId, cancellationToken).ConfigureAwait(false))?.Client;
@@ -300,7 +324,7 @@ public static class OAuth
         // Without a known client and one of its own addresses there is nowhere safe to send an answer.
         if (client == null || !(client.Get("redirects") is List<object?> registered && registered.Any(r => r is string s && s == redirect)))
         {
-            return Page("This app is not registered", "<p>Start connecting again from the app.</p>", 400);
+            return Page(lang, tr.Html("oauth.unregisteredTitle"), "<p>" + tr.Html("oauth.startAgain") + "</p>", 400);
         }
         Response Back(params (string Key, string Value)[] parameters)
         {
@@ -322,7 +346,7 @@ public static class OAuth
         // it got wrong ends on a page here rather than sending a visitor who is not signed in on to it.
         Response Refuse(string error, string? description = null) => client.Has("usedAt") && Js.Truthy(client.Get("usedAt"))
             ? (description == null ? Back(("error", error)) : Back(("error", error), ("error_description", description)))
-            : Page("This app asked in a way Runlight does not support", "<p>" + Esc(Js.String(client.Get("name"))) + " sent " + Esc(description ?? error) + ". Start connecting again from the app.</p>", 400);
+            : Page(lang, tr.Html("oauth.unsupportedTitle"), "<p>" + tr.Html("oauth.unsupported", new JsObject { ["app"] = Esc(Js.String(client.Get("name"))), ["error"] = Esc(description ?? error) }) + "</p>", 400);
         if (form.Get("response_type") != "code")
         {
             return Refuse("unsupported_response_type");
@@ -359,7 +383,7 @@ public static class OAuth
             // Someone signed in who may only read would be sent to sign in again and again.
             if (ctx.IsReader != null && await ctx.IsReader(request, cancellationToken).ConfigureAwait(false))
             {
-                return Page("Ask an owner to connect this", "<p>You are signed in as a viewer, and only an owner of this Runlight can connect " + Esc(name) + ".</p>", 403);
+                return Page(lang, tr.Html("oauth.viewerTitle"), "<p>" + tr.Html("oauth.viewer", new JsObject { ["app"] = Esc(name) }) + "</p>", 403);
             }
             // The site stays, since on the way in it only says which one to offer first.
             var kept = new SearchParams();
@@ -376,7 +400,7 @@ public static class OAuth
                 return new Response("", 303, new Headers { ["location"] = ctx.SignIn + "?next=" + Js.EncodeURIComponent(here), ["cache-control"] = "no-store" });
             }
             string home = basePath.Length > 0 ? basePath : "/";
-            return Page("Sign in first", "<p>Open your Runlight dashboard at <a href=\"" + Esc(home) + "\">" + Esc(url.Host + home) + "</a> and sign in, then connect " + Esc(name) + " again.</p>", 401);
+            return Page(lang, tr.Html("oauth.signInTitle"), "<p>" + tr.Html("oauth.signIn", new JsObject { ["link"] = "<a href=\"" + Esc(home) + "\">" + Esc(url.Host + home) + "</a>", ["app"] = Esc(name) }) + "</p>", 401);
         }
 
         if (request.Method == "GET")
@@ -391,25 +415,27 @@ public static class OAuth
                 }
             }
             // The app names itself, so the page also shows where the answer goes, which it cannot fake.
-            string sendsTo = "<p class=\"note\">Allowing sends you back to <strong>" + Esc(new Url(redirect).Host) + "</strong>. Only allow it if you started connecting there.</p>";
+            string sendsTo = "<p class=\"note\">" + tr.Html("oauth.sendsTo", new JsObject { ["host"] = "<strong>" + Esc(new Url(redirect).Host) + "</strong>" }) + "</p>";
+            string buttons = "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">" + tr.Html("oauth.deny") + "</button><button type=\"submit\" name=\"decision\" value=\"allow\">" + tr.Html("oauth.allow") + "</button></div></form>";
             var sites = await ctx.Sites(cancellationToken).ConfigureAwait(false);
             if (cms)
             {
                 if (counting.Count == 0 && !ctx.ManagedSites)
                 {
-                    return Page("Add this site first", "<p>No site in this Runlight counts <strong>" + Esc(host) + "</strong>. Add it to a site's domains in your code, then connect again from " + Esc(name) + ".</p>", 400);
+                    return Page(lang, tr.Html("oauth.addSiteTitle"), "<p>" + tr.Html("oauth.addSite", new JsObject { ["host"] = "<strong>" + Esc(host) + "</strong>", ["app"] = Esc(name) }) + "</p>", 400);
                 }
                 string choices = string.Concat(counting.Select(s => "<option value=\"" + Esc(Js.String(s.Get("id"))) + "\">" + Esc(Js.String(s.Get("name"))) + "</option>"))
-                    + (ctx.ManagedSites && counting.Count == 0 ? "<option value=\"new\">A new site for " + Esc(host) + "</option>" : "");
+                    + (ctx.ManagedSites && counting.Count == 0 ? "<option value=\"new\">" + tr.Html("oauth.newSite", new JsObject { ["host"] = Esc(host) }) + "</option>" : "");
                 return Page(
-                    "Connect " + Esc(name),
-                    "<p><strong>" + Esc(name) + "</strong> wants to count <strong>" + Esc(host) + "</strong> in this Runlight.</p>\n"
-                    + "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>\n"
+                    lang,
+                    tr.Html("oauth.connectTitle", new JsObject { ["app"] = Esc(name) }),
+                    "<p>" + tr.Html("oauth.cmsIntro", new JsObject { ["app"] = "<strong>" + Esc(name) + "</strong>", ["host"] = "<strong>" + Esc(host) + "</strong>" }) + "</p>\n"
+                    + "<p>" + tr.Html("oauth.cmsDetail") + "</p>\n"
                     + sendsTo + "\n"
                     + "<form method=\"post\" action=\"" + Esc(basePath) + "/oauth/authorize\">" + hidden + "\n"
-                    + "<label>Site<select name=\"site\">" + choices + "</select></label>\n"
-                    + "<p class=\"note\">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in " + Esc(name) + ".</p>\n"
-                    + "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>");
+                    + "<label>" + tr.Html("app.site") + "<select name=\"site\">" + choices + "</select></label>\n"
+                    + "<p class=\"note\">" + tr.Html("oauth.cmsNote", new JsObject { ["app"] = Esc(name) }) + "</p>\n"
+                    + buttons);
             }
             if (manage)
             {
@@ -425,34 +451,36 @@ public static class OAuth
                     }
                 }
                 return Page(
-                    "Connect " + Esc(name),
-                    "<p><strong>" + Esc(name) + "</strong> wants to show this site" + (char)0x2019 + "s stats and change its settings, so you can manage it from there.</p>\n"
-                    + "<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>\n"
+                    lang,
+                    tr.Html("oauth.connectTitle", new JsObject { ["app"] = Esc(name) }),
+                    "<p>" + tr.Html("oauth.manageIntro", new JsObject { ["app"] = "<strong>" + Esc(name) + "</strong>" }) + "</p>\n"
+                    + "<p>" + tr.Html("oauth.manageDetail") + "</p>\n"
                     + sendsTo + "\n"
                     + "<form method=\"post\" action=\"" + Esc(basePath) + "/oauth/authorize\">" + hidden + "\n"
-                    + "<label>Site<select name=\"site\">" + choices + "</select></label>\n"
-                    + "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects " + Esc(name) + ".</p>\n"
-                    + "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>");
+                    + "<label>" + tr.Html("app.site") + "<select name=\"site\">" + choices + "</select></label>\n"
+                    + "<p class=\"note\">" + tr.Html("oauth.manageNote", new JsObject { ["app"] = Esc(name) }) + "</p>\n"
+                    + buttons);
             }
             string options = "";
             foreach (var s in sites)
             {
-                options += "<option value=\"" + Esc(Js.String(s.Get("id"))) + "\">" + Esc(Js.String(s.Get("name"))) + " only</option>";
+                options += "<option value=\"" + Esc(Js.String(s.Get("id"))) + "\">" + tr.Html("oauth.siteOnly", new JsObject { ["site"] = Esc(Js.String(s.Get("name"))) }) + "</option>";
             }
             return Page(
-                "Connect " + Esc(name),
-                "<p><strong>" + Esc(name) + "</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>\n"
+                lang,
+                tr.Html("oauth.connectTitle", new JsObject { ["app"] = Esc(name) }),
+                "<p>" + tr.Html("oauth.readIntro", new JsObject { ["app"] = "<strong>" + Esc(name) + "</strong>" }) + "</p>\n"
                 + sendsTo + "\n"
                 + "<form method=\"post\" action=\"" + Esc(basePath) + "/oauth/authorize\">" + hidden + "\n"
-                + "<label>Which sites it can read<select name=\"site\"><option value=\"\">Every site</option>" + (sites.Count > 1 ? options : "") + "</select></label>\n"
-                + "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>\n"
-                + "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>");
+                + "<label>" + tr.Html("oauth.readSites") + "<select name=\"site\"><option value=\"\">" + tr.Html("tokens.allSites") + "</option>" + (sites.Count > 1 ? options : "") + "</select></label>\n"
+                + "<p class=\"note\">" + tr.Html("oauth.readNote") + "</p>\n"
+                + buttons);
         }
         // The consent form posts here from this page only; a form from another site is refused.
         string? origin = request.Headers.Get("origin");
         if (!string.IsNullOrEmpty(origin) && origin != url.Origin)
         {
-            return Page("This request came from another site", "<p>Start connecting again from the app.</p>", 403);
+            return Page(lang, tr.Html("oauth.anotherSiteTitle"), "<p>" + tr.Html("oauth.startAgain") + "</p>", 403);
         }
         if (form.Get("decision") != "allow")
         {
@@ -578,7 +606,7 @@ public static class OAuth
         // A CMS plugin gets the site's agents key too, so connecting fills in every key its settings ask for.
         if (scope == "cms")
         {
-            return JsonAnswer(new JsObject { ["access_token"] = secret, ["token_type"] = "Bearer", ["scope"] = scope, ["site"] = grantSite, ["agents_key"] = await AgentsKeyAsync(ctx.Store, grantSite, false, cancellationToken).ConfigureAwait(false) });
+            return JsonAnswer(new JsObject { ["access_token"] = secret, ["token_type"] = "Bearer", ["scope"] = scope, ["site"] = grantSite, ["agents_key"] = await AgentsKeyAsync(ctx.Store, ctx.Secret, grantSite, false, cancellationToken).ConfigureAwait(false) });
         }
         // site is not part of OAuth, but a hub needs to know which site it was given.
         var answer = new JsObject { ["access_token"] = secret, ["token_type"] = "Bearer", ["scope"] = scope };
@@ -678,8 +706,8 @@ public static class OAuth
             201);
     }
 
-    private static Response Page(string title, string body, int status = 200) => new(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>" + title + " | Runlight</title>\n"
+    private static Response Page(string lang, string title, string body, int status = 200) => new(
+        "<!doctype html><html lang=\"" + lang + "\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>" + title + " | Runlight</title>\n"
         + "<style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a8a93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style></head><body><main><h1>"
         + title + "</h1>" + body + "</main></body></html>",
         status,

@@ -126,6 +126,40 @@ public sealed class AccountsTests : IAsyncLifetime
 
     [Theory]
     [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task Signing_in_hashes_a_password_made_at_the_old_cost_again_and_a_wrong_password_changes_nothing(string kind)
+    {
+        var store = await StoreAsync(kind);
+        var accounts = new AccountsStore(store, Secret);
+        var user = await accounts.SetPasswordAsync("owner@example.com", "a long password", Now);
+        byte[] salt = Crypto.RandomBytes(16);
+        string old = "scrypt$" + Crypto.Base64url(salt) + "$" + Crypto.Base64url(Scrypt.Derive(Js.Utf8("a long password"), salt, 16384, 8, 1, 32));
+        await store.Db.RunAsync("UPDATE rl_users SET hash = ? WHERE id = ?", [old, user.Str("id")]);
+        Assert.Null(await accounts.SignInAsync("owner@example.com", "a wrong password"));
+        Assert.Equal(old, (await accounts.ByIdAsync(user.Str("id")!))!.Str("hash"));
+        var signedIn = await accounts.SignInAsync("owner@example.com", "a long password");
+        Assert.StartsWith("scrypt$32768$8$3$", signedIn!.Str("hash"), StringComparison.Ordinal); // made again at the new cost
+        Assert.Equal(signedIn.Str("hash"), (await accounts.ByIdAsync(user.Str("id")!))!.Str("hash"));
+        Assert.NotNull(await accounts.SignInAsync("owner@example.com", "a long password")); // and it still signs in
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task Deleting_a_site_removes_the_accounts_and_invitations_kept_to_it_and_no_one_else(string kind)
+    {
+        var store = await StoreAsync(kind);
+        var accounts = new AccountsStore(store, Secret);
+        await accounts.SetPasswordAsync("owner@example.com", "a long password", Now);
+        await accounts.SetPasswordAsync("alpha@example.com", "a long password", Now, "viewer", site: "alpha");
+        await accounts.SetPasswordAsync("beta@example.com", "a long password", Now, "member", site: "beta");
+        await accounts.InviteAsync("invited@example.com", "member", "owner@example.com", Now, site: "alpha");
+        await accounts.InviteAsync("other@example.com", "member", "owner@example.com", Now, site: "beta");
+        await accounts.ForgetSiteAsync("alpha");
+        Assert.Equal(["beta@example.com", "owner@example.com"], (await accounts.ListAsync()).Select(u => u.Str("email")!).Order(StringComparer.Ordinal));
+        Assert.Equal(["other@example.com"], (await accounts.InvitesAsync(Now)).Select(i => i.Str("email")!));
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
     public async Task Sessions_tickets_and_devices_are_signed_and_end_with_their_password(string kind)
     {
         var accounts = new AccountsStore(await StoreAsync(kind), Secret);
@@ -143,12 +177,7 @@ public sealed class AccountsTests : IAsyncLifetime
         Assert.Null(await accounts.FromSessionAsync(id + ".later." + signature, Now));
 
         string pending = accounts.PendingFor(user, Now);
-        var real = await accounts.FromPendingAsync(pending, Now);
-        Assert.Equal(J(user), J(real!.Value.User));
-        Assert.True(real.Value.Real);
-        var decoy = await accounts.FromPendingAsync(accounts.DecoyFor(user, Now), Now);
-        Assert.Equal(J(user), J(decoy!.Value.User));
-        Assert.False(decoy.Value.Real);
+        Assert.Equal(J(user), J(await accounts.FromPendingAsync(pending, Now)));
         Assert.Null(await accounts.FromPendingAsync(session, Now));
         Assert.Null(await accounts.FromPendingAsync(pending, Now + 5 * 60_000));
 
@@ -247,9 +276,16 @@ public sealed class AccountsTests : IAsyncLifetime
         await throttle.FailAsync("ada@example.com", Now);
         await throttle.FailAsync("ada@example.com", Now);
         Assert.True(await new Throttle(store, "test", 3, 1000).BlockedAsync("ada@example.com", Now));
-        // A new entry clears expired ones.
-        await throttle.FailAsync("zed@example.com", Now + 2000);
+        // A throttle that has not counted yet reads its counts on the first new entry, which clears expired ones.
+        var fresh = new Throttle(store, "test", 3, 1000);
+        await fresh.FailAsync("zed@example.com", Now + 2000);
         Assert.Single(await store.SettingsStartingWithAsync("throttle:test:"));
+        // After that it counts new entries itself and reads them back only when they can have passed the ceiling,
+        // so a new entry no longer scans the rest: the expired one stays until the scheduled sweep.
+        await fresh.FailAsync("bob@example.com", Now + 2001);
+        Assert.Equal(2, (await store.SettingsStartingWithAsync("throttle:test:")).Count);
+        await Throttle.SweepAsync(store, Now + 3002);
+        Assert.Empty(await store.SettingsStartingWithAsync("throttle:test:"));
     }
 
     [Theory]

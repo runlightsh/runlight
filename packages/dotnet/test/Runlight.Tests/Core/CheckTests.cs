@@ -350,6 +350,143 @@ public sealed class CheckTests : CoreTestCase
         Assert.Equal(1, Sum(await rl.Store.HourlyAsync(query))); // rolled up
     }
 
+    public static TheoryData<string> Servers() => Databases.ServerData();
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task Renaming_a_click_goal_keeps_its_conversions_on_built_days_even_onto_a_name_with_events_of_its_own(string kind)
+    {
+        var t = await Harness.CreateAsync(kind, Site("UTC"));
+        t.Advance(-3 * 24 * HOUR);
+        for (int i = 0; i < 3; i++)
+        {
+            string ip = "203.0.113." + (60 + i);
+            await t.SendAsync(new JsObject { ["k"] = "pageview", ["u"] = "https://example.com/", ["i"] = "c" + i }, ip: ip);
+            await t.SendAsync(new JsObject { ["k"] = "event", ["u"] = "https://example.com/", ["i"] = "c" + i, ["n"] = "Buy click" }, ip: ip);
+            // One visit also sends a plain event under the name the goal is renamed to.
+            if (i == 0)
+            {
+                await t.SendAsync(new JsObject { ["k"] = "event", ["u"] = "https://example.com/", ["i"] = "c" + i, ["n"] = "Purchase" }, ip: ip);
+            }
+            t.Advance(HOUR);
+        }
+        t.Advance(3 * 24 * HOUR - 3 * HOUR);
+        var goal = new JsObject { ["id"] = "c".PadLeft(24, '0'), ["site"] = "default", ["name"] = "Buy click", ["kind"] = "click", ["match"] = "button.buy", ["clickBy"] = "selector", ["valueMode"] = "none", ["value"] = 0L, ["valueProp"] = "", ["currency"] = "USD", ["createdAt"] = t.Now };
+        await t.Store.SaveGoalAsync(goal);
+        async Task BuildAllAsync()
+        {
+            for (int made = await t.Rl.BuildRollupsAsync(); made > 0; made = await t.Rl.BuildRollupsAsync())
+            {
+            }
+        }
+        await BuildAllAsync();
+        var q = t.Query("2026-09-30", "2026-10-06");
+        async Task<(List<object?> Goals, List<object?> Events)> ReadAsync()
+        {
+            var goals = await t.Store.GoalsAsync("default");
+            var totals = await t.Store.GoalTotalsAllAsync(q, goals);
+            return (
+                goals.Select(g => (object?)new List<object?> { g.Str("name"), totals[g.Str("id")!].Num("conversions"), totals[g.Str("id")!].Num("visitors") }).ToList(),
+                (await t.Store.BreakdownAsync(q, "event", 10, 0)).Select(r => (object?)new List<object?> { r.Str("value"), r.Num("events") }).ToList());
+        }
+        Assert.Equal("[[\"Buy click\",3,3]]", J((await ReadAsync()).Goals));
+        foreach (string name in new[] { "Checkout click", "Purchase" })
+        {
+            var before = (await t.Store.GoalsAsync("default"))[0];
+            await t.Store.SaveGoalAsync(before.With(new JsObject { ["name"] = name }), before);
+            var rolled = await ReadAsync();
+            Assert.Equal("[[\"" + name + "\"," + (name == "Purchase" ? 4 : 3) + ",3]]", J(rolled.Goals)); // renamed
+            // Days built again where both names met, then every built day read the same as the raw events.
+            await BuildAllAsync();
+            var built = await ReadAsync();
+            await t.Store.ClearRollupsAsync("default");
+            var raw = await ReadAsync();
+            Assert.Equal(J(new List<object?> { raw.Goals, raw.Events }), J(new List<object?> { built.Goals, built.Events })); // rollups agree with the raw events
+            await BuildAllAsync();
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task A_header_longer_than_its_column_is_cut_to_fit_so_the_days_rollup_still_builds(string kind)
+    {
+        var t = await Harness.CreateAsync(kind, Site("UTC"));
+        t.Advance(-2 * 24 * HOUR);
+        string platform = "\"" + string.Concat(Enumerable.Repeat("Windows ", 400)) + "\"";
+        await t.SendAsync(
+            new JsObject { ["k"] = "pageview", ["u"] = "https://example.com/" + new string('a', 1500), ["i"] = "long1" },
+            // A browser whose user agent names no system, so the platform hint is what is stored.
+            ua: "Mozilla/5.0 (Unknown) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            ip: "203.0.113.70",
+            headers: new() { ["sec-ch-ua-platform"] = platform, ["sec-ch-ua"] = "\"" + new string('B', 3000) + "\";v=\"1\"" });
+        t.Advance(2 * 24 * HOUR);
+        var row = (await t.Store.Db.AllAsync("SELECT os, entry_path FROM rl_sessions"))[0];
+        int os = Sql.S(row.Get("os")).Length;
+        Assert.True(os is > 50 and <= 100, "os is " + os + " characters");
+        Assert.True(Sql.S(row.Get("entry_path")).Length <= 1000);
+        int built = 0;
+        for (int made = await t.Rl.BuildRollupsAsync(); made > 0; made = await t.Rl.BuildRollupsAsync())
+        {
+            built += made;
+        }
+        Assert.True(built >= 1, "the day builds");
+        Assert.Equal(1, (await t.StatsAsync(t.Query("2026-09-30", "2026-10-06"))).Num("visits"));
+    }
+
+    [Fact]
+    public async Task Text_is_cut_to_its_columns_width_in_characters_never_through_the_middle_of_one()
+    {
+        var t = await Harness.CreateAsync("sqlite", Site("UTC"));
+        await t.Rl.InitAsync();
+        // An emoji is one character in a VARCHAR, though two UTF-16 units: 300 of them fit in a hostname column of 255 only as 255.
+        await t.Store.InsertEventAsync(new JsObject { ["site"] = "default", ["ts"] = t.Now, ["kind"] = "event", ["visitor"] = "v", ["session"] = "s", ["pageview"] = "p", ["path"] = "/", ["hostname"] = string.Concat(Enumerable.Repeat("\U0001F600", 300)), ["title"] = "", ["name"] = "n", ["engagedMs"] = 0L, ["scroll"] = null, ["link"] = "" });
+        string host = Sql.S((await t.Store.Db.AllAsync("SELECT hostname FROM rl_events"))[0].Get("hostname"));
+        Assert.Equal(255, host.EnumerateRunes().Count());
+        Assert.Equal(string.Concat(Enumerable.Repeat("\U0001F600", 255)), host);
+    }
+
+    [Theory]
+    [MemberData(nameof(Servers))]
+    public async Task On_MySQL_two_processes_building_one_day_at_once_add_its_rows_once(string kind)
+    {
+        if (kind is "none" or "postgres")
+        {
+            Assert.Skip("MySQL only");
+        }
+        var one = Harness.Create(await Databases.FreshAsync(kind), Site("UTC"));
+        one.Now = Utc(2026, 10, 3, 12);
+        for (int i = 0; i < 5; i++)
+        {
+            await one.SendAsync(new JsObject { ["k"] = "pageview", ["u"] = "https://example.com/p" + i }, ip: "203.0.113." + (80 + i));
+        }
+        var other = Harness.Create(Databases.MysqlStore(kind), Site("UTC"));
+        other.Now = one.Now;
+        await other.Rl.InitAsync();
+        long start = Utc(2026, 10, 3);
+        for (int round = 0; round < 5; round++)
+        {
+            var both = await Task.WhenAll(
+                Attempt(() => one.Store.BuildRollupDayAsync("default", "2026-10-03", start, start + DAY)),
+                Attempt(() => other.Store.BuildRollupDayAsync("default", "2026-10-03", start, start + DAY)));
+            Assert.Contains(true, both); // one of them builds it
+            var totals = (await one.Store.Db.AllAsync("SELECT COUNT(*) AS n, SUM(visits) AS visits FROM rl_rollups WHERE site = 'default' AND day = '2026-10-03' AND dim = ''"))[0];
+            Assert.Equal([1d, 5d], [Js.Number(totals.Get("n")), Js.Number(totals.Get("visits"))]);
+        }
+
+        static async Task<bool> Attempt(Func<Task> build)
+        {
+            try
+            {
+                await build();
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+    }
+
     [Fact]
     public async Task A_check_reports_what_it_sent()
     {
