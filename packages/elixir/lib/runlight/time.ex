@@ -49,10 +49,22 @@ defmodule Runlight.Time do
     # Where clocks jump forward at that time (midnight in Santiago, Havana, and the Azores), it never
     # happens, and the sum above lands before it; the day then begins when the clocks land, at most a
     # few quarter hours on.
-    Enum.reduce_while(1..8, at, fn _, at ->
-      {ly, lm, ld, lh, _, _} = parts(at, timezone)
-      if JS.date_utc(ly, lm - 1, ld, lh) >= guess, do: {:halt, at}, else: {:cont, at + 15 * 60_000}
-    end)
+    at =
+      Enum.reduce_while(1..8, at, fn _, at ->
+        {ly, lm, ld, lh, _, _} = parts(at, timezone)
+        if JS.date_utc(ly, lm - 1, ld, lh) >= guess, do: {:halt, at}, else: {:cont, at + 15 * 60_000}
+      end)
+
+    # Where clocks fall back across that hour (midnight in Amman in 2019, three hours at Casey station), it
+    # happens twice; the day begins at the first.
+    if offset(at - 3 * 3_600_000, timezone) == offset(at, timezone) do
+      at
+    else
+      Enum.find_value(180..15//-15, at, fn back ->
+        {ly, lm, ld, lh, _, _} = parts(at - back * 60_000, timezone)
+        if JS.date_utc(ly, lm - 1, ld, lh) == guess, do: at - back * 60_000
+      end)
+    end
   end
 
   @doc "The local date of an instant, YYYY-MM-DD."

@@ -448,7 +448,12 @@ defmodule Runlight.PureTest do
 
   test "csv and zip" do
     f = Fixtures.php("zip.json")
-    for c <- f["rows"], do: assert(Zip.csv_row([cell(c["cell"])]) == c["row"], inspect(c["cell"]))
+    # The fixture was made before a semicolon or a tab got a cell quoted; those are checked below.
+    for c <- f["rows"],
+        not (is_binary(c["cell"]) and Regex.match?(~r/[;\t]/, c["cell"])),
+        do: assert(Zip.csv_row([cell(c["cell"])]) == c["row"], inspect(c["cell"]))
+
+    assert Zip.csv_row(["a;b", "x\ty", "=1;2", "plain"]) == ~s("a;b","x\ty","'=1;2",plain)
 
     for c <- f["csvs"] do
       assert Zip.csv(Enum.map(c["header"], &cell/1), Enum.map(c["rows"], fn r -> Enum.map(r, &cell/1) end)) == c["csv"]

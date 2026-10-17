@@ -89,7 +89,7 @@ defmodule Runlight.StoreCrossTest do
         Store.breakdown(store, query(q), d, l, o)
 
       {"goalTotalsAll", [q, goals]} ->
-        store |> Store.goal_totals_all(query(q), goals) |> Enum.sort() |> Object.new()
+        Store.goal_totals_all(store, query(q), goals)
 
       {"funnelCounts", [q, f]} ->
         Store.funnel_counts(store, query(q), f)
@@ -217,7 +217,7 @@ defmodule Runlight.StoreCrossTest do
       fixture["calls"]
       |> Enum.with_index()
       |> Enum.flat_map(fn {call, i} ->
-        canon = call["method"] in ["siteOverrides", "goalTotalsAll"]
+        canon = call["method"] == "siteOverrides"
         expected = if canon, do: JS.stringify(sorted(call["result"])), else: JS.stringify(call["result"])
 
         actual =

@@ -14,6 +14,7 @@ defmodule Runlight.Accounts.Web do
   alias Runlight.Http.Response
   alias Runlight.JS
   alias Runlight.JS.Object
+  alias Runlight.Messages
   alias Runlight.SearchParams
   alias Runlight.State
   alias Runlight.Store
@@ -56,14 +57,12 @@ defmodule Runlight.Accounts.Web do
     # a caller who invents a new address for every try still cannot guess on and on. And per address across every
     # account, thirty, so one caller trying made-up emails cannot keep the server hashing; a request with no known
     # address skips that one, since it would hold up everyone at once. Six-digit codes: five wrong tries an account
-    # every fifteen minutes, and five to confirm the first one. A decoy ticket's tries count apart, the same way, so
-    # someone guessing passwords cannot use up the owner's five. Password re-checks in Account: ten.
+    # every fifteen minutes, and five to confirm the first one. Password re-checks in Account: ten.
     throttles = %{
       per_address: Throttle.new(table, {:web, id, :per_address}, 10),
       per_account: Throttle.new(table, {:web, id, :per_account}, 50),
       per_ip: Throttle.new(table, {:web, id, :per_ip}, 30),
       code_tries: Throttle.new(table, {:web, id, :code_tries}, 5),
-      decoy_tries: Throttle.new(table, {:web, id, :decoy_tries}, 5),
       confirm_tries: Throttle.new(table, {:web, id, :confirm_tries}, 5),
       rechecks: Throttle.new(table, {:web, id, :rechecks}, 10)
     }
@@ -261,11 +260,21 @@ defmodule Runlight.Accounts.Web do
     end
   end
 
+  # An account's problem in the visitor's language, where the dashboard has words for it; English as it was raised.
+  defp reason(%AccountError{} = error, lang) do
+    key = "error.#{error.code}"
+    text = Messages.t(lang, key, error.params || [])
+    if lang == "en" or text == key, do: error.message, else: text
+  end
+
   defp asks_for_token?(web), do: match?({:token, _}, web.first)
 
-  defp setup_locked(web) do
+  defp setup_locked(web, lang) do
     html(
-      if(web.first == :locked, do: Pages.setup_needs_token_page(web.base), else: Pages.setup_locked_page(web.base)),
+      if(web.first == :locked,
+        do: Pages.setup_needs_token_page(web.base, lang),
+        else: Pages.setup_locked_page(web.base, lang)
+      ),
       403
     )
   end
@@ -345,6 +354,8 @@ defmodule Runlight.Accounts.Web do
     base = web.base
     acc = web.accounts
 
+    lang = Messages.accepted_language(request)
+
     cond do
       path == "/auth.css" ->
         Response.new(Pages.auth_css(), 200, [
@@ -353,7 +364,7 @@ defmodule Runlight.Accounts.Web do
         ])
 
       path == "/auth.js" ->
-        Response.new(Pages.auth_js(), 200, [
+        Response.new(Pages.auth_js(SearchParams.get(Url.search_params(url), "lang") || "en"), 200, [
           {"content-type", "application/javascript; charset=utf-8"},
           {"cache-control", "public, max-age=3600"}
         ])
@@ -372,17 +383,21 @@ defmodule Runlight.Accounts.Web do
         case Accounts.from_link(acc, SearchParams.get(q, "ticket") || "", now(web)) do
           nil ->
             html(
-              Pages.login_page(base, %{
-                error: "That sign-in link has run out. Sign in again.",
-                next: next,
-                forgot: web.forgot
-              }),
+              Pages.login_page(
+                base,
+                %{
+                  error: Messages.t(lang, "auth.linkExpired"),
+                  next: next,
+                  forgot: web.forgot
+                },
+                lang
+              ),
               410
             )
 
           user ->
             if user["twoFactor"],
-              do: html(Pages.code_page(base, %{pending: Accounts.pending_for(acc, user, now(web)), next: next})),
+              do: html(Pages.code_page(base, %{pending: Accounts.pending_for(acc, user, now(web)), next: next}, lang)),
               else: signed_in_to(web, request, user, next)
         end
 
@@ -395,30 +410,34 @@ defmodule Runlight.Accounts.Web do
           nil ->
             redirect("#{base}/login?next=#{JS.encode_uri_component(next)}")
 
-          %{user: user, real: real} ->
+          user ->
             # Counted before the check, so a burst cannot get past five.
             cond do
-              not Throttle.take(
-                if(real, do: web.throttles.code_tries, else: web.throttles.decoy_tries),
-                user["id"],
-                now(web)
-              ) ->
+              not Throttle.take(web.throttles.code_tries, user["id"], now(web)) ->
                 html(
-                  Pages.code_page(base, %{
-                    pending: pending_text,
-                    next: next,
-                    error: "Too many tries. Wait fifteen minutes and try again."
-                  }),
+                  Pages.code_page(
+                    base,
+                    %{
+                      pending: pending_text,
+                      next: next,
+                      error: Messages.t(lang, "error.too_many_tries")
+                    },
+                    lang
+                  ),
                   429
                 )
 
-              not real or not Accounts.check_second_factor(acc, user["id"], field(form, "code"), now(web)) ->
+              not Accounts.check_second_factor(acc, user["id"], field(form, "code"), now(web)) ->
                 html(
-                  Pages.code_page(base, %{
-                    pending: pending_text,
-                    next: next,
-                    error: "That code is not right. Check the time on your phone, or use a recovery code."
-                  }),
+                  Pages.code_page(
+                    base,
+                    %{
+                      pending: pending_text,
+                      next: next,
+                      error: Messages.t(lang, "auth.codeWrong")
+                    },
+                    lang
+                  ),
                   401
                 )
 
@@ -441,6 +460,7 @@ defmodule Runlight.Accounts.Web do
 
   defp setup(web, request, url, method) do
     base = web.base
+    lang = Messages.accepted_language(request)
     acc = web.accounts
     asks = asks_for_token?(web)
 
@@ -452,11 +472,11 @@ defmodule Runlight.Accounts.Web do
         code = SearchParams.get(Url.search_params(url), "code") || ""
 
         cond do
-          web.first == :locked -> setup_locked(web)
+          web.first == :locked -> setup_locked(web, lang)
           # The app's token is typed in; the server's code comes in the link it printed.
-          asks or web.first == :open -> html(Pages.setup_page(base, %{code: "", ask_code: asks}))
-          setup_ok?(web, code) -> html(Pages.setup_page(base, %{code: code}))
-          true -> setup_locked(web)
+          asks or web.first == :open -> html(Pages.setup_page(base, %{code: "", ask_code: asks}, lang))
+          setup_ok?(web, code) -> html(Pages.setup_page(base, %{code: code}, lang))
+          true -> setup_locked(web, lang)
         end
 
       method == "POST" ->
@@ -469,25 +489,33 @@ defmodule Runlight.Accounts.Web do
             if asks,
               do:
                 html(
-                  Pages.setup_page(base, %{
-                    code: "",
-                    ask_code: true,
-                    error: "That is not this app's RUNLIGHT_TOKEN.",
-                    email: email
-                  }),
+                  Pages.setup_page(
+                    base,
+                    %{
+                      code: "",
+                      ask_code: true,
+                      error: Messages.t(lang, "auth.tokenWrong"),
+                      email: email
+                    },
+                    lang
+                  ),
                   403
                 ),
-              else: setup_locked(web)
+              else: setup_locked(web, lang)
 
           # Asked twice, since a typo here would lock the first owner out.
           field(form, "password") != field(form, "again") ->
             html(
-              Pages.setup_page(base, %{
-                code: if(asks, do: "", else: code),
-                ask_code: asks,
-                error: "The two passwords are not the same.",
-                email: email
-              }),
+              Pages.setup_page(
+                base,
+                %{
+                  code: if(asks, do: "", else: code),
+                  ask_code: asks,
+                  error: Messages.t(lang, "auth.mismatch"),
+                  email: email
+                },
+                lang
+              ),
               400
             )
 
@@ -508,12 +536,16 @@ defmodule Runlight.Accounts.Web do
             rescue
               error in AccountError ->
                 html(
-                  Pages.setup_page(base, %{
-                    code: if(asks, do: "", else: code),
-                    ask_code: asks,
-                    error: error.message,
-                    email: email
-                  }),
+                  Pages.setup_page(
+                    base,
+                    %{
+                      code: if(asks, do: "", else: code),
+                      ask_code: asks,
+                      error: reason(error, lang),
+                      email: email
+                    },
+                    lang
+                  ),
                   400
                 )
             end
@@ -526,22 +558,27 @@ defmodule Runlight.Accounts.Web do
 
   defp login(web, request, url, method) do
     base = web.base
+    lang = Messages.accepted_language(request)
     acc = web.accounts
 
     cond do
       not has_account(web) ->
         cond do
-          web.first == :locked -> setup_locked(web)
+          web.first == :locked -> setup_locked(web, lang)
           web.first == :open or asks_for_token?(web) -> redirect("#{base}/setup")
-          true -> setup_locked(web)
+          true -> setup_locked(web, lang)
         end
 
       method == "GET" ->
         html(
-          Pages.login_page(base, %{
-            next: safe_next(web, SearchParams.get(Url.search_params(url), "next")),
-            forgot: web.forgot
-          })
+          Pages.login_page(
+            base,
+            %{
+              next: safe_next(web, SearchParams.get(Url.search_params(url), "next")),
+              forgot: web.forgot
+            },
+            lang
+          )
         )
 
       method == "POST" ->
@@ -552,10 +589,10 @@ defmodule Runlight.Accounts.Web do
         account = email |> JS.trim() |> JS.lower()
         ip = Runlight.client_ip(web.rl, request)
         pair = "#{account}\n#{if ip == "", do: "unknown", else: ip}"
-        login_page = fn opts -> Pages.login_page(base, Map.merge(opts, %{next: next, forgot: web.forgot})) end
+        login_page = fn opts -> Pages.login_page(base, Map.merge(opts, %{next: next, forgot: web.forgot}), lang) end
 
         too_many = fn ->
-          html(login_page.(%{error: "Too many tries. Wait fifteen minutes and try again.", email: email}), 429)
+          html(login_page.(%{error: Messages.t(lang, "error.too_many_tries"), email: email}), 429)
         end
 
         if (ip != "" and not Throttle.take(web.throttles.per_ip, ip, now(web))) or
@@ -568,10 +605,11 @@ defmodule Runlight.Accounts.Web do
             trusted = known != nil and Accounts.trusts_device(acc, read_cookie(request, @device_cookie), known)
             over = not trusted and not Throttle.take(web.throttles.per_account, account, now(web))
 
-            # Past the account's limit, a right password and a wrong one get the same answer. With two-factor on, both
-            # reach the code step, where a wrong password's ticket never passes. Without it, a right password emails a
-            # sign-in link.
-            if over and not (known != nil and known["twoFactor"]) do
+            # Past the account's limit, a right password and a wrong one get the same answer, and so does every
+            # account, with two-factor on or not, and an email with no account, so guessing from many addresses
+            # learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+            # leads to the code step when two-factor is on.
+            if over do
               if Runlight.mail_settings(web.rl) == nil or home_origin(web) == nil do
                 too_many.()
               else
@@ -590,8 +628,7 @@ defmodule Runlight.Accounts.Web do
 
                 html(
                   login_page.(%{
-                    error:
-                      "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
+                    error: Messages.t(lang, "auth.tooManyLink"),
                     email: email
                   }),
                   429
@@ -600,19 +637,19 @@ defmodule Runlight.Accounts.Web do
             else
               case Accounts.sign_in(acc, email, password) do
                 nil ->
-                  if over and known,
-                    do: html(Pages.code_page(base, %{pending: Accounts.decoy_for(acc, known, now(web)), next: next})),
-                    else:
-                      html(login_page.(%{error: "That email and password do not match an account.", email: email}), 401)
+                  html(login_page.(%{error: Messages.t(lang, "auth.wrongPassword"), email: email}), 401)
 
                 user ->
                   Throttle.clear(web.throttles.per_address, pair)
                   if ip != "", do: Throttle.forgive(web.throttles.per_ip, ip)
-                  if not over and not trusted, do: Throttle.forgive(web.throttles.per_account, account)
+                  if not trusted, do: Throttle.forgive(web.throttles.per_account, account)
 
                   # With two-factor on, the password only earns the second step.
                   if user["twoFactor"],
-                    do: html(Pages.code_page(base, %{pending: Accounts.pending_for(acc, user, now(web)), next: next})),
+                    do:
+                      html(
+                        Pages.code_page(base, %{pending: Accounts.pending_for(acc, user, now(web)), next: next}, lang)
+                      ),
                     else: signed_in_to(web, request, user, next)
               end
             end
@@ -621,7 +658,11 @@ defmodule Runlight.Accounts.Web do
             error in AccountError ->
               if error.code == "busy",
                 do:
-                  Response.new(login_page.(%{error: error.message, email: email}), 503, @html ++ [{"retry-after", "5"}]),
+                  Response.new(
+                    login_page.(%{error: reason(error, lang), email: email}),
+                    503,
+                    @html ++ [{"retry-after", "5"}]
+                  ),
                 else: reraise(error, __STACKTRACE__)
           end
         end
@@ -633,6 +674,7 @@ defmodule Runlight.Accounts.Web do
 
   defp invite_page(web, request, url, method) do
     base = web.base
+    lang = Messages.accepted_language(request)
     acc = web.accounts
 
     case method do
@@ -641,17 +683,21 @@ defmodule Runlight.Accounts.Web do
 
         case Accounts.invite_by_code(acc, code, now(web)) do
           nil ->
-            html(Pages.invite_gone_page(base), 410)
+            html(Pages.invite_gone_page(base, lang), 410)
 
           invite ->
             html(
-              Pages.invite_page(base, %{
-                code: code,
-                email: invite["email"],
-                role: invite["role"],
-                site: invite["site"],
-                host: Url.host(url)
-              })
+              Pages.invite_page(
+                base,
+                %{
+                  code: code,
+                  email: invite["email"],
+                  role: invite["role"],
+                  site: invite["site"],
+                  host: Url.host(url)
+                },
+                lang
+              )
             )
         end
 
@@ -661,25 +707,29 @@ defmodule Runlight.Accounts.Web do
 
         case Accounts.invite_by_code(acc, code, now(web)) do
           nil ->
-            html(Pages.invite_gone_page(base), 410)
+            html(Pages.invite_gone_page(base, lang), 410)
 
           invite ->
             again = fn error ->
               html(
-                Pages.invite_page(base, %{
-                  code: code,
-                  email: invite["email"],
-                  role: invite["role"],
-                  site: invite["site"],
-                  host: Url.host(url),
-                  error: error
-                }),
+                Pages.invite_page(
+                  base,
+                  %{
+                    code: code,
+                    email: invite["email"],
+                    role: invite["role"],
+                    site: invite["site"],
+                    host: Url.host(url),
+                    error: error
+                  },
+                  lang
+                ),
                 400
               )
             end
 
             if field(form, "password") != field(form, "again") do
-              again.("The two passwords are not the same.")
+              again.(Messages.t(lang, "auth.mismatch"))
             else
               try do
                 user = Accounts.accept_invite(acc, code, field(form, "password"), now(web))
@@ -697,8 +747,8 @@ defmodule Runlight.Accounts.Web do
               rescue
                 error in AccountError ->
                   if error.code == "invite_gone",
-                    do: html(Pages.invite_gone_page(base), 410),
-                    else: again.(error.message)
+                    do: html(Pages.invite_gone_page(base, lang), 410),
+                    else: again.(reason(error, lang))
               end
             end
         end
@@ -1111,7 +1161,9 @@ defmodule Runlight.Accounts.Web do
           next = if search != "", do: "?next=#{JS.encode_uri_component("#{home_path(web)}#{search}")}", else: ""
           redirect("#{web.base}/login#{next}")
         else
-          if web.first == :open or asks_for_token?(web), do: redirect("#{web.base}/setup"), else: setup_locked(web)
+          if web.first == :open or asks_for_token?(web),
+            do: redirect("#{web.base}/setup"),
+            else: setup_locked(web, Messages.accepted_language(request))
         end
 
       true ->

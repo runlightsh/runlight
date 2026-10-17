@@ -12,6 +12,8 @@ defmodule Runlight.Assistant do
   alias Runlight.Mcp
   alias Runlight.Url
 
+  # The most text of earlier turns a question carries, about six thousand tokens.
+  @max_history_chars 24_000
   @max_rounds 8
   # However many rounds a question takes, the answer comes within this long or the assistant stops.
   @deadline_ms 120_000
@@ -305,6 +307,21 @@ defmodule Runlight.Assistant do
     end
   end
 
+  # The browser sends the history, so its whole length is held too, the oldest turns dropped first: each tool
+  # round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+  defp cap_history(history) do
+    if length(history) > 1 and Enum.sum_by(history, &JS.len16(&1.content)) > @max_history_chars do
+      [_ | rest] = history
+      cap_history(Enum.drop_while(rest, &(&1.role != "user")) |> keep_one(rest))
+    else
+      history
+    end
+  end
+
+  # Turns are dropped from the front until one is a question, but never the last of them.
+  defp keep_one([], rest), do: [List.last(rest)]
+  defp keep_one(kept, _rest), do: kept
+
   defp converse(rl, settings, provider, base, model, messages, context, read_api) do
     deadline = clock() + @deadline_ms
     # The last twenty turns, starting with a question, with unanswered questions in a row joined into one.
@@ -322,6 +339,7 @@ defmodule Runlight.Assistant do
             history ++ [%{role: m.role, content: content}]
         end
       end)
+      |> cap_history()
       |> Enum.map(&JS.obj(role: &1.role, content: &1.content))
 
     if provider["protocol"] == "anthropic",

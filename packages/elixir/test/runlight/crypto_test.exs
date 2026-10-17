@@ -26,7 +26,7 @@ defmodule Runlight.CryptoTest do
     refute Crypto.check_password("a long password!", hd(f["hashes"])["hash"])
 
     hash = Crypto.hash_password("a long password")
-    assert hash =~ ~r/\Apbkdf2\$100000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}\z/
+    assert hash =~ ~r/\Apbkdf2\$600000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}\z/
     assert Crypto.check_password("a long password", hash)
     refute Crypto.check_password("another password", hash)
 

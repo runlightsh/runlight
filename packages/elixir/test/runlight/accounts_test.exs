@@ -117,8 +117,8 @@ defmodule Runlight.AccountsTest do
     assert Accounts.by_id(acc, user["id"])["recoveryLeft"] == 9
 
     pending = Accounts.pending_for(acc, user, now)
-    assert %{real: true} = Accounts.from_pending(acc, pending, now)
-    assert %{real: false} = Accounts.from_pending(acc, Accounts.decoy_for(acc, user, now), now)
+    assert Accounts.from_pending(acc, pending, now)["id"] == user["id"]
+    assert Accounts.from_pending(acc, pending <> "x", now) == nil
     link = Accounts.link_for(acc, Accounts.by_id(acc, user["id"]), now)
     assert Accounts.from_link(acc, link, now)
     assert Accounts.from_link(acc, link, now) == nil

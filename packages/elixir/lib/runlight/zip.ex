@@ -55,7 +55,9 @@ defmodule Runlight.Zip do
     Enum.map_join(values, ",", fn v ->
       s = if v in [nil, :undefined], do: "", else: JS.string(v)
       s = if Regex.match?(~r/^[=+\-@\t\r]/, s) and not Regex.match?(~r/\A-?\d+(\.\d+)?\z/, s), do: "'" <> s, else: s
-      if Regex.match?(~r/[",\n\r]/, s), do: "\"" <> String.replace(s, "\"", "\"\"") <> "\"", else: s
+      # Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an
+      # unquoted cell there, and what follows could start with = and run as a formula.
+      if Regex.match?(~r/[",;\t\n\r]/, s), do: "\"" <> String.replace(s, "\"", "\"\"") <> "\"", else: s
     end)
   end
 

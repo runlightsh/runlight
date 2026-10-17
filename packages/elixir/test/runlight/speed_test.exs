@@ -174,7 +174,7 @@ defmodule Runlight.SpeedTest do
 
       Store.clear_rollups(rl.store, "default")
       assert Store.goal_totals_all(rl.store, query, goals) == rolled, "the same as when every visit is read"
-      assert Store.goal_totals_all(rl.store, query, []) == %{}
+      assert Store.goal_totals_all(rl.store, query, []) == Runlight.JS.Object.new()
     end
   end
 end

@@ -159,7 +159,12 @@ defmodule Runlight.Store.Sql do
             events BIGINT NOT NULL DEFAULT 0,
             #{if my, do: "KEY rl_rollups_day (site, dim, day)", else: "PRIMARY KEY (site, dim, day, value)"})#{table}\
       """
-    ]
+    ] ++
+      if dialect == "sqlite",
+        do: [
+          "CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'"
+        ],
+        else: []
   end
 
   @doc """

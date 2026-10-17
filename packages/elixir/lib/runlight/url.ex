@@ -328,12 +328,29 @@ defmodule Runlight.Url do
     end
   end
 
+  # Characters UTS #46 maps to nothing: the soft hyphen, the combining grapheme joiner, Mongolian free variation
+  # selectors, the zero width space, the word joiner and invisible plus, the byte order mark, and variation selectors.
+  @ignored ~r/[\x{00AD}\x{034F}\x{180B}-\x{180D}\x{180F}\x{200B}\x{2060}\x{2064}\x{FE00}-\x{FE0F}\x{FEFF}\x{E0100}-\x{E01EF}]/u
+
+  # UTS #46's mapping step, as the URL standard runs it: case folded, the ignored characters dropped, compatibility
+  # forms (full width letters, ligatures) normalised, and the ideographic full stops read as dots.
+  defp uts46(host) do
+    host
+    |> String.downcase()
+    |> then(&Regex.replace(@ignored, &1, ""))
+    |> String.normalize(:nfkc)
+    |> String.downcase()
+    |> String.replace(["\u3002", "\uFF0E", "\uFF61"], ".")
+  end
+
   defp domain(host) do
     host = percent_decode(host)
 
-    if Regex.match?(~r/[\x00-\x20#%\/:<>?@\[\\\]^|]/, host), do: raise(ArgumentError, "Invalid URL")
+    unless String.valid?(host), do: raise(ArgumentError, "Invalid URL")
 
-    lower = if String.valid?(host), do: String.downcase(host), else: raise(ArgumentError, "Invalid URL")
+    lower = if Regex.match?(~r/[^\x00-\x7f]/, host), do: uts46(host), else: String.downcase(host)
+
+    if Regex.match?(~r/[\x00-\x20#%\/:<>?@\[\\\]^|]/, lower), do: raise(ArgumentError, "Invalid URL")
 
     lower =
       if Regex.match?(~r/[^\x00-\x7f]/, lower) do
@@ -359,11 +376,15 @@ defmodule Runlight.Url do
     last = List.last(parts)
 
     cond do
-      parts == [] or length(parts) > 4 ->
+      parts == [] ->
         nil
 
       not Regex.match?(~r/\A(0x[0-9a-f]*|[0-9]+)\z/, last) ->
         nil
+
+      # A host ending in a number is an address, and one with more than four parts is not one.
+      length(parts) > 4 ->
+        raise ArgumentError, "Invalid URL"
 
       true ->
         numbers =
@@ -375,8 +396,12 @@ defmodule Runlight.Url do
                   [_, hex] -> String.to_integer(hex, 16)
                 end
 
+              # A leading zero reads in octal, so an 8 or 9 after it is not a number.
               Regex.match?(~r/\A0[0-7]+\z/, part) ->
                 String.to_integer(part, 8)
+
+              Regex.match?(~r/\A0[0-9]+\z/, part) ->
+                raise ArgumentError, "Invalid URL"
 
               Regex.match?(~r/\A[0-9]+\z/, part) ->
                 String.to_integer(part)

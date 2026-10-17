@@ -113,7 +113,7 @@ if Code.ensure_loaded?(Plug.Conn) do
           do: conn.req_headers,
           else: conn.req_headers ++ [{"host", authority(conn)}]
 
-      proto = if conn.scheme == :https, do: "https", else: "http"
+      proto = scheme(conn)
       host = Enum.find_value(headers, "localhost", fn {k, v} -> if k == "host", do: v end)
       query = if conn.query_string == "", do: "", else: "?" <> conn.query_string
       url = "#{proto}://#{host}#{conn.request_path}#{query}"
@@ -134,6 +134,24 @@ if Code.ensure_loaded?(Plug.Conn) do
 
         other ->
           other
+      end
+    end
+
+    # The first x-forwarded-proto of http or https, as the Node adapter honours it, else the connection's own.
+    @doc false
+    def scheme(conn) do
+      forwarded =
+        conn.req_headers
+        |> Enum.find_value("", fn {k, v} -> if k == "x-forwarded-proto", do: v end)
+        |> String.split(",")
+        |> hd()
+        |> String.trim()
+        |> String.downcase()
+
+      cond do
+        forwarded in ["http", "https"] -> forwarded
+        conn.scheme == :https -> "https"
+        true -> "http"
       end
     end
 
@@ -370,7 +388,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp observe(conn, rl) do
       host = Enum.find_value(conn.req_headers, conn.host, fn {k, v} -> if k == "host", do: v end)
       query = if conn.query_string == "", do: "", else: "?" <> conn.query_string
-      url = "#{if conn.scheme == :https, do: "https", else: "http"}://#{host}#{conn.request_path}#{query}"
+      url = "#{Runlight.Plug.scheme(conn)}://#{host}#{conn.request_path}#{query}"
       Runlight.observe(rl, %Runlight.Http.Request{url: url, method: "GET", headers: conn.req_headers, ref: make_ref()})
       conn
     end

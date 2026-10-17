@@ -296,7 +296,7 @@ defmodule Runlight.RoutesTest do
   test "a key made on first use is the same for every request that asks at once" do
     rl = rl(sites: [[id: "a", hostnames: ["a.example.com"]]])
 
-    for key <- ["oauth-key", "pick-key", "embed-key", "observe-key:a"] do
+    for key <- ["oauth-key", "pick-key", "embed-key"] do
       made = fn -> Runlight.Hash.random_id(32) end
       keys = 1..20 |> Task.async_stream(fn _ -> Store.setting_or_add(rl.store, key, made) end) |> Enum.map(&elem(&1, 1))
       assert length(Enum.uniq(keys)) == 1
