@@ -104,19 +104,19 @@ final class Http
         if ($text === '') {
             return 0;
         }
-        if (preg_match('/^0[xX][0-9a-fA-F]+$/', $text)) {
+        if (preg_match('/^0[xX][0-9a-fA-F]+$/D', $text)) {
             return (float) hexdec(substr($text, 2));
         }
-        if (preg_match('/^0[oO][0-7]+$/', $text)) {
+        if (preg_match('/^0[oO][0-7]+$/D', $text)) {
             return (float) octdec(substr($text, 2));
         }
-        if (preg_match('/^0[bB][01]+$/', $text)) {
+        if (preg_match('/^0[bB][01]+$/D', $text)) {
             return (float) bindec(substr($text, 2));
         }
-        if (preg_match('/^[+-]?Infinity$/', $text)) {
+        if (preg_match('/^[+-]?Infinity$/D', $text)) {
             return $text[0] === '-' ? -INF : INF;
         }
-        if (preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/', $text)) {
+        if (preg_match('/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/D', $text)) {
             return (float) $text;
         }
         return NAN;
@@ -125,7 +125,7 @@ final class Http
     /** JavaScript's String.prototype.trim. */
     public static function trim(string $text): string
     {
-        return (string) preg_replace('/^[\s\x{FEFF}\x{A0}]+|[\s\x{FEFF}\x{A0}]+$/u', '', $text);
+        return (string) preg_replace('/^[\s\x{FEFF}\x{A0}]+|[\s\x{FEFF}\x{A0}]+$/uD', '', $text);
     }
 
     /** JavaScript's encodeURIComponent. */
@@ -195,7 +195,7 @@ final class Http
             return NAN;
         }
         $text = self::trim($text);
-        if (preg_match('/^([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?)?$/i', $text, $m)) {
+        if (preg_match('/^([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?)?$/iD', $text, $m)) {
             $year = (int) $m[1];
             $month = ($m[2] ?? '') !== '' ? (int) $m[2] : 1;
             $day = ($m[3] ?? '') !== '' ? (int) $m[3] : 1;

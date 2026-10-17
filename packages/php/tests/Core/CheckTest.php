@@ -290,6 +290,15 @@ final class CheckTest extends CoreTestCase
         $t->rl->freshenStatistics();
         $t->rl->freshenStatistics();
         self::assertSame(2, $analyzed, 'once for the doubled events, then not again within the hour');
+        // A PHP process serves one request, so a fresh one finds when statistics were last checked in the database.
+        $insert('r', 4000);
+        $later = new Runlight(['store' => $store, 'site' => ['hostnames' => ['example.com'], 'timezone' => 'UTC'], 'now' => fn (): int => $t->now]);
+        $later->freshenStatistics();
+        self::assertSame(2, $analyzed, 'not again by another process within the hour');
+        $t->advance(self::HOUR);
+        $other = new Runlight(['store' => $store, 'site' => ['hostnames' => ['example.com'], 'timezone' => 'UTC'], 'now' => fn (): int => $t->now]);
+        $other->freshenStatistics();
+        self::assertSame(3, $analyzed, 'and once the hour is up');
     }
 
     public function testShortLinkClicksAreNotVisitsInTheHeatmapRawOrRolledUpNorTheFirstVisit(): void

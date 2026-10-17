@@ -25,6 +25,13 @@ final class PdoDb implements Db
     /** One lock per MySQL database, so installs sharing a server do not wait on each other. Lock names are 64 characters at most. */
     private const MYSQL_LOCK = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))";
 
+    /**
+     * The session's sql_mode as it was, less NO_BACKSLASH_ESCAPES, wherever it sits in the list. Values are
+     * written into statements with backslash escapes, which a session in that mode reads as text, so a quote
+     * could end a value early. Every MySQL connection Runlight uses, an app's own too, runs this first.
+     */
+    public const NO_BACKSLASH_ESCAPES_OFF = "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))";
+
     private ?\PDO $pdo;
     /** @var (\Closure(): \PDO)|null */
     private ?\Closure $connect;
@@ -340,6 +347,7 @@ final class PdoDb implements Db
         if ($this->dialect === 'mysql') {
             // Values are written into the statement on the client, as mysql2 sends them.
             $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, true);
+            $pdo->exec(self::NO_BACKSLASH_ESCAPES_OFF);
         }
         if ($this->dialect === 'sqlite') {
             $pdo->setAttribute(\PDO::ATTR_TIMEOUT, 5);

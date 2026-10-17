@@ -7,6 +7,8 @@
  * the package's MySQL driver does, each statement is turned into MySQL's
  * form first by MysqlText: a "quoted" name in backticks, a backslash inside
  * 'text' doubled, and each `?` replaced by its value, escaped by $wpdb itself.
+ * The connection is WordPress's, so its SQL mode is not changed; where it
+ * includes NO_BACKSLASH_ESCAPES, a backslash in 'text' is left as it is.
  *
  * @package Runlight
  */
@@ -26,6 +28,9 @@ final class WpdbDb implements Db {
 	private const LOCK = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))";
 
 	private int $depth = 0;
+
+	/** Whether WordPress's session is in NO_BACKSLASH_ESCAPES mode, read once; null until then. */
+	private ?bool $plain_backslashes = null;
 
 	/** @param \wpdb $wpdb WordPress's database. */
 	public function __construct( private readonly \wpdb $wpdb ) {}
@@ -164,7 +169,19 @@ final class WpdbDb implements Db {
 	 * @param array  $params Its values.
 	 */
 	private function text( string $sql, array $params ): string {
-		return MysqlText::of( $sql, array_values( $params ), $this->literal( ... ) );
+		return MysqlText::of( $sql, array_values( $params ), $this->literal( ... ), ! $this->no_backslash_escapes() );
+	}
+
+	/**
+	 * Whether the session reads a backslash in text as itself. Read once, since WordPress sets the mode when it
+	 * connects; its own escaping follows the mode, and so must the backslashes in Runlight's statements.
+	 */
+	private function no_backslash_escapes(): bool {
+		if ( null === $this->plain_backslashes ) {
+			$mode                    = $this->quietly( fn () => $this->wpdb->get_var( 'SELECT @@SESSION.sql_mode' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- a fixed statement reading the session's SQL mode, once.
+			$this->plain_backslashes = in_array( 'NO_BACKSLASH_ESCAPES', explode( ',', strtoupper( (string) $mode ) ), true );
+		}
+		return $this->plain_backslashes;
 	}
 
 	/**

@@ -311,7 +311,7 @@ final class Transports
     /** JavaScript's String.prototype.trim, which also takes Unicode spaces. */
     public static function trim(string $text): string
     {
-        return (string) preg_replace('/^[\s\x{FEFF}\x{A0}]+|[\s\x{FEFF}\x{A0}]+$/u', '', $text);
+        return (string) preg_replace('/^[\s\x{FEFF}\x{A0}]+|[\s\x{FEFF}\x{A0}]+$/uD', '', $text);
     }
 
     /** The first `$units` UTF-16 code units, as String.prototype.slice counts them. */

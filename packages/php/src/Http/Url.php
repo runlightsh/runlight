@@ -32,7 +32,7 @@ final class Url
     {
         $input = trim($input, "\x00..\x20");
         $input = str_replace(["\t", "\n", "\r"], '', $input);
-        if (!preg_match('/^([a-zA-Z][a-zA-Z0-9+.\-]*):(.*)$/s', $input, $m)) {
+        if (!preg_match('/^([a-zA-Z][a-zA-Z0-9+.\-]*):(.*)$/sD', $input, $m)) {
             if ($base === null) {
                 throw new \InvalidArgumentException("Invalid URL: $input");
             }
@@ -292,20 +292,27 @@ final class Url
         if (end($parts) === '') {
             array_pop($parts);
         }
-        if ($parts === [] || count($parts) > 4) {
+        if ($parts === []) {
             return null;
         }
         $last = end($parts);
-        if (!preg_match('/^(0x[0-9a-f]*|[0-9]+)$/', $last)) {
+        if (!preg_match('/^(0x[0-9a-f]*|[0-9]+)$/D', $last)) {
             return null;
+        }
+        // Ending in a number, the host is an address, and five parts are no address.
+        if (count($parts) > 4) {
+            throw new \InvalidArgumentException('Invalid URL');
         }
         $numbers = [];
         foreach ($parts as $part) {
-            if (preg_match('/^0x([0-9a-f]*)$/', $part, $m)) {
+            if (preg_match('/^0x([0-9a-f]*)$/D', $part, $m)) {
                 $numbers[] = $m[1] === '' ? 0 : hexdec($m[1]);
-            } elseif (preg_match('/^0[0-7]+$/', $part)) {
+            } elseif (preg_match('/^0[0-7]+$/D', $part)) {
                 $numbers[] = octdec($part);
-            } elseif (preg_match('/^[0-9]+$/', $part)) {
+            } elseif (preg_match('/^0[0-9]+$/D', $part)) {
+                // A leading zero makes it octal, and 8 and 9 are no octal digits.
+                throw new \InvalidArgumentException('Invalid URL');
+            } elseif (preg_match('/^[0-9]+$/D', $part)) {
                 $numbers[] = (int) $part;
             } else {
                 throw new \InvalidArgumentException('Invalid URL');

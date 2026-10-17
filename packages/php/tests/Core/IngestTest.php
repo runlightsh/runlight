@@ -123,8 +123,14 @@ final class IngestTest extends CoreTestCase
         self::assertSame(2, $stats['pageviews']);
     }
 
+    /** @return list<string> */
+    private static function saltDays(Harness $t): array
+    {
+        return array_map(static fn (array $r): string => (string) $r['day'], $t->store()->db->all('SELECT day FROM rl_salts ORDER BY day'));
+    }
+
     #[DataProvider('kinds')]
-    public function testASaltIsDeletedOnceItsDayHasEndedEverywhere(string $kind): void
+    public function testASaltLastsItsDayAndPastMidnightOnlyWhileAVisitThatBeganThatDayGoesOn(string $kind): void
     {
         $t = new Harness($kind);
         $t->send(['k' => 'pageview', 'u' => 'https://example.com/', 'i' => 's1']);
@@ -133,9 +139,41 @@ final class IngestTest extends CoreTestCase
             $t->send(['k' => 'pageview', 'u' => 'https://example.com/', 'i' => 's' . ($i + 2)]);
         }
         $t->rl->check();
-        // October 9th at noon UTC: the earliest timezone is on the 8th and still needs the 7th.
-        $days = array_map(static fn (array $r): string => (string) $r['day'], $t->store()->db->all('SELECT day FROM rl_salts ORDER BY day'));
-        self::assertSame(['2026-10-07', '2026-10-08', '2026-10-09'], $days);
+        // October 9th at noon UTC: no visit from the 8th is still going, so only today's salt is left.
+        self::assertSame(['2026-10-09'], self::saltDays($t));
+
+        // A visit that runs past midnight keeps its day's salt until it ends, and stays one visit.
+        $t->advance(11 * 60 * self::MIN + 50 * self::MIN); // 23:50 on the 9th
+        $t->send(['k' => 'pageview', 'u' => 'https://example.com/late', 'i' => 'm1']);
+        $t->advance(20 * self::MIN); // 00:10 on the 10th
+        $t->send(['k' => 'pageview', 'u' => 'https://example.com/later', 'i' => 'm2']);
+        $t->rl->check();
+        self::assertSame(['2026-10-09', '2026-10-10'], self::saltDays($t), 'the visit is still going');
+        $t->advance(31 * self::MIN); // idle for half an hour: the visit has ended
+        $t->rl->check();
+        self::assertSame(['2026-10-10'], self::saltDays($t));
+        // Noon on the 9th, and the one across midnight, which belongs to the 9th where it began.
+        $stats = $t->stats($t->query('2026-10-09', '2026-10-10'));
+        self::assertSame([2, 3], [$stats['visits'], $stats['pageviews']], 'the visit across midnight is one visit');
+    }
+
+    #[DataProvider('kinds')]
+    public function testEachSitesTimezoneKeepsTheSaltsItsOwnVisitsNeed(string $kind): void
+    {
+        // Toronto is still on the 9th when UTC reaches the 10th.
+        $t = new Harness($kind, ['sites' => [
+            ['id' => 'utc', 'name' => 'UTC', 'hostnames' => ['example.com'], 'timezone' => 'UTC'],
+            ['id' => 'to', 'name' => 'Toronto', 'hostnames' => ['example.org'], 'timezone' => 'America/Toronto'],
+        ]]);
+        $t->advance(-12 * 60 * self::MIN + 2 * 60 * self::MIN); // 02:00 UTC on the 6th, 22:00 on the 5th in Toronto
+        $t->rl->check();
+        foreach (self::saltDays($t) as $day) {
+            self::assertContains($day, ['2026-10-05', '2026-10-06']);
+        }
+        $t->send(['k' => 'pageview', 'u' => 'https://example.org/', 'i' => 'to1']);
+        $t->send(['k' => 'pageview', 'u' => 'https://example.com/', 'i' => 'utc1']);
+        $t->rl->check();
+        self::assertSame(['2026-10-05', '2026-10-06'], self::saltDays($t), 'today in each timezone');
     }
 
     #[DataProvider('kinds')]

@@ -16,6 +16,11 @@ use Runlight\Js;
  */
 final class Crypto
 {
+    /**
+     * What a new hash costs here: the setting hashes had before they recorded theirs. TypeScript writes N=32768,
+     * r=8, p=3, but scrypt in plain PHP takes about six times as long as that, several seconds a sign-in, so
+     * this stays where it was. Each hash records its own cost, and any cost in bounds checks out.
+     */
     private const SCRYPT_N = 16384;
     private const SCRYPT_R = 8;
     private const SCRYPT_P = 1;
@@ -49,7 +54,7 @@ final class Crypto
         if (strlen($plain) % 4 === 0) {
             $plain = (string) preg_replace('/={1,2}\z/', '', $plain);
         }
-        if (strlen($plain) % 4 === 1 || !preg_match('/^[A-Za-z0-9+\/]*$/', $plain)) {
+        if (strlen($plain) % 4 === 1 || !preg_match('/^[A-Za-z0-9+\/]*$/D', $plain)) {
             throw new \InvalidArgumentException('The string to be decoded is not correctly encoded.');
         }
         return (string) base64_decode($plain, false);
@@ -81,11 +86,54 @@ final class Crypto
         return self::sameBytes($a, $b);
     }
 
-    /** A password hash, in the scrypt form the standalone server has always written. */
+    /** A password hash, as scrypt$N$r$p$salt$key: its cost is recorded in it, so that can rise again. */
     public static function hashPassword(string $password): string
     {
         $salt = self::randomBytes(16);
-        return 'scrypt$' . self::base64url($salt) . '$' . self::base64url(self::scrypt($password, $salt, 32));
+        return 'scrypt$' . self::SCRYPT_N . '$' . self::SCRYPT_R . '$' . self::SCRYPT_P . '$' . self::base64url($salt) . '$'
+            . self::base64url(self::scrypt($password, $salt, 32, self::SCRYPT_N, self::SCRYPT_R, self::SCRYPT_P));
+    }
+
+    /**
+     * A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key). Null for
+     * one out of bounds, so a stored hash cannot ask for a huge amount of memory or time.
+     *
+     * @param list<string> $parts
+     * @return array{int, int, int}|null
+     */
+    private static function scryptCost(array $parts): ?array
+    {
+        if (count($parts) === 3) {
+            return [16384, 8, 1];
+        }
+        [$n, $r, $p] = array_map(Js::number(...), array_slice($parts, 1, 3));
+        // N a power of two up to 2^20, and r and p small.
+        foreach ([[$n, 1 << 20], [$r, 32], [$p, 16]] as [$value, $max]) {
+            if (!is_int($value) || $value < 1 || $value > $max) {
+                return null;
+            }
+        }
+        if ($n < 2 || ($n & ($n - 1)) !== 0) {
+            return null;
+        }
+        return [$n, $r, $p];
+    }
+
+    /**
+     * Whether a stored hash costs less than a new one would here, so the password it matched is hashed again:
+     * an scrypt hash with a lower cost, or a PBKDF2 one.
+     */
+    public static function weakerThanNow(string $stored): bool
+    {
+        $parts = explode('$', $stored);
+        if ($parts[0] === 'pbkdf2') {
+            return true;
+        }
+        if ($parts[0] !== 'scrypt') {
+            return false;
+        }
+        $cost = self::scryptCost($parts);
+        return $cost !== null && $cost[0] * $cost[1] * $cost[2] < self::SCRYPT_N * self::SCRYPT_R * self::SCRYPT_P;
     }
 
     /** The shortest stored key accepted. Ours are 32 bytes. */
@@ -107,13 +155,14 @@ final class Crypto
                 return null;
             }
         };
-        if ($parts[0] === 'scrypt' && count($parts) === 3) {
-            $expected = $decode($parts[2]);
-            $salt = $decode($parts[1]);
-            if ($expected === null || $salt === null || strlen($expected) < self::MIN_KEY_BYTES) {
+        if ($parts[0] === 'scrypt' && (count($parts) === 3 || count($parts) === 6)) {
+            $cost = self::scryptCost($parts);
+            $expected = $decode($parts[count($parts) - 1]);
+            $salt = $decode($parts[count($parts) - 2]);
+            if ($cost === null || $expected === null || $salt === null || strlen($expected) < self::MIN_KEY_BYTES) {
                 return false;
             }
-            return self::sameBytes(self::scrypt($password, $salt, strlen($expected)), $expected);
+            return self::sameBytes(self::scrypt($password, $salt, strlen($expected), ...$cost), $expected);
         }
         if ($parts[0] === 'pbkdf2' && count($parts) === 4) {
             $rounds = Js::number($parts[1]);
@@ -130,9 +179,9 @@ final class Crypto
         return false;
     }
 
-    private static function scrypt(string $password, string $salt, int $length): string
+    private static function scrypt(string $password, string $salt, int $length, int $n, int $r, int $p): string
     {
-        return $length === 0 ? '' : Scrypt::derive($password, $salt, self::SCRYPT_N, self::SCRYPT_R, self::SCRYPT_P, $length);
+        return $length === 0 ? '' : Scrypt::derive($password, $salt, $n, $r, $p, $length);
     }
 
     private static function pbkdf2(string $password, string $salt, int $rounds, int $length): string

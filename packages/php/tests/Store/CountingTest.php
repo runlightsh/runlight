@@ -443,4 +443,39 @@ final class CountingTest extends StoreTestCase
         Seed::buildDays($store, 'default', $query['from'], $query['to']);
         $this->assertSame(1, $sum($store->hourly($query)), 'rolled up');
     }
+
+    #[DataProvider('kinds')]
+    public function testTwoVisitsOpenedForOneVisitorAtOnceByTwoProcessesSettleOnOne(string $kind): void
+    {
+        $store = $this->store($kind);
+        $open = static function (string $id) use ($store): void {
+            $store->insertSession([
+                'id' => $id, 'site' => 'default', 'visitor' => 'v1', 'startedAt' => self::NOW, 'hostname' => 'example.com', 'referrerHost' => '', 'referrerPath' => '', 'source' => '', 'channel' => 'Direct',
+                'utmSource' => '', 'utmMedium' => '', 'utmCampaign' => '', 'utmTerm' => '', 'utmContent' => '', 'country' => '', 'region' => '', 'city' => '',
+                'browser' => '', 'browserVersion' => '', 'os' => '', 'osVersion' => '', 'device' => '', 'screen' => '', 'language' => '',
+            ]);
+        };
+        $open('bbbb');
+        $open('aaaa');
+        // Each process asks after opening its own; both settle on the same one, and the other is gone.
+        $one = $store->settleOpenSession('default', ['v1'], self::NOW - 60_000, ['id' => 'bbbb', 'visitor' => 'v1']);
+        $other = $store->settleOpenSession('default', ['v1'], self::NOW - 60_000, ['id' => 'aaaa', 'visitor' => 'v1']);
+        $this->assertSame(['aaaa', 'aaaa'], [$one['id'], $other['id']]);
+        $this->assertSame(['aaaa'], array_map(static fn (array $r): string => (string) $r['id'], $store->db->all('SELECT id FROM rl_sessions')));
+    }
+
+    #[DataProvider('kinds')]
+    public function testHostnameSuggestionsStepThroughHostnamesInTheOrderTheyAreSortedIn(string $kind): void
+    {
+        // A locale's own order puts blog-staging after blog. where byte order puts it before, so suggestions taken
+        // one after another in byte order must compare in byte order too, or one is skipped (Postgres on Linux).
+        $store = $this->store($kind);
+        foreach (['blog.example.com', 'blog-staging.example.com', 'shop.example.com'] as $i => $host) {
+            Seed::visit($store, "h$i", "hv$i", self::NOW + $i, ['hostname' => $host], [['pageview', '/', self::NOW + $i, "hp$i"]]);
+        }
+        $values = static fn (array $rows): array => array_map(static fn (array $r): string => $r['value'], $rows);
+        $this->assertSame(['blog-staging.example.com', 'blog.example.com', 'shop.example.com'], $values($store->hostnameSuggestions(self::today(), 10)));
+        $this->assertSame(['blog-staging.example.com', 'blog.example.com'], $values($store->hostnameSuggestions(self::today(), 2)));
+        $this->assertSame(['shop.example.com'], $values($store->hostnameSuggestions(self::today(['hostname', 'is', 'shop.example.com']), 10)));
+    }
 }

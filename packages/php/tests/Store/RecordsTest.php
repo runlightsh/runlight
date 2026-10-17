@@ -184,7 +184,7 @@ final class RecordsTest extends StoreTestCase
         $rl->init();
         $agents = \Runlight\OAuth::agentsKey($rl, 'default');
         $this->assertSame($agents, \Runlight\OAuth::agentsKey($rl, 'default'));
-        $this->assertSame($agents, $store->setting('observe-key:default'));
+        $this->assertSame($agents, \Runlight\OAuth::openAgentsKey($rl, (string) $store->setting('observe-key:default')));
         $this->assertNotSame($agents, \Runlight\OAuth::agentsKey($rl, 'default', true), 'replacing it still makes a new one');
     }
 
@@ -195,7 +195,7 @@ final class RecordsTest extends StoreTestCase
         $this->assertSame('first', $store->salt('2026-10-06', 'first'));
         $this->assertSame('first', $store->salt('2026-10-06', 'second'), 'two racing callers agree on one');
         $store->salt('2026-10-05', 'old');
-        $store->dropSaltsBefore('2026-10-06');
+        $store->dropSaltsExcept(['2026-10-06']);
         $this->assertNull($store->saltIfExists('2026-10-05'));
         $this->assertSame('first', $store->saltIfExists('2026-10-06'));
 

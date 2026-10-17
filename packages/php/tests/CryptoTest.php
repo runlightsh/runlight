@@ -52,12 +52,50 @@ final class CryptoTest extends TestCase
         }
     }
 
-    public function testNewHashesUseScryptAndCheck(): void
+    public function testNewHashesRecordTheirScryptCostAndCheck(): void
     {
         $hash = Crypto::hashPassword('a long password');
-        $this->assertMatchesRegularExpression('/^scrypt\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/', $hash);
+        // PHP's scrypt is too slow for the cost TypeScript writes (32768, 8, 3), so this stays at 16384, 8, 1 and says so.
+        $this->assertMatchesRegularExpression('/^scrypt\$16384\$8\$1\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/', $hash);
         $this->assertTrue(Crypto::checkPassword('a long password', $hash));
+        $this->assertFalse(Crypto::checkPassword('a long passwore', $hash));
         $this->assertNotSame($hash, Crypto::hashPassword('a long password'), 'a new salt each time');
+    }
+
+    public function testEveryFormatChecksAndACostOutOfBoundsIsRefusedNotRun(): void
+    {
+        $salt = 'saltsaltsaltsalt';
+        $encode = Crypto::base64url(...);
+        // The hash before costs were recorded, and one recorded at a cost other than ours.
+        $old = 'scrypt$' . $encode($salt) . '$' . $encode(Scrypt::derive('a long password', $salt, 16384, 8, 1, 32));
+        $this->assertTrue(Crypto::checkPassword('a long password', $old));
+        $other = 'scrypt$1024$8$2$' . $encode($salt) . '$' . $encode(Scrypt::derive('a long password', $salt, 1024, 8, 2, 32));
+        $this->assertTrue(Crypto::checkPassword('a long password', $other));
+        $this->assertFalse(Crypto::checkPassword('a long passwore', $other));
+        $key = $encode(Scrypt::derive('a long password', $salt, 1024, 8, 2, 32));
+        foreach (['2097152$8$1', '30000$8$1', '1$8$1', '16384$33$1', '16384$8$17', '16384$0$1', 'x$8$1'] as $cost) {
+            $this->assertFalse(Crypto::checkPassword('a long password', "scrypt\$$cost\$" . $encode($salt) . "\$$key"), $cost);
+        }
+    }
+
+    public function testAHashTypeScriptWritesAtItsOwnCostChecksHere(): void
+    {
+        // Node's scrypt at N=32768, r=8, p=3 for "a long password" with the salt "saltsaltsaltsalt".
+        $hash = 'scrypt$32768$8$3$c2FsdHNhbHRzYWx0c2FsdA$4-U8VUB6dCEM89cxm4ww8JJ2cEotjwVHRJIVAVaAlYY';
+        $this->assertTrue(Crypto::checkPassword('a long password', $hash));
+        $this->assertFalse(Crypto::checkPassword('a long passwore', $hash));
+    }
+
+    public function testAHashCostingLessThanANewOneIsWeakerThanNow(): void
+    {
+        $salt = Crypto::base64url('saltsaltsaltsalt');
+        $key = Crypto::base64url(str_repeat('k', 32));
+        $this->assertFalse(Crypto::weakerThanNow(Crypto::hashPassword('a long password')));
+        $this->assertFalse(Crypto::weakerThanNow("scrypt\$16384\$8\$1\$$salt\$$key"));
+        $this->assertFalse(Crypto::weakerThanNow("scrypt\$32768\$8\$3\$$salt\$$key"), 'a stronger one stays');
+        $this->assertTrue(Crypto::weakerThanNow("scrypt\$1024\$8\$1\$$salt\$$key"));
+        $this->assertTrue(Crypto::weakerThanNow("pbkdf2\$100000\$$salt\$$key"));
+        $this->assertFalse(Crypto::weakerThanNow('nonsense'));
     }
 
     public function testCheckPasswordAnswersAsTypeScriptDoes(): void

@@ -231,4 +231,92 @@ final class RollupsTest extends StoreTestCase
         $this->assertSame(0, (int) $store->db->all("SELECT COUNT(*) AS n FROM rl_events WHERE session = 'gone'")[0]['n']);
         $this->assertSame(1, (int) $store->db->all("SELECT COUNT(*) AS n FROM rl_events WHERE kind = 'fetch'")[0]['n'], 'rows of no visit stay');
     }
+
+    /** @return array{list<array{string, int|float, int|float}>, list<array{string, int|float}>} the goal's totals and the events, as reports read them */
+    private static function goalAndEvents(SqlStore $store, array $goal): array
+    {
+        $query = self::q(self::NOW - 7 * self::DAY, self::NOW + self::DAY);
+        $totals = $store->goalTotalsAll($query, [$goal])[$goal['id']];
+        return [
+            [[$goal['name'], $totals['conversions'], $totals['visitors']]],
+            array_map(static fn (array $r): array => [$r['value'], $r['events']], $store->breakdown($query, 'event', 10, 0)),
+        ];
+    }
+
+    #[DataProvider('kinds')]
+    public function testRenamingAClickGoalKeepsItsConversionsOnBuiltDaysEvenOntoANameWithEventsOfItsOwn(string $kind): void
+    {
+        $store = $this->store($kind);
+        $start = self::NOW - 3 * self::DAY;
+        for ($i = 0; $i < 3; $i++) {
+            $t = $start + $i * self::HOUR;
+            $rows = [['pageview', '/', $t, "c$i"], ['event', 'Buy click', $t, null]];
+            // One visit also sends a plain event under the name the goal is renamed to.
+            if ($i === 0) {
+                $rows[] = ['event', 'Purchase', $t, null];
+            }
+            Seed::visit($store, "c$i", "cv$i", $t, [], $rows);
+        }
+        $goal = self::goal(str_repeat('c', 24), ['name' => 'Buy click', 'kind' => 'click', 'match' => 'button.buy', 'clickBy' => 'selector']);
+        $store->saveGoal($goal);
+        Seed::buildDays($store, 'default', self::NOW - 4 * self::DAY, self::NOW - self::DAY);
+        $this->assertSame([['Buy click', 3, 3]], self::goalAndEvents($store, $goal)[0]);
+        foreach (['Checkout click', 'Purchase'] as $name) {
+            $before = $store->goalById($goal['id']);
+            $renamed = [...$before, 'name' => $name];
+            $store->saveGoal($renamed, $before);
+            $rolled = self::goalAndEvents($store, $renamed);
+            $this->assertSame([[$name, $name === 'Purchase' ? 4 : 3, 3]], $rolled[0], "renamed to $name");
+            // Days built again where both names met, then every built day reads the same as the raw events.
+            Seed::buildDays($store, 'default', self::NOW - 4 * self::DAY, self::NOW - self::DAY);
+            $built = self::goalAndEvents($store, $renamed);
+            $store->clearRollups('default');
+            $this->assertSame($built, self::goalAndEvents($store, $renamed), "rollups agree with the raw events after renaming to $name");
+            Seed::buildDays($store, 'default', self::NOW - 4 * self::DAY, self::NOW - self::DAY);
+        }
+    }
+
+    #[DataProvider('kinds')]
+    public function testTextLongerThanItsColumnIsCutToFitSoTheDaysRollupStillBuilds(string $kind): void
+    {
+        $store = $this->store($kind);
+        $t = self::NOW - 2 * self::DAY;
+        $long = str_repeat('Windows ', 400);
+        Seed::visit($store, 'long1', 'lv', $t, ['os' => $long, 'hostname' => str_repeat('h', 400), 'city' => str_repeat('é', 300)], [['pageview', '/' . str_repeat('a', 1500), $t, 'long1']]);
+        $row = $store->db->all('SELECT os, hostname, city, entry_path FROM rl_sessions')[0];
+        $this->assertSame([100, 255, 100], [mb_strlen((string) $row['os']), mb_strlen((string) $row['hostname']), mb_strlen((string) $row['city'])], 'cut to the columns');
+        $this->assertSame(1000, mb_strlen((string) $row['entry_path']));
+        $this->assertGreaterThan(0, Seed::buildDays($store, 'default', $t - self::DAY, $t + self::DAY), 'the day builds');
+        $this->assertSame(1, $store->stats(self::q(self::NOW - 7 * self::DAY, self::NOW))['visits']);
+    }
+
+    public function testOnMysqlTwoConnectionsBuildingOneDayInTurnLeaveItsRowsOnce(): void
+    {
+        $urls = Databases::mysqlUrls();
+        if (!$urls) {
+            $this->markTestSkipped('RUNLIGHT_TEST_MYSQL is not set');
+        }
+        $one = $this->store('mysql');
+        $other = new SqlStore(self::second($one));
+        $day = gmmktime(0, 0, 0, 10, 3, 2026) * 1000;
+        for ($i = 0; $i < 5; $i++) {
+            Seed::visit($one, "m$i", "mv$i", $day + $i * self::HOUR, [], [['pageview', "/p$i", $day + $i * self::HOUR, "mp$i"]]);
+        }
+        for ($round = 0; $round < 3; $round++) {
+            // The day is marked first on MySQL, inside the build's transaction, so a build never leaves two sets.
+            foreach ([$one, $other, $one] as $store) {
+                $store->buildRollupDay('default', '2026-10-03', $day, $day + self::DAY);
+            }
+            $totals = $one->db->all("SELECT COUNT(*) AS n, SUM(visits) AS visits FROM rl_rollups WHERE site = 'default' AND day = '2026-10-03' AND dim = ''")[0];
+            $this->assertSame([1, 5], [(int) $totals['n'], (int) $totals['visits']], "round $round");
+        }
+    }
+
+    /** A second connection to the same MySQL database, as another process would have. */
+    private static function second(SqlStore $store): \Runlight\Db\Db
+    {
+        $name = (string) $store->db->all('SELECT DATABASE() AS d')[0]['d'];
+        $url = preg_replace('#/[^/]*$#', '/' . $name, array_values(Databases::mysqlUrls())[0]);
+        return \Runlight\Db\Connect::url((string) $url);
+    }
 }

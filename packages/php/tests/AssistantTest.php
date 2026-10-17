@@ -94,6 +94,24 @@ final class AssistantTest extends TestCase
         $this->assertCount(3, $log);
     }
 
+    public function testAQuestionCarriesAtMost24000CharactersOfEarlierTurnsHoweverMuchHistoryTheBrowserSends(): void
+    {
+        // Nineteen made-up turns of 8,000 characters each, then the question.
+        $history = [];
+        for ($i = 0; $i < 19; $i++) {
+            $history[] = ['role' => $i % 2 ? 'assistant' : 'user', 'content' => "$i " . str_repeat('x', 7998)];
+        }
+        $history[] = ['role' => 'user', 'content' => 'How many visitors?'];
+        $fetcher = new RecordingFetcher([new Response(Json::encode(['stop_reason' => 'end_turn', 'content' => [['type' => 'text', 'text' => 'Plenty.']]]))]);
+        $log = [];
+        Assistant::chat(['provider' => 'anthropic', 'model' => 'm', 'baseUrl' => '', 'key' => 'k'], $history, self::CONTEXT, McpTest::readApi($log), $fetcher);
+        $sent = Json::decode((string) $fetcher->requests[0]['body'], true)['messages'];
+        $text = array_sum(array_map(static fn (array $m): int => is_string($m['content']) ? strlen($m['content']) : 0, $sent));
+        $this->assertLessThanOrEqual(24_000, $text);
+        $this->assertSame('user', $sent[0]['role'], 'still starting with a question');
+        $this->assertStringContainsString('How many visitors?', (string) end($sent)['content'], 'and ending with this one');
+    }
+
     public function testACancelledQuestionStopsBeforeItsNextRequest(): void
     {
         $fetcher = new RecordingFetcher([]);

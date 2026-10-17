@@ -43,6 +43,8 @@ final class Assistant
         ['id' => 'custom', 'name' => 'Another OpenAI-compatible service', 'protocol' => 'openai', 'baseUrl' => '', 'model' => '', 'key' => 'optional'],
     ];
 
+    /** The most text of earlier turns a question carries, about six thousand tokens. */
+    private const MAX_HISTORY_CHARS = 24_000;
     private const MAX_ROUNDS = 8;
     /** However many rounds a question takes, the answer comes within this long or the assistant stops. */
     public const DEADLINE_MS = 120_000;
@@ -279,6 +281,17 @@ Rule: answer only the newest message. If it asks nothing new (thanks, a greeting
                 $history[$n - 1]['content'] .= "\n\n$content";
             } else {
                 $history[] = ['role' => $m['role'], 'content' => $content];
+            }
+        }
+        // The browser sends the history, so its whole length is held too, the oldest turns dropped first: each
+        // tool round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+        $size = static function () use (&$history): int {
+            return array_sum(array_map(static fn (array $h): int => Js::length($h['content']), $history));
+        };
+        while (count($history) > 1 && $size() > self::MAX_HISTORY_CHARS) {
+            array_shift($history);
+            while (count($history) > 1 && $history[0]['role'] !== 'user') {
+                array_shift($history);
             }
         }
 

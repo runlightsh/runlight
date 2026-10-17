@@ -242,7 +242,7 @@ final class Storage
             if (!str_contains($dsn, 'options=')) {
                 $options = ['-c statement_timeout=' . self::TIMEOUT];
                 $schema = (string) Craft::$app->getConfig()->getDb()->schema;
-                if (preg_match('/^[a-z_][a-z0-9_$]*$/i', $schema)) {
+                if (preg_match('/^[a-z_][a-z0-9_$]*$/iD', $schema)) {
                     $options[] = '-c search_path=' . $schema;
                 }
                 $dsn .= ";options='" . implode(' ', $options) . "'";

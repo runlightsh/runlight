@@ -199,7 +199,7 @@ final class Intl
         $negative = $n < 0 || ($n == 0 && fdiv(1, $n) < 0);
         $text = Json::digits(abs($n));
         $exponent = 0;
-        if (preg_match('/^(.*)E([+-]?\d+)$/i', $text, $m)) {
+        if (preg_match('/^(.*)E([+-]?\d+)$/iD', $text, $m)) {
             $text = $m[1];
             $exponent = (int) $m[2];
         }

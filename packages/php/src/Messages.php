@@ -42,7 +42,10 @@ final class Messages
      * The words for one language: t(key, vars) and tn(key, n, vars), with
      * `lang` the language used, English when the one asked for is not known.
      *
-     * @return array{t: \Closure(string, array<string, string|int|float>=): string, tn: \Closure(string, int|float, array<string, string|int|float>=): string, lang: string}
+     * `html(key, vars)` is for a page: the message's own text escaped (& < >), then each {name} filled with HTML
+     * the caller already made safe.
+     *
+     * @return array{t: \Closure(string, array<string, string|int|float>=): string, tn: \Closure(string, int|float, array<string, string|int|float>=): string, html: \Closure(string, array<string, string>=): string, lang: string}
      */
     public static function translator(string $lang): array
     {
@@ -58,7 +61,24 @@ final class Messages
             $own = self::table($code)["{$key}_$form"] ?? self::table($code)["{$key}_other"] ?? null;
             return $own !== null && $own !== '' ? $fill($own, $vars) : $t("{$key}_other", $vars);
         };
-        return ['t' => $t, 'tn' => $tn, 'lang' => $code];
+        $html = static fn (string $key, array $vars = []): string => (string) preg_replace_callback(
+            '/\{(\w+)\}/',
+            static fn (array $m): string => array_key_exists($m[1], $vars) ? $vars[$m[1]] : $m[0],
+            strtr($t($key), ['&' => '&amp;', '<' => '&lt;', '>' => '&gt;']),
+        );
+        return ['t' => $t, 'tn' => $tn, 'html' => $html, 'lang' => $code];
+    }
+
+    /** The first language a browser asks for that the dashboard speaks, else English. */
+    public static function acceptedLanguage(Http\Request $request): string
+    {
+        foreach (explode(',', $request->headers->get('accept-language') ?? '') as $part) {
+            $code = Js::lower(Js::slice(Js::trim(explode(';', $part)[0]), 0, 2));
+            if (in_array($code, self::languages(), true)) {
+                return $code;
+            }
+        }
+        return 'en';
     }
 
     /**
@@ -107,7 +127,7 @@ final class Messages
     {
         $text = Json::number($n);
         // Plain digits, from JavaScript's exponent form where it uses one.
-        if (preg_match('/^(\d+)(?:\.(\d+))?e([+-]\d+)$/', $text, $m)) {
+        if (preg_match('/^(\d+)(?:\.(\d+))?e([+-]\d+)$/D', $text, $m)) {
             $digits = $m[1] . ($m[2] ?? '');
             $point = strlen($m[1]) + (int) $m[3];
             if ($point <= 0) {

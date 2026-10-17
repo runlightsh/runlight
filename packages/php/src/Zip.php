@@ -54,7 +54,9 @@ final class Zip
             if (preg_match('/^[=+\-@\t\r]/', $s) && !preg_match('/^-?\d+(\.\d+)?$/D', $s)) {
                 $s = "'$s";
             }
-            return preg_match('/[",\n\r]/', $s) ? '"' . str_replace('"', '""', $s) . '"' : $s;
+            // Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an
+            // unquoted cell there, and what follows could start with = and run as a formula.
+            return preg_match('/[",;\t\n\r]/', $s) ? '"' . str_replace('"', '""', $s) . '"' : $s;
         }, $values));
     }
 

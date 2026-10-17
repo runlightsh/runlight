@@ -133,6 +133,17 @@ final class Time
             }
             $at += 15 * 60_000;
         }
+        // Where clocks fall back across that hour (midnight in Amman in 2019, three hours at Casey station), it
+        // happens twice; the day begins at the first.
+        if (self::offset($at - 3 * 3_600_000, $timezone) === self::offset($at, $timezone)) {
+            return $at;
+        }
+        for ($back = 3 * 60; $back > 0; $back -= 15) {
+            [$ly, $lm, $ld, $lh] = self::parts($at - $back * 60_000, $timezone);
+            if (self::utc($ly, $lm - 1, $ld, $lh) === $guess) {
+                return $at - $back * 60_000;
+            }
+        }
         return $at;
     }
 

@@ -269,30 +269,13 @@ final class Accounts
     }
 
     /**
-     * A ticket that looks and acts like pendingFor's, except that no code ever
-     * passes with it. A wrong password gets one once an account with
-     * two-factor has had too many, so the answer never tells a right password.
+     * The account a code-step ticket names.
      *
-     * @param User $user
-     */
-    public function decoyFor(array $user, int $now): string
-    {
-        return $this->ticket('decoy', $user, $now + 5 * 60_000);
-    }
-
-    /**
-     * The account a code-step ticket names, and whether a right code may sign in with it.
-     *
-     * @return array{user: User, real: bool}|null
+     * @return User|null
      */
     public function fromPending(string $value, int $now): ?array
     {
-        $user = $this->fromTicket('pending', $value, $now);
-        if ($user !== null) {
-            return ['user' => $user, 'real' => true];
-        }
-        $decoy = $this->fromTicket('decoy', $value, $now);
-        return $decoy !== null ? ['user' => $decoy, 'real' => false] : null;
+        return $this->fromTicket('pending', $value, $now);
     }
 
     /**
@@ -442,6 +425,22 @@ final class Accounts
             }
             $this->store->db->run("UPDATE rl_users SET role = 'owner' WHERE id = ?", [$to]);
             $this->store->db->run("UPDATE rl_users SET role = 'admin' WHERE id = ?", [$from]);
+        });
+    }
+
+    /**
+     * Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+     * same id, from its domain, and they must not find their way into it.
+     */
+    public function forgetSite(string $site): void
+    {
+        $this->init();
+        $this->turn(function () use ($site): void {
+            foreach (array_filter($this->list(), static fn (array $u): bool => ($u['site'] ?? null) === $site) as $user) {
+                $this->store->db->run('DELETE FROM rl_users WHERE id = ?', [$user['id']]);
+                $this->store->setSetting("login-link-used:{$user['id']}", null);
+            }
+            $this->store->db->run('DELETE FROM rl_invites WHERE site = ?', [$site]);
         });
     }
 
@@ -639,7 +638,15 @@ final class Accounts
             Crypto::checkPassword($password, self::$decoy ??= Crypto::hashPassword(Crypto::hex(Crypto::randomBytes(16))));
             return null;
         }
-        return Crypto::checkPassword($password, $user['hash']) ? $user : null;
+        if (!Crypto::checkPassword($password, $user['hash'])) {
+            return null;
+        }
+        if (!Crypto::weakerThanNow($user['hash'])) {
+            return $user;
+        }
+        // A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+        $this->store->db->run('UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?', [Crypto::hashPassword($password), $user['id'], $user['hash']]);
+        return $this->byId($user['id']) ?? $user;
     }
 
     /**

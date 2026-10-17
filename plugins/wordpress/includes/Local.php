@@ -80,7 +80,7 @@ final class Local {
 	/** WordPress's timezone as a name Runlight knows: a city, or for a plain offset of whole hours, Etc/GMT. */
 	private static function timezone(): string {
 		$zone = wp_timezone_string();
-		if ( preg_match( '/^([+-])(\d{2}):00$/', $zone, $offset ) ) {
+		if ( preg_match( '/^([+-])(\d{2}):00$/D', $zone, $offset ) ) {
 			$hours = (int) $offset[2];
 			// Etc/GMT names count the other way: UTC+2 is Etc/GMT-2.
 			return 0 === $hours ? 'UTC' : 'Etc/GMT' . ( '+' === $offset[1] ? '-' : '+' ) . $hours;
@@ -213,7 +213,7 @@ final class Local {
 			'CONTENT_TYPE', 'CONTENT_LENGTH', 'REDIRECT_HTTP_AUTHORIZATION',
 			'HTTP_AUTHORIZATION', 'HTTP_COOKIE', 'HTTP_USER_AGENT', 'HTTP_ACCEPT_LANGUAGE',
 			'HTTP_IF_NONE_MATCH', 'HTTP_SEC_CH_UA', 'HTTP_SEC_CH_UA_MOBILE', 'HTTP_SEC_CH_UA_PLATFORM',
-			'HTTP_X_FORWARDED_FOR', 'HTTP_CF_CONNECTING_IP', 'HTTP_CF_IPCOUNTRY',
+			'HTTP_X_FORWARDED_FOR', 'HTTP_X_FORWARDED_PROTO', 'HTTP_CF_CONNECTING_IP', 'HTTP_CF_IPCOUNTRY',
 			'HTTP_CF_REGION_CODE', 'HTTP_X_RUNLIGHT_SHARE', 'HTTP_X_RUNLIGHT_EMBED',
 		) as $key ) {
 			if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {

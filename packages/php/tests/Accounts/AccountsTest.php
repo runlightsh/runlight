@@ -154,8 +154,7 @@ final class AccountsTest extends TestCase
         $this->assertNull($accounts->fromSession("$id.later.$signature", self::NOW));
 
         $pending = $accounts->pendingFor($user, self::NOW);
-        $this->assertSame(['user' => $user, 'real' => true], $accounts->fromPending($pending, self::NOW));
-        $this->assertSame(['user' => $user, 'real' => false], $accounts->fromPending($accounts->decoyFor($user, self::NOW), self::NOW));
+        $this->assertSame($user, $accounts->fromPending($pending, self::NOW));
         $this->assertNull($accounts->fromPending($session, self::NOW), 'a session is not a code-step ticket');
         $this->assertNull($accounts->fromPending($pending, self::NOW + 5 * 60_000));
 
@@ -322,5 +321,40 @@ final class AccountsTest extends TestCase
         $this->assertSame([], $store->settingsStartingWith('throttle:'));
         $this->assertNotNull($store->setting($day($now)), "today's key stays");
         $this->assertNull($store->setting($day(self::NOW)));
+    }
+
+    #[DataProvider('kinds')]
+    public function testSigningInHashesAPasswordMadeAtALowerCostAgainAndAWrongPasswordChangesNothing(string $kind): void
+    {
+        $store = self::store($kind);
+        $accounts = new Accounts($store, self::SECRET);
+        $user = $accounts->setPassword('owner@example.com', 'a long password', self::NOW);
+        // A hash from a cheaper setting than this one writes.
+        $salt = 'saltsaltsaltsalt';
+        $old = 'scrypt$1024$8$1$' . Crypto::base64url($salt) . '$' . Crypto::base64url(\Runlight\Accounts\Scrypt::derive('a long password', $salt, 1024, 8, 1, 32));
+        $store->db->run('UPDATE rl_users SET hash = ? WHERE id = ?', [$old, $user['id']]);
+        $this->assertNull($accounts->signIn('owner@example.com', 'a wrong password'));
+        $this->assertSame($old, $accounts->byId($user['id'])['hash']);
+        $signedIn = $accounts->signIn('owner@example.com', 'a long password');
+        $this->assertNotNull($signedIn);
+        $this->assertMatchesRegularExpression('/^scrypt\$16384\$8\$1\$/', $signedIn['hash'], 'made again at the new cost');
+        $this->assertSame($signedIn['hash'], $accounts->byId($user['id'])['hash']);
+        $this->assertNotNull($accounts->signIn('owner@example.com', 'a long password'), 'and it still signs in');
+    }
+
+    #[DataProvider('kinds')]
+    public function testDeletingASiteRemovesTheAccountsAndInvitationsKeptToItAndNoOneElse(string $kind): void
+    {
+        $accounts = new Accounts(self::store($kind), self::SECRET);
+        $accounts->setPassword('owner@example.com', 'a long password', self::NOW);
+        $accounts->setPassword('alpha@example.com', 'a long password', self::NOW, 'viewer', 'alpha');
+        $accounts->setPassword('beta@example.com', 'a long password', self::NOW, 'member', 'beta');
+        $accounts->invite('invited@example.com', 'member', 'owner@example.com', self::NOW, 'alpha');
+        $accounts->invite('other@example.com', 'member', 'owner@example.com', self::NOW, 'beta');
+        $accounts->forgetSite('alpha');
+        $emails = array_map(static fn (array $u): string => $u['email'], $accounts->list());
+        sort($emails);
+        $this->assertSame(['beta@example.com', 'owner@example.com'], $emails);
+        $this->assertSame(['other@example.com'], array_map(static fn (array $i): string => $i['email'], $accounts->invites(self::NOW)));
     }
 }

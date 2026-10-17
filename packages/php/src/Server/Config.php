@@ -352,7 +352,7 @@ final class Config
         }
         if ($code !== null) {
             $settings['setupCode'] = $code;
-            $settings['setupWhere'] = "in the file setup.txt in Runlight's data folder (<code>vendor/bin/runlight setup</code> prints it too)";
+            $settings['setupWhere'] = true;
         }
         return new Standalone([...$settings, ...$options]);
     }

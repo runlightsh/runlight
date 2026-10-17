@@ -39,7 +39,7 @@ final class Bitly implements Importer
     {
         $bare = (string) preg_replace('#^https?://#', '', $value);
         $at = strpos($bare, '/');
-        return $at === false ? ['domain' => $bare, 'slug' => ''] : ['domain' => substr($bare, 0, $at), 'slug' => (string) preg_replace('#/$#', '', substr($bare, $at + 1))];
+        return $at === false ? ['domain' => $bare, 'slug' => ''] : ['domain' => substr($bare, 0, $at), 'slug' => (string) preg_replace('#/$#D', '', substr($bare, $at + 1))];
     }
 
     public function step(array $credentials, ?string $cursor, callable $known): array

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Runlight\Accounts;
 
+use Runlight\Json;
+use Runlight\Messages;
+
 /**
  * The account pages: sign in, the code step, invites, and first-run setup. Everything else is the dashboard.
  * Each takes the base path the routes answer under: "" on the standalone server, and "/runlight" in an app.
@@ -166,13 +169,34 @@ CSS;
 })();
 JS;
 
-    private const THEME_BUTTON = '<button type="button" class="theme" aria-label="Switch theme"><svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg></button>';
+    private const THEME_ICONS = '<svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg>';
 
     private static ?string $icon = null;
 
     private static function esc(string $value): string
     {
         return strtr($value, ['&' => '&amp;', '<' => '&lt;', '>' => '&gt;', '"' => '&quot;', "'" => '&#39;']);
+    }
+
+    /**
+     * AUTH_JS with its words in a language the dashboard speaks. English is AUTH_JS itself, served as auth.js; the
+     * others come as auth.js?lang=fr and so on, and a language Runlight does not speak is English.
+     */
+    public static function authJs(string $lang = 'en'): string
+    {
+        ['t' => $t, 'lang' => $code] = Messages::translator($lang);
+        if ($code === 'en') {
+            return self::AUTH_JS;
+        }
+        $q = static fn (string $key): string => Json::encode($t($key));
+        $hide = $q('auth.hidePassword');
+        $show = $q('auth.showPassword');
+        return strtr(self::AUTH_JS, [
+            '"Theme: device setting"' => $q('auth.themeSystem'),
+            '"Theme: " + c' => 'c === "dark" ? ' . $q('auth.themeDark') . ' : ' . $q('auth.themeLight'),
+            'shown ? "Hide password" : "Show password"' => "shown ? $hide : $show",
+            '["Too short", "Weak", "Fair", "Good", "Strong"]' => '[' . implode(', ', array_map(static fn (int $n): string => $q("account.strength$n"), [0, 1, 2, 3, 4])) . ']',
+        ]);
     }
 
     /** The Runlight mark for the tab, as the TypeScript's RUNLIGHT_ICON, from the shared assets. */
@@ -185,11 +209,13 @@ JS;
         return self::$icon;
     }
 
-    private static function page(string $base, string $title, string $body): string
+    private static function page(string $base, string $lang, string $title, string $body): string
     {
         $b = self::esc($base);
+        ['t' => $t, 'lang' => $code] = Messages::translator($lang);
+        $script = $code === 'en' ? '' : "?lang=$code";
         return "<!doctype html>
-<html lang=\"en\">
+<html lang=\"$code\">
 <head>
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
@@ -197,14 +223,14 @@ JS;
 <title>" . self::esc($title) . " | Runlight</title>
 <link rel=\"icon\" href=\"" . self::icon() . "\">
 <link rel=\"stylesheet\" href=\"$b/auth.css\">
-<script src=\"$b/auth.js\"></script>
+<script src=\"$b/auth.js$script\"></script>
 </head>
 <body>
 <main>
 <p class=\"brand\">" . self::MARK . "Runlight</p>
 $body
 </main>
-" . self::THEME_BUTTON . "
+<button type=\"button\" class=\"theme\" aria-label=\"" . self::esc($t('auth.switchTheme')) . '">' . self::THEME_ICONS . "</button>
 </body>
 </html>
 ";
@@ -216,22 +242,24 @@ $body
     }
 
     /** @param array{error?: string, email?: string, next?: string, forgot: string} $opts */
-    public static function loginPage(string $base, array $opts): string
+    public static function loginPage(string $base, array $opts, string $lang = 'en'): string
     {
         $b = self::esc($base);
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
         return self::page(
             $base,
-            'Sign in',
-            '<h1>Sign in</h1>
-<p>Sign in to see your sites.</p>
+            $lang,
+            $t('auth.signIn'),
+            '<h1>' . $h('auth.signIn') . '</h1>
+<p>' . $h('auth.signInIntro') . '</p>
 ' . self::error($opts['error'] ?? null) . "
 <form method=\"post\" action=\"$b/login\">
 <input type=\"hidden\" name=\"next\" value=\"" . self::esc($opts['next'] ?? "$base/") . '">
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="' . self::esc($opts['email'] ?? '') . '"></label>
-<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
+<label>' . $h('auth.email') . '<input type="email" name="email" autocomplete="username" required autofocus value="' . self::esc($opts['email'] ?? '') . '"></label>
+<label>' . $h('auth.password') . '<input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">' . $h('auth.signIn') . '</button>
 </form>
-<p class="hint">If you have forgotten your password, <a href="' . self::esc($opts['forgot']) . '" target="_blank" rel="noopener">the docs say how to set a new one</a>.</p>',
+<p class="hint">' . $h('auth.forgot', ['link' => '<a href="' . self::esc($opts['forgot']) . '" target="_blank" rel="noopener">' . $h('auth.forgotLink') . '</a>']) . '</p>',
         );
     }
 
@@ -240,118 +268,136 @@ $body
      *
      * @param array{pending: string, next: string, error?: string} $opts
      */
-    public static function codePage(string $base, array $opts): string
+    public static function codePage(string $base, array $opts, string $lang = 'en'): string
     {
         $b = self::esc($base);
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
         return self::page(
             $base,
-            'Enter your code',
-            '<h1>Enter your code</h1>
-<p>Open your authenticator app and enter the six-digit code for Runlight.</p>
+            $lang,
+            $t('auth.codeTitle'),
+            '<h1>' . $h('auth.codeTitle') . '</h1>
+<p>' . $h('auth.codeIntro') . '</p>
 ' . self::error($opts['error'] ?? null) . "
 <form method=\"post\" action=\"$b/login/code\">
 <input type=\"hidden\" name=\"pending\" value=\"" . self::esc($opts['pending']) . '">
 <input type="hidden" name="next" value="' . self::esc($opts['next']) . '">
-<label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
-<button type="submit">Sign in</button>
+<label>' . $h('auth.code') . '<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
+<button type="submit">' . $h('auth.signIn') . '</button>
 </form>
-<p class="hint">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>',
+<p class="hint">' . $h('auth.codeHint') . '</p>',
         );
     }
 
     /** What someone invited with a role can do, after "as". */
-    public static function roleText(string $role, ?string $site = null): string
+    public static function roleText(string $role, ?string $site = null, string $lang = 'en'): string
     {
-        if ($site !== null) return $role === 'viewer' ? "a viewer, who can read the stats for $site only" : "a member, who can change the settings of $site only";
+        ['t' => $t] = Messages::translator($lang);
+        if ($site !== null) {
+            return $role === 'viewer' ? $t('auth.roleViewerSite', ['site' => $site]) : $t('auth.roleMemberSite', ['site' => $site]);
+        }
         if ($role === 'viewer') {
-            return "a viewer, who can read every site's stats";
+            return $t('auth.roleViewer');
         }
         if ($role === 'member') {
-            return 'a member, who can change the settings of every site';
+            return $t('auth.roleMember');
         }
-        return 'an admin, who can change everything and manage people';
+        return $t('auth.roleAdmin');
     }
 
     /**
      * Where an invited person chooses a password and joins.
      *
-     * @param array{code: string, email: string, role: string, host: string, error?: string} $opts
+     * @param array{code: string, email: string, role: string, host: string, site?: ?string, error?: string} $opts
      */
-    public static function invitePage(string $base, array $opts): string
+    public static function invitePage(string $base, array $opts, string $lang = 'en'): string
     {
         $b = self::esc($base);
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
         return self::page(
             $base,
-            'Join Runlight',
-            '<h1>Join Runlight</h1>
-<p>You were invited to ' . self::esc($opts['host']) . ' as ' . self::esc(self::roleText($opts['role'], $opts['site'] ?? null)) . '. Choose a password to finish.</p>
+            $lang,
+            $t('auth.joinTitle'),
+            '<h1>' . $h('auth.joinTitle') . '</h1>
+<p>' . $h('auth.joinIntro', ['host' => self::esc($opts['host']), 'role' => self::esc(self::roleText($opts['role'], $opts['site'] ?? null, $lang))]) . '</p>
 ' . self::error($opts['error'] ?? null) . "
 <form method=\"post\" action=\"$b/invite\">
 <input type=\"hidden\" name=\"code\" value=\"" . self::esc($opts['code']) . '">
-<label>Email<input type="email" value="' . self::esc($opts['email']) . '" disabled></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Join</button>
+<label>' . $h('auth.email') . '<input type="email" value="' . self::esc($opts['email']) . '" disabled></label>
+<label>' . $h('auth.password') . '<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
+<label>' . $h('auth.passwordAgain') . '<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">' . $h('auth.join') . '</button>
 </form>
-<p class="hint">Use at least ten characters.</p>',
+<p class="hint">' . $h('auth.passwordHint') . '</p>',
         );
     }
 
-    public static function inviteGonePage(string $base): string
+    public static function inviteGonePage(string $base, string $lang = 'en'): string
     {
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
         return self::page(
             $base,
-            'This invite no longer works',
-            '<h1>This invite no longer works</h1>
-<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>',
+            $lang,
+            $t('auth.inviteGoneTitle'),
+            '<h1>' . $h('auth.inviteGoneTitle') . '</h1>
+<p>' . $h('auth.inviteGone') . '</p>',
         );
     }
 
     /** @param array{code: string, error?: string, email?: string, askCode?: bool} $opts */
-    public static function setupPage(string $base, array $opts): string
+    public static function setupPage(string $base, array $opts, string $lang = 'en'): string
     {
         $b = self::esc($base);
         $code = self::esc($opts['code']);
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
         $field = !empty($opts['askCode'])
-            ? "<label>Your RUNLIGHT_TOKEN<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\"$code\"></label>"
+            ? '<label>' . $h('auth.setupToken') . "<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\"$code\"></label>"
             : "<input type=\"hidden\" name=\"code\" value=\"$code\">";
         return self::page(
             $base,
-            'Create your account',
-            '<h1>Create your account</h1>
-<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>
+            $lang,
+            $t('auth.setupTitle'),
+            '<h1>' . $h('auth.setupTitle') . '</h1>
+<p>' . $h('auth.setupIntro') . '</p>
 ' . self::error($opts['error'] ?? null) . "
 <form method=\"post\" action=\"$b/setup\">
 $field
-<label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\"" . self::esc($opts['email'] ?? '') . '"></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Create account</button>
+<label>" . $h('auth.email') . '<input type="email" name="email" autocomplete="username" required autofocus value="' . self::esc($opts['email'] ?? '') . '"></label>
+<label>' . $h('auth.password') . '<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+<label>' . $h('auth.passwordAgain') . '<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">' . $h('auth.createAccount') . '</button>
 </form>
-<p class="hint">Use at least ten characters.</p>',
+<p class="hint">' . $h('auth.passwordHint') . '</p>',
         );
     }
 
-    /** For a server with no account yet, which prints a setup link with a one-time code in its log. */
-    public static function setupLockedPage(string $base, ?string $where = null): string
+    /**
+     * For a server with no account yet, which prints a setup link with a one-time code in its log. With `$file`,
+     * the link is in the file setup.txt in the data folder instead (the standalone server), in any language.
+     */
+    public static function setupLockedPage(string $base, bool $file = false, string $lang = 'en'): string
     {
-        $where ??= "printed in the server's log when it started";
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
+        $text = $file ? $h('auth.setupLockedFile', ['command' => '<code>vendor/bin/runlight setup</code>']) : $h('auth.setupLocked');
         return self::page(
             $base,
-            'Finish setting up',
-            "<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Open the setup link $where, which carries a one-time code, to create the first account.</p>",
+            $lang,
+            $t('auth.finishTitle'),
+            '<h1>' . $h('auth.finishTitle') . "</h1>
+<p>$text</p>",
         );
     }
 
     /** For an app with accounts on but nothing to prove the first account with. */
-    public static function setupNeedsTokenPage(string $base): string
+    public static function setupNeedsTokenPage(string $base, string $lang = 'en'): string
     {
+        ['t' => $t, 'html' => $h] = Messages::translator($lang);
         return self::page(
             $base,
-            'Finish setting up',
-            '<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>',
+            $lang,
+            $t('auth.finishTitle'),
+            '<h1>' . $h('auth.finishTitle') . '</h1>
+<p>' . $h('auth.setupNeedsToken') . '</p>',
         );
     }
 }

@@ -56,9 +56,9 @@ final class StandaloneTest extends TestCase
 
     public function testANewServerIsLockedUntilTheSetupCodeMakesTheFirstAccount(): void
     {
-        $server = $this->make(['setupWhere' => 'in setup.txt']);
+        $server = $this->make(['setupWhere' => true]);
         $this->assertSame(403, $server->handle(self::req('/'))->status, 'the dashboard waits for setup');
-        $this->assertStringContainsString('Open the setup link in setup.txt', $server->handle(self::req('/'))->text());
+        $this->assertStringContainsString("Open the setup link in the file setup.txt in Runlight's data folder", $server->handle(self::req('/'))->text());
         $this->assertSame(403, $server->handle(self::req('/setup?code=wrong'))->status);
         $this->assertSame(403, $server->handle(self::form('/setup', ['code' => 'wrong', 'email' => 'a@b.co', 'password' => 'long enough pw']))->status);
         $this->assertSame(200, $server->handle(self::req('/setup?code=' . self::CODE))->status);

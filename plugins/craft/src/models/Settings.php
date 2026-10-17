@@ -54,7 +54,7 @@ final class Settings extends Model
     public function getAddress(): string
     {
         $value = trim((string) App::parseEnv($this->address));
-        $value = (string) preg_replace('#/s\.js$#', '', $value);
+        $value = (string) preg_replace('#/s\.js$#D', '', $value);
         return rtrim($value, '/');
     }
 
@@ -132,7 +132,7 @@ final class Settings extends Model
 
     public function validateSite(string $attribute): void
     {
-        if (!preg_match('/^[a-z0-9._-]*$/i', $this->getSite())) {
+        if (!preg_match('/^[a-z0-9._-]*$/iD', $this->getSite())) {
             $this->addError($attribute, Craft::t('runlight', 'A site id has only letters, numbers, dots, dashes, and underscores.'));
         }
     }

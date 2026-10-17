@@ -25,7 +25,7 @@ final class Connect
     /** The install's address as its dashboard is, without a trailing slash. */
     public static function installUrl(mixed $value, bool $local = false): string
     {
-        $url = (string) preg_replace('#/+$#', '', Js::trim(Js::string($value ?? '')));
+        $url = (string) preg_replace('#/+$#D', '', Js::trim(Js::string($value ?? '')));
         // The pattern says which addresses are allowed; the parser, that it is an address at all ("https://[" is not).
         if (!Safefetch::installAddress($url, $local) || !Url::canParse($url)) {
             throw new ConnectError("Enter the install's address, like https://example.com/runlight", 'url');

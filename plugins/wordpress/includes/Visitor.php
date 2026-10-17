@@ -118,13 +118,13 @@ final class Visitor {
 	 */
 	private static function ip( $value ): string {
 		$value = trim( is_string( $value ) ? $value : '' );
-		if ( preg_match( '/^\[([^\]]+)\](?::\d+)?$/', $value, $bracketed ) ) {
+		if ( preg_match( '/^\[([^\]]+)\](?::\d+)?$/D', $value, $bracketed ) ) {
 			$value = $bracketed[1];
-		} elseif ( preg_match( '/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/', $value, $with_port ) ) {
+		} elseif ( preg_match( '/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/D', $value, $with_port ) ) {
 			$value = $with_port[1];
 		}
 		// An IPv4 address written as IPv6, as some servers give it, is the IPv4 address.
-		if ( preg_match( '/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i', $value, $mapped ) ) {
+		if ( preg_match( '/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/iD', $value, $mapped ) ) {
 			$value = $mapped[1];
 		}
 		return false !== filter_var( $value, FILTER_VALIDATE_IP ) ? $value : '';

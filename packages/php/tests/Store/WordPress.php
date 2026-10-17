@@ -53,15 +53,20 @@ final class WordPress
     /** The plugin's $wpdb driver over a database a mysql:// URL names. */
     public static function wpdb(string $url): Db
     {
+        return new \Runlight\WordPress\WpdbDb(self::connection($url));
+    }
+
+    /** The stand-in $wpdb itself over a database a mysql:// URL names, for a test that changes its session. */
+    public static function connection(string $url): \wpdb
+    {
         self::load();
         $parts = parse_url($url);
-        $wpdb = new \wpdb(
+        return new \wpdb(
             (string) ($parts['host'] ?? '127.0.0.1'),
             (int) ($parts['port'] ?? 3306),
             rawurldecode((string) ($parts['user'] ?? 'root')),
             rawurldecode((string) ($parts['pass'] ?? '')),
             rawurldecode(ltrim((string) ($parts['path'] ?? ''), '/')),
         );
-        return new \Runlight\WordPress\WpdbDb($wpdb);
     }
 }
