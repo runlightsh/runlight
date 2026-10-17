@@ -124,7 +124,9 @@ public static class Zip
             {
                 s = "'" + s;
             }
-            return s.AsSpan().IndexOfAny("\",\n\r") >= 0 ? "\"" + s.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"" : s;
+            // Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an
+            // unquoted cell there, and what follows could start with = and run as a formula.
+            return s.AsSpan().IndexOfAny("\",;\t\n\r") >= 0 ? "\"" + s.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"" : s;
         }));
     }
 

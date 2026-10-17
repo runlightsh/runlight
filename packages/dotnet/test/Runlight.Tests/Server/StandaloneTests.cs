@@ -78,7 +78,7 @@ public sealed class StandaloneTests : ServerTestCase
     {
         var server = Make(await Databases.FreshAsync(kind), setupWhere: "in setup.txt");
         Assert.Equal(403, (await server.HandleAsync(Req("/"))).Status);
-        Assert.Contains("Open the setup link in setup.txt", (await server.HandleAsync(Req("/"))).Text(), StringComparison.Ordinal);
+        Assert.Contains("Open the setup link in the file setup.txt in Runlight", (await server.HandleAsync(Req("/"))).Text(), StringComparison.Ordinal);
         Assert.Equal(403, (await server.HandleAsync(Req("/setup?code=wrong"))).Status);
         Assert.Equal(403, (await server.HandleAsync(Form("/setup", new() { ["code"] = "wrong", ["email"] = "a@b.co", ["password"] = "long enough pw" }))).Status);
         Assert.Equal(200, (await server.HandleAsync(Req("/setup?code=" + Code))).Status);

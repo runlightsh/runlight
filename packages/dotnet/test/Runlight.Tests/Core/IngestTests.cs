@@ -91,9 +91,12 @@ public sealed class IngestTests : CoreTestCase
         Assert.Equal(2, stats.Num("pageviews"));
     }
 
+    private static async Task<List<string>> SaltDaysAsync(Harness t) =>
+        (await t.Store.Db.AllAsync("SELECT day FROM rl_salts ORDER BY day")).Select(r => Sql.S(r.Get("day"))).ToList();
+
     [Theory]
     [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
-    public async Task A_salt_is_deleted_once_its_day_has_ended_everywhere(string kind)
+    public async Task A_salt_lasts_its_day_and_past_midnight_only_while_a_visit_that_began_that_day_goes_on(string kind)
     {
         var t = await Harness.CreateAsync(kind);
         await t.SendAsync(Pv("https://example.com/", "s1"));
@@ -103,9 +106,45 @@ public sealed class IngestTests : CoreTestCase
             await t.SendAsync(Pv("https://example.com/", "s" + (i + 2)));
         }
         await t.Rl.CheckAsync();
-        // October 9th at noon UTC: the earliest timezone is on the 8th and still needs the 7th.
-        var days = (await t.Store.Db.AllAsync("SELECT day FROM rl_salts ORDER BY day")).Select(r => Sql.S(r.Get("day"))).ToList();
-        Assert.Equal(["2026-10-07", "2026-10-08", "2026-10-09"], days);
+        // October 9th at noon UTC: no visit from the 8th is still going, so only today's salt is left.
+        Assert.Equal(["2026-10-09"], await SaltDaysAsync(t));
+
+        // A visit that runs past midnight keeps its day's salt until it ends, and stays one visit.
+        t.Advance(11 * 60 * MIN + 50 * MIN); // 23:50 on the 9th
+        await t.SendAsync(Pv("https://example.com/late", "m1"));
+        t.Advance(20 * MIN); // 00:10 on the 10th
+        await t.SendAsync(Pv("https://example.com/later", "m2"));
+        await t.Rl.CheckAsync();
+        Assert.Equal(["2026-10-09", "2026-10-10"], await SaltDaysAsync(t)); // the visit is still going
+        t.Advance(31 * MIN); // idle for half an hour: the visit has ended
+        await t.Rl.CheckAsync();
+        Assert.Equal(["2026-10-10"], await SaltDaysAsync(t));
+        // Noon on the 9th, and the one across midnight, which belongs to the 9th where it began.
+        var stats = await t.StatsAsync(t.Query("2026-10-09", "2026-10-10"));
+        Assert.Equal(2, stats.Num("visits"));
+        Assert.Equal(3, stats.Num("pageviews")); // the visit across midnight is one visit
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task Each_sites_timezone_keeps_the_salts_its_own_visits_need(string kind)
+    {
+        // Toronto is still on the 9th when UTC reaches the 10th.
+        var t = await Harness.CreateAsync(kind, sites:
+        [
+            new SiteOptions { Id = "utc", Name = "UTC", Hostnames = ["example.com"], Timezone = "UTC" },
+            new SiteOptions { Id = "to", Name = "Toronto", Hostnames = ["example.org"], Timezone = "America/Toronto" },
+        ]);
+        t.Advance(-12 * 60 * MIN + 2 * 60 * MIN); // 02:00 UTC on the 6th, 22:00 on the 5th in Toronto
+        await t.Rl.CheckAsync();
+        foreach (string day in await SaltDaysAsync(t))
+        {
+            Assert.True(day is "2026-10-05" or "2026-10-06", day);
+        }
+        await t.SendAsync(Pv("https://example.org/", "to1"));
+        await t.SendAsync(Pv("https://example.com/", "utc1"));
+        await t.Rl.CheckAsync();
+        Assert.Equal(["2026-10-05", "2026-10-06"], await SaltDaysAsync(t)); // today in each timezone
     }
 
     [Theory]

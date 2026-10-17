@@ -19,9 +19,14 @@ namespace Runlight.Accounts;
 /// </remarks>
 public static class Crypto
 {
-    private const int ScryptN = 16384;
+    // What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check. Each hash records its own cost,
+    // so this can rise again. A hash written as scrypt$salt$key costs what hashes did before they recorded it.
+    private const int ScryptN = 32768;
     private const int ScryptR = 8;
-    private const int ScryptP = 1;
+    private const int ScryptP = 3;
+    private const int ScryptBeforeN = 16384;
+    private const int ScryptBeforeR = 8;
+    private const int ScryptBeforeP = 1;
 
     /// <summary>As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on.</summary>
     public const int Pbkdf2Rounds = 100_000;
@@ -127,15 +132,54 @@ public static class Crypto
     /// <summary>Compares two strings in time that does not depend on where they differ.</summary>
     public static bool SameText(string a, string b) => SameBytes(Js.Utf8(a), Js.Utf8(b));
 
-    /// <summary>A password hash, in the scrypt form the standalone server has always written.</summary>
+    /// <summary>A password hash, as scrypt$N$r$p$salt$key: it records the cost it was made at.</summary>
     public static string HashPassword(string password)
     {
         byte[] salt = RandomBytes(16);
-        return "scrypt$" + Base64url(salt) + "$" + Base64url(ScryptKey(password, salt, 32));
+        return "scrypt$" + ScryptN + "$" + ScryptR + "$" + ScryptP + "$" + Base64url(salt) + "$" +
+            Base64url(ScryptKey(password, salt, 32, ScryptN, ScryptR, ScryptP));
+    }
+
+    /// <summary>A scrypt hash's cost: recorded in it, or the old setting for scrypt$salt$key. Null for one out of bounds.</summary>
+    private static (int N, int R, int P)? ScryptCost(string[] parts)
+    {
+        if (parts.Length == 3)
+        {
+            return (ScryptBeforeN, ScryptBeforeR, ScryptBeforeP);
+        }
+        double n = Js.Number(parts[1]);
+        double r = Js.Number(parts[2]);
+        double p = Js.Number(parts[3]);
+        static bool Whole(double v, double max) => Js.IsInteger(v) && v >= 1 && v <= max;
+        // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
+        if (!Whole(n, 1 << 20) || n < 2 || (((int)n) & ((int)n - 1)) != 0 || !Whole(r, 32) || !Whole(p, 16))
+        {
+            return null;
+        }
+        return ((int)n, (int)r, (int)p);
     }
 
     /// <summary>
-    /// Password hashes being worked out at once. Each scrypt holds 16 MB and a core for a while, so a flood
+    /// Whether a stored hash costs less than a new one would, so the password it matched is hashed again: an
+    /// scrypt hash with a lower cost, or a PBKDF2 one.
+    /// </summary>
+    public static bool WeakerThanNow(string stored)
+    {
+        string[] parts = stored.Split('$');
+        if (parts[0] == "pbkdf2")
+        {
+            return true;
+        }
+        if (parts[0] != "scrypt")
+        {
+            return false;
+        }
+        var cost = ScryptCost(parts);
+        return cost is { } c && (long)c.N * c.R * c.P < (long)ScryptN * ScryptR * ScryptP;
+    }
+
+    /// <summary>
+    /// Password hashes being worked out at once. Each scrypt holds 32 MB and a core for a while, so a flood
     /// of sign-ins waits its turn here instead of taking all the memory and every request thread.
     /// </summary>
     private static readonly SemaphoreSlim Hashing = new(Math.Clamp(Environment.ProcessorCount, 1, 8));
@@ -168,15 +212,20 @@ public static class Crypto
     public static bool CheckPassword(string password, string stored)
     {
         string[] parts = stored.Split('$');
-        if (parts[0] == "scrypt" && parts.Length == 3)
+        if (parts[0] == "scrypt" && (parts.Length == 3 || parts.Length == 6))
         {
-            byte[]? expected = Decode(parts[2]);
-            byte[]? salt = Decode(parts[1]);
+            var cost = ScryptCost(parts);
+            if (cost is not { } c)
+            {
+                return false;
+            }
+            byte[]? expected = Decode(parts[^1]);
+            byte[]? salt = Decode(parts[^2]);
             if (expected == null || salt == null || expected.Length < MinKeyBytes)
             {
                 return false;
             }
-            return SameBytes(ScryptKey(password, salt, expected.Length), expected);
+            return SameBytes(ScryptKey(password, salt, expected.Length, c.N, c.R, c.P), expected);
         }
         if (parts[0] == "pbkdf2" && parts.Length == 4)
         {
@@ -209,8 +258,8 @@ public static class Crypto
         }
     }
 
-    private static byte[] ScryptKey(string password, byte[] salt, int length) =>
-        length == 0 ? [] : Scrypt.Derive(Js.Utf8(password), salt, ScryptN, ScryptR, ScryptP, length);
+    private static byte[] ScryptKey(string password, byte[] salt, int length, int n, int r, int p) =>
+        length == 0 ? [] : Scrypt.Derive(Js.Utf8(password), salt, n, r, p, length);
 
     private static byte[] Pbkdf2(string password, byte[] salt, int rounds, int length) =>
         length == 0 ? [] : Rfc2898DeriveBytes.Pbkdf2(Js.Utf8(password), salt, rounds, HashAlgorithmName.SHA256, length);

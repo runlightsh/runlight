@@ -273,24 +273,9 @@ public sealed class Accounts
     /// </summary>
     public string PendingFor(JsObject user, long now) => Ticket("pending", user, now + 5 * 60_000);
 
-    /// <summary>
-    /// A ticket that looks and acts like <see cref="PendingFor"/>'s, except that no code ever passes with it. A
-    /// wrong password gets one once an account with two-factor has had too many, so the answer never tells a
-    /// right password.
-    /// </summary>
-    public string DecoyFor(JsObject user, long now) => Ticket("decoy", user, now + 5 * 60_000);
-
-    /// <summary>The account a code-step ticket names, and whether a right code may sign in with it.</summary>
-    public async Task<(JsObject User, bool Real)?> FromPendingAsync(string value, long now, CancellationToken cancellationToken = default)
-    {
-        var user = await FromTicketAsync("pending", value, now, cancellationToken).ConfigureAwait(false);
-        if (user != null)
-        {
-            return (user, true);
-        }
-        var decoy = await FromTicketAsync("decoy", value, now, cancellationToken).ConfigureAwait(false);
-        return decoy != null ? (decoy, false) : null;
-    }
+    /// <summary>The account a code-step ticket names.</summary>
+    public Task<JsObject?> FromPendingAsync(string value, long now, CancellationToken cancellationToken = default) =>
+        FromTicketAsync("pending", value, now, cancellationToken);
 
     /// <summary>A ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it.</summary>
     public string LinkFor(JsObject user, long now) => Ticket("link", user, now + 15 * 60_000);
@@ -430,6 +415,27 @@ public sealed class Accounts
                 }
                 await Db.RunAsync("UPDATE rl_users SET role = 'owner' WHERE id = ?", [to], cancellationToken).ConfigureAwait(false);
                 await Db.RunAsync("UPDATE rl_users SET role = 'admin' WHERE id = ?", [from], cancellationToken).ConfigureAwait(false);
+                return true;
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+    /// same id, from its domain, and they must not find their way into it.
+    /// </summary>
+    public async Task ForgetSiteAsync(string site, CancellationToken cancellationToken = default)
+    {
+        await InitAsync(cancellationToken).ConfigureAwait(false);
+        await TurnAsync(
+            async () =>
+            {
+                foreach (var user in (await ListAsync(cancellationToken).ConfigureAwait(false)).Where(u => u.Str("site") == site))
+                {
+                    await Db.RunAsync("DELETE FROM rl_users WHERE id = ?", [user.Str("id")], cancellationToken).ConfigureAwait(false);
+                    await _store.SetSettingAsync("login-link-used:" + user.Str("id"), null, cancellationToken).ConfigureAwait(false);
+                }
+                await Db.RunAsync("DELETE FROM rl_invites WHERE site = ?", [site], cancellationToken).ConfigureAwait(false);
                 return true;
             },
             cancellationToken).ConfigureAwait(false);
@@ -660,7 +666,18 @@ public sealed class Accounts
             await SlotAsync(() => Crypto.CheckPasswordAsync(password, decoy, cancellationToken), cancellationToken).ConfigureAwait(false);
             return null;
         }
-        return await SlotAsync(() => Crypto.CheckPasswordAsync(password, UserHash(user), cancellationToken), cancellationToken).ConfigureAwait(false) ? user : null;
+        if (!await SlotAsync(() => Crypto.CheckPasswordAsync(password, UserHash(user), cancellationToken), cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+        if (!Crypto.WeakerThanNow(UserHash(user)))
+        {
+            return user;
+        }
+        // A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+        string hash = await SlotAsync(() => Crypto.HashPasswordAsync(password, cancellationToken), cancellationToken).ConfigureAwait(false);
+        await Db.RunAsync("UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", [hash, Id(user), UserHash(user)], cancellationToken).ConfigureAwait(false);
+        return await ByIdAsync(Id(user), cancellationToken).ConfigureAwait(false) ?? user;
     }
 
     /// <summary>

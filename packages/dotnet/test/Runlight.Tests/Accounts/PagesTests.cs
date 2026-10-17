@@ -13,7 +13,7 @@ public sealed class PagesTests
     {
         var fixture = Load("pages");
         Assert.True(fixture.Str("css") == Pages.AuthCss);
-        Assert.True(fixture.Str("js") == Pages.AuthJs);
+        Assert.True(fixture.Str("js") == Pages.AuthJs());
     }
 
     /// <summary>A page by the TypeScript function's name and its options object.</summary>

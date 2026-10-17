@@ -272,6 +272,18 @@ public sealed class TimeTests
     }
 
     [Fact]
+    public void A_day_where_clocks_fall_back_across_midnight_begins_at_the_first_midnight()
+    {
+        // Amman in 2019, Gaza and Hebron in 2020, an hour each, and three hours at Casey station in 2019.
+        foreach (var (date, zone) in new[] { ("2019-10-25", "Asia/Amman"), ("2020-10-24", "Asia/Gaza"), ("2020-10-24", "Asia/Hebron"), ("2019-03-17", "Antarctica/Casey") })
+        {
+            long start = Time.StartOf(date, zone);
+            Assert.Equal(date, Time.LocalDate(start, zone));
+            Assert.True(string.CompareOrdinal(Time.LocalDate(start - 1, zone), date) < 0, zone + ": the moment before is the day before");
+        }
+    }
+
+    [Fact]
     public void Date_math()
     {
         var fixture = Load("time");

@@ -298,20 +298,42 @@ public sealed partial class SqlStore
 
     public async Task SaveGoalAsync(JsObject g, JsObject? before = null, CancellationToken cancellationToken = default)
     {
+        Task Write(IDb db) =>
+            db.RunAsync(
+                Sql.Upsert(
+                    db.Dialect,
+                    "rl_goals",
+                    ["id", "site", "name", "kind", "\"match\"", "click_by", "value_mode", "value", "value_prop", "currency", "created_at"],
+                    ["id"],
+                    ["name", "kind", "\"match\"", "click_by", "value_mode", "value", "value_prop", "currency"]),
+                A(g.Get("id"), g.Get("site"), g.Get("name"), g.Get("kind"), g.Get("match"), g.Get("clickBy"), g.Get("valueMode"), g.Get("value"), g.Get("valueProp"), g.Get("currency"), g.Get("createdAt")),
+                cancellationToken);
         // A click goal is counted by its name, which the tracker sends as the event name. Renaming one
         // renames its past clicks too, so its history stays.
-        if (before != null && before.Str("kind") == "click" && g.Str("kind") == "click" && before.Str("name") != g.Str("name"))
+        if (!(before != null && before.Str("kind") == "click" && g.Str("kind") == "click" && before.Str("name") != g.Str("name")))
         {
-            await Db.RunAsync("UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", A(g.Get("name"), g.Get("site"), before.Get("name")), cancellationToken).ConfigureAwait(false);
+            await Write(Db).ConfigureAwait(false);
+            return;
         }
-        await Db.RunAsync(
-            Sql.Upsert(
-                Dialect,
-                "rl_goals",
-                ["id", "site", "name", "kind", "\"match\"", "click_by", "value_mode", "value", "value_prop", "currency", "created_at"],
-                ["id"],
-                ["name", "kind", "\"match\"", "click_by", "value_mode", "value", "value_prop", "currency"]),
-            A(g.Get("id"), g.Get("site"), g.Get("name"), g.Get("kind"), g.Get("match"), g.Get("clickBy"), g.Get("valueMode"), g.Get("value"), g.Get("valueProp"), g.Get("currency"), g.Get("createdAt")),
+        await TransactionAsync(
+            async store =>
+            {
+                var db = store.Db;
+                await db.RunAsync("UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", A(g.Get("name"), g.Get("site"), before.Get("name")), cancellationToken).ConfigureAwait(false);
+                // The daily rollups count events by name too, and goals read them, so they take the new name as well.
+                // A day that already has events under the new name counts both together now, so it is built again.
+                var both = (await db.AllAsync(
+                    "SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ? AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)",
+                    A(g.Get("site"), before.Get("name"), g.Get("site"), g.Get("name")),
+                    cancellationToken).ConfigureAwait(false)).Select(r => Sql.S(r.Get("day"))).ToList();
+                foreach (string day in both)
+                {
+                    await db.RunAsync("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", A(g.Get("site"), day), cancellationToken).ConfigureAwait(false);
+                    await db.RunAsync("DELETE FROM rl_rollups WHERE site = ? AND day = ?", A(g.Get("site"), day), cancellationToken).ConfigureAwait(false);
+                }
+                await db.RunAsync("UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?", A(g.Get("name"), g.Get("site"), before.Get("name")), cancellationToken).ConfigureAwait(false);
+                await Write(db).ConfigureAwait(false);
+            },
             cancellationToken).ConfigureAwait(false);
     }
 

@@ -41,6 +41,12 @@ public sealed class Throttle
     private readonly int _limit;
     private readonly long _windowMs;
 
+    /// <summary>
+    /// How many counts this throttle holds, as far as this process knows: unknown (-1) until the first sweep reads
+    /// them, then that number plus each count made since, so a sweep runs only when the ceiling can have been passed.
+    /// </summary>
+    private long _rows = -1;
+
     public Throttle(SqlStore store, string name, int limit = 10, long windowMs = 15 * 60_000)
     {
         _store = store;
@@ -248,7 +254,11 @@ public sealed class Throttle
         if (entry == null)
         {
             await SaveAsync(id, (1, now + _windowMs), cancellationToken).ConfigureAwait(false);
-            await PruneAsync(now, cancellationToken).ConfigureAwait(false);
+            long rows = Volatile.Read(ref _rows);
+            if (rows < 0 || Interlocked.Increment(ref _rows) > Accounts.MaxThrottled)
+            {
+                await PruneAsync(now, cancellationToken).ConfigureAwait(false);
+            }
             return;
         }
         await SaveAsync(id, (entry.Value.Count + 1, entry.Value.Until), cancellationToken).ConfigureAwait(false);
@@ -257,7 +267,7 @@ public sealed class Throttle
     /// <summary>
     /// Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
     /// have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when a new entry is
-    /// made, since only then can there be more.
+    /// made and the count may have passed the ceiling, since reading every count back is the costly part.
     /// </summary>
     private async Task PruneAsync(long now, CancellationToken cancellationToken)
     {
@@ -277,6 +287,7 @@ public sealed class Throttle
         int size = entries.Count;
         if (size <= Accounts.MaxThrottled)
         {
+            Interlocked.Exchange(ref _rows, size);
             return;
         }
         // Oldest first: each entry's window started windowMs before its end.
@@ -287,6 +298,7 @@ public sealed class Throttle
             {
                 if (size <= Accounts.MaxThrottled)
                 {
+                    Interlocked.Exchange(ref _rows, size);
                     return;
                 }
                 if (entry.Blocked == blocked)
@@ -296,6 +308,7 @@ public sealed class Throttle
                 }
             }
         }
+        Interlocked.Exchange(ref _rows, size);
     }
 
     /// <summary>Forgets every try counted under a key, under either day's hashing key.</summary>
