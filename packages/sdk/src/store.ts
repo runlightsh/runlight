@@ -1397,6 +1397,85 @@ export class SqlStore {
     );
   }
 
+  // Imports
+
+  async deleteSession(id: string): Promise<void> {
+    await this.db.run(`DELETE FROM rl_sessions WHERE id = ?`, [id]);
+  }
+
+  /**
+   * Marks a visit as imported from another tool. With `unknownEngagement`, its engaged time is unknown
+   * rather than none, so its duration falls back to first to last request.
+   */
+  async markImported(id: string, unknownEngagement: boolean): Promise<void> {
+    await this.db.run(unknownEngagement ? "UPDATE rl_sessions SET imported = 1, engaged_ms = NULL WHERE id = ?" : "UPDATE rl_sessions SET imported = 1 WHERE id = ?", [id]);
+  }
+
+  /** Deletes an imported link's clicks, and the visits they opened. */
+  async deleteLinkHistory(link: string): Promise<void> {
+    await this.db.run(`DELETE FROM rl_sessions WHERE id IN (SELECT DISTINCT session FROM rl_events WHERE link = ? AND session <> '')`, [link]);
+    await this.db.run(`DELETE FROM rl_events WHERE link = ?`, [link]);
+  }
+
+  /** Clears what an earlier import left in [from, to), so a step of a visit import can always run again. */
+  async clearImportedVisits(site: string, from: number, to: number): Promise<void> {
+    const imported = `SELECT id FROM rl_sessions WHERE site = ? AND imported = 1`;
+    await this.db.run(`DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${imported})`, [site, from, to, site]);
+    // Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
+    // so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
+    // EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
+    // CSV imported again has new ids, so its new visit does not take that one's place.
+    await this.db.run(
+      `DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
+         AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
+      [site, from - EVENT_TAIL_MS, to, site, from - EVENT_TAIL_MS, to + EVENT_TAIL_MS],
+    );
+  }
+
+  /**
+   * After a step of a visit import: a visit that began in an earlier step and went on into this one, [from, to),
+   * is counted again from its rows, so a repeated step cannot leave it with doubled totals. The days those visits
+   * began may already be built, so they are built again too.
+   */
+  async recountCarriedVisits(site: string, from: number, to: number): Promise<void> {
+    const carried = await this.db.all<{ id: string; started_at: unknown }>(
+      `SELECT s.id AS id, s.started_at AS started_at FROM rl_sessions s
+       WHERE s.site = ? AND s.imported = 1 AND s.started_at < ? AND s.started_at >= ?
+         AND s.id IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
+      [site, from, from - EVENT_TAIL_MS, site, from, to],
+    );
+    if (!carried.length) return;
+    const earliest = Math.min(...carried.map((c) => Number(c.started_at)));
+    await this.clearRollups(site, { from: earliest, to: from });
+    // Their rows lie between the earliest start and this step's end, which the (site, ts) index reads in one pass.
+    // Ninety ids a statement, within Cloudflare D1's 100 values.
+    const rows: Array<{ session: string; kind: string; ts: unknown; path: string }> = [];
+    for (let i = 0; i < carried.length; i += 90) {
+      const ids = carried.slice(i, i + 90).map((c) => c.id);
+      rows.push(
+        ...(await this.db.all<{ session: string; kind: string; ts: unknown; path: string }>(
+          `SELECT e.session AS session, e.kind AS kind, e.ts AS ts, e.path AS path FROM rl_events e
+           WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind IN ('pageview', 'event') AND e.session IN (${ids.map(() => "?").join(", ")})
+           ORDER BY e.ts, e.id`,
+          [site, earliest, to, ...ids],
+        )),
+      );
+    }
+    const totals = new Map<string, { pageviews: number; events: number; last: number; exit: string | null }>();
+    for (const r of rows) {
+      const t = totals.get(r.session) ?? { pageviews: 0, events: 0, last: 0, exit: null };
+      if (r.kind === "pageview") {
+        t.pageviews++;
+        t.exit = r.path;
+      } else t.events++;
+      t.last = Math.max(t.last, Number(r.ts));
+      totals.set(r.session, t);
+    }
+    for (const [id, t] of totals) {
+      await this.db.run(`UPDATE rl_sessions SET pageviews = ?, events = ?, last_at = ?, exit_path = COALESCE(?, exit_path) WHERE id = ?`, [t.pageviews, t.events, t.last, t.exit, id]);
+    }
+  }
+
   // Links
 
   /** The live link with a slug. Slugs are unique across every domain. */

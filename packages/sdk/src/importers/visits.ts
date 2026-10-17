@@ -13,7 +13,7 @@ import { addDays, localDate } from "../time.js";
 import type { Runlight } from "../runlight.js";
 import { SESSION_IDLE_MS } from "../runlight.js";
 import { attribute, parsePage } from "../sources.js";
-import { EVENT_TAIL_MS, type SqlStore } from "../store.js";
+import type { SqlStore } from "../store.js";
 import { getJson } from "./http.js";
 import { ImportError } from "./types.js";
 import { umamiSignIn } from "./umami.js";
@@ -195,17 +195,7 @@ async function writeStep(
     await store.clearRollups(siteId, { from, to });
     // A failed earlier try at these days (on D1, which has no transactions) can
     // have left part of them behind. Clear it, so every step can safely run again.
-    const imported = `SELECT id FROM rl_sessions WHERE site = ? AND imported = 1`;
-    await store.db.run(`DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${imported})`, [siteId, from, to, siteId]);
-    // Visits of these days that kept no rows go too. Their rows would come within EVENT_TAIL_MS of the step,
-    // so the time bounds let the (site, ts) index find them, with no scan of every event. That reaches back
-    // EVENT_TAIL_MS too, for a visit an earlier import began before this step whose rows were all in it: a
-    // CSV imported again has new ids, so its new visit does not take that one's place.
-    await store.db.run(
-      `DELETE FROM rl_sessions WHERE site = ? AND imported = 1 AND started_at >= ? AND started_at < ?
-         AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
-      [siteId, from - EVENT_TAIL_MS, to, siteId, from - EVENT_TAIL_MS, to + EVENT_TAIL_MS],
-    );
+    await store.clearImportedVisits(siteId, from, to);
     for (const { ns, hit } of hits) {
       const made = await writeEvent(store, site, ns, hit);
       if (made) counts.visits++;
@@ -214,44 +204,7 @@ async function writeStep(
     }
     // A visit that began in an earlier step and went on into this one is counted
     // again from its rows, so a repeated step cannot leave it with doubled totals.
-    // The day it began may already be built, so that day is built again too.
-    const carried = await store.db.all<{ id: string; started_at: unknown }>(
-      `SELECT s.id AS id, s.started_at AS started_at FROM rl_sessions s
-       WHERE s.site = ? AND s.imported = 1 AND s.started_at < ? AND s.started_at >= ?
-         AND s.id IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
-      [siteId, from, from - EVENT_TAIL_MS, siteId, from, to],
-    );
-    if (carried.length) {
-      const earliest = Math.min(...carried.map((c) => Number(c.started_at)));
-      await store.clearRollups(siteId, { from: earliest, to: from });
-      // Their rows lie between the earliest start and this step's end, which the (site, ts) index reads in one pass.
-      // Ninety ids a statement, within Cloudflare D1's 100 values.
-      const rows: Array<{ session: string; kind: string; ts: unknown; path: string }> = [];
-      for (let i = 0; i < carried.length; i += 90) {
-        const ids = carried.slice(i, i + 90).map((c) => c.id);
-        rows.push(
-          ...(await store.db.all<{ session: string; kind: string; ts: unknown; path: string }>(
-            `SELECT e.session AS session, e.kind AS kind, e.ts AS ts, e.path AS path FROM rl_events e
-             WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind IN ('pageview', 'event') AND e.session IN (${ids.map(() => "?").join(", ")})
-             ORDER BY e.ts, e.id`,
-            [siteId, earliest, to, ...ids],
-          )),
-        );
-      }
-      const totals = new Map<string, { pageviews: number; events: number; last: number; exit: string | null }>();
-      for (const r of rows) {
-        const t = totals.get(r.session) ?? { pageviews: 0, events: 0, last: 0, exit: null };
-        if (r.kind === "pageview") {
-          t.pageviews++;
-          t.exit = r.path;
-        } else t.events++;
-        t.last = Math.max(t.last, Number(r.ts));
-        totals.set(r.session, t);
-      }
-      for (const [id, t] of totals) {
-        await store.db.run(`UPDATE rl_sessions SET pageviews = ?, events = ?, last_at = ?, exit_path = COALESCE(?, exit_path) WHERE id = ?`, [t.pageviews, t.events, t.last, t.exit, id]);
-      }
-    }
+    await store.recountCarriedVisits(siteId, from, to);
     if (done) await done(store);
   });
   return counts;
@@ -330,7 +283,7 @@ async function writeEvent(store: SqlStore, site: { id: string; hostnames: string
   let id = open?.id;
   if (!id) {
     id = await hexId(`${ns}:${e.key}:${e.ts}`);
-    await store.db.run(`DELETE FROM rl_sessions WHERE id = ?`, [id]);
+    await store.deleteSession(id);
     const referrer = e.referrer;
     const country = (e.country || "").toUpperCase().slice(0, 2);
     const rawRegion = e.region;
@@ -359,7 +312,7 @@ async function writeEvent(store: SqlStore, site: { id: string; hostnames: string
       language: e.language.slice(0, 35),
     });
     // No engaged time is known, so duration falls back to first-to-last pageview.
-    await store.db.run("UPDATE rl_sessions SET imported = 1, engaged_ms = NULL WHERE id = ?", [id]);
+    await store.markImported(id, true);
   }
   const kind = e.kind;
   await store.touchSession(id, e.ts, kind, page.path);
