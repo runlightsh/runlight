@@ -348,7 +348,7 @@ class RecordsTest extends StoreTestCase {
     assertEquals("first", store.salt("2026-10-06", "first"));
     assertEquals("first", store.salt("2026-10-06", "second"), "two racing callers agree on one");
     store.salt("2026-10-05", "old");
-    store.dropSaltsBefore("2026-10-06");
+    store.dropSaltsExcept(List.of("2026-10-06"));
     assertNull(store.saltIfExists("2026-10-05"));
     assertEquals("first", store.saltIfExists("2026-10-06"));
 

@@ -21,7 +21,7 @@ public final class Zip {
 
   private static final Pattern FORMULA = Pattern.compile("^[=+\\-@\\t\\r]");
   private static final Pattern PLAIN_NUMBER = Pattern.compile("^-?\\d+(\\.\\d+)?\\z");
-  private static final Pattern QUOTE = Pattern.compile("[\",\\n\\r]");
+  private static final Pattern QUOTE = Pattern.compile("[\",;\\t\\n\\r]");
 
   /** DOS date and time, as ZIP stores them: {time, day}. */
   private static int[] dosTime(long ms) {

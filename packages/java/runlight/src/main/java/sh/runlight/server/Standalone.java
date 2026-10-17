@@ -83,8 +83,8 @@ public final class Standalone {
    *       header a request carries.
    *   <li>trustProxy: true (the default), false, or the one header the proxy sets.
    *   <li>geo, geoCredit: where locations come from, and whether to credit DB-IP for them.
-   *   <li>setupCode: the one-time code that unlocks /setup while no account exists; setupWhere says
-   *       where it is written down, for the page that asks for it.
+   *   <li>setupCode: the one-time code that unlocks /setup while no account exists; setupWhere,
+   *       when set, has the page that asks for it say the link is in the file setup.txt.
    *   <li>cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
    *   <li>observeKey: one key for every site's AI agent reports.
    *   <li>now, fetcher: the clock and outgoing requests, for tests.

@@ -375,26 +375,9 @@ public final class Accounts {
     return ticket("pending", user, now + 5 * 60_000L);
   }
 
-  /**
-   * A ticket that looks and acts like pendingFor's, except that no code ever passes with it. A
-   * wrong password gets one once an account with two-factor has had too many, so the answer never
-   * tells a right password.
-   */
-  public String decoyFor(Map<String, Object> user, long now) {
-    return ticket("decoy", user, now + 5 * 60_000L);
-  }
-
-  /**
-   * The account a code-step ticket names, and whether a right code may sign in with it: {user,
-   * real}, or null.
-   */
+  /** The account a code-step ticket names. */
   public Map<String, Object> fromPending(String value, long now) {
-    Map<String, Object> user = fromTicket("pending", value, now);
-    if (user != null) {
-      return Json.object("user", user, "real", true);
-    }
-    Map<String, Object> fake = fromTicket("decoy", value, now);
-    return fake != null ? Json.object("user", fake, "real", false) : null;
+    return fromTicket("pending", value, now);
   }
 
   /**
@@ -540,6 +523,25 @@ public final class Accounts {
           }
           db().run("UPDATE rl_users SET role = 'owner' WHERE id = ?", List.of(to));
           db().run("UPDATE rl_users SET role = 'admin' WHERE id = ?", List.of(from));
+          return null;
+        });
+  }
+
+  /**
+   * Removes the accounts and invitations kept to a site that was deleted. A site made later is
+   * often given the same id, from its domain, and they must not find their way into it.
+   */
+  public void forgetSite(String site) {
+    init();
+    turn(
+        () -> {
+          for (Map<String, Object> user : list()) {
+            if (site.equals(user.get("site"))) {
+              db().run("DELETE FROM rl_users WHERE id = ?", List.of(id(user)));
+              store.setSetting("login-link-used:" + id(user), null);
+            }
+          }
+          db().run("DELETE FROM rl_invites WHERE site = ?", List.of(site));
           return null;
         });
   }
@@ -774,7 +776,21 @@ public final class Accounts {
       slot(() -> Crypto.checkPassword(password, hash));
       return null;
     }
-    return slot(() -> Crypto.checkPassword(password, (String) user.get("hash"))) ? user : null;
+    String stored = (String) user.get("hash");
+    if (!slot(() -> Crypto.checkPassword(password, stored))) {
+      return null;
+    }
+    if (!Crypto.weakerThanNow(stored)) {
+      return user;
+    }
+    // A hash from before the cost rose is made again now that the password is here, unless it
+    // changed meanwhile.
+    String hash = slot(() -> Crypto.hashPassword(password));
+    db().run(
+            "UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?",
+            List.of(hash, id(user), stored));
+    Map<String, Object> now = byId(id(user));
+    return now != null ? now : user;
   }
 
   /**

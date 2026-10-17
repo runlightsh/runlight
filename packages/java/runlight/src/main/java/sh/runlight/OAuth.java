@@ -20,6 +20,7 @@ import sh.runlight.http.Request;
 import sh.runlight.http.Response;
 import sh.runlight.http.SearchParams;
 import sh.runlight.http.Url;
+import sh.runlight.mail.Secret;
 import sh.runlight.store.SqlStore;
 
 /**
@@ -57,6 +58,9 @@ public final class OAuth {
     long now();
 
     SqlStore store();
+
+    /** The secret that seals the keys kept in the database, or null when there is none. */
+    String secret();
 
     /** The address a request came from, as the Runlight reads it (trusting a proxy or not). */
     String clientIp(Request request, Map<String, Object> context);
@@ -108,16 +112,36 @@ public final class OAuth {
 
   /**
    * The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new
-   * one that replaces it.
+   * one that replaces it. It is kept sealed with the server's secret, as the mail service's keys
+   * are, so a copied database alone cannot report for the site; one kept before as plain text is
+   * sealed the next time it is read.
    */
   public static String agentsKey(Install runlight, String site, boolean replace) {
     String name = "observe-key:" + site;
     if (!replace) {
-      return runlight.store().settingOrAdd(name, () -> "rlo_" + Hash.randomId(20));
+      String made = Secret.seal("rlo_" + Hash.randomId(20), runlight.secret());
+      String stored = runlight.store().settingOrAdd(name, () -> made);
+      String key = openAgentsKey(runlight, stored);
+      if (key != null && stored.startsWith("rlo_")) {
+        runlight.store().setSetting(name, Secret.seal(key, runlight.secret()));
+      }
+      // One sealed under a secret the server no longer has cannot be shown or checked, so it is
+      // replaced.
+      if (key != null) {
+        return key;
+      }
     }
     String key = "rlo_" + Hash.randomId(20);
-    runlight.store().setSetting(name, key);
+    runlight.store().setSetting(name, Secret.seal(key, runlight.secret()));
     return key;
+  }
+
+  /**
+   * A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed.
+   * Null when it cannot be opened.
+   */
+  public static String openAgentsKey(Install runlight, String stored) {
+    return stored.startsWith("rlo_") ? stored : Secret.unseal(stored, runlight.secret());
   }
 
   /** A redirect address's host as a site's domains are kept: lowercase, with no port and no www. */
@@ -267,7 +291,12 @@ public final class OAuth {
         status,
         cors(
             Headers.of(
-                "content-type", "application/json; charset=utf-8", "cache-control", "no-store")));
+                "content-type",
+                "application/json; charset=utf-8",
+                "cache-control",
+                "no-store",
+                "x-content-type-options",
+                "nosniff")));
   }
 
   private static Response json(Object body) {
@@ -408,6 +437,8 @@ public final class OAuth {
   private static Response authorize(Context ctx, Request request, Url url, String base) {
     Install runlight = ctx.runlight;
     runlight.init();
+    Messages.Translator t = Messages.translator(Messages.acceptedLanguage(request));
+    String lang = t.lang();
     boolean post = request.method().equals("POST");
     SearchParams form = post ? new SearchParams(request.text()) : url.searchParams();
     String clientId = orEmpty(form.get("client_id"));
@@ -418,7 +449,11 @@ public final class OAuth {
     if (client == null
         || !(client.get("redirects") instanceof List<?> redirects)
         || !redirects.contains(redirect)) {
-      return page("This app is not registered", "<p>Start connecting again from the app.</p>", 400);
+      return page(
+          lang,
+          t.html("oauth.unregisteredTitle"),
+          "<p>" + t.html("oauth.startAgain") + "</p>",
+          400);
     }
     Function<Map<String, String>, Response> back =
         params -> {
@@ -443,15 +478,20 @@ public final class OAuth {
             Js.truthy(client.get("usedAt"))
                 ? back.apply(params)
                 : page(
-                    "This app asked in a way Runlight does not support",
+                    lang,
+                    t.html("oauth.unsupportedTitle"),
                     "<p>"
-                        + esc(name)
-                        + " sent "
-                        + esc(
-                            params.containsKey("error_description")
-                                ? params.get("error_description")
-                                : params.get("error"))
-                        + ". Start connecting again from the app.</p>",
+                        + t.html(
+                            "oauth.unsupported",
+                            Map.of(
+                                "app",
+                                esc(name),
+                                "error",
+                                esc(
+                                    params.containsKey("error_description")
+                                        ? params.get("error_description")
+                                        : params.get("error"))))
+                        + "</p>",
                     400);
     if (!"code".equals(form.get("response_type"))) {
       return refuse.apply(ordered("error", "unsupported_response_type"));
@@ -491,10 +531,9 @@ public final class OAuth {
       // Someone signed in who may only read would be sent to sign in again and again.
       if (ctx.isReader != null && ctx.isReader.test(request)) {
         return page(
-            "Ask an owner to connect this",
-            "<p>You are signed in as a viewer, and only an owner of this Runlight can connect "
-                + esc(name)
-                + ".</p>",
+            lang,
+            t.html("oauth.viewerTitle"),
+            "<p>" + t.html("oauth.viewer", Map.of("app", esc(name))) + "</p>",
             403);
       }
       // The site stays, since on the way in it only says which one to offer first.
@@ -510,14 +549,17 @@ public final class OAuth {
       }
       String home = base.isEmpty() ? "/" : base;
       return page(
-          "Sign in first",
-          "<p>Open your Runlight dashboard at <a href=\""
-              + esc(home)
-              + "\">"
-              + esc(url.host() + home)
-              + "</a> and sign in, then connect "
-              + esc(name)
-              + " again.</p>",
+          lang,
+          t.html("oauth.signInTitle"),
+          "<p>"
+              + t.html(
+                  "oauth.signIn",
+                  Map.of(
+                      "link",
+                      "<a href=\"" + esc(home) + "\">" + esc(url.host() + home) + "</a>",
+                      "app",
+                      esc(name)))
+              + "</p>",
           401);
     }
 
@@ -544,24 +586,31 @@ public final class OAuth {
       }
       // The app names itself, so the page also shows where the answer goes, which it cannot fake.
       String sendsTo =
-          "<p class=\"note\">Allowing sends you back to <strong>"
-              + esc(new Url(redirect).host())
-              + "</strong>. Only allow it if you started connecting there.</p>";
+          "<p class=\"note\">"
+              + t.html(
+                  "oauth.sendsTo",
+                  Map.of("host", "<strong>" + esc(new Url(redirect).host()) + "</strong>"))
+              + "</p>";
       List<Map<String, Object>> sites = runlight.sites();
       String buttons =
           "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\""
-              + " class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\""
-              + " value=\"allow\">Allow</button></div></form>";
+              + " class=\"ghost\">"
+              + t.html("oauth.deny")
+              + "</button><button type=\"submit\" name=\"decision\""
+              + " value=\"allow\">"
+              + t.html("oauth.allow")
+              + "</button></div></form>";
       String formStart = "<form method=\"post\" action=\"" + esc(base) + "/oauth/authorize\">";
       if (cms) {
         if (counting.isEmpty() && !runlight.managedSites()) {
           return page(
-              "Add this site first",
-              "<p>No site in this Runlight counts <strong>"
-                  + esc(host)
-                  + "</strong>. Add it to a site's domains in your code, then connect again from "
-                  + esc(name)
-                  + ".</p>",
+              lang,
+              t.html("oauth.addSiteTitle"),
+              "<p>"
+                  + t.html(
+                      "oauth.addSite",
+                      Map.of("host", "<strong>" + esc(host) + "</strong>", "app", esc(name)))
+                  + "</p>",
               400);
         }
         StringBuilder choices = new StringBuilder();
@@ -575,33 +624,36 @@ public final class OAuth {
         }
         if (runlight.managedSites() && counting.isEmpty()) {
           choices
-              .append("<option value=\"new\">A new site for ")
-              .append(esc(host))
+              .append("<option value=\"new\">")
+              .append(t.html("oauth.newSite", Map.of("host", esc(host))))
               .append("</option>");
         }
         return page(
-            "Connect " + esc(name),
-            "<p><strong>"
-                + esc(name)
-                + "</strong> wants to count <strong>"
-                + esc(host)
-                + "</strong> in this Runlight.</p>\n"
-                + "<p>It will get the site's agents key, to report AI agents such as ChatGPT and"
-                + " Claude reading its pages, and a dashboard key, to show the site's read-only"
-                + " dashboard in its admin pages. It cannot change anything here or read other"
-                + " sites.</p>\n"
+            lang,
+            t.html("oauth.connectTitle", Map.of("app", esc(name))),
+            "<p>"
+                + t.html(
+                    "oauth.cmsIntro",
+                    Map.of(
+                        "app", "<strong>" + esc(name) + "</strong>",
+                        "host", "<strong>" + esc(host) + "</strong>"))
+                + "</p>\n"
+                + "<p>"
+                + t.html("oauth.cmsDetail")
+                + "</p>\n"
                 + sendsTo
                 + "\n"
                 + formStart
                 + hidden
                 + "\n"
-                + "<label>Site<select name=\"site\">"
+                + "<label>"
+                + t.html("app.site")
+                + "<select name=\"site\">"
                 + choices
                 + "</select></label>\n"
-                + "<p class=\"note\">Its dashboard key appears in Settings, API and AI, where"
-                + " deleting it stops the dashboard in "
-                + esc(name)
-                + ".</p>\n"
+                + "<p class=\"note\">"
+                + t.html("oauth.cmsNote", Map.of("app", esc(name)))
+                + "</p>\n"
                 + buttons,
             200);
       }
@@ -623,27 +675,27 @@ public final class OAuth {
           }
         }
         return page(
-            "Connect " + esc(name),
-            "<p><strong>"
-                + esc(name)
-                + "</strong> wants to show this site’s stats and change its settings, so you"
-                + " can manage it from there.</p>\n"
-                + "<p>It will be able to change goals, funnels, short links, link domains, email"
-                + " reports, and share links for the site you pick, along with its name, timezone,"
-                + " and retention. It cannot read other sites, add people, make tokens, or change"
-                + " how email is sent.</p>\n"
+            lang,
+            t.html("oauth.connectTitle", Map.of("app", esc(name))),
+            "<p>"
+                + t.html("oauth.manageIntro", Map.of("app", "<strong>" + esc(name) + "</strong>"))
+                + "</p>\n"
+                + "<p>"
+                + t.html("oauth.manageDetail")
+                + "</p>\n"
                 + sendsTo
                 + "\n"
                 + formStart
                 + hidden
                 + "\n"
-                + "<label>Site<select name=\"site\">"
+                + "<label>"
+                + t.html("app.site")
+                + "<select name=\"site\">"
                 + choices
                 + "</select></label>\n"
-                + "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it"
-                + " disconnects "
-                + esc(name)
-                + ".</p>\n"
+                + "<p class=\"note\">"
+                + t.html("oauth.manageNote", Map.of("app", esc(name)))
+                + "</p>\n"
                 + buttons,
             200);
       }
@@ -653,26 +705,30 @@ public final class OAuth {
             .append("<option value=\"")
             .append(esc(s.get("id")))
             .append("\">")
-            .append(esc(s.get("name")))
-            .append(" only</option>");
+            .append(t.html("oauth.siteOnly", Map.of("site", esc(s.get("name")))))
+            .append("</option>");
       }
       return page(
-          "Connect " + esc(name),
-          "<p><strong>"
-              + esc(name)
-              + "</strong> wants to read your Runlight stats so it can answer questions about them."
-              + " It will be able to read and never to change anything.</p>\n"
+          lang,
+          t.html("oauth.connectTitle", Map.of("app", esc(name))),
+          "<p>"
+              + t.html("oauth.readIntro", Map.of("app", "<strong>" + esc(name) + "</strong>"))
+              + "</p>\n"
               + sendsTo
               + "\n"
               + formStart
               + hidden
               + "\n"
-              + "<label>Which sites it can read<select name=\"site\"><option value=\"\">Every"
-              + " site</option>"
+              + "<label>"
+              + t.html("oauth.readSites")
+              + "<select name=\"site\"><option value=\"\">"
+              + t.html("tokens.allSites")
+              + "</option>"
               + (sites.size() > 1 ? options : "")
               + "</select></label>\n"
-              + "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it"
-              + " disconnects the app.</p>\n"
+              + "<p class=\"note\">"
+              + t.html("oauth.readNote")
+              + "</p>\n"
               + buttons,
           200);
     }
@@ -680,9 +736,7 @@ public final class OAuth {
     String origin = request.headers().get("origin");
     if (origin != null && !origin.isEmpty() && !origin.equals(url.origin())) {
       return page(
-          "This request came from another site",
-          "<p>Start connecting again from the app.</p>",
-          403);
+          lang, t.html("oauth.anotherSiteTitle"), "<p>" + t.html("oauth.startAgain") + "</p>", 403);
     }
     if (!"allow".equals(form.get("decision"))) {
       return back.apply(ordered("error", "access_denied"));
@@ -966,9 +1020,11 @@ public final class OAuth {
           + "color:var(--card);font:inherit;font-weight:600;cursor:pointer}"
           + "button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style>";
 
-  private static Response page(String title, String body, int status) {
+  private static Response page(String lang, String title, String body, int status) {
     return new Response(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\""
+        "<!doctype html><html lang=\""
+            + lang
+            + "\"><head><meta charset=\"utf-8\"><meta name=\"viewport\""
             + " content=\"width=device-width,initial-scale=1\"><meta name=\"robots\""
             + " content=\"noindex\"><title>"
             + title

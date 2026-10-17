@@ -29,9 +29,15 @@ import sh.runlight.Js;
 public final class Crypto {
   private Crypto() {}
 
-  private static final int SCRYPT_N = 16384;
-  private static final int SCRYPT_R = 8;
-  private static final int SCRYPT_P = 1;
+  /**
+   * What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check, so several sign-ins at
+   * once stay within a small server's memory. Each hash records its own cost, so this can rise
+   * again.
+   */
+  private static final int[] SCRYPT = {32768, 8, 3};
+
+  /** What a hash written as scrypt$salt$key costs: the setting before hashes recorded theirs. */
+  private static final int[] SCRYPT_BEFORE = {16384, 8, 1};
 
   /** As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on. */
   public static final int PBKDF2_ROUNDS = 100_000;
@@ -150,10 +156,46 @@ public final class Crypto {
     return sameBytes(Js.utf8(a), Js.utf8(b));
   }
 
-  /** A password hash, in the scrypt form the standalone server has always written. */
+  /** A password hash, in the form scrypt$N$r$p$salt$key, which records what it cost. */
   public static String hashPassword(String password) {
     byte[] salt = randomBytes(16);
-    return "scrypt$" + base64url(salt) + "$" + base64url(scrypt(password, salt, 32));
+    return "scrypt$"
+        + SCRYPT[0]
+        + "$"
+        + SCRYPT[1]
+        + "$"
+        + SCRYPT[2]
+        + "$"
+        + base64url(salt)
+        + "$"
+        + base64url(scrypt(password, salt, 32, SCRYPT));
+  }
+
+  /**
+   * A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting
+   * (scrypt$salt$key). Null for one out of bounds.
+   */
+  private static int[] scryptCost(String[] parts) {
+    if (parts.length == 3) {
+      return SCRYPT_BEFORE;
+    }
+    double n = Js.toNumber(parts[1]);
+    double r = Js.toNumber(parts[2]);
+    double p = Js.toNumber(parts[3]);
+    // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount
+    // of memory or time.
+    if (!whole(n, 1 << 20)
+        || n < 2
+        || ((long) n & ((long) n - 1)) != 0
+        || !whole(r, 32)
+        || !whole(p, 16)) {
+      return null;
+    }
+    return new int[] {(int) n, (int) r, (int) p};
+  }
+
+  private static boolean whole(double n, int max) {
+    return Js.isInteger(n) && n >= 1 && n <= max;
   }
 
   /**
@@ -167,13 +209,21 @@ public final class Crypto {
     String[] parts = stored.split("\\$", -1);
     // A stored hash whose salt or key is not base64url matches nothing, rather than failing the
     // sign-in.
-    if (parts[0].equals("scrypt") && parts.length == 3) {
-      byte[] expected = decode(parts[2]);
-      byte[] salt = decode(parts[1]);
+    if (parts[0].equals("scrypt") && (parts.length == 3 || parts.length == 6)) {
+      int[] cost = scryptCost(parts);
+      if (cost == null) {
+        return false;
+      }
+      byte[] expected = decode(parts[parts.length - 1]);
+      byte[] salt = decode(parts[parts.length - 2]);
       if (expected == null || salt == null || expected.length < MIN_KEY_BYTES) {
         return false;
       }
-      return sameBytes(scrypt(password, salt, expected.length), expected);
+      try {
+        return sameBytes(scrypt(password, salt, expected.length, cost), expected);
+      } catch (OutOfMemoryError tooBig) {
+        return false;
+      }
     }
     if (parts[0].equals("pbkdf2") && parts.length == 4) {
       double rounds = Js.toNumber(parts[1]);
@@ -191,6 +241,23 @@ public final class Crypto {
     return false;
   }
 
+  /**
+   * Whether a stored hash costs less than a new one would here, so the password it matched is
+   * hashed again: an scrypt hash with a lower cost, or a PBKDF2 one.
+   */
+  public static boolean weakerThanNow(String stored) {
+    String[] parts = stored.split("\\$", -1);
+    if (parts[0].equals("pbkdf2")) {
+      return true;
+    }
+    if (!parts[0].equals("scrypt") || (parts.length != 3 && parts.length != 6)) {
+      return false;
+    }
+    int[] cost = scryptCost(parts);
+    return cost != null
+        && (long) cost[0] * cost[1] * cost[2] < (long) SCRYPT[0] * SCRYPT[1] * SCRYPT[2];
+  }
+
   /** Bytes from base64url, or null for text that is not base64url. */
   private static byte[] decode(String text) {
     try {
@@ -200,10 +267,10 @@ public final class Crypto {
     }
   }
 
-  private static byte[] scrypt(String password, byte[] salt, int length) {
+  private static byte[] scrypt(String password, byte[] salt, int length, int[] cost) {
     return length == 0
         ? new byte[0]
-        : Scrypt.derive(Js.utf8(password), salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, length);
+        : Scrypt.derive(Js.utf8(password), salt, cost[0], cost[1], cost[2], length);
   }
 
   /** PBKDF2 with HMAC-SHA-256 over bytes, an empty password included, as WebCrypto derives it. */

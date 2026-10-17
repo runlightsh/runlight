@@ -86,7 +86,12 @@ class StandaloneTest {
   void aNewServerIsLockedUntilTheSetupCodeMakesTheFirstAccount() {
     Standalone server = make(options -> options.setupWhere("in setup.txt"));
     assertEquals(403, server.handle(req("/")).status(), "the dashboard waits for setup");
-    assertTrue(server.handle(req("/")).text().contains("Open the setup link in setup.txt"));
+    assertTrue(
+        server
+            .handle(req("/"))
+            .text()
+            .contains(
+                "Open the setup link in the file setup.txt in Runlight's data folder (<code>runlight setup</code> prints it too), which carries"));
     assertEquals(403, server.handle(req("/setup?code=wrong")).status());
     assertEquals(
         403,

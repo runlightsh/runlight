@@ -572,6 +572,8 @@ public final class Safefetch {
     return HTTPS_ADDRESS.matcher(url).find() || (local && LOCAL_INSTALL.matcher(url).find());
   }
 
+  private static final long INSTALL_ANSWER_BYTES = 100L * 1024 * 1024;
+
   /**
    * Fetches from another Runlight install, which someone signed in named: a public address as
    * {@link #publicFetch} fetches it, with no redirect followed, so a token sent there goes nowhere
@@ -584,6 +586,12 @@ public final class Safefetch {
    */
   public static Response installFetch(
       String target, Map<String, Object> init, boolean local, Fetcher fetcher) {
+    // However much an install sends is held in memory here, so past this it is refused, unless the
+    // caller set its own ceiling.
+    if (init.get("maxBytes") == null) {
+      init = new HashMap<>(init);
+      init.put("maxBytes", INSTALL_ANSWER_BYTES);
+    }
     if (local && LOCAL_INSTALL.matcher(target).find()) {
       Fetcher sender = fetcher != null ? fetcher : new JdkFetcher();
       String method = init.get("method") instanceof String given ? Js.upper(given) : "GET";

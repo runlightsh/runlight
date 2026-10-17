@@ -87,11 +87,52 @@ class CryptoTest {
   }
 
   @Test
-  void newHashesUseScryptAndCheck() {
+  void newHashesUseScryptAtTheCostTheyRecordAndCheck() {
     String hash = Crypto.hashPassword("a long password");
-    assertTrue(hash.matches("^scrypt\\$[A-Za-z0-9_-]{22}\\$[A-Za-z0-9_-]{43}\\z"), hash);
+    assertTrue(
+        hash.matches("^scrypt\\$32768\\$8\\$3\\$[A-Za-z0-9_-]{22}\\$[A-Za-z0-9_-]{43}\\z"), hash);
     assertTrue(Crypto.checkPassword("a long password", hash));
+    assertFalse(Crypto.checkPassword("a long passwore", hash));
     assertNotEquals(hash, Crypto.hashPassword("a long password"), "a new salt each time");
+    assertFalse(Crypto.weakerThanNow(hash));
+  }
+
+  @Test
+  void hashesAtEitherCostCheckAsNodesScryptGivesThem() {
+    // Node's crypto.scryptSync("a long password", "0123456789abcdef", 32, ...) at each cost.
+    String salt = "MDEyMzQ1Njc4OWFiY2RlZg";
+    String recorded = "scrypt$32768$8$3$" + salt + "$IYJymjfhwPIP7LtZ7leNBpvwTMK6zINi-tTs7Dknq4A";
+    String before = "scrypt$" + salt + "$4e4Ay7yg4Ogm37fyCe7QqI544HrAnZQaPJJBcP8RNmQ";
+    for (String stored : List.of(recorded, before)) {
+      assertTrue(Crypto.checkPassword("a long password", stored), stored);
+      assertFalse(Crypto.checkPassword("a long passwore", stored), stored);
+    }
+    assertFalse(Crypto.weakerThanNow(recorded));
+    assertTrue(Crypto.weakerThanNow(before), "the old setting costs less");
+    assertTrue(Crypto.weakerThanNow("scrypt$16384$8$1$" + salt + "$abcdefghijklmnopqrstuv"));
+    assertTrue(Crypto.weakerThanNow("pbkdf2$100000$" + salt + "$abcdefghijklmnopqrstuv"));
+    assertFalse(Crypto.weakerThanNow("nonsense"));
+  }
+
+  @Test
+  void aScryptCostOutOfBoundsIsRefusedNotRun() {
+    String salt = "MDEyMzQ1Njc4OWFiY2RlZg";
+    String key = "IYJymjfhwPIP7LtZ7leNBpvwTMK6zINi-tTs7Dknq4A";
+    for (String cost :
+        List.of(
+            "2097152$8$1",
+            "30000$8$1",
+            "1$8$1",
+            "16384$33$1",
+            "16384$8$17",
+            "16384$0$1",
+            "x$8$1")) {
+      long started = System.nanoTime();
+      assertFalse(
+          Crypto.checkPassword("a long password", "scrypt$" + cost + "$" + salt + "$" + key), cost);
+      assertTrue(System.nanoTime() - started < 200_000_000L, cost + " was not run");
+      assertFalse(Crypto.weakerThanNow("scrypt$" + cost + "$" + salt + "$" + key), cost);
+    }
   }
 
   @Test

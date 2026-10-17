@@ -119,6 +119,19 @@ public final class Sql {
   }
 
   public static List<String> schema(String dialect) {
+    List<String> all = new ArrayList<>(baseSchema(dialect));
+    // Hostname suggestions seek one pageview hostname after another through the second.
+    if (dialect.equals("sqlite")) {
+      // Exact visitor counts in index order, without loading every session row.
+      all.add(
+          "CREATE INDEX IF NOT EXISTS rl_sessions_visit_visitors ON rl_sessions (site, visitor, started_at) WHERE pageviews > 0 OR events > 0");
+      all.add(
+          "CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'");
+    }
+    return all;
+  }
+
+  private static List<String> baseSchema(String dialect) {
     boolean my = dialect.equals("mysql");
     String id =
         dialect.equals("postgres")

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static sh.runlight.Fixtures.assertJson;
 
 import java.io.IOException;
@@ -113,9 +114,7 @@ class GeoTest {
   @Test
   void aRealDatabaseWhenOneIsGiven() {
     String file = System.getenv("RUNLIGHT_TEST_MMDB");
-    if (file == null || file.isEmpty()) {
-      return;
-    }
+    assumeTrue(file != null && !file.isEmpty(), "Set RUNLIGHT_TEST_MMDB to a real MMDB file.");
     Mmdb reader = Mmdb.open(Path.of(file));
     assertNotNull(reader.get("8.8.8.8"));
     assertNull(reader.get("127.0.0.1"));

@@ -93,6 +93,19 @@ public final class Messages {
       return own != null && !own.isEmpty() ? fill(own, vars) : t(key + "_other", vars);
     }
 
+    /**
+     * A message for a page: its own text escaped, then each {name} filled with HTML the caller made
+     * safe.
+     */
+    public String html(String key) {
+      return html(key, Map.of());
+    }
+
+    public String html(String key, Map<String, ?> vars) {
+      String text = t(key).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+      return fill(text, vars);
+    }
+
     private static String fill(String text, Map<String, ?> vars) {
       Matcher m = PLACEHOLDER.matcher(text);
       StringBuilder out = new StringBuilder();
@@ -104,6 +117,18 @@ public final class Messages {
       m.appendTail(out);
       return out.toString();
     }
+  }
+
+  /** The first language a browser asks for that the dashboard speaks, else English. */
+  public static String acceptedLanguage(sh.runlight.http.Request request) {
+    String header = request.headers().get("accept-language");
+    for (String part : (header == null ? "" : header).split(",", -1)) {
+      String code = Js.lower(Js.slice(Js.trim(part.split(";", -1)[0]), 0, 2));
+      if (languages().contains(code)) {
+        return code;
+      }
+    }
+    return "en";
   }
 
   /** The words for one language, English when it is not known. */

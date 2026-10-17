@@ -257,13 +257,23 @@ class SitesTest {
   }
 
   @Test
-  void retentionCountsBackCalendarMonthsAsSetUtcMonthDoes() {
+  void retentionCountsBackCalendarMonthsAndKeepsTheDayWithinItsMonth() {
     Harness t = new Harness("sqlite");
     t.rl.init();
     t.rl.setRetention("default", 6L);
-    t.now = utc(2026, 8, 31, 10, 30, 0) + 123;
-    // February 31st runs on to March 3rd, as JavaScript's dates do.
-    assertEquals(utc(2026, 3, 3, 10, 30, 0) + 123, t.rl.retentionCutoff("default"));
+    // Six months before August 31st is February 28th (or 29th), not March 2nd.
+    long[][] cases = {
+      {utc(2026, 8, 31, 12), utc(2026, 2, 28, 12)},
+      {utc(2026, 8, 30, 12), utc(2026, 2, 28, 12)},
+      {utc(2028, 8, 31, 12), utc(2028, 2, 29, 12)},
+      {utc(2026, 10, 6, 12), utc(2026, 4, 6, 12)},
+      {utc(2026, 8, 31, 10, 30, 0) + 123, utc(2026, 2, 28, 10, 30, 0) + 123},
+    };
+    for (long[] c : cases) {
+      t.now = c[0];
+      assertEquals(
+          c[1], t.rl.retentionCutoff("default"), java.time.Instant.ofEpochMilli(c[0]).toString());
+    }
   }
 
   @Test
