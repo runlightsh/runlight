@@ -29,3 +29,10 @@ packages/dotnet/**/obj
 **/.bundle
 **/.elixir_ls
 erl_crash.dump
+packages/elixir/doc
+packages/dotnet/TestResults
+packages/dotnet/artifacts
+packages/php/.phpunit.cache
+**/*.gem
+.claude
+**/.DS_Store
