@@ -6,7 +6,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Added
 
-- The standalone server can keep its visits and events in ClickHouse (25.8 or newer): set `CLICKHOUSE_URL`, and everything else stays in SQLite, Postgres, or MySQL. Filtered reports over long ranges come back 15 to 47 times faster on a million visits, with no rollups to build.
+- The standalone server can keep its visits and events in ClickHouse (25.8 or newer): set `CLICKHOUSE_URL`, and everything else stays in SQLite, Postgres, or MySQL. On a year of a million visits, a dashboard filtered to one page opens in 0.65 s, where SQLite, Postgres, and MySQL take 9 to 24 s, with no rollups to build. See runlight.sh/docs/clickhouse.
 - Moving an existing install: on the first start with `CLICKHOUSE_URL`, the server copies the visits of the last two days before it takes a hit, so a visit going on carries on, then the rest in the background, newest first, with a banner in the dashboard until it is done. A restart carries on where it stopped. `npx @runlight/server clickhouse status`, `copy`, `drop-old`, and `copy --back` say how far it has got, run it in the foreground, empty the old tables, and go back.
 
 ## 0.1.8 - 2026-10-16

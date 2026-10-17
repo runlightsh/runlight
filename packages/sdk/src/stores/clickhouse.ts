@@ -67,7 +67,8 @@ const VISIT_TEXT = [
 const EVENT_COLUMNS = ["site", "ts", "kind", "visitor", "session", "pageview", "path", "hostname", "title", "name", "props", "engaged_ms", "scroll", "link"] as const;
 
 const text = (v: unknown) => (v === null || v === undefined ? "" : String(v));
-const int = (v: unknown) => Number(v ?? 0);
+// Whole numbers, as ClickHouse's columns take them, so one odd row cannot stop a copy.
+const int = (v: unknown) => Math.trunc(Number(v ?? 0));
 
 /** A visit from the other store as one row of ClickHouse's: all of it at once, as if every hit were in. */
 function visitFrom(r: Record<string, unknown>): Record<string, unknown> {
