@@ -534,7 +534,7 @@ export const api = {
   removeLinkDomain: (site: string, domain: string) => del(`link-domains/${encodeURIComponent(domain)}${siteQuery(site)}`),
   updateSite: (id: string, patch: { name?: string; timezone?: string; hostnames?: string; retentionMonths?: number | null }) => send<{ site: Site }>("PATCH", `sites/${encodeURIComponent(id)}`, patch),
   sites: () =>
-    get<{ sites: Site[]; managed?: boolean }>("sites", new URLSearchParams()).then((r) => {
+    get<{ sites: Site[]; managed?: boolean; moving?: { through: number } }>("sites", new URLSearchParams()).then((r) => {
       install.managed = Boolean(r.managed);
       return r;
     }),

@@ -4,7 +4,7 @@ import { render } from "preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, forgetReports, install, onEmbedExpired, share, shared, viewParams, type Person, type Realtime, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
 import { Chart, asSeries } from "./chart.js";
-import { change, exact } from "./format.js";
+import { change, day, exact } from "./format.js";
 import { FilterDrawer, MAX_FILTERS, fieldName, opName } from "./filters.js";
 import { Icon } from "./icons.js";
 import { LANGUAGES, currentLocale, hasKey, initialLocale, rich, setLocale, t, tn, type Key } from "./i18n.js";
@@ -197,6 +197,8 @@ function App() {
     // Only a code with words of its own is shown as itself; anything else reads as "failed".
     return code === null ? null : { key: (/^[a-z]+$/.test(code) && hasKey(`sites.connectError.${code}`) ? `sites.connectError.${code}` : "sites.connectError.failed") as Key, error: true };
   });
+  // While older visits are still being copied into ClickHouse, the start of the oldest copied so far.
+  const [moving, setMoving] = useState<number | null>(null);
   const [filtering, setFiltering] = useState(false);
   const [asking, setAsking] = useState(() => opening("assistant"));
   // Coming back from connecting another Runlight, the server's redirect asks for settings with ?settings=general.
@@ -237,11 +239,24 @@ function App() {
         const selected = r.sites.find((s) => s.id === view.site) ?? r.sites[0];
         if (selected) void api.realtime(selected.id).catch(() => {});
         setSites(r.sites);
+        setMoving(r.moving?.through ?? null);
         // A ?site= that names no site, such as one deleted since the link was made, gives way to the first.
         setView((v) => (v.site && !r.sites.some((s) => s.id === v.site) ? { ...v, site: r.sites[0]?.id ?? "" } : v));
       })
       .catch(fail);
   }, []);
+
+  // The copy moves back a day at a time; its banner follows it, and goes once it is done.
+  useEffect(() => {
+    if (moving === null) return;
+    const timer = setInterval(() => {
+      api
+        .sites()
+        .then((r) => setMoving(r.moving?.through ?? null))
+        .catch(() => {});
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [moving === null]);
 
   useEffect(() => {
     writeUrl(view, charted);
@@ -480,6 +495,11 @@ function App() {
               <path d="M4 4l8 8M12 4l-8 8" />
             </svg>
           </button>
+        </p>
+      ) : null}
+      {moving !== null ? (
+        <p class="failure notice" role="status">
+          {t("app.moving", { day: day(new Date(moving).toISOString().slice(0, 10)) })}
         </p>
       ) : null}
       {failure ? <p class="failure">{failure}</p> : null}

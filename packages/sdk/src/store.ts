@@ -891,6 +891,11 @@ export class SqlStore {
     await this.db.close?.();
   }
 
+  /** While visits are still being copied into another database, the start of the oldest copied so far. */
+  async moving(): Promise<{ through: number } | null> {
+    return null;
+  }
+
   /** How many rows an UPDATE or DELETE of rows with an id matched. */
   private async changed(sql: string, params: unknown[]): Promise<number> {
     if (this.db.affected) return this.db.affected(sql, params);

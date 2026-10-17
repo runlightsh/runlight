@@ -1,5 +1,6 @@
 {
   "app.site": "Website",
+  "app.moving": "Ältere Besuche werden nach ClickHouse kopiert. Berichte reichen bisher bis {day} zurück und weiter, je länger die Kopie läuft.",
   "app.confirmDelete": "{name} löschen?",
   "app.signedOut": "Öffne diese Seite einmal mit {token}, gefolgt von deinem {env}, um dich anzumelden.",
   "app.live.title": "Besucher in den letzten fünf Minuten",
@@ -1019,6 +1020,7 @@
   "error.import_umami_login": "Gib einen API-Schlüssel oder einen Benutzernamen und ein Passwort ein.",
   "error.import_website": "Wähle die Umami-Website, die importiert werden soll.",
   "error.import_csv_batch": "Sende höchstens {max} Zeilen auf einmal.",
+  "error.import_moving": "Besuche werden noch nach ClickHouse kopiert. Importiere, sobald das fertig ist.",
   "error.import_csv_format": "Diese Datei ist weder ein Umami-Export noch im Besuchsformat von Runlight. Prüfe ihre Kopfzeile.",
   "error.install_refused": "Diese Installation hat das Token abgelehnt.",
   "error.install_token": "Gib ein API-Token dieser Installation ein.",
