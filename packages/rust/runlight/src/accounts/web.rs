@@ -591,12 +591,8 @@ impl AccountsWeb {
                 let email = form.get("email").unwrap_or("");
                 if !self.setup_ok(code) {
                     if asks {
-                        let page = SetupPage {
-                            code: "",
-                            ask_code: true,
-                            error: Some(&t("auth.tokenWrong")),
-                            email: Some(email),
-                        };
+                        let error = t("auth.tokenWrong");
+                        let page = SetupPage { code: "", ask_code: true, error: Some(&error), email: Some(email) };
                         return Ok(Some(html(setup_page(base, &page, &lang), 403)));
                     }
                     return Ok(Some(self.setup_locked(&lang)));
@@ -664,8 +660,9 @@ impl AccountsWeb {
         if path == "/login/link" && method == "GET" {
             let next = self.safe_next(query.get("next"));
             let Some(user) = self.0.accounts.from_link(query.get("ticket").unwrap_or(""), self.now()).await? else {
+                let error = t("auth.linkExpired");
                 let page = LoginPage {
-                    error: Some(&t("auth.linkExpired")),
+                    error: Some(&error),
                     next: Some(&next),
                     forgot: &self.0.forgot,
                     ..LoginPage::default()
@@ -691,11 +688,13 @@ impl AccountsWeb {
             };
             // Counted before the check, so a burst cannot get past five.
             if !self.0.code_tries.take(&user.id, self.now()) {
-                let page = CodePage { pending: given, next: &next, error: Some(&t("error.too_many_tries")) };
+                let error = t("error.too_many_tries");
+                let page = CodePage { pending: given, next: &next, error: Some(&error) };
                 return Ok(Some(html(code_page(base, &page, &lang), 429)));
             }
             if !self.0.accounts.check_second_factor(&user.id, form.get("code").unwrap_or(""), self.now()).await? {
-                let page = CodePage { pending: given, next: &next, error: Some(&t("auth.codeWrong")) };
+                let error = t("auth.codeWrong");
+                let page = CodePage { pending: given, next: &next, error: Some(&error) };
                 return Ok(Some(html(code_page(base, &page, &lang), 401)));
             }
             self.0.code_tries.clear(&user.id);
