@@ -123,32 +123,30 @@ test("failed tries by others cannot lock out a browser that signed in before, an
   assert.equal((await code((await totp(secret, Math.floor(now / 30_000))))).status, 429, "even the right code waits after five wrong ones");
 });
 
-test("with two-factor on, failed passwords from others cannot lock its owner out, nor tell which password was right", async () => {
+test("with two-factor on, failed passwords from others hold its owner up only for a while, and never tell which password was right", async () => {
   let now = Date.UTC(2026, 9, 7, 12);
   const server = createServer({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64), now: () => now });
   const user = await server.accounts.setPassword("jon@example.com", "a long password", now);
   const secret = await server.accounts.startTwoFactor(user.id);
   await server.accounts.confirmTwoFactor(user.id, (await totp(secret, Math.floor(now / 30_000))), now);
   now += 60_000;
-  const login = (password: string, ip: string) =>
-    server.handler(new Request(`${origin}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip }, body: new URLSearchParams({ email: "jon@example.com", password }).toString() }));
+  const login = (password: string, ip: string, email = "jon@example.com") =>
+    server.handler(new Request(`${origin}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip }, body: new URLSearchParams({ email, password }).toString() }));
   for (let i = 0; i < 50; i++) assert.equal((await login("wrong wrong wrong", `203.0.113.${i}`)).status, 401);
-  // Past the account's limit, a wrong password reaches the code step too, where no code passes.
-  const decoy = await login("wrong wrong wrong", "203.0.113.200");
-  assert.equal(decoy.status, 200);
-  const fake = /name="pending" value="([^"]+)"/.exec(await decoy.text())![1]!;
-  const code = async (pending: string) => server.handler(req("/login/code", form({ pending, code: (await totp(secret, Math.floor(now / 30_000))) })));
-  assert.equal((await code(fake)).status, 401, "even the right code fails after a wrong password");
-  // A decoy's tries wait after five, like a real ticket's, but never use up the owner's.
-  for (let i = 0; i < 4; i++) assert.equal((await code(fake)).status, 401);
-  assert.equal((await code(fake)).status, 429);
-  // The owner, from a new browser, gets the real step.
+  for (let i = 0; i < 50; i++) assert.equal((await login("wrong wrong wrong", `203.0.114.${i}`, "nobody@example.com")).status, 401);
+  // Past the limit, the account with two-factor and an email with no account answer alike.
+  const held = await login("wrong wrong wrong", "203.0.113.200");
+  const nobody = await login("wrong wrong wrong", "203.0.114.200", "nobody@example.com");
+  assert.deepEqual([held.status, nobody.status], [429, 429]);
+  assert.equal(/name="pending"/.test(await held.text()), false, "no code step to tell a right password from a wrong one");
+  // With no mail service to send a link, the owner's right password waits too, then reaches the real step.
+  assert.equal((await login("a long password", "192.0.2.77")).status, 429);
+  now += 16 * 60_000;
   const step = await login("a long password", "192.0.2.77");
-  assert.equal(step.status, 200, "a new browser reaches the code step");
-  const real = /name="pending" value="([^"]+)"/.exec(await step.text())![1]!;
-  assert.equal(real.split(".").length, fake.split(".").length);
-  now += 30_000;
-  assert.equal((await code(real)).status, 303);
+  assert.equal(step.status, 200, "the code step, once the limit has passed");
+  const pending = /name="pending" value="([^"]+)"/.exec(await step.text())![1]!;
+  const code = await server.handler(req("/login/code", form({ pending, code: await totp(secret, Math.floor(now / 30_000)) })));
+  assert.equal(code.status, 303);
   // Each address still has its own limit.
   for (let i = 0; i < 10; i++) await login("wrong wrong wrong", "198.51.100.9");
   assert.equal((await login("a long password", "198.51.100.9")).status, 429);

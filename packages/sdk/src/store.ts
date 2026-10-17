@@ -1900,7 +1900,8 @@ export class SqlStore {
       const revenue = goal.valueMode === "fixed" ? Math.round(sum.conversions * goal.value * 100) / 100 : 0;
       out.set(goal.id, { ...sum, revenue });
     }
-    return out;
+    // In the goals' own order, however each was counted.
+    return new Map(goals.map((goal) => [goal.id, out.get(goal.id)!]));
   }
 
   /** Every goal's totals read from the events of the range's visits. */
