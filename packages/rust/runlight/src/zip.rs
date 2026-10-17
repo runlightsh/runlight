@@ -100,7 +100,9 @@ pub fn csv_row(values: &[String]) -> String {
             if test(js_re!(r"^[=+\-@\t\r]"), &s) && !test(js_re!(r"^-?\d+(\.\d+)?$"), &s) {
                 s = format!("'{s}");
             }
-            if s.contains(['"', ',', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
+            // Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an
+            // unquoted cell there, and what follows could start with = and run as a formula.
+            if s.contains(['"', ',', ';', '\t', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
         })
         .collect::<Vec<_>>()
         .join(",")

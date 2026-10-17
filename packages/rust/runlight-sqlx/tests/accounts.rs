@@ -7,9 +7,11 @@ mod common;
 
 use std::sync::Arc;
 
-use runlight::accounts::auth::{Pending, match_step};
-use runlight::accounts::crypto::{HmacHash, base64url, hmac};
-use runlight::accounts::{Accounts, AuthError, INVITE_MS, Role, SESSION_MS, User, totp};
+use runlight::accounts::auth::match_step;
+use runlight::accounts::crypto::{HmacHash, base64url, from_base64url, hmac, scrypt_derive};
+use runlight::accounts::{
+    Accounts, AuthError, INVITE_MS, Role, SESSION_MS, User, check_password, hash_password, totp, weaker_than_now,
+};
 use runlight::store::SqlStore;
 
 const NOW: i64 = 1_791_288_000_000;
@@ -253,14 +255,7 @@ async fn sessions_tickets_and_devices_are_signed_and_end_with_their_password() {
         );
 
         let pending = accounts.pending_for(&user, NOW).unwrap();
-        assert_eq!(
-            accounts.from_pending(&pending, NOW).await.unwrap(),
-            Some(Pending { user: user.clone(), real: true })
-        );
-        assert_eq!(
-            accounts.from_pending(&accounts.decoy_for(&user, NOW).unwrap(), NOW).await.unwrap(),
-            Some(Pending { user: user.clone(), real: false })
-        );
+        assert_eq!(accounts.from_pending(&pending, NOW).await.unwrap(), Some(user.clone()));
         assert_eq!(accounts.from_pending(&session, NOW).await.unwrap(), None, "a session is not a code-step ticket");
         assert_eq!(accounts.from_pending(&pending, NOW + 5 * 60_000).await.unwrap(), None);
 
@@ -466,4 +461,79 @@ async fn an_empty_secret_is_refused_as_webcrypto_refuses_it() {
     let accounts = Accounts::new(store, "");
     let user = accounts.set_password("jon@example.com", "a long password", NOW, None).await.unwrap();
     assert!(matches!(accounts.session_for(&user, NOW), Err(AuthError::Crypto(_))));
+}
+
+#[tokio::test]
+async fn new_password_hashes_record_their_scrypt_cost_and_a_cost_out_of_bounds_is_refused_unrun() {
+    let made = hash_password("a long password");
+    let parts: Vec<&str> = made.split('$').collect();
+    assert_eq!(&parts[..4], ["scrypt", "32768", "8", "3"]);
+    assert_eq!(parts.len(), 6);
+    assert!(check_password("a long password", &made));
+    assert!(!check_password("a long passwore", &made));
+    // The same bytes any language's scrypt gives for that cost, so every port can check them.
+    let salt = from_base64url(parts[4]).unwrap();
+    let again = scrypt_derive(b"a long password", &salt, 32768, 8, 3, 32).unwrap();
+    assert_eq!(base64url(&again), parts[5]);
+    for cost in ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1"] {
+        assert!(!check_password("a long password", &format!("scrypt${cost}${}${}", parts[4], parts[5])), "{cost}");
+    }
+    // A hash made before costs were recorded still checks, at the old cost.
+    let old = scrypt_derive(b"a long password", &salt, 16384, 8, 1, 32).unwrap();
+    let old = format!("scrypt${}${}", parts[4], base64url(&old));
+    assert!(check_password("a long password", &old));
+    assert!(!check_password("a long passwore", &old));
+    assert!(weaker_than_now(&old));
+    assert!(!weaker_than_now(&made));
+    assert!(weaker_than_now("pbkdf2$100000$c2FsdA$a2V5"));
+    assert!(!weaker_than_now("scrypt$65536$8$3$c2FsdA$a2V5"));
+    assert!(!weaker_than_now("nonsense"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_in_hashes_a_password_made_at_the_old_cost_again_and_a_wrong_password_changes_nothing() {
+    each(async |kind, store| {
+        let accounts = Accounts::new(store.clone(), SECRET);
+        let user = accounts.set_password("owner@example.com", "a long password", NOW, None).await.unwrap();
+        let salt = runlight::accounts::crypto::random_bytes(16);
+        let key = scrypt_derive(b"a long password", &salt, 16384, 8, 1, 32).unwrap();
+        let old = format!("scrypt${}${}", base64url(&salt), base64url(&key));
+        store.db().run("UPDATE rl_users SET hash = ? WHERE id = ?", runlight::params![&old, &user.id]).await.unwrap();
+        assert_eq!(accounts.sign_in("owner@example.com", "a wrong password").await.unwrap(), None, "{kind}");
+        assert_eq!(accounts.by_id(&user.id).await.unwrap().unwrap().hash, old, "{kind}");
+        let signed = accounts.sign_in("owner@example.com", "a long password").await.unwrap().unwrap();
+        assert!(signed.hash.starts_with("scrypt$32768$8$3$"), "{kind}: made again at the new cost");
+        assert_eq!(accounts.by_id(&user.id).await.unwrap().unwrap().hash, signed.hash, "{kind}");
+        assert!(accounts.sign_in("owner@example.com", "a long password").await.unwrap().is_some(), "{kind}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_site_removes_the_accounts_and_invitations_kept_to_it_and_no_one_else() {
+    each(async |kind, store| {
+        let accounts = Accounts::new(store, SECRET);
+        accounts.set_password("owner@example.com", "a long password", NOW, None).await.unwrap();
+        for (email, role, site) in
+            [("alpha@example.com", Role::Viewer, "alpha"), ("beta@example.com", Role::Member, "beta")]
+        {
+            let invite = accounts.invite_scoped(email, role, "owner@example.com", NOW, Some(site)).await.unwrap();
+            accounts.accept_invite(&invite.code, "a long password", NOW).await.unwrap();
+        }
+        accounts
+            .invite_scoped("invited@example.com", Role::Member, "owner@example.com", NOW, Some("alpha"))
+            .await
+            .unwrap();
+        accounts
+            .invite_scoped("other@example.com", Role::Member, "owner@example.com", NOW, Some("beta"))
+            .await
+            .unwrap();
+        accounts.forget_site("alpha").await.unwrap();
+        let mut emails: Vec<String> = accounts.list().await.unwrap().into_iter().map(|u| u.email).collect();
+        emails.sort();
+        assert_eq!(emails, ["beta@example.com", "owner@example.com"], "{kind}");
+        let invited: Vec<String> = accounts.invites(NOW).await.unwrap().into_iter().map(|i| i.email).collect();
+        assert_eq!(invited, ["other@example.com"], "{kind}");
+    })
+    .await;
 }

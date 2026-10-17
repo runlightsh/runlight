@@ -41,6 +41,14 @@ impl Routes {
             {
                 return Ok(coded("Unknown site", "unknown_site", 404, None));
             }
+            if site_path.is_some()
+                && is_json(request)
+                && request.json().is_ok_and(|body| body.get("hostnames").is_some())
+            {
+                // Where a site lives stays with whoever runs the install: an account kept to the site may rename
+                // it, as a hub may, never move it.
+                return Ok(coded("Your account cannot change a site's domains", "site_domains", 403, None));
+            }
             let mut params = url.search_params();
             params.set("site", site);
             url.set_search_params(&params);
@@ -532,7 +540,13 @@ impl Routes {
                 return Ok(refused);
             }
             return Ok(match rl.delete_site(&id).await {
-                Ok(()) => json(&obj! { "ok" => true }, 200, &[]),
+                Ok(()) => {
+                    // Those kept to the site go with it, so a site made later with the same id is not theirs.
+                    if let Some(web) = &self.0.web {
+                        web.accounts().forget_site(&id).await?;
+                    }
+                    json(&obj! { "ok" => true }, 200, &[])
+                }
                 Err(Error::Settings(e)) if e.message == "Unknown site" => coded(&e.message, "unknown_site", 404, None),
                 Err(Error::Settings(e)) => refused(&e, 400),
                 Err(e) => return Err(e),
@@ -883,9 +897,10 @@ impl Routes {
             let (rows, sampled) = store.journey_pages(query, crate::journeys::PAGES_PER_VISIT).await?;
             let options = crate::journeys::JourneyOptions {
                 steps: q.get("steps").map_or(5.0, js::text_number),
-                start: q.get("start").filter(|s| !s.is_empty()).map(str::to_string),
-                end: q.get("end").filter(|s| !s.is_empty()).map(str::to_string),
-                through,
+                // Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+                start: q.get("start").filter(|s| !s.is_empty()).map(recorded),
+                end: q.get("end").filter(|s| !s.is_empty()).map(recorded),
+                through: through.map(|(step, value)| (step, recorded(&value))),
             };
             let answer = crate::journeys::journeys(&rows, &options);
             let mut out = obj! { "site" => site.id.clone(), "range" => range_out };
@@ -946,7 +961,7 @@ impl Routes {
                 return Ok(coded("Bad property name", "property_bad", 400, None));
             }
             let key = asked.or_else(|| keys.iter().find(|k| safe(&k.0)).map(|k| k.0.clone()));
-            let limit = clamp_number(params.get("limit"), 100.0);
+            let limit = whole(params.get("limit"), 100.0, 1000.0);
             let rows = match &key {
                 Some(k) if !k.is_empty() => store.event_prop_values(query, &event, k, limit as i64).await?,
                 _ => vec![],
@@ -976,12 +991,17 @@ impl Routes {
                     Some(&[("dimension", &dimension)]),
                 ));
             }
-            let limit = clamp_number(params.get("limit"), 10.0);
-            let page = {
-                let n = params.get("page").map_or(0.0, js::text_number);
-                let n = if n == 0.0 || n.is_nan() { 1.0 } else { n };
-                n.max(1.0)
-            };
+            let limit = whole(params.get("limit"), 10.0, 1000.0);
+            let page = whole(params.get("page"), 1.0, 100_000.0);
+            if dimension == "hostname" && params.get("suggestions") == Some("1") && params.get("format") != Some("csv")
+            {
+                let rows = store.hostname_suggestions(query, (limit as i64).min(50)).await?;
+                return Ok(json(
+                    &obj! { "site" => site.id.clone(), "range" => range_out, "dimension" => dimension, "rows" => Value::Array(rows) },
+                    200,
+                    &[],
+                ));
+            }
             let rows = store.breakdown(query, &dimension, limit as i64, ((page - 1.0) * limit) as i64).await?;
             if params.get("format") == Some("csv") {
                 return Ok(download(
@@ -1253,7 +1273,11 @@ impl Routes {
             rl.init().await?;
             for (key, value) in rl.store().settings_starting_with("observe-key:").await? {
                 let id = &key["observe-key:".len()..];
-                if !id.is_empty() && constant_time_equal(&given, &value) && rl.site(Some(id)).is_some() {
+                let opened = crate::oauth::open_agents_key(rl, &value);
+                if !id.is_empty()
+                    && opened.is_some_and(|o| constant_time_equal(&given, &o))
+                    && rl.site(Some(id)).is_some()
+                {
                     key_site = Some(id.to_string());
                 }
             }
@@ -1319,10 +1343,15 @@ impl Routes {
 }
 
 /// `Math.min(1000, Math.max(1, Number(text) || fallback))`.
-fn clamp_number(text: Option<&str>, fallback: f64) -> f64 {
+/// A page as it is recorded, or as given when it is not a path or a URL.
+fn recorded(text: &str) -> String {
+    crate::sources::recorded_path(text).unwrap_or_else(|| text.to_string())
+}
+
+/// A whole number from a query, within 1 and `max`, or `fallback` for anything else: a fraction, a huge number, or text.
+fn whole(text: Option<&str>, fallback: f64, max: f64) -> f64 {
     let n = text.map_or(0.0, js::text_number);
-    let n = if n == 0.0 || n.is_nan() { fallback } else { n };
-    n.clamp(1.0, 1000.0)
+    if n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0 && n >= 1.0 { n.min(max) } else { fallback }
 }
 
 /// `{ site, range, compare?, ...rest }` with undefined values left out, as JSON.stringify leaves them.

@@ -70,8 +70,8 @@ fn passwords_hashed_by_typescript_check_here() {
 fn new_hashes_use_scrypt_and_check() {
     let hash = hash_password("a long password");
     let parts: Vec<&str> = hash.split('$').collect();
-    assert_eq!(parts[0], "scrypt");
-    assert_eq!((parts[1].len(), parts[2].len()), (22, 43));
+    assert_eq!(&parts[..4], ["scrypt", "32768", "8", "3"], "the cost is recorded in the hash");
+    assert_eq!((parts[4].len(), parts[5].len()), (22, 43));
     assert!(check_password("a long password", &hash));
     assert!(!check_password("a wrong password", &hash));
     assert_ne!(hash, hash_password("a long password"), "a new salt each time");
@@ -252,7 +252,8 @@ fn the_throttle_keeps_a_ceiling_and_its_blocks() {
 fn styles_and_script_match() {
     let f = fixture("pages");
     assert_eq!(pages::AUTH_CSS, s(&f, "css"));
-    assert_eq!(pages::AUTH_JS, s(&f, "js"));
+    assert_eq!(pages::auth_js("en"), s(&f, "js"));
+    assert_eq!(pages::auth_js("xx"), s(&f, "js"), "a language Runlight does not speak is English");
 }
 
 fn opt<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -275,10 +276,12 @@ fn pages_match() {
                     next: opt(o, "next"),
                     forgot: s(o, "forgot"),
                 },
+                "en",
             ),
             "codePage" => pages::code_page(
                 base,
                 &CodePage { pending: s(o, "pending"), next: s(o, "next"), error: opt(o, "error") },
+                "en",
             ),
             "invitePage" => pages::invite_page(
                 base,
@@ -290,8 +293,9 @@ fn pages_match() {
                     host: s(o, "host"),
                     error: opt(o, "error"),
                 },
+                "en",
             ),
-            "inviteGonePage" => pages::invite_gone_page(base),
+            "inviteGonePage" => pages::invite_gone_page(base, "en"),
             "setupPage" => pages::setup_page(
                 base,
                 &SetupPage {
@@ -300,27 +304,90 @@ fn pages_match() {
                     email: opt(o, "email"),
                     ask_code: o.get("askCode").and_then(Value::as_bool).unwrap_or(false),
                 },
+                "en",
             ),
-            "setupLockedPage" => pages::setup_locked_page(base),
-            "setupNeedsTokenPage" => pages::setup_needs_token_page(base),
+            "setupLockedPage" => pages::setup_locked_page(base, "en"),
+            "setupNeedsTokenPage" => pages::setup_needs_token_page(base, "en"),
             other => panic!("no page {other}"),
         };
         assert_eq!(html, s(case, "html"), "{name} at {base:?}");
     }
     for case in list(&f, "roles") {
-        assert_eq!(pages::role_text(s(case, "role")), s(case, "text"));
+        assert_eq!(pages::role_text(s(case, "role"), "en"), s(case, "text"));
     }
 }
 
 #[test]
 fn setup_asks_for_the_token_when_told() {
-    let page = pages::setup_page("/runlight", &SetupPage { code: "", ask_code: true, ..Default::default() });
+    let page = pages::setup_page("/runlight", &SetupPage { code: "", ask_code: true, ..Default::default() }, "en");
     assert!(page.contains("RUNLIGHT_TOKEN"));
     assert!(page.contains(r#"action="/runlight/setup""#));
     assert!(page.contains(r#"href="/runlight/auth.css""#));
     let invite = pages::invite_page(
         "",
         &InvitePage { site: None, code: "c", email: "a@b.c", role: "member", host: "x", error: None },
+        "en",
     );
     assert!(invite.contains("as a member"));
+}
+
+#[test]
+fn every_account_page_comes_out_in_french_when_asked() {
+    let login = LoginPage { forgot: "https://runlight.sh/docs", ..Default::default() };
+    let invite = InvitePage {
+        code: "c",
+        email: "a@example.com",
+        role: "viewer",
+        host: "stats.example.com",
+        ..Default::default()
+    };
+    let cases = [
+        ("sign in", pages::login_page("/runlight", &login, "fr"), "Se connecter"),
+        (
+            "the code step",
+            pages::code_page("/runlight", &CodePage { pending: "p", next: "/", error: None }, "fr"),
+            "Saisissez votre code",
+        ),
+        ("an invite", pages::invite_page("/runlight", &invite, "fr"), "Rejoindre Runlight"),
+        ("an invite that is gone", pages::invite_gone_page("/runlight", "fr"), "Cette invitation ne fonctionne plus"),
+        (
+            "setup",
+            pages::setup_page("/runlight", &SetupPage { code: "", ask_code: true, ..Default::default() }, "fr"),
+            "Créez votre compte",
+        ),
+        ("setup locked", pages::setup_locked_page("/runlight", "fr"), "Terminez la configuration"),
+        ("setup needing a token", pages::setup_needs_token_page("/runlight", "fr"), "Terminez la configuration"),
+    ];
+    for (name, html, heading) in cases {
+        assert!(html.contains(r#"<html lang="fr">"#), "{name}");
+        assert!(html.contains(&format!("<h1>{heading}</h1>")), "{name}");
+        assert!(html.contains(&format!("<title>{heading} | Runlight</title>")), "{name}");
+        assert!(
+            html.contains(r#"<script src="/runlight/auth.js?lang=fr"></script>"#),
+            "{name} loads the French script"
+        );
+        assert!(html.contains(r#"aria-label="Changer de thème""#), "{name}");
+    }
+    let scoped = InvitePage { role: "member", site: Some("<Blog>"), ..invite };
+    assert!(
+        pages::invite_page("", &scoped, "fr")
+            .contains("Votre rôle : membre, qui peut modifier les réglages de &lt;Blog&gt; uniquement."),
+        "the role is French too, and the site name stays escaped"
+    );
+    let forgot = LoginPage { forgot: "https://x.example/?a=1&b=2", ..Default::default() };
+    assert!(pages::login_page("", &forgot, "fr").contains(
+        r#"<a href="https://x.example/?a=1&amp;b=2" target="_blank" rel="noopener">la documentation explique"#
+    ));
+    // The script's words: show and hide, the theme, and the strength meter.
+    let script = pages::auth_js("fr");
+    for words in [
+        r#""Afficher le mot de passe""#,
+        r#""Masquer le mot de passe""#,
+        "\"Thème : réglage de l’appareil\"",
+        r#""Thème : sombre""#,
+        r#"["Trop court", "Faible", "Moyen", "Bon", "Fort"]"#,
+    ] {
+        assert!(script.contains(words), "{words}");
+    }
+    assert!(!script.contains("Show password"));
 }

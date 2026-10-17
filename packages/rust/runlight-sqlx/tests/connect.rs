@@ -8,7 +8,7 @@ use runlight::BoxFuture;
 use runlight::connect::{ConnectError, ConnectFailure, finish_connect, install_url, start_connect};
 use runlight::http::{FetchError, FetchInit, Fetcher, Headers, Response, SearchParams, Url};
 use runlight::js::{self, Value};
-use runlight::{Runlight, RunlightOptions};
+use runlight::{Routes, RoutesOptions, Runlight, RunlightOptions, TokenOption};
 
 const APP: &str = "http://127.0.0.1:4100/runlight";
 const START: i64 = 1_791_288_000_000;
@@ -366,4 +366,60 @@ async fn a_hub_never_asks_its_own_machine_or_network_for_an_install_unless_code_
         refused(start_connect(&hub, Some(&Value::from(url)), back, "").await, "unreachable");
     }
     assert!(router.requests.lock().unwrap().is_empty());
+}
+
+/// An install that answers a list of sites and then whatever a read asks for, noting each read's byte ceiling and
+/// refusing it as the fetcher does when its answer is longer than that.
+struct Reads {
+    ceilings: Mutex<Vec<(String, Option<usize>)>>,
+    too_long: bool,
+}
+
+impl Fetcher for Reads {
+    fn fetch<'a>(&'a self, url: &'a str, init: FetchInit) -> BoxFuture<'a, Result<Response, FetchError>> {
+        Box::pin(async move {
+            let json = |body: &str| {
+                Ok(Response::new(body.to_string(), 200, Headers::new().with("content-type", "application/json")))
+            };
+            if url.contains("/api/sites") {
+                return json(
+                    r#"{"sites":[{"id":"blog","name":"Blog","timezone":"UTC","hostnames":["blog.example.com"]}]}"#,
+                );
+            }
+            self.ceilings.lock().unwrap().push((url.to_string(), init.max_bytes));
+            match (self.too_long, init.max_bytes) {
+                (true, Some(max)) => Err(FetchError::TooLong(max)),
+                _ => json("{}"),
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn every_read_passed_to_a_connected_install_has_a_byte_ceiling_and_past_it_answers_502() {
+    for too_long in [false, true] {
+        let reads = Arc::new(Reads { ceilings: Mutex::new(vec![]), too_long });
+        let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+        options.managed_sites = true;
+        options.secret = Some("k".repeat(32));
+        options.fetcher = Some(reads.clone());
+        options.local_installs = true;
+        let hub = Runlight::new(options).unwrap();
+        hub.init().await.unwrap();
+        let input = js::parse(&format!(r#"{{"remote":{{"url":"{APP}","token":"rl_x"}}}}"#)).unwrap();
+        let site = hub.add_site(&input).await.unwrap();
+        let routes: Routes =
+            hub.routes(RoutesOptions { token: TokenOption::Given("t".into()), ..RoutesOptions::default() }).unwrap();
+        let mut statuses = Vec::new();
+        for path in ["/api/stats?period=7d", "/api/export?period=7d", "/api/realtime?period=today"] {
+            let request =
+                runlight::http::Request::get(format!("https://hub.example.com/runlight{path}&site={}", site.id))
+                    .header("authorization", "Bearer t");
+            statuses.push(routes.handle(request).await.status);
+        }
+        let ceilings: Vec<Option<usize>> =
+            reads.ceilings.lock().unwrap().iter().filter(|c| !c.0.contains("/api/token")).map(|c| c.1).collect();
+        assert_eq!(ceilings, [Some(100 * 1024 * 1024), Some(100 * 1024 * 1024), Some(4 * 1024 * 1024)]);
+        assert_eq!(statuses, if too_long { [502, 502, 502] } else { [200, 200, 200] }, "too long: {too_long}");
+    }
 }

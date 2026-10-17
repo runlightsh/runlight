@@ -48,6 +48,18 @@ pub struct Translator {
     pub lang: String,
 }
 
+/// The first language a browser asks for that the dashboard speaks, else English.
+pub fn accepted_language(request: &crate::http::Request) -> String {
+    let languages = languages();
+    for part in request.headers.get("accept-language").unwrap_or_default().split(',') {
+        let code = js::head16(js::trim(part.split(';').next().unwrap_or("")), 2).to_lowercase();
+        if languages.contains(&code) {
+            return code;
+        }
+    }
+    "en".into()
+}
+
 /// The words for a language, or English's.
 pub fn translator(lang: &str) -> Translator {
     let code = if languages().iter().any(|l| l == lang) { lang } else { "en" };
@@ -85,6 +97,13 @@ impl Translator {
     pub fn t(&self, key: &str, vars: &[(&str, Value)]) -> String {
         let text = table(&self.lang).get(key).or_else(|| table("en").get(key)).map_or(key, String::as_str);
         fill(text, vars)
+    }
+
+    /// A message for a page: its own text escaped, then each `{name}` filled with HTML the caller made safe.
+    pub fn html(&self, key: &str, vars: &[(&str, &str)]) -> String {
+        let escaped = self.t(key, &[]).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let vars: Vec<(&str, Value)> = vars.iter().map(|(k, v)| (*k, Value::from(*v))).collect();
+        fill(&escaped, &vars)
     }
 
     /// The text for a count: the key with `_one`, `_other`, or the form

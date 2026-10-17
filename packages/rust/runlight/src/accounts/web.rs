@@ -10,13 +10,14 @@ use super::auth::{
 };
 use super::crypto::{base64url, random_bytes, same_text};
 use super::pages::{
-    AUTH_CSS, AUTH_JS, CodePage, InvitePage, LoginPage, SetupPage, code_page, invite_gone_page, invite_page,
+    AUTH_CSS, CodePage, InvitePage, LoginPage, SetupPage, auth_js, code_page, invite_gone_page, invite_page,
     login_page, scoped_role_text, setup_locked_page, setup_needs_token_page, setup_page,
 };
 use crate::error::Error;
 use crate::http::{Headers, Request, Response, SearchParams, Url};
 use crate::js::{self, Object, Value};
 use crate::mail::Message;
+use crate::messages::{accepted_language, translator};
 use crate::routes::Access;
 use crate::runlight::{Clock, Runlight};
 use crate::sources::{decode_uri_component, encode_uri_component};
@@ -233,8 +234,6 @@ struct Inner {
     // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
     // Password re-checks in Account: ten.
     code_tries: Throttle,
-    // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-    decoy_tries: Throttle,
     confirm_tries: Throttle,
     rechecks: Throttle,
     /// When each account was last sent a sign-in link, at most one a minute.
@@ -266,7 +265,6 @@ pub fn accounts_web(options: AccountsWebOptions) -> AccountsWeb {
         per_account: Throttle::new(50, window),
         per_ip: Throttle::new(30, window),
         code_tries: Throttle::new(5, window),
-        decoy_tries: Throttle::new(5, window),
         confirm_tries: Throttle::new(5, window),
         rechecks: Throttle::new(10, window),
         link_sent: Mutex::new(HashMap::new()),
@@ -423,10 +421,14 @@ impl AccountsWeb {
     }
 
     /// Why there is no setup form.
-    fn setup_locked(&self) -> Response {
+    fn setup_locked(&self, lang: &str) -> Response {
         let base = &self.0.base;
         html(
-            if self.0.first == FirstAccount::Locked { setup_needs_token_page(base) } else { setup_locked_page(base) },
+            if self.0.first == FirstAccount::Locked {
+                setup_needs_token_page(base, lang)
+            } else {
+                setup_locked_page(base, lang)
+            },
             403,
         )
     }
@@ -441,7 +443,7 @@ impl AccountsWeb {
         let link = format!("{origin}{}/invite?code={code}", self.0.base);
         let host =
             Url::parse(&origin).map(|u| u.host()).ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?;
-        let what = scoped_role_text(invite.role.as_str(), invite.site.as_deref());
+        let what = scoped_role_text(invite.role.as_str(), invite.site.as_deref(), "en");
         out.set("link", link.as_str());
         if self.0.rl.mail_settings().await?.is_none() {
             out.set("emailed", false);
@@ -513,11 +515,12 @@ impl AccountsWeb {
         Ok(true)
     }
 
-    fn login_html(&self, error: &str, email: &str, next: &str, status: u16) -> Response {
+    fn login_html(&self, error: &str, email: &str, next: &str, lang: &str, status: u16) -> Response {
         html(
             login_page(
                 &self.0.base,
                 &LoginPage { error: Some(error), email: Some(email), next: Some(next), forgot: &self.0.forgot },
+                lang,
             ),
             status,
         )
@@ -529,6 +532,16 @@ impl AccountsWeb {
         let method = request.method.as_str();
         let base = self.0.base.as_str();
         let asks = self.0.asks_for_token;
+        let lang = accepted_language(request);
+        let words = translator(&lang);
+        let t = |key: &str| words.t(key, &[]);
+        // An account's problem in the visitor's language, where the dashboard has words for it; English as it was thrown.
+        let reason = |error: &AccountError| {
+            let key = format!("error.{}", error.code);
+            let vars: Vec<(&str, Value)> =
+                error.params.iter().map(|(k, v)| (k.as_str(), Value::from(v.as_str()))).collect();
+            if lang == "en" || words.t(&key, &[]) == key { error.message.clone() } else { words.t(&key, &vars) }
+        };
         if path == "/auth.css" {
             return Ok(Some(Response::new(
                 AUTH_CSS,
@@ -538,7 +551,7 @@ impl AccountsWeb {
         }
         if path == "/auth.js" {
             return Ok(Some(Response::new(
-                AUTH_JS,
+                auth_js(query.get("lang").unwrap_or("en")),
                 200,
                 headers(
                     &[
@@ -557,19 +570,19 @@ impl AccountsWeb {
             if method == "GET" {
                 let code = query.get("code").unwrap_or("");
                 if self.0.first == FirstAccount::Locked {
-                    return Ok(Some(self.setup_locked()));
+                    return Ok(Some(self.setup_locked(&lang)));
                 }
                 // The app's token is typed in; the server's code comes in the link it printed.
                 if asks || self.0.first == FirstAccount::Open {
                     return Ok(Some(html(
-                        setup_page(base, &SetupPage { code: "", ask_code: asks, ..SetupPage::default() }),
+                        setup_page(base, &SetupPage { code: "", ask_code: asks, ..SetupPage::default() }, &lang),
                         200,
                     )));
                 }
                 return Ok(Some(if self.setup_ok(code) {
-                    html(setup_page(base, &SetupPage { code, ..SetupPage::default() }), 200)
+                    html(setup_page(base, &SetupPage { code, ..SetupPage::default() }, &lang), 200)
                 } else {
-                    self.setup_locked()
+                    self.setup_locked(&lang)
                 }));
             }
             if method == "POST" {
@@ -581,12 +594,12 @@ impl AccountsWeb {
                         let page = SetupPage {
                             code: "",
                             ask_code: true,
-                            error: Some("That is not this app's RUNLIGHT_TOKEN."),
+                            error: Some(&t("auth.tokenWrong")),
                             email: Some(email),
                         };
-                        return Ok(Some(html(setup_page(base, &page), 403)));
+                        return Ok(Some(html(setup_page(base, &page, &lang), 403)));
                     }
-                    return Ok(Some(self.setup_locked()));
+                    return Ok(Some(self.setup_locked(&lang)));
                 }
                 let again = |error: &str, status: u16| {
                     html(
@@ -598,13 +611,14 @@ impl AccountsWeb {
                                 error: Some(error),
                                 email: Some(email),
                             },
+                            &lang,
                         ),
                         status,
                     )
                 };
                 // Asked twice, since a typo here would lock the first owner out.
                 if form.get("password").unwrap_or("") != form.get("again").unwrap_or("") {
-                    return Ok(Some(again("The two passwords are not the same.", 400)));
+                    return Ok(Some(again(&t("auth.mismatch"), 400)));
                 }
                 return match self
                     .0
@@ -616,7 +630,7 @@ impl AccountsWeb {
                         self.0.existing.store(true, Ordering::Relaxed);
                         Ok(Some(redirect(&self.0.home_path, &[("set-cookie", &self.fresh_session(request, &user)?)])))
                     }
-                    Err(AuthError::Account(error)) => Ok(Some(again(&error.message, 400))),
+                    Err(AuthError::Account(error)) => Ok(Some(again(&reason(&error), 400))),
                     Err(error) => Err(error.into()),
                 };
             }
@@ -625,15 +639,19 @@ impl AccountsWeb {
         if path == "/login" {
             if !self.has_account().await? {
                 return Ok(Some(match self.0.first {
-                    FirstAccount::Locked => self.setup_locked(),
+                    FirstAccount::Locked => self.setup_locked(&lang),
                     FirstAccount::Open | FirstAccount::Token(_) => redirect(&format!("{base}/setup"), &[]),
-                    FirstAccount::Code(_) => self.setup_locked(),
+                    FirstAccount::Code(_) => self.setup_locked(&lang),
                 }));
             }
             if method == "GET" {
                 let next = self.safe_next(query.get("next"));
                 return Ok(Some(html(
-                    login_page(base, &LoginPage { next: Some(&next), forgot: &self.0.forgot, ..LoginPage::default() }),
+                    login_page(
+                        base,
+                        &LoginPage { next: Some(&next), forgot: &self.0.forgot, ..LoginPage::default() },
+                        &lang,
+                    ),
                     200,
                 )));
             }
@@ -647,16 +665,19 @@ impl AccountsWeb {
             let next = self.safe_next(query.get("next"));
             let Some(user) = self.0.accounts.from_link(query.get("ticket").unwrap_or(""), self.now()).await? else {
                 let page = LoginPage {
-                    error: Some("That sign-in link has run out. Sign in again."),
+                    error: Some(&t("auth.linkExpired")),
                     next: Some(&next),
                     forgot: &self.0.forgot,
                     ..LoginPage::default()
                 };
-                return Ok(Some(html(login_page(base, &page), 410)));
+                return Ok(Some(html(login_page(base, &page, &lang), 410)));
             };
             if user.two_factor {
                 let pending = self.0.accounts.pending_for(&user, self.now())?;
-                return Ok(Some(html(code_page(base, &CodePage { pending: &pending, next: &next, error: None }), 200)));
+                return Ok(Some(html(
+                    code_page(base, &CodePage { pending: &pending, next: &next, error: None }, &lang),
+                    200,
+                )));
             }
             return self.signed_in_to(request, &user, &next).map(Some);
         }
@@ -665,29 +686,17 @@ impl AccountsWeb {
             let form = SearchParams::parse(&request.text());
             let next = self.safe_next(form.get("next"));
             let given = form.get("pending").unwrap_or("");
-            let Some(pending) = self.0.accounts.from_pending(given, self.now()).await? else {
+            let Some(user) = self.0.accounts.from_pending(given, self.now()).await? else {
                 return Ok(Some(redirect(&format!("{base}/login?next={}", encode_uri_component(&next)), &[])));
             };
-            let user = pending.user;
             // Counted before the check, so a burst cannot get past five.
-            let tries = if pending.real { &self.0.code_tries } else { &self.0.decoy_tries };
-            if !tries.take(&user.id, self.now()) {
-                let page = CodePage {
-                    pending: given,
-                    next: &next,
-                    error: Some("Too many tries. Wait fifteen minutes and try again."),
-                };
-                return Ok(Some(html(code_page(base, &page), 429)));
+            if !self.0.code_tries.take(&user.id, self.now()) {
+                let page = CodePage { pending: given, next: &next, error: Some(&t("error.too_many_tries")) };
+                return Ok(Some(html(code_page(base, &page, &lang), 429)));
             }
-            if !pending.real
-                || !self.0.accounts.check_second_factor(&user.id, form.get("code").unwrap_or(""), self.now()).await?
-            {
-                let page = CodePage {
-                    pending: given,
-                    next: &next,
-                    error: Some("That code is not right. Check the time on your phone, or use a recovery code."),
-                };
-                return Ok(Some(html(code_page(base, &page), 401)));
+            if !self.0.accounts.check_second_factor(&user.id, form.get("code").unwrap_or(""), self.now()).await? {
+                let page = CodePage { pending: given, next: &next, error: Some(&t("auth.codeWrong")) };
+                return Ok(Some(html(code_page(base, &page, &lang), 401)));
             }
             self.0.code_tries.clear(&user.id);
             return self.signed_in_to(request, &user, &next).map(Some);
@@ -716,17 +725,18 @@ impl AccountsWeb {
                                 host: &host,
                                 error: None,
                             },
+                            &lang,
                         ),
                         200,
                     ),
-                    None => html(invite_gone_page(base), 410),
+                    None => html(invite_gone_page(base, &lang), 410),
                 }));
             }
             if method == "POST" {
                 let form = SearchParams::parse(&request.text());
                 let code = form.get("code").unwrap_or("");
                 let Some(invite) = self.0.accounts.invite_by_code(code, self.now()).await? else {
-                    return Ok(Some(html(invite_gone_page(base), 410)));
+                    return Ok(Some(html(invite_gone_page(base, &lang), 410)));
                 };
                 let again = |error: &str| {
                     html(
@@ -740,12 +750,13 @@ impl AccountsWeb {
                                 host: &host,
                                 error: Some(error),
                             },
+                            &lang,
                         ),
                         400,
                     )
                 };
                 if form.get("password").unwrap_or("") != form.get("again").unwrap_or("") {
-                    return Ok(Some(again("The two passwords are not the same.")));
+                    return Ok(Some(again(&t("auth.mismatch"))));
                 }
                 return match self.0.accounts.accept_invite(code, form.get("password").unwrap_or(""), self.now()).await {
                     Ok(user) => {
@@ -753,9 +764,9 @@ impl AccountsWeb {
                         Ok(Some(redirect(&self.0.home_path, &[("set-cookie", &self.fresh_session(request, &user)?)])))
                     }
                     Err(AuthError::Account(error)) if error.code == "invite_gone" => {
-                        Ok(Some(html(invite_gone_page(base), 410)))
+                        Ok(Some(html(invite_gone_page(base, &lang), 410)))
                     }
-                    Err(AuthError::Account(error)) => Ok(Some(again(&error.message))),
+                    Err(AuthError::Account(error)) => Ok(Some(again(&reason(&error)))),
                     Err(error) => Err(error.into()),
                 };
             }
@@ -765,6 +776,9 @@ impl AccountsWeb {
 
     async fn login(&self, request: &Request) -> R<Response> {
         let base = self.0.base.as_str();
+        let lang = accepted_language(request);
+        let words = translator(&lang);
+        let t = |key: &str| words.t(key, &[]);
         let form = SearchParams::parse(&request.text());
         let email = form.get("email").unwrap_or("");
         let password = form.get("password").unwrap_or("");
@@ -772,7 +786,7 @@ impl AccountsWeb {
         let account = js::trim(email).to_lowercase();
         let ip = self.0.rl.client_ip(request);
         let pair = format!("{account}\n{}", if ip.is_empty() { "unknown" } else { ip.as_str() });
-        let too_many = || self.login_html("Too many tries. Wait fifteen minutes and try again.", email, &next, 429);
+        let too_many = || self.login_html(&t("error.too_many_tries"), email, &next, &lang, 429);
         if !ip.is_empty() && !self.0.per_ip.take(&ip, self.now()) {
             return Ok(too_many());
         }
@@ -787,10 +801,11 @@ impl AccountsWeb {
                 None => false,
             };
             let over = !trusted && !self.0.per_account.take(&account, self.now());
-            // Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-            // addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-            // where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-            if over && !known.as_ref().is_some_and(|k| k.two_factor) {
+            // Past the account's limit, a right password and a wrong one get the same answer, and so does every
+            // account, with two-factor on or not, and an email with no account, so guessing from many addresses
+            // learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+            // leads to the code step when two-factor is on.
+            if over {
                 if self.0.rl.mail_settings().await?.is_none() || self.home().await.is_none_or(|h| h.is_empty()) {
                     return Ok(too_many());
                 }
@@ -804,31 +819,25 @@ impl AccountsWeb {
                         }
                     });
                 }
-                return Ok(self.login_html(
-                    "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
-                    email,
-                    &next,
-                    429,
-                ));
+                return Ok(self.login_html(&t("auth.tooManyLink"), email, &next, &lang, 429));
             }
             let Some(user) = self.0.accounts.sign_in(email, password).await? else {
-                if over && let Some(known) = &known {
-                    let pending = self.0.accounts.decoy_for(known, self.now())?;
-                    return Ok(html(code_page(base, &CodePage { pending: &pending, next: &next, error: None }), 200));
-                }
-                return Ok(self.login_html("That email and password do not match an account.", email, &next, 401));
+                return Ok(self.login_html(&t("auth.wrongPassword"), email, &next, &lang, 401));
             };
             self.0.per_address.clear(&pair);
             if !ip.is_empty() {
                 self.0.per_ip.forgive(&ip);
             }
-            if !over && !trusted {
+            if !trusted {
                 self.0.per_account.forgive(&account);
             }
             // With two-factor on, the password only earns the second step.
             if user.two_factor {
                 let pending = self.0.accounts.pending_for(&user, self.now())?;
-                return Ok(html(code_page(base, &CodePage { pending: &pending, next: &next, error: None }), 200));
+                return Ok(html(
+                    code_page(base, &CodePage { pending: &pending, next: &next, error: None }, &lang),
+                    200,
+                ));
             }
             self.signed_in_to(request, &user, &next)
         }
@@ -836,7 +845,9 @@ impl AccountsWeb {
         match checked {
             // Too many password checks already waiting, so this one was never run: try again in a moment.
             Err(Error::Settings(error)) if error.code == "busy" => {
-                let mut answer = self.login_html(&error.message, email, &next, 503);
+                let message = words.t("error.busy", &[]);
+                let message = if lang == "en" { error.message.clone() } else { message };
+                let mut answer = self.login_html(&message, email, &next, &lang, 503);
                 answer.headers.set("retry-after", "5");
                 Ok(answer)
             }
@@ -1151,11 +1162,12 @@ impl AccountsWeb {
         // The dashboard itself: straight to sign-in, or to setting up the first account.
         if (path == "/" || path.is_empty()) && request.method == "GET" && self.signed_in(request).await?.is_none() {
             let base = &self.0.base;
+            let lang = accepted_language(request);
             if !self.has_account().await? {
                 return Ok(Some(if self.0.first == FirstAccount::Open || self.0.asks_for_token {
                     redirect(&format!("{base}/setup"), &[])
                 } else {
-                    self.setup_locked()
+                    self.setup_locked(&lang)
                 }));
             }
             let search = request.parsed_url().search();

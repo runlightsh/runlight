@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::assistant::locale_compare;
 use crate::error::Error;
 use crate::geo::{SharedGeo, locate};
 use crate::hash::{new_id, random_salt, visitor_hash};
@@ -30,6 +31,8 @@ const ROLLUP_VERSION: &str = "3";
 const ROLLUP_BATCH: usize = 10;
 /// The most a connected install's list of sites may weigh; a real one is a few kilobytes.
 pub(crate) const REMOTE_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// The most an answer from a connected install may weigh when the request names no limit: enough for its largest export.
+pub(crate) const INSTALL_MAX_BYTES: usize = 100 * 1024 * 1024;
 /// On a database that caps statements per request (Cloudflare D1), fewer days a check.
 const METERED_ROLLUP_BATCH: usize = 4;
 const ROLLUP_DELAY_MS: i64 = 2 * 3_600_000;
@@ -248,15 +251,6 @@ fn site_row(options: &SiteOptions, index: usize) -> Result<SiteRow, String> {
     })
 }
 
-fn utc_day(ts: i64) -> String {
-    js::head16(&js::iso_string(ts), 10)
-}
-
-/// The sort `a.name.localeCompare(b.name)` gives, near enough: case-insensitive first, then as written.
-pub(crate) fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| b.cmp(a))
-}
-
 #[derive(Default)]
 struct State {
     configured: Vec<SiteRow>,
@@ -424,7 +418,13 @@ impl Runlight {
 
     /// A request to another install, through the fetcher, only to a public address (or this machine,
     /// with `local_installs`), and with no redirect followed.
-    pub(crate) async fn fetch_install(&self, url: &str, init: FetchInit) -> Result<Response, crate::http::FetchError> {
+    pub(crate) async fn fetch_install(
+        &self,
+        url: &str,
+        mut init: FetchInit,
+    ) -> Result<Response, crate::http::FetchError> {
+        // No install streams an answer into memory without end: past the most one may weigh, the fetch fails.
+        init.max_bytes.get_or_insert(INSTALL_MAX_BYTES);
         crate::safefetch::install_fetch(&*self.0.fetcher, url, init, self.0.local_installs, self.lookup()).await
     }
 
@@ -1238,9 +1238,49 @@ impl Runlight {
         Ok((today, yesterday))
     }
 
-    /// Deletes salts whose day has ended everywhere.
+    /// Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
+    /// site's timezone, and after midnight only while a visit that began that day there is still going, since
+    /// it carries on under the visitor it began with. So a salt lasts its day and the visits that run past it.
     async fn drop_old_salts(&self, now: i64) -> Result<(), Error> {
-        self.0.store.drop_salts_before(&utc_day(now - 2 * 86_400_000)).await?;
+        let mut zones: Vec<(String, Vec<String>)> = Vec::new();
+        for site in self.sites() {
+            match zones.iter_mut().find(|(z, _)| *z == site.timezone) {
+                Some((_, ids)) => ids.push(site.id),
+                None => zones.push((site.timezone, vec![site.id])),
+            }
+        }
+        if zones.is_empty() {
+            return Ok(());
+        }
+        let mut needed: Vec<String> = Vec::new();
+        for (timezone, sites) in &zones {
+            let today = local_date(now, timezone);
+            if !needed.contains(&today) {
+                needed.push(today.clone());
+            }
+            let yesterday = add_days(&today, -1);
+            let open = self
+                .0
+                .store
+                .visit_open(
+                    sites,
+                    start_of(&yesterday, timezone, 0),
+                    start_of(&today, timezone, 0),
+                    now - SESSION_IDLE_MS,
+                )
+                .await?;
+            if open {
+                if !needed.contains(&yesterday) {
+                    needed.push(yesterday);
+                }
+            } else if let Some(cached) = self.state().salts.get_mut(timezone)
+                && cached.0 == today
+            {
+                // Nor is it kept here: no visit is left for it to find.
+                cached.2 = None;
+            }
+        }
+        self.0.store.drop_salts_except(&needed).await?;
         Ok(())
     }
 
@@ -1433,7 +1473,10 @@ impl Runlight {
                     language: language.into(),
                 })
                 .await?;
-            Ok::<(String, String), Error>((id, today.clone()))
+            // Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+            Ok::<(String, String), Error>(
+                store.settle_open_session(&site.id, &candidates, now - SESSION_IDLE_MS, (id, today.clone())).await?,
+            )
         }
         .await
     }
@@ -1758,7 +1801,10 @@ fn minus_months(now: i64, months: i64) -> i64 {
     let days = now.div_euclid(86_400_000);
     let rest = now.rem_euclid(86_400_000);
     let (y, m, d) = js::civil_from_days(days);
-    js::date_utc(y, m - 1 - months, d, 0, 0, 0, 0) + rest
+    // Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
+    let last = js::date_utc(y, m - 1 - months + 1, 0, 0, 0, 0, 0).div_euclid(86_400_000);
+    let (_, _, last_day) = js::civil_from_days(last);
+    js::date_utc(y, m - 1 - months, d.min(last_day), 0, 0, 0, 0) + rest
 }
 
 fn not_found() -> Response {

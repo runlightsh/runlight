@@ -495,7 +495,13 @@ impl Routes {
         let method = request.method.as_str();
         if path == "/api/mail" {
             return match method {
-                "GET" => Ok(json(&glue::mail_view(rl, call.is_managed()).await?, 200, &[])),
+                "GET" => {
+                    // A hub with a manage token, or an account kept to one site, learns which service sends the
+                    // reports and from where, nothing more: a webhook's address is often its own credential.
+                    let kept =
+                        call.is_managed() || self.session_scope(request).await?.is_some_and(|u| u.site.is_some());
+                    Ok(json(&glue::mail_view(rl, kept).await?, 200, &[]))
+                }
                 "PUT" => {
                     let body = match read_json(request) {
                         Ok(b) => Value::Object(b),
@@ -521,7 +527,7 @@ impl Routes {
                 return Ok(coded("Enter an email address to send the test to", "test_email", 400, None));
             }
             let lang = body.get("lang").filter(|v| !v.is_null()).map_or_else(|| "en".to_string(), js::js_string);
-            return glue::send_test_mail(rl, &to, &lang).await;
+            return glue::send_test_mail(rl, &to, &lang, &self.0.sample_sent).await;
         }
         let site = match self.query_site(url) {
             Ok(s) => s,
