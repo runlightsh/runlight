@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/messages"
 	"runlight.sh/go/internal/web"
 	"runlight.sh/go/internal/whatwg"
 )
@@ -38,14 +39,49 @@ const (
 // oauthScopes are the scopes a token from OAuth may have.
 var oauthScopes = []string{"read", "manage", "cms"}
 
-// agentsKey is the key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
+// agentsKey is the key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+// replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied database alone
+// cannot report for the site; one kept before as plain text is sealed the next time it is read.
 func agentsKey(ctx context.Context, r *Runlight, site string, replace bool) (string, error) {
 	name := "observe-key:" + site
 	if !replace {
-		return r.Store.SettingOrAdd(ctx, name, func() string { return "rlo_" + randomID(20) })
+		made, err := r.seal("rlo_" + randomID(20))
+		if err != nil {
+			return "", err
+		}
+		stored, err := r.Store.SettingOrAdd(ctx, name, func() string { return made })
+		if err != nil {
+			return "", err
+		}
+		if key, ok := r.openAgentsKey(stored); ok {
+			if strings.HasPrefix(stored, "rlo_") {
+				sealed, err := r.seal(key)
+				if err != nil {
+					return "", err
+				}
+				if err := r.Store.SetSetting(ctx, name, &sealed); err != nil {
+					return "", err
+				}
+			}
+			return key, nil
+		}
+		// One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
 	}
 	key := "rlo_" + randomID(20)
-	return key, r.Store.SetSetting(ctx, name, &key)
+	sealed, err := r.seal(key)
+	if err != nil {
+		return "", err
+	}
+	return key, r.Store.SetSetting(ctx, name, &sealed)
+}
+
+// openAgentsKey is a site's agents key as kept in its setting: sealed, or plain text from before keys were sealed.
+// False when it cannot be opened.
+func (r *Runlight) openAgentsKey(stored string) (string, bool) {
+	if strings.HasPrefix(stored, "rlo_") {
+		return stored, true
+	}
+	return r.unseal(stored)
 }
 
 var trailingDots = regexp.MustCompile(`\.+$`)
@@ -160,7 +196,7 @@ func clientOf(o *js.Object) *oauthClient {
 var oauthCORS = []string{"access-control-allow-origin", "*", "access-control-allow-headers", "authorization, content-type, mcp-protocol-version", "access-control-allow-methods", "GET, POST, OPTIONS"}
 
 func oauthJSON(body any, status int) *Response {
-	headers := append([]string{"content-type", "application/json; charset=utf-8", "cache-control", "no-store"}, oauthCORS...)
+	headers := append([]string{"content-type", "application/json; charset=utf-8", "cache-control", "no-store", "x-content-type-options", "nosniff"}, oauthCORS...)
 	return web.NewResponse(status, []byte(js.Stringify(body)), headers...)
 }
 
@@ -358,6 +394,16 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	if err := r.Init(ctx); err != nil {
 		return nil, err
 	}
+	tr := messages.New(acceptedLanguage(request))
+	// A message for a page: its own text escaped, then each {name} filled with the HTML given beside it.
+	h := func(key string, vars ...string) string {
+		filled := map[string]string{}
+		for i := 0; i+1 < len(vars); i += 2 {
+			filled[vars[i]] = vars[i+1]
+		}
+		return tr.HTML(key, filled)
+	}
+	oauthPage := func(title, body string, status int) *Response { return oauthPageIn(tr.Lang, title, body, status) }
 	form := u.SearchParams()
 	if request.Method == "POST" {
 		form = whatwg.ParseQuery(request.Text())
@@ -370,7 +416,7 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	redirect := form.Value("redirect_uri")
 	// Without a known client and one of its own addresses there is nowhere safe to send an answer.
 	if client == nil || !contains(client.redirects, redirect) {
-		return oauthPage("This app is not registered", "<p>Start connecting again from the app.</p>", 400), nil
+		return oauthPage(h("oauth.unregisteredTitle"), "<p>"+h("oauth.startAgain")+"</p>", 400), nil
 	}
 	back := func(pairs ...string) *Response {
 		to := whatwg.MustParse(redirect)
@@ -394,7 +440,7 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 		if len(pairs) >= 4 {
 			what = pairs[3]
 		}
-		return oauthPage("This app asked in a way Runlight does not support", "<p>"+escapeHTML(client.name)+" sent "+escapeHTML(what)+". Start connecting again from the app.</p>", 400)
+		return oauthPage(h("oauth.unsupportedTitle"), "<p>"+h("oauth.unsupported", "app", escapeHTML(client.name), "error", escapeHTML(what))+"</p>", 400)
 	}
 	if form.Value("response_type") != "code" {
 		return refuse("error", "unsupported_response_type"), nil
@@ -429,7 +475,7 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	if !o.isOwner(ctx, request) {
 		// Someone signed in who may only read would be sent to sign in again and again.
 		if o.isReader != nil && o.isReader(ctx, request) {
-			return oauthPage("Ask an owner to connect this", "<p>You are signed in as a viewer, and only an owner of this Runlight can connect "+escapeHTML(client.name)+".</p>", 403), nil
+			return oauthPage(h("oauth.viewerTitle"), "<p>"+h("oauth.viewer", "app", escapeHTML(client.name))+"</p>", 403), nil
 		}
 		// The site stays, since on the way in it only says which one to offer first.
 		kept := whatwg.NewSearchParams()
@@ -443,7 +489,7 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 			return web.NewResponse(303, nil, "location", o.signIn+"?next="+encodeURIComponent(here), "cache-control", "no-store"), nil
 		}
 		home := firstNonEmpty(base, "/")
-		return oauthPage("Sign in first", `<p>Open your Runlight dashboard at <a href="`+escapeHTML(home)+`">`+escapeHTML(u.Host()+home)+`</a> and sign in, then connect `+escapeHTML(client.name)+` again.</p>`, 401), nil
+		return oauthPage(h("oauth.signInTitle"), `<p>`+h("oauth.signIn", "link", `<a href="`+escapeHTML(home)+`">`+escapeHTML(u.Host()+home)+`</a>`, "app", escapeHTML(client.name))+`</p>`, 401), nil
 	}
 
 	if request.Method == "GET" {
@@ -454,26 +500,26 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 			}
 		}
 		// The app names itself, so the page also shows where the answer goes, which it cannot fake.
-		sendsTo := `<p class="note">Allowing sends you back to <strong>` + escapeHTML(whatwg.MustParse(redirect).Host()) + `</strong>. Only allow it if you started connecting there.</p>`
+		sendsTo := `<p class="note">` + h("oauth.sendsTo", "host", "<strong>"+escapeHTML(whatwg.MustParse(redirect).Host())+"</strong>") + `</p>`
 		name := escapeHTML(client.name)
 		if cms {
 			if len(counting) == 0 && !r.ManagedSites {
-				return oauthPage("Add this site first", `<p>No site in this Runlight counts <strong>`+escapeHTML(host)+`</strong>. Add it to a site's domains in your code, then connect again from `+name+`.</p>`, 400), nil
+				return oauthPage(h("oauth.addSiteTitle"), `<p>`+h("oauth.addSite", "host", "<strong>"+escapeHTML(host)+"</strong>", "app", name)+`</p>`, 400), nil
 			}
 			var choices strings.Builder
 			for _, s := range counting {
 				choices.WriteString(`<option value="` + escapeHTML(s.ID) + `">` + escapeHTML(s.Name) + `</option>`)
 			}
 			if r.ManagedSites && len(counting) == 0 {
-				choices.WriteString(`<option value="new">A new site for ` + escapeHTML(host) + `</option>`)
+				choices.WriteString(`<option value="new">` + h("oauth.newSite", "host", escapeHTML(host)) + `</option>`)
 			}
-			return oauthPage("Connect "+name, `<p><strong>`+name+`</strong> wants to count <strong>`+escapeHTML(host)+`</strong> in this Runlight.</p>
-<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+			return oauthPage(h("oauth.connectTitle", "app", name), `<p>`+h("oauth.cmsIntro", "app", "<strong>"+name+"</strong>", "host", "<strong>"+escapeHTML(host)+"</strong>")+`</p>
+<p>`+h("oauth.cmsDetail")+`</p>
 `+sendsTo+`
 <form method="post" action="`+escapeHTML(base)+`/oauth/authorize">`+hidden.String()+`
-<label>Site<select name="site">`+choices.String()+`</select></label>
-<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in `+name+`.</p>
-<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`, 200), nil
+<label>`+h("app.site")+`<select name="site">`+choices.String()+`</select></label>
+<p class="note">`+h("oauth.cmsNote", "app", name)+`</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">`+h("oauth.deny")+`</button><button type="submit" name="decision" value="allow">`+h("oauth.allow")+`</button></div></form>`, 200), nil
 		}
 		if manage {
 			// Changing settings is for one site at a time, so there is no "every site" here.
@@ -489,30 +535,30 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 				}
 				choices.WriteString(`<option value="` + escapeHTML(s.ID) + `"` + selected + `>` + escapeHTML(s.Name) + `</option>`)
 			}
-			return oauthPage("Connect "+name, `<p><strong>`+name+`</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>
-<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>
+			return oauthPage(h("oauth.connectTitle", "app", name), `<p>`+h("oauth.manageIntro", "app", "<strong>"+name+"</strong>")+`</p>
+<p>`+h("oauth.manageDetail")+`</p>
 `+sendsTo+`
 <form method="post" action="`+escapeHTML(base)+`/oauth/authorize">`+hidden.String()+`
-<label>Site<select name="site">`+choices.String()+`</select></label>
-<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects `+name+`.</p>
-<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`, 200), nil
+<label>`+h("app.site")+`<select name="site">`+choices.String()+`</select></label>
+<p class="note">`+h("oauth.manageNote", "app", name)+`</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">`+h("oauth.deny")+`</button><button type="submit" name="decision" value="allow">`+h("oauth.allow")+`</button></div></form>`, 200), nil
 		}
 		options := ""
 		if sites := r.Sites(); len(sites) > 1 {
 			for _, s := range sites {
-				options += `<option value="` + escapeHTML(s.ID) + `">` + escapeHTML(s.Name) + ` only</option>`
+				options += `<option value="` + escapeHTML(s.ID) + `">` + h("oauth.siteOnly", "site", escapeHTML(s.Name)) + `</option>`
 			}
 		}
-		return oauthPage("Connect "+name, `<p><strong>`+name+`</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>
+		return oauthPage(h("oauth.connectTitle", "app", name), `<p>`+h("oauth.readIntro", "app", "<strong>"+name+"</strong>")+`</p>
 `+sendsTo+`
 <form method="post" action="`+escapeHTML(base)+`/oauth/authorize">`+hidden.String()+`
-<label>Which sites it can read<select name="site"><option value="">Every site</option>`+options+`</select></label>
-<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>
-<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`, 200), nil
+<label>`+h("oauth.readSites")+`<select name="site"><option value="">`+h("tokens.allSites")+`</option>`+options+`</select></label>
+<p class="note">`+h("oauth.readNote")+`</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">`+h("oauth.deny")+`</button><button type="submit" name="decision" value="allow">`+h("oauth.allow")+`</button></div></form>`, 200), nil
 	}
 	// The consent form posts here from this page only; a form from another site is refused.
 	if origin, has := request.Header.Lookup("origin"); has && origin != "" && origin != u.Origin() {
-		return oauthPage("This request came from another site", "<p>Start connecting again from the app.</p>", 403), nil
+		return oauthPage(h("oauth.anotherSiteTitle"), "<p>"+h("oauth.startAgain")+"</p>", 403), nil
 	}
 	if form.Value("decision") != "allow" {
 		return back("error", "access_denied"), nil
@@ -622,8 +668,9 @@ func (o *oauthHost) register(ctx context.Context, name string, redirects []strin
 
 const oauthStyle = `<style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a8a93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style>`
 
-func oauthPage(title, body string, status int) *Response {
-	return web.NewResponse(status, []byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>`+title+` | Runlight</title>
+// oauthPageIn is a page in the visitor's language, with a title already written as HTML.
+func oauthPageIn(lang, title, body string, status int) *Response {
+	return web.NewResponse(status, []byte(`<!doctype html><html lang="`+lang+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>`+title+` | Runlight</title>
 `+oauthStyle+`</head><body><main><h1>`+title+`</h1>`+body+`</main></body></html>`),
 		"content-type", "text/html; charset=utf-8",
 		"cache-control", "no-store",

@@ -74,12 +74,13 @@ func Zip(files []ZipFile, now int64) []byte {
 var (
 	formulaStart = regexp.MustCompile(`^[=+\-@\t\r]`)
 	plainNumber  = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
-	needsQuotes  = regexp.MustCompile(`[",\n\r]`)
+	needsQuotes  = regexp.MustCompile(`[",;\t\n\r]`)
 )
 
 // CsvRow is one CSV row, quoting what needs it; a leading =, +, -, or @ is
-// escaped so a spreadsheet will not run it. A nil value is an empty cell,
-// and anything else is written as String() writes it.
+// escaped so a spreadsheet will not run it, and a value with a semicolon or tab
+// is quoted too, for spreadsheets that split a cell there. A nil value is an
+// empty cell, and anything else is written as String() writes it.
 func CsvRow(values []any) string {
 	cells := make([]string, len(values))
 	for i, v := range values {

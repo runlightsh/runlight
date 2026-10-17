@@ -74,7 +74,7 @@ func TestPasswordsHashedByTypeScriptCheckHere(t *testing.T) {
 
 func TestNewHashesUseScryptAndCheck(t *testing.T) {
 	hash, err := HashPassword("a long password")
-	if err != nil || !regexp.MustCompile(`^scrypt\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$`).MatchString(hash) {
+	if err != nil || !regexp.MustCompile(`^scrypt\$32768\$8\$3\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$`).MatchString(hash) {
 		t.Fatalf("%q %v", hash, err)
 	}
 	if !CheckPassword("a long password", hash) {
@@ -82,6 +82,41 @@ func TestNewHashesUseScryptAndCheck(t *testing.T) {
 	}
 	if again, _ := HashPassword("a long password"); again == hash {
 		t.Error("a new salt each time")
+	}
+}
+
+// Hashes made by Node's scrypt at each cost, for the password "a long password" and one salt.
+func TestHashesOfEveryCostCheckOutAndOnlyOldOnesAreWeaker(t *testing.T) {
+	const salt = "Xn_mYpTI3PoQhj0lEUmHtw"
+	for hash, weaker := range map[string]bool{
+		"scrypt$32768$8$3$" + salt + "$k9Up30YE3NUBBXr8_Tt4n-QfFHzNEZN6RyF8qJK-Dz8": false,
+		"scrypt$" + salt + "$BTiE2boAoCNe8rAj5iUgTQ0PTQZ4BcDBDKzYpe5a_mo":           true,
+		"scrypt$16384$8$3$" + salt + "$HY_T-capvON-gwNCp9KXvwP2xyKROXzmpnzI680gTOs": true,
+	} {
+		if !CheckPassword("a long password", hash) {
+			t.Errorf("%s does not check out", hash)
+		}
+		if CheckPassword("a long passwore", hash) {
+			t.Errorf("%s checked a wrong password", hash)
+		}
+		if got := WeakerThanNow(hash); got != weaker {
+			t.Errorf("%s: weaker %v, want %v", hash, got, weaker)
+		}
+	}
+	if !WeakerThanNow("pbkdf2$100000$" + salt + "$FcGYjCCSlbHmKWA3V4___zmHCpuJn9C3-muNyTgOOBI") {
+		t.Error("a PBKDF2 hash is weaker than scrypt")
+	}
+	if WeakerThanNow("nonsense") {
+		t.Error("a hash that is not one is not weaker")
+	}
+}
+
+func TestACostOutOfBoundsIsRefusedNotRun(t *testing.T) {
+	const salt, key = "Xn_mYpTI3PoQhj0lEUmHtw", "k9Up30YE3NUBBXr8_Tt4n-QfFHzNEZN6RyF8qJK-Dz8"
+	for _, cost := range []string{"2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1"} {
+		if CheckPassword("a long password", "scrypt$"+cost+"$"+salt+"$"+key) {
+			t.Errorf("%s checked out", cost)
+		}
 	}
 }
 

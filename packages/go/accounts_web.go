@@ -8,6 +8,7 @@ import (
 
 	"runlight.sh/go/internal/accounts"
 	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/messages"
 	"runlight.sh/go/internal/web"
 	"runlight.sh/go/internal/whatwg"
 )
@@ -54,7 +55,6 @@ type AccountsWeb struct {
 	perAccount   *Throttle
 	perIP        *Throttle
 	codeTries    *Throttle
-	decoyTries   *Throttle
 	confirmTries *Throttle
 	rechecks     *Throttle
 	mu           sync.Mutex
@@ -82,13 +82,12 @@ func NewAccountsWeb(options AccountsWebOptions) *AccountsWeb {
 	// fifty, so a caller who invents a new address for every try still cannot guess on and on. And per address
 	// across every account, thirty, so one caller trying made-up emails cannot keep the server hashing; a
 	// request with no known address skips that one, since it would hold up everyone at once. Six-digit
-	// codes: five wrong tries an account every fifteen minutes, and five to confirm the first one. A decoy
-	// ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
+	// codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
 	// Password re-checks in Account: ten.
 	return &AccountsWeb{
 		Accounts: NewAccountStore(options.Runlight.Store, options.Secret), o: options, r: options.Runlight,
 		cookiePath: firstNonEmpty(options.Base, "/"), home: options.Base + "/",
-		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), perIP: NewThrottle(30, 0), codeTries: NewThrottle(5, 0), decoyTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
+		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), perIP: NewThrottle(30, 0), codeTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
 		linkSent: map[string]int64{},
 	}
 }
@@ -288,11 +287,28 @@ func (w *AccountsWeb) setupOk(given string) bool {
 	return false
 }
 
-func (w *AccountsWeb) setupLocked() *Response {
+func (w *AccountsWeb) setupLocked(lang string) *Response {
 	if w.o.FirstAccount.Mode == "locked" {
-		return html(accounts.SetupNeedsTokenPage(w.o.Base), 403)
+		return html(accounts.SetupNeedsTokenPage(w.o.Base, lang), 403)
 	}
-	return html(accounts.SetupLockedPage(w.o.Base), 403)
+	return html(accounts.SetupLockedPage(w.o.Base, lang), 403)
+}
+
+// reason is an account's problem in the visitor's language, where the dashboard has words for it; English as it was thrown.
+func reason(tr messages.Translator, err error) string {
+	var ae *AccountError
+	if tr.Lang == "en" || !asAccountError(err, &ae) {
+		return err.Error()
+	}
+	key := "error." + ae.Code
+	vars := map[string]string{}
+	if ae.Params != nil {
+		ae.Params.Each(func(k string, v any) { vars[k] = js.String(v) })
+	}
+	if text := tr.T(key, vars); text != key {
+		return text
+	}
+	return err.Error()
 }
 
 func (w *AccountsWeb) asksForToken() bool { return w.o.FirstAccount.Mode == "token" }
@@ -313,7 +329,7 @@ func (w *AccountsWeb) sendInvite(ctx context.Context, request *Request, invite I
 	}
 	link := origin + w.o.Base + "/invite?code=" + code
 	host := whatwg.MustParse(origin).Host()
-	what := accounts.RoleText(invite.Role, invite.Site)
+	what := accounts.RoleText(invite.Role, invite.Site, "en")
 	settings, err := w.r.MailSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -384,8 +400,14 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 	if path == "/auth.css" {
 		return web.NewResponse(200, []byte(accounts.AuthCSS), "content-type", "text/css; charset=utf-8", "cache-control", "public, max-age=3600"), nil
 	}
+	lang := acceptedLanguage(request)
+	tr := messages.New(lang)
 	if path == "/auth.js" {
-		return web.NewResponse(200, []byte(accounts.AuthJS), "content-type", "application/javascript; charset=utf-8", "cache-control", "public, max-age=3600"), nil
+		asked := "en"
+		if q := u.SearchParams(); q.Has("lang") {
+			asked = q.Value("lang")
+		}
+		return web.NewResponse(200, []byte(accounts.AuthJSFor(asked)), "content-type", "application/javascript; charset=utf-8", "cache-control", "public, max-age=3600"), nil
 	}
 	if path == "/setup" {
 		has, err := w.HasAccount(ctx)
@@ -398,25 +420,25 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 		if method == "GET" {
 			code := u.SearchParams().Value("code")
 			if w.o.FirstAccount.Mode == "locked" {
-				return w.setupLocked(), nil
+				return w.setupLocked(lang), nil
 			}
 			// The app's token is typed in; the server's code comes in the link it printed.
 			if w.asksForToken() || w.o.FirstAccount.Mode == "open" {
-				return html(accounts.SetupPage(base, accounts.SetupOptions{AskCode: w.asksForToken()}), 200), nil
+				return html(accounts.SetupPage(base, accounts.SetupOptions{AskCode: w.asksForToken()}, lang), 200), nil
 			}
 			if w.setupOk(code) {
-				return html(accounts.SetupPage(base, accounts.SetupOptions{Code: code}), 200), nil
+				return html(accounts.SetupPage(base, accounts.SetupOptions{Code: code}, lang), 200), nil
 			}
-			return w.setupLocked(), nil
+			return w.setupLocked(lang), nil
 		}
 		if method == "POST" {
 			form := formOf(request)
 			code := form.Value("code")
 			if !w.setupOk(code) {
 				if w.asksForToken() {
-					return html(accounts.SetupPage(base, accounts.SetupOptions{AskCode: true, Error: "That is not this app's RUNLIGHT_TOKEN.", Email: form.Value("email")}), 403), nil
+					return html(accounts.SetupPage(base, accounts.SetupOptions{AskCode: true, Error: tr.T("auth.tokenWrong", nil), Email: form.Value("email")}, lang), 403), nil
 				}
-				return w.setupLocked(), nil
+				return w.setupLocked(lang), nil
 			}
 			kept := code
 			if w.asksForToken() {
@@ -424,12 +446,12 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			}
 			// Asked twice, since a typo here would lock the first owner out.
 			if form.Value("password") != form.Value("again") {
-				return html(accounts.SetupPage(base, accounts.SetupOptions{Code: kept, AskCode: w.asksForToken(), Error: "The two passwords are not the same.", Email: form.Value("email")}), 400), nil
+				return html(accounts.SetupPage(base, accounts.SetupOptions{Code: kept, AskCode: w.asksForToken(), Error: tr.T("auth.mismatch", nil), Email: form.Value("email")}, lang), 400), nil
 			}
 			user, err := w.Accounts.SetPassword(ctx, form.Value("email"), form.Value("password"), w.now(), "")
 			if err != nil {
 				if isRangeError(err) {
-					return html(accounts.SetupPage(base, accounts.SetupOptions{Code: kept, AskCode: w.asksForToken(), Error: err.Error(), Email: form.Value("email")}), 400), nil
+					return html(accounts.SetupPage(base, accounts.SetupOptions{Code: kept, AskCode: w.asksForToken(), Error: reason(tr, err), Email: form.Value("email")}, lang), 400), nil
 				}
 				return nil, err
 			}
@@ -451,11 +473,11 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			if w.o.FirstAccount.Mode != "locked" && (w.o.FirstAccount.Mode == "open" || w.asksForToken()) {
 				return redirect(base + "/setup"), nil
 			}
-			return w.setupLocked(), nil
+			return w.setupLocked(lang), nil
 		}
 		if method == "GET" {
 			next := w.safeNext(u.SearchParams().Value("next"))
-			return html(accounts.LoginPage(base, accounts.LoginOptions{Next: &next, Forgot: w.o.Forgot}), 200), nil
+			return html(accounts.LoginPage(base, accounts.LoginOptions{Next: &next, Forgot: w.o.Forgot}, lang), 200), nil
 		}
 		if method == "POST" {
 			return w.login(ctx, request)
@@ -471,14 +493,14 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			return nil, err
 		}
 		if user == nil {
-			return html(accounts.LoginPage(base, accounts.LoginOptions{Error: "That sign-in link has run out. Sign in again.", Next: &next, Forgot: w.o.Forgot}), 410), nil
+			return html(accounts.LoginPage(base, accounts.LoginOptions{Error: tr.T("auth.linkExpired", nil), Next: &next, Forgot: w.o.Forgot}, lang), 410), nil
 		}
 		if user.TwoFactor {
 			pending, err := w.Accounts.PendingFor(*user, w.now())
 			if err != nil {
 				return nil, err
 			}
-			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: pending, Next: next}), 200), nil
+			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: pending, Next: next}, lang), 200), nil
 		}
 		return w.signedInTo(request, *user, next)
 	}
@@ -486,7 +508,7 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 	if path == "/login/code" && method == "POST" {
 		form := formOf(request)
 		next := w.safeNext(form.Value("next"))
-		user, real, err := w.Accounts.FromPending(ctx, form.Value("pending"), w.now())
+		user, err := w.Accounts.FromPending(ctx, form.Value("pending"), w.now())
 		if err != nil {
 			return nil, err
 		}
@@ -494,21 +516,15 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			return redirect(base + "/login?next=" + encodeURIComponent(next)), nil
 		}
 		// Counted before the check, so a burst cannot get past five.
-		tries := w.codeTries
-		if !real {
-			tries = w.decoyTries
+		if !w.codeTries.Take(user.ID, w.now()) {
+			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: tr.T("error.too_many_tries", nil)}, lang), 429), nil
 		}
-		if !tries.Take(user.ID, w.now()) {
-			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: "Too many tries. Wait fifteen minutes and try again."}), 429), nil
-		}
-		ok := false
-		if real {
-			if ok, err = w.Accounts.CheckSecondFactor(ctx, user.ID, form.Value("code"), w.now()); err != nil {
-				return nil, err
-			}
+		ok, err := w.Accounts.CheckSecondFactor(ctx, user.ID, form.Value("code"), w.now())
+		if err != nil {
+			return nil, err
 		}
 		if !ok {
-			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: "That code is not right. Check the time on your phone, or use a recovery code."}), 401), nil
+			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: tr.T("auth.codeWrong", nil)}, lang), 401), nil
 		}
 		w.codeTries.Clear(user.ID)
 		return w.signedInTo(request, *user, next)
@@ -526,9 +542,9 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 				return nil, err
 			}
 			if invite == nil {
-				return html(accounts.InviteGonePage(base), 410), nil
+				return html(accounts.InviteGonePage(base, lang), 410), nil
 			}
-			return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host()}), 200), nil
+			return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host()}, lang), 200), nil
 		}
 		if method == "POST" {
 			form := formOf(request)
@@ -538,22 +554,22 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 				return nil, err
 			}
 			if invite == nil {
-				return html(accounts.InviteGonePage(base), 410), nil
+				return html(accounts.InviteGonePage(base, lang), 410), nil
 			}
 			again := func(message string) *Response {
-				return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host(), Error: message}), 400)
+				return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host(), Error: message}, lang), 400)
 			}
 			if form.Value("password") != form.Value("again") {
-				return again("The two passwords are not the same."), nil
+				return again(tr.T("auth.mismatch", nil)), nil
 			}
 			user, err := w.Accounts.AcceptInvite(ctx, code, form.Value("password"), w.now())
 			if err != nil {
 				var ae *AccountError
 				if asAccountError(err, &ae) && ae.Code == "invite_gone" {
-					return html(accounts.InviteGonePage(base), 410), nil
+					return html(accounts.InviteGonePage(base, lang), 410), nil
 				}
 				if isRangeError(err) {
-					return again(err.Error()), nil
+					return again(reason(tr, err)), nil
 				}
 				return nil, err
 			}
@@ -570,6 +586,8 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 
 func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, error) {
 	base := w.o.Base
+	lang := acceptedLanguage(request)
+	tr := messages.New(lang)
 	form := formOf(request)
 	email, password := form.Value("email"), form.Value("password")
 	next := w.safeNext(form.Value("next"))
@@ -577,14 +595,14 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 	ip := w.r.ClientIP(request)
 	pair := account + "\n" + firstNonEmpty(ip, "unknown")
 	page := func(message string) string {
-		return accounts.LoginPage(base, accounts.LoginOptions{Error: message, Email: email, Next: &next, Forgot: w.o.Forgot})
+		return accounts.LoginPage(base, accounts.LoginOptions{Error: message, Email: email, Next: &next, Forgot: w.o.Forgot}, lang)
 	}
-	tooMany := func() *Response { return html(page("Too many tries. Wait fifteen minutes and try again."), 429) }
+	tooMany := func() *Response { return html(page(tr.T("error.too_many_tries", nil)), 429) }
 	// Too many password checks already waiting, so this one was never run: try again in a moment.
 	busy := func(err error) (*Response, error) {
 		var ae *AccountError
 		if asAccountError(err, &ae) && ae.Code == "busy" {
-			return html(page(ae.Message), 503, "retry-after", "5"), nil
+			return html(page(reason(tr, err)), 503, "retry-after", "5"), nil
 		}
 		return nil, err
 	}
@@ -601,10 +619,11 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 	}
 	trusted := known != nil && w.Accounts.TrustsDevice(readCookie(request, deviceCookie), *known)
 	over := !trusted && !w.perAccount.Take(account, w.now())
-	// Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-	// addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-	// where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-	if over && (known == nil || !known.TwoFactor) {
+	// Past the account's limit, a right password and a wrong one get the same answer, and so does every
+	// account, with two-factor on or not, and an email with no account, so guessing from many addresses
+	// learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+	// leads to the code step when two-factor is on.
+	if over {
 		settings, err := w.r.MailSettings(ctx)
 		if err != nil {
 			return nil, err
@@ -625,27 +644,20 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 				}
 			})
 		}
-		return html(page("Too many tries for this account. If the password was right, a link to sign in is on its way to its email address."), 429), nil
+		return html(page(tr.T("auth.tooManyLink", nil)), 429), nil
 	}
 	user, err := w.Accounts.SignIn(ctx, email, password)
 	if err != nil {
 		return busy(err)
 	}
 	if user == nil {
-		if over && known != nil {
-			decoy, err := w.Accounts.DecoyFor(*known, w.now())
-			if err != nil {
-				return nil, err
-			}
-			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: decoy, Next: next}), 200), nil
-		}
-		return html(page("That email and password do not match an account."), 401), nil
+		return html(page(tr.T("auth.wrongPassword", nil)), 401), nil
 	}
 	w.perAddress.Clear(pair)
 	if ip != "" {
 		w.perIP.Forgive(ip)
 	}
-	if !over && !trusted {
+	if !trusted {
 		w.perAccount.Forgive(account)
 	}
 	// With two-factor on, the password only earns the second step.
@@ -654,7 +666,7 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 		if err != nil {
 			return nil, err
 		}
-		return html(accounts.CodePage(base, accounts.CodeOptions{Pending: pending, Next: next}), 200), nil
+		return html(accounts.CodePage(base, accounts.CodeOptions{Pending: pending, Next: next}, lang), 200), nil
 	}
 	return w.signedInTo(request, *user, next)
 }
@@ -1112,7 +1124,7 @@ func (w *AccountsWeb) Handle(ctx context.Context, request *Request, path string)
 			if w.o.FirstAccount.Mode == "open" || w.asksForToken() {
 				return redirect(w.o.Base + "/setup"), nil
 			}
-			return w.setupLocked(), nil
+			return w.setupLocked(acceptedLanguage(request)), nil
 		}
 		search := request.Parsed().Search
 		target := w.o.Base + "/login"

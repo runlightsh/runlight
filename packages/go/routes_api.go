@@ -132,6 +132,17 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 				return Coded("Unknown site", "unknown_site", 404, nil), nil
 			}
 		}
+		if siteOnePath.MatchString(path) && isJSON(request) {
+			// Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+			// a hub may, never move it.
+			if body, err := request.JSON(); err == nil {
+				if object, isObject := body.(*js.Object); isObject {
+					if _, has := object.Get("hostnames"); has {
+						return Coded("Your account cannot change a site's domains", "site_domains", 403, nil), nil
+					}
+				}
+			}
+		}
 		u = u.Clone()
 		q := u.SearchParams()
 		q.Set("site", site)
@@ -611,7 +622,8 @@ func (rt *Routes) observeAPI(c *call) (*Response, error) {
 		}
 		for _, s := range settings {
 			id := strings.TrimPrefix(s.Key, "observe-key:")
-			if _, known := r.Site(id); id != "" && known && constantTimeEqual(given, s.Value) {
+			opened, ok := r.openAgentsKey(s.Value)
+			if _, known := r.Site(id); id != "" && known && ok && constantTimeEqual(given, opened) {
 				keySite = id
 			}
 		}
@@ -783,6 +795,12 @@ func (rt *Routes) siteWrites(c *call, raw string, u *whatwg.URL) (*Response, err
 		}
 		if err := r.DeleteSite(ctx, id); err != nil {
 			return siteError(err)
+		}
+		// Those kept to the site go with it, so a site made later with the same id is not theirs.
+		if rt.web != nil {
+			if err := rt.web.Accounts.ForgetSite(ctx, id); err != nil {
+				return nil, err
+			}
 		}
 		return ok(), nil
 	}
@@ -1176,9 +1194,22 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		if v, has := q.Get("steps"); has {
 			steps = js.Number(v)
 		}
-		options := JourneyOptions{Steps: steps, Start: q.Value("start"), End: q.Value("end")}
+		// Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+		recorded := func(page string) string {
+			if path, ok := RecordedPath(page); ok {
+				return path
+			}
+			return page
+		}
+		options := JourneyOptions{Steps: steps}
+		if start := q.Value("start"); start != "" {
+			options.Start = recorded(start)
+		}
+		if end := q.Value("end"); end != "" {
+			options.End = recorded(end)
+		}
 		if through != nil {
-			options.Through = &JourneyThrough{Step: js.Number(through[1]), Value: through[2]}
+			options.Through = &JourneyThrough{Step: js.Number(through[1]), Value: recorded(through[2])}
 		}
 		answer := js.ToValue(Journeys(rows, options)).(*js.Object)
 		out := js.NewObject("site", site.ID, "range", ranged)
@@ -1243,7 +1274,7 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 				}
 			}
 		}
-		limit := clampedNumber(u, "limit", 100)
+		limit := whole(u, "limit", 100, 1000)
 		rows := []PropValue{}
 		if k, isString := key.(string); isString && k != "" {
 			if rows, err = r.Store.EventPropValues(ctx, query, event, k, limit); err != nil {
@@ -1257,14 +1288,18 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		if !IsDimension(dimension) {
 			return Coded(`Unknown dimension "`+dimension+`"`, "unknown_dimension", 400, params("dimension", dimension)), nil
 		}
-		limit := clampedNumber(u, "limit", 10)
-		pageNumber := 1.0
-		if v, has := queryValue(u, "page"); has {
-			if n := js.Number(v); !math.IsNaN(n) && n != 0 {
-				pageNumber = math.Max(1, n)
+		limit := whole(u, "limit", 10, 1000)
+		pageNumber := whole(u, "page", 1, 100_000)
+		if format, _ := queryValue(u, "format"); dimension == "hostname" && format != "csv" {
+			if suggestions, _ := queryValue(u, "suggestions"); suggestions == "1" {
+				rows, err := r.Store.HostnameSuggestions(ctx, query, min(limit, 50))
+				if err != nil {
+					return nil, err
+				}
+				return jsonAnswer(js.NewObject("site", site.ID, "range", ranged, "dimension", dimension, "rows", rows), 200), nil
 			}
 		}
-		rows, err := r.Store.Breakdown(ctx, query, dimension, limit, int((pageNumber-1)*float64(limit)))
+		rows, err := r.Store.Breakdown(ctx, query, dimension, limit, (pageNumber-1)*limit)
 		if err != nil {
 			return nil, err
 		}
@@ -1312,15 +1347,17 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 	return Coded("Not found", "not_found", 404, nil), nil
 }
 
-// clampedNumber is Math.min(1000, Math.max(1, Number(value) || fallback)), as a whole number.
-func clampedNumber(u *whatwg.URL, name string, fallback float64) int {
-	n := fallback
-	if v, has := queryValue(u, name); has {
-		if parsed := js.Number(v); !math.IsNaN(parsed) && parsed != 0 {
-			n = parsed
-		}
+// whole is a whole number from a query, within 1 and max, or fallback for anything else: a fraction, a huge number, or text.
+func whole(u *whatwg.URL, name string, fallback, max int) int {
+	v, has := queryValue(u, name)
+	if !has {
+		return fallback
 	}
-	return int(math.Min(1000, math.Max(1, n)))
+	n := js.Number(v)
+	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) || math.Abs(n) > 1<<53-1 || n < 1 {
+		return fallback
+	}
+	return int(math.Min(n, float64(max)))
 }
 
 func rate(part, whole int64) float64 {

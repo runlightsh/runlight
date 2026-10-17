@@ -13,6 +13,7 @@ import (
 
 	"runlight.sh/go/internal/assets"
 	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/messages"
 	"runlight.sh/go/internal/web"
 	"runlight.sh/go/internal/whatwg"
 )
@@ -134,13 +135,7 @@ func smallPageScript(lang, body string, status int, script string) *Response {
 
 // acceptedLanguage is the first language a browser asks for that the dashboard speaks, else English.
 func acceptedLanguage(request *Request) string {
-	for _, part := range strings.Split(request.Header.Get("accept-language"), ",") {
-		code := lower(head16(jsTrim(strings.Split(part, ";")[0]), 2))
-		if contains(Languages(), code) {
-			return code
-		}
-	}
-	return "en"
+	return messages.Accepted(request.Header.Get("accept-language"))
 }
 
 var sheetPathDimensions = map[string]bool{"page": true, "entry": true, "exit": true, "ai_page": true}

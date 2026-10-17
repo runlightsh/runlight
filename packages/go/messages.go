@@ -5,38 +5,18 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 
-	"runlight.sh/go/internal/assets"
 	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/messages"
 )
 
 // The dashboard's translations, for text the server writes (email reports).
 // Same keys, same placeholders, so every language stays in one place.
 
-var (
-	tablesMu sync.Mutex
-	tables   = map[string]map[string]string{}
-)
-
-func messageTable(lang string) map[string]string {
-	tablesMu.Lock()
-	defer tablesMu.Unlock()
-	if found, ok := tables[lang]; ok {
-		return found
-	}
-	found := map[string]string{}
-	if raw, ok := assets.Locales[lang]; ok {
-		if v, err := js.Parse(raw); err == nil {
-			js.Obj(v).Each(func(k string, v any) { found[k] = js.Str(v) })
-		}
-	}
-	tables[lang] = found
-	return found
-}
+func messageTable(lang string) map[string]string { return messages.Table(lang) }
 
 // Languages are the languages the dashboard and email reports come in.
-func Languages() []string { return assets.LocaleOrder }
+func Languages() []string { return messages.Languages() }
 
 // Vars fill a message's {placeholders}: strings, or numbers written as
 // JavaScript writes them.

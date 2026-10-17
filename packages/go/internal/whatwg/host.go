@@ -5,16 +5,21 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-// domain reads a special URL's host: percent-decoded, checked for the
-// characters a host cannot hold, lowercased, a name outside ASCII written
-// in punycode, and an IPv4 address in any form browsers accept written in
-// dotted decimal.
+// domain reads a special URL's host: percent-decoded, mapped as UTS 46 maps a name (case folded, full-width
+// letters and other dots read as their plain forms, soft hyphens dropped, and the result normalized), checked
+// for the characters a host cannot hold, a name outside ASCII written in punycode, and an IPv4 address in
+// any form browsers accept written in dotted decimal.
 func domain(host string) (string, error) {
 	host = PercentDecode(host)
 	if !utf8.ValidString(host) {
+		return "", ErrInvalid
+	}
+	host, ok := mapHost(host)
+	if !ok {
 		return "", ErrInvalid
 	}
 	for i := 0; i < len(host); i++ {
@@ -23,20 +28,22 @@ func domain(host string) (string, error) {
 			return "", ErrInvalid
 		}
 	}
-	lower := strings.ToLower(host)
-	if !isASCII(lower) {
-		ascii, ok := ToASCII(lower)
+	if strings.Contains(host, "xn--") && !validPunycodeLabels(host) {
+		return "", ErrInvalid
+	}
+	if !isASCII(host) {
+		ascii, ok := ToASCII(host)
 		if !ok {
 			return "", ErrInvalid
 		}
-		lower = ascii
+		host = ascii
 	}
-	if ip, ok, err := ipv4(lower); err != nil {
+	if ip, ok, err := ipv4(host); err != nil {
 		return "", err
 	} else if ok {
 		return ip, nil
 	}
-	return lower, nil
+	return host, nil
 }
 
 func isASCII(s string) bool {
@@ -224,14 +231,17 @@ func unhex(c byte) byte {
 	return c - 'A' + 10
 }
 
-// ToASCII writes a lowercased host name outside ASCII in punycode, label
-// by label (bücher.example as xn--bcher-kva.example), as IDNA does for the
-// names people type. It does not apply UTS 46's other mappings.
+// ToASCII writes a mapped host name (see mapHost) outside ASCII in punycode, label by label (bücher.example
+// as xn--bcher-kva.example), as IDNA does for the names people type. False for a name with a label that may
+// not be written, or one too long.
 func ToASCII(host string) (string, bool) {
 	labels := strings.Split(host, ".")
 	for i, label := range labels {
 		if isASCII(label) {
 			continue
+		}
+		if !validLabel(label) {
+			return "", false
 		}
 		encoded, ok := punycode(label)
 		if !ok {
@@ -241,6 +251,119 @@ func ToASCII(host string) (string, bool) {
 	}
 	out := strings.Join(labels, ".")
 	return out, len(out) <= 253 || strings.HasSuffix(out, ".") && len(out) <= 254
+}
+
+// validPunycodeLabels is whether each label of a host that starts xn-- is one IDNA could have made: Punycode
+// that decodes to a name with something outside ASCII in it, which needs no mapping, and is as ToASCII would write it.
+func validPunycodeLabels(host string) bool {
+	for _, label := range strings.Split(host, ".") {
+		if !strings.HasPrefix(label, "xn--") {
+			continue
+		}
+		decoded, ok := punycodeDecode(label[4:])
+		if !ok || len(decoded) == 0 {
+			return false
+		}
+		text := string(decoded)
+		if isASCII(text) || !validLabel(text) {
+			return false
+		}
+		if again, ok := mapHost(text); !ok || again != text {
+			return false
+		}
+	}
+	return true
+}
+
+// punycodeDecode is RFC 3492's decoding of one label's code points.
+func punycodeDecode(label string) ([]rune, bool) {
+	const (
+		base        = 36
+		tmin        = 1
+		tmax        = 26
+		skew        = 38
+		damp        = 700
+		initialBias = 72
+		initialN    = 128
+	)
+	var out []rune
+	rest := label
+	if i := strings.LastIndexByte(label, '-'); i >= 0 {
+		for _, c := range label[:i] {
+			if c >= 0x80 {
+				return nil, false
+			}
+			out = append(out, c)
+		}
+		rest = label[i+1:]
+	}
+	n, bias := initialN, initialBias
+	i := 0
+	for pos := 0; pos < len(rest); {
+		oldI, w := i, 1
+		for k := base; ; k += base {
+			if pos >= len(rest) {
+				return nil, false
+			}
+			c := rest[pos]
+			pos++
+			var digit int
+			switch {
+			case c >= 'a' && c <= 'z':
+				digit = int(c - 'a')
+			case c >= 'A' && c <= 'Z':
+				digit = int(c - 'A')
+			case c >= '0' && c <= '9':
+				digit = int(c-'0') + 26
+			default:
+				return nil, false
+			}
+			if digit > (math.MaxInt32-i)/w {
+				return nil, false
+			}
+			i += digit * w
+			t := k - bias
+			if t < tmin {
+				t = tmin
+			} else if t > tmax {
+				t = tmax
+			}
+			if digit < t {
+				break
+			}
+			if w > math.MaxInt32/(base-t) {
+				return nil, false
+			}
+			w *= base - t
+		}
+		count := len(out) + 1
+		delta := i - oldI
+		if oldI == 0 {
+			delta /= damp
+		} else {
+			delta /= 2
+		}
+		delta += delta / count
+		k := 0
+		for delta > ((base-tmin)*tmax)/2 {
+			delta /= base - tmin
+			k += base
+		}
+		bias = k + (base-tmin+1)*delta/(delta+skew)
+		if i/count > math.MaxInt32-n {
+			return nil, false
+		}
+		n += i / count
+		i %= count
+		if n > unicode.MaxRune || (n >= 0xd800 && n <= 0xdfff) {
+			return nil, false
+		}
+		out = append(out, 0)
+		copy(out[i+1:], out[i:])
+		out[i] = rune(n)
+		i++
+	}
+	return out, true
 }
 
 // punycode is RFC 3492's encoding of one label.

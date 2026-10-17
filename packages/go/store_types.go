@@ -202,6 +202,11 @@ type SeriesPoint struct {
 
 // BreakdownRow is one value of a breakdown. A nil field is not reported for
 // that dimension.
+// HostnameSuggestion is one hostname a site's pageviews were seen on.
+type HostnameSuggestion struct {
+	Value string `json:"value"`
+}
+
 type BreakdownRow struct {
 	Value      string   `json:"value"`
 	Visitors   int64    `json:"visitors"`

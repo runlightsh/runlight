@@ -9,7 +9,9 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -90,7 +92,8 @@ func randomHex(n int) string {
 func New(options Options) (*Server, error) {
 	logf := options.Logf
 	if logf == nil {
-		logf = func(format string, args ...any) {}
+		// As the core does: what goes wrong where nothing can answer for it still reaches standard error.
+		logf = log.New(os.Stderr, "", 0).Printf
 	}
 	s := &Server{options: options, SetupCode: runlight.SetupCode(), logf: logf}
 	var origin string
@@ -104,7 +107,7 @@ func New(options Options) (*Server, error) {
 	}
 	rl, err := runlight.New(runlight.Options{
 		Store: options.Store, ManagedSites: true, Secret: &options.Secret, IgnoreProxy: options.IgnoreProxy, ProxyHeader: options.ProxyHeader,
-		TrustProxy: options.TrustProxy, Geo: options.Geo, Now: options.Now, Fetcher: options.Fetcher, Logf: options.Logf,
+		TrustProxy: options.TrustProxy, Geo: options.Geo, Now: options.Now, Fetcher: options.Fetcher, Logf: logf,
 	})
 	if err != nil {
 		return nil, err

@@ -348,3 +348,43 @@ func TestAModelsAnswerWithoutEndIsReadOnlySoFar(t *testing.T) {
 		t.Errorf("%d bytes were sent before it stopped", written.Load())
 	}
 }
+
+// The browser sends the history, so a question carries at most 24,000 characters of earlier turns, the oldest dropped first.
+func TestAQuestionCarriesAtMost24000CharactersOfEarlierTurns(t *testing.T) {
+	messages := []ChatMessage{}
+	for i := range 19 {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		messages = append(messages, ChatMessage{role, strings.Repeat("x", 7998) + " " + js.FormatNumber(float64(i))})
+	}
+	messages = append(messages, ChatMessage{"user", "How many visitors?"})
+	answer := web.NewResponse(200, []byte(js.Stringify(js.NewObject("stop_reason", "end_turn", "content", []any{js.NewObject("type", "text", "text", "Some.")}))))
+	fetcher := &recorder{queue: []any{answer}}
+	var log []any
+	if _, err := Chat(context.Background(), fetcher, Settings{Provider: "anthropic", Model: "m", Key: "k"}, messages, testContext, fakeAPI(t, &log), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fetcher.requests) != 1 {
+		t.Fatalf("%d requests", len(fetcher.requests))
+	}
+	body, err := js.Parse(string(fetcher.requests[0].body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentMessages := js.Arr(js.Dig(body, "messages"))
+	total := 0
+	for _, m := range sentMessages {
+		total += js.Length16(js.Str(js.Dig(m, "content")))
+	}
+	if total > 24_000 {
+		t.Errorf("%d characters sent", total)
+	}
+	if role := js.Str(js.Dig(sentMessages[0], "role")); role != "user" {
+		t.Errorf("starts with %s, not a question", role)
+	}
+	if last := js.Str(js.Dig(sentMessages[len(sentMessages)-1], "content")); !strings.Contains(last, "How many visitors?") {
+		t.Errorf("the question is gone: %q", last)
+	}
+}

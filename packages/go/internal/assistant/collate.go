@@ -74,6 +74,10 @@ func elements(text string) []element {
 	return out
 }
 
+// LocaleCompare is a.localeCompare(b) as Node has it, for the sort of names that must read as the dashboard's
+// do; see localeCompare.
+func LocaleCompare(a, b string) int { return localeCompare(a, b) }
+
 // localeCompare is a.localeCompare(b) as Node has it, with ICU's root
 // collation: letters before their marks before their case, level by level,
 // so "e" < "é" < "f" and "ab" < "aB" < "Ab". It is exact for ASCII and for

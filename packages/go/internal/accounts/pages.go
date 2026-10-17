@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"runlight.sh/go/internal/assets"
+	"runlight.sh/go/internal/js"
+	"runlight.sh/go/internal/messages"
 )
 
 var escaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
@@ -58,8 +60,8 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
 .eye:hover, .eye[aria-pressed="true"] { color: var(--ink); }
 .eye svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }`
 
-// AuthJS applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D).
-const AuthJS = `(() => {
+// authJSTemplate is the script with markers where its words go.
+const authJSTemplate = `(() => {
   const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
   function strength(password, avoid = []) {
     if (password.length < 10) return 0;
@@ -101,7 +103,7 @@ const AuthJS = `(() => {
     const button = document.querySelector(".theme");
     if (!button) return;
     for (const icon of button.querySelectorAll("svg")) icon.classList.toggle("on", icon.dataset.choice === c);
-    button.title = c === "system" ? "Theme: device setting" : "Theme: " + c;
+    button.title = c === "system" ? @@THEME_SYSTEM@@ : @@THEME@@;
   };
   const set = (c) => { try { localStorage.setItem(KEY, c); } catch {} show(); };
   show();
@@ -120,8 +122,8 @@ const AuthJS = `(() => {
       const set = (shown) => {
         input.type = shown ? "text" : "password";
         eye.setAttribute("aria-pressed", String(shown));
-        eye.setAttribute("aria-label", shown ? "Hide password" : "Show password");
-        eye.title = shown ? "Hide password" : "Show password";
+        eye.setAttribute("aria-label", shown ? @@HIDE@@ : @@SHOW@@);
+        eye.title = shown ? @@HIDE@@ : @@SHOW@@;
         eye.innerHTML = shown ? SHUT : EYE;
       };
       set(false);
@@ -143,7 +145,7 @@ const AuthJS = `(() => {
         const score = strength(password.value, [address, address.split("@")[0]]);
         meter.hidden = !password.value;
         meter.dataset.score = String(score);
-        meter.querySelector(".strength-label").textContent = ["Too short", "Weak", "Fair", "Good", "Strong"][score];
+        meter.querySelector(".strength-label").textContent = [@@STRENGTH@@][score];
         meter.querySelectorAll(".strength-bar span").forEach((bar, i) => bar.classList.toggle("on", score > i));
       };
       password.addEventListener("input", update);
@@ -160,11 +162,42 @@ const AuthJS = `(() => {
   });
 })();`
 
-const themeButton = `<button type="button" class="theme" aria-label="Switch theme"><svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg></button>`
+// AuthJSFor applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D),
+// with its words in a language the dashboard speaks. English is served as auth.js, the others as auth.js?lang=fr and
+// so on.
+func AuthJSFor(lang string) string {
+	tr := messages.New(lang)
+	q := func(key string) string { return js.Stringify(tr.T(key, nil)) }
+	theme := `"Theme: " + c`
+	if tr.Lang != "en" {
+		theme = `c === "dark" ? ` + q("auth.themeDark") + ` : ` + q("auth.themeLight")
+	}
+	strength := make([]string, 5)
+	for n := range strength {
+		strength[n] = q("account.strength" + string(rune('0'+n)))
+	}
+	return strings.NewReplacer(
+		"@@THEME_SYSTEM@@", q("auth.themeSystem"),
+		"@@THEME@@", theme,
+		"@@HIDE@@", q("auth.hidePassword"),
+		"@@SHOW@@", q("auth.showPassword"),
+		"@@STRENGTH@@", strings.Join(strength, ", "),
+	).Replace(authJSTemplate)
+}
 
-func page(base, title, body string) string {
+// AuthJS is the script in English.
+var AuthJS = AuthJSFor("en")
+
+const themeIcons = `<svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg>`
+
+func page(base, lang, title, body string) string {
+	tr := messages.New(lang)
+	script := ""
+	if tr.Lang != "en" {
+		script = "?lang=" + tr.Lang
+	}
 	return `<!doctype html>
-<html lang="en">
+<html lang="` + tr.Lang + `">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -172,14 +205,14 @@ func page(base, title, body string) string {
 <title>` + esc(title) + ` | Runlight</title>
 <link rel="icon" href="` + assets.Build.Icon + `">
 <link rel="stylesheet" href="` + esc(base) + `/auth.css">
-<script src="` + esc(base) + `/auth.js"></script>
+<script src="` + esc(base) + `/auth.js` + script + `"></script>
 </head>
 <body>
 <main>
 <p class="brand">` + mark + `Runlight</p>
 ` + body + `
 </main>
-` + themeButton + `
+<button type="button" class="theme" aria-label="` + esc(tr.T("auth.switchTheme", nil)) + `">` + themeIcons + `</button>
 </body>
 </html>
 `
@@ -201,22 +234,25 @@ type LoginOptions struct {
 	Forgot string
 }
 
-// LoginPage is the sign-in page.
-func LoginPage(base string, opts LoginOptions) string {
+// LoginPage is the sign-in page, in a language the dashboard speaks.
+func LoginPage(base string, opts LoginOptions, lang string) string {
+	tr := messages.New(lang)
 	next := base + "/"
 	if opts.Next != nil {
 		next = *opts.Next
 	}
-	return page(base, "Sign in", `<h1>Sign in</h1>
-<p>Sign in to see your sites.</p>
+	h := func(key string) string { return tr.HTML(key, nil) }
+	link := `<a href="` + esc(opts.Forgot) + `" target="_blank" rel="noopener">` + h("auth.forgotLink") + `</a>`
+	return page(base, lang, tr.T("auth.signIn", nil), `<h1>`+h("auth.signIn")+`</h1>
+<p>`+h("auth.signInIntro")+`</p>
 `+errorLine(opts.Error)+`
 <form method="post" action="`+esc(base)+`/login">
 <input type="hidden" name="next" value="`+esc(next)+`">
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="`+esc(opts.Email)+`"></label>
-<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
+<label>`+h("auth.email")+`<input type="email" name="email" autocomplete="username" required autofocus value="`+esc(opts.Email)+`"></label>
+<label>`+h("auth.password")+`<input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">`+h("auth.signIn")+`</button>
 </form>
-<p class="hint">If you have forgotten your password, <a href="`+esc(opts.Forgot)+`" target="_blank" rel="noopener">the docs say how to set a new one</a>.</p>`)
+<p class="hint">`+tr.HTML("auth.forgot", map[string]string{"link": link})+`</p>`)
 }
 
 // CodeOptions is what the code step shows.
@@ -227,34 +263,37 @@ type CodeOptions struct {
 }
 
 // CodePage is the second step of signing in, for an account with two-factor on.
-func CodePage(base string, opts CodeOptions) string {
-	return page(base, "Enter your code", `<h1>Enter your code</h1>
-<p>Open your authenticator app and enter the six-digit code for Runlight.</p>
+func CodePage(base string, opts CodeOptions, lang string) string {
+	tr := messages.New(lang)
+	h := func(key string) string { return tr.HTML(key, nil) }
+	return page(base, lang, tr.T("auth.codeTitle", nil), `<h1>`+h("auth.codeTitle")+`</h1>
+<p>`+h("auth.codeIntro")+`</p>
 `+errorLine(opts.Error)+`
 <form method="post" action="`+esc(base)+`/login/code">
 <input type="hidden" name="pending" value="`+esc(opts.Pending)+`">
 <input type="hidden" name="next" value="`+esc(opts.Next)+`">
-<label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
-<button type="submit">Sign in</button>
+<label>`+h("auth.code")+`<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
+<button type="submit">`+h("auth.signIn")+`</button>
 </form>
-<p class="hint">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>`)
+<p class="hint">`+h("auth.codeHint")+`</p>`)
 }
 
-// RoleText is what someone invited with a role can do, after "as".
-func RoleText(role string, sites ...string) string {
-	if len(sites) > 0 && sites[0] != "" {
+// RoleText is what someone invited with a role can do, after "as"; site is "" for every site.
+func RoleText(role, site, lang string) string {
+	tr := messages.New(lang)
+	if site != "" {
 		if role == "viewer" {
-			return "a viewer, who can read the stats for " + sites[0] + " only"
+			return tr.T("auth.roleViewerSite", map[string]string{"site": site})
 		}
-		return "a member, who can change the settings of " + sites[0] + " only"
+		return tr.T("auth.roleMemberSite", map[string]string{"site": site})
 	}
-	if role == "viewer" {
-		return "a viewer, who can read every site's stats"
+	switch role {
+	case "viewer":
+		return tr.T("auth.roleViewer", nil)
+	case "member":
+		return tr.T("auth.roleMember", nil)
 	}
-	if role == "member" {
-		return "a member, who can change the settings of every site"
-	}
-	return "an admin, who can change everything and manage people"
+	return tr.T("auth.roleAdmin", nil)
 }
 
 // InviteOptions is what the invite page shows.
@@ -268,24 +307,28 @@ type InviteOptions struct {
 }
 
 // InvitePage is where an invited person chooses a password and joins.
-func InvitePage(base string, opts InviteOptions) string {
-	return page(base, "Join Runlight", `<h1>Join Runlight</h1>
-<p>You were invited to `+esc(opts.Host)+` as `+esc(RoleText(opts.Role, opts.Site))+`. Choose a password to finish.</p>
+func InvitePage(base string, opts InviteOptions, lang string) string {
+	tr := messages.New(lang)
+	h := func(key string) string { return tr.HTML(key, nil) }
+	intro := tr.HTML("auth.joinIntro", map[string]string{"host": esc(opts.Host), "role": esc(RoleText(opts.Role, opts.Site, lang))})
+	return page(base, lang, tr.T("auth.joinTitle", nil), `<h1>`+h("auth.joinTitle")+`</h1>
+<p>`+intro+`</p>
 `+errorLine(opts.Error)+`
 <form method="post" action="`+esc(base)+`/invite">
 <input type="hidden" name="code" value="`+esc(opts.Code)+`">
-<label>Email<input type="email" value="`+esc(opts.Email)+`" disabled></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Join</button>
+<label>`+h("auth.email")+`<input type="email" value="`+esc(opts.Email)+`" disabled></label>
+<label>`+h("auth.password")+`<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
+<label>`+h("auth.passwordAgain")+`<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">`+h("auth.join")+`</button>
 </form>
-<p class="hint">Use at least ten characters.</p>`)
+<p class="hint">`+h("auth.passwordHint")+`</p>`)
 }
 
 // InviteGonePage is for an invite link that has expired or was used.
-func InviteGonePage(base string) string {
-	return page(base, "This invite no longer works", `<h1>This invite no longer works</h1>
-<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>`)
+func InviteGonePage(base, lang string) string {
+	tr := messages.New(lang)
+	return page(base, lang, tr.T("auth.inviteGoneTitle", nil), `<h1>`+tr.HTML("auth.inviteGoneTitle", nil)+`</h1>
+<p>`+tr.HTML("auth.inviteGone", nil)+`</p>`)
 }
 
 // SetupOptions is what the setup page shows. AskCode asks for RUNLIGHT_TOKEN in a field instead of carrying Code hidden.
@@ -297,32 +340,36 @@ type SetupOptions struct {
 }
 
 // SetupPage is where the first account is made.
-func SetupPage(base string, opts SetupOptions) string {
+func SetupPage(base string, opts SetupOptions, lang string) string {
+	tr := messages.New(lang)
+	h := func(key string) string { return tr.HTML(key, nil) }
 	code := `<input type="hidden" name="code" value="` + esc(opts.Code) + `">`
 	if opts.AskCode {
-		code = `<label>Your RUNLIGHT_TOKEN<input type="password" name="code" autocomplete="off" required value="` + esc(opts.Code) + `"></label>`
+		code = `<label>` + h("auth.setupToken") + `<input type="password" name="code" autocomplete="off" required value="` + esc(opts.Code) + `"></label>`
 	}
-	return page(base, "Create your account", `<h1>Create your account</h1>
-<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>
+	return page(base, lang, tr.T("auth.setupTitle", nil), `<h1>`+h("auth.setupTitle")+`</h1>
+<p>`+h("auth.setupIntro")+`</p>
 `+errorLine(opts.Error)+`
 <form method="post" action="`+esc(base)+`/setup">
 `+code+`
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="`+esc(opts.Email)+`"></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Create account</button>
+<label>`+h("auth.email")+`<input type="email" name="email" autocomplete="username" required autofocus value="`+esc(opts.Email)+`"></label>
+<label>`+h("auth.password")+`<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+<label>`+h("auth.passwordAgain")+`<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">`+h("auth.createAccount")+`</button>
 </form>
-<p class="hint">Use at least ten characters.</p>`)
+<p class="hint">`+h("auth.passwordHint")+`</p>`)
 }
 
 // SetupLockedPage is for a server with no account yet, which prints a setup link with a one-time code in its log.
-func SetupLockedPage(base string) string {
-	return page(base, "Finish setting up", `<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Open the setup link printed in the server's log when it started, which carries a one-time code, to create the first account.</p>`)
+func SetupLockedPage(base, lang string) string {
+	tr := messages.New(lang)
+	return page(base, lang, tr.T("auth.finishTitle", nil), `<h1>`+tr.HTML("auth.finishTitle", nil)+`</h1>
+<p>`+tr.HTML("auth.setupLocked", nil)+`</p>`)
 }
 
 // SetupNeedsTokenPage is for an app with accounts on but nothing to prove the first account with.
-func SetupNeedsTokenPage(base string) string {
-	return page(base, "Finish setting up", `<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>`)
+func SetupNeedsTokenPage(base, lang string) string {
+	tr := messages.New(lang)
+	return page(base, lang, tr.T("auth.finishTitle", nil), `<h1>`+tr.HTML("auth.finishTitle", nil)+`</h1>
+<p>`+tr.HTML("auth.setupNeedsToken", nil)+`</p>`)
 }

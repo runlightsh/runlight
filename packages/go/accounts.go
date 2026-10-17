@@ -452,21 +452,9 @@ func (a *AccountStore) PendingFor(user User, now int64) (string, error) {
 	return a.ticket("pending", user, now+5*60_000)
 }
 
-// DecoyFor is a ticket that looks and acts like PendingFor's, except that no
-// code ever passes with it. A wrong password gets one once an account with
-// two-factor has had too many, so the answer never tells a right password.
-func (a *AccountStore) DecoyFor(user User, now int64) (string, error) {
-	return a.ticket("decoy", user, now+5*60_000)
-}
-
-// FromPending is the account a code-step ticket names, and whether a right code may sign in with it.
-func (a *AccountStore) FromPending(ctx context.Context, value string, now int64) (*User, bool, error) {
-	user, err := a.fromTicket(ctx, "pending", value, now)
-	if err != nil || user != nil {
-		return user, user != nil, err
-	}
-	decoy, err := a.fromTicket(ctx, "decoy", value, now)
-	return decoy, false, err
+// FromPending is the account a code-step ticket names; nil when it names none.
+func (a *AccountStore) FromPending(ctx context.Context, value string, now int64) (*User, error) {
+	return a.fromTicket(ctx, "pending", value, now)
 }
 
 // LinkFor is a ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it.
@@ -686,6 +674,32 @@ func (a *AccountStore) Remove(ctx context.Context, id string) error {
 	})
 }
 
+// ForgetSite removes the accounts and invitations kept to a site that was deleted. A site made later is often
+// given the same id, from its domain, and they must not find their way into it.
+func (a *AccountStore) ForgetSite(ctx context.Context, site string) error {
+	if err := a.init(ctx); err != nil {
+		return err
+	}
+	return a.turn(ctx, func() error {
+		users, err := a.List(ctx)
+		if err != nil {
+			return err
+		}
+		for _, user := range users {
+			if user.Site != site {
+				continue
+			}
+			if err := a.store.db.Run(ctx, `DELETE FROM rl_users WHERE id = ?`, user.ID); err != nil {
+				return err
+			}
+			if err := a.store.SetSetting(ctx, "login-link-used:"+user.ID, nil); err != nil {
+				return err
+			}
+		}
+		return a.store.db.Run(ctx, `DELETE FROM rl_invites WHERE site = ?`, site)
+	})
+}
+
 // SetPassword makes an account, or sets a new password on an existing one.
 // A new account is the owner when it is the first, and otherwise an admin
 // unless a role is given ("" for none), since a server has one owner.
@@ -898,6 +912,24 @@ func (a *AccountStore) SignIn(ctx context.Context, email, password string) (*Use
 	right, err := slot(ctx, func() bool { return accounts.CheckPassword(password, user.Hash) })
 	if err != nil || !right {
 		return nil, err
+	}
+	if !accounts.WeakerThanNow(user.Hash) {
+		return user, nil
+	}
+	// A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+	var hash string
+	var hashErr error
+	if _, err := slot(ctx, func() bool { hash, hashErr = accounts.HashPassword(password); return hashErr == nil }); err != nil {
+		return nil, err
+	}
+	if hashErr != nil {
+		return nil, hashErr
+	}
+	if err := a.store.db.Run(ctx, `UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?`, hash, user.ID, user.Hash); err != nil {
+		return nil, err
+	}
+	if current, err := a.ByID(ctx, user.ID); err != nil || current != nil {
+		return current, err
 	}
 	return user, nil
 }

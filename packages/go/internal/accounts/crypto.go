@@ -18,6 +18,7 @@ import (
 	"hash"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"runlight.sh/go/internal/js"
@@ -126,12 +127,49 @@ func sameBytes(a, b []byte) bool {
 	return diff == 0
 }
 
-// The scrypt cost Node's standalone server has always hashed with.
-const (
-	scryptN = 16384
-	scryptR = 8
-	scryptP = 1
-)
+// scryptCost is the work one scrypt hash takes.
+type scryptCost struct{ n, r, p int }
+
+// What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check, so several sign-ins at once stay within a
+// small server's memory. Each hash records its own cost, so this can rise again.
+var scryptWritten = atomic.Pointer[scryptCost]{}
+
+func init() { scryptWritten.Store(&scryptCost{n: 32768, r: 8, p: 3}) }
+
+func scryptNow() scryptCost { return *scryptWritten.Load() }
+
+// SetCostForTests changes what a new hash costs, so a test suite that signs in hundreds of times does not spend
+// its time hashing (a check at the real cost takes a second under the race detector). It returns what puts the
+// cost back. Only for tests.
+func SetCostForTests(n, r, p int) (restore func()) {
+	before := scryptWritten.Swap(&scryptCost{n: n, r: r, p: p})
+	return func() { scryptWritten.Store(before) }
+}
+
+// What a hash written as scrypt$salt$key costs: the setting before hashes recorded theirs.
+var scryptBefore = scryptCost{n: 16384, r: 8, p: 1}
+
+// costOf is a scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key).
+// False for one out of bounds: N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a
+// huge amount of memory or time.
+func costOf(parts []string) (scryptCost, bool) {
+	if len(parts) == 3 {
+		return scryptBefore, true
+	}
+	var cost [3]int
+	for i, part := range parts[1:4] {
+		n := js.Number(part)
+		if !js.IsInteger(n) || n < 1 || n > 1<<20 {
+			return scryptCost{}, false
+		}
+		cost[i] = int(n)
+	}
+	n, r, p := cost[0], cost[1], cost[2]
+	if n < 2 || n&(n-1) != 0 || r > 32 || p > 16 {
+		return scryptCost{}, false
+	}
+	return scryptCost{n, r, p}, true
+}
 
 // PBKDF2Rounds is as many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on.
 const PBKDF2Rounds = 100_000
@@ -140,28 +178,33 @@ const PBKDF2Rounds = 100_000
 // easily, or anything.
 const MinKeyBytes = 16
 
-// HashPassword is a password hash, in the scrypt form the standalone server has always written. It says which
-// it is, so it can be checked later.
+// HashPassword is a password hash, in the scrypt form the standalone server writes: scrypt$N$r$p$salt$key. It
+// says which it is, and at what cost, so it can be checked later.
 func HashPassword(password string) (string, error) {
 	salt := RandomBytes(16)
-	key, err := Scrypt(password, salt, scryptN, scryptR, scryptP, 32)
+	now := scryptNow()
+	key, err := Scrypt(password, salt, now.n, now.r, now.p, 32)
 	if err != nil {
 		return "", err
 	}
-	return "scrypt$" + Base64url(salt) + "$" + Base64url(key), nil
+	return "scrypt$" + strconv.Itoa(now.n) + "$" + strconv.Itoa(now.r) + "$" + strconv.Itoa(now.p) + "$" + Base64url(salt) + "$" + Base64url(key), nil
 }
 
 // CheckPassword is whether a password matches a hash, scrypt or PBKDF2. A stored hash whose salt or key is not
 // base64url matches nothing, rather than failing the sign-in.
 func CheckPassword(password, stored string) bool {
 	parts := strings.Split(stored, "$")
-	if parts[0] == "scrypt" && len(parts) == 3 {
-		expected, err := FromBase64url(parts[2])
-		salt, saltErr := FromBase64url(parts[1])
+	if parts[0] == "scrypt" && (len(parts) == 3 || len(parts) == 6) {
+		cost, ok := costOf(parts)
+		if !ok {
+			return false
+		}
+		expected, err := FromBase64url(parts[len(parts)-1])
+		salt, saltErr := FromBase64url(parts[len(parts)-2])
 		if err != nil || saltErr != nil || len(expected) < MinKeyBytes {
 			return false
 		}
-		key, err := Scrypt(password, salt, scryptN, scryptR, scryptP, len(expected))
+		key, err := Scrypt(password, salt, cost.n, cost.r, cost.p, len(expected))
 		return err == nil && sameBytes(key, expected)
 	}
 	if parts[0] == "pbkdf2" && len(parts) == 4 {
@@ -178,6 +221,21 @@ func CheckPassword(password, stored string) bool {
 		return err == nil && sameBytes(key, expected)
 	}
 	return false
+}
+
+// WeakerThanNow is whether a stored hash costs less than a new one would here, so the password it matched is
+// hashed again: an scrypt hash with a lower cost, or a PBKDF2 one.
+func WeakerThanNow(stored string) bool {
+	parts := strings.Split(stored, "$")
+	if parts[0] == "pbkdf2" {
+		return true
+	}
+	if parts[0] != "scrypt" || (len(parts) != 3 && len(parts) != 6) {
+		return false
+	}
+	cost, ok := costOf(parts)
+	now := scryptNow()
+	return ok && cost.n*cost.r*cost.p < now.n*now.r*now.p
 }
 
 func sealKey(secret string) []byte {

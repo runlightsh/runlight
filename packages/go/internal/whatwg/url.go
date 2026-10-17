@@ -132,7 +132,14 @@ func (u *URL) parse(input, base string, hasBase bool) error {
 		u.Pathname, u.Search = cut(rest, '?')
 		return nil
 	}
-	rest = strings.ReplaceAll(rest, "\\", "/")
+	// A special URL with the base's own scheme is read against it unless two slashes follow: https:/x and
+	// https:x are paths on the base's host, as a browser reads them, while http:x on an https base names the host x.
+	if hasBase {
+		if b, err := Parse(base); err == nil && b.Protocol == u.Protocol {
+			return u.resolve(rest, b)
+		}
+	}
+	rest = slashes(rest)
 	rest = strings.TrimLeft(rest, "/")
 	end := strings.IndexAny(rest, "/?#")
 	if end < 0 {
@@ -145,10 +152,20 @@ func (u *URL) parse(input, base string, hasBase bool) error {
 	return nil
 }
 
+// slashes reads the backslashes before a query or fragment as the slashes a special URL takes them for; after
+// one they are text.
+func slashes(s string) string {
+	end := strings.IndexAny(s, "?#")
+	if end < 0 {
+		end = len(s)
+	}
+	return strings.ReplaceAll(s[:end], "\\", "/") + s[end:]
+}
+
 func (u *URL) resolve(input string, base *URL) error {
 	u.Protocol = base.Protocol
 	if base.Special() {
-		input = strings.ReplaceAll(input, "\\", "/")
+		input = slashes(input)
 	}
 	if strings.HasPrefix(input, "//") {
 		// A special scheme skips any further slashes before the host: ///x is the host x.

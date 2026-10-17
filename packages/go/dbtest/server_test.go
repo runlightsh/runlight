@@ -3,7 +3,9 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"io"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -215,5 +217,29 @@ func TestServerLearnsNamesOnlyFromOwners(t *testing.T) {
 	s.do("GET", "/api/sites", "", "", "cookie", as(owner))
 	if n := names(); n != `["stats.example.com"]` {
 		t.Fatal(n)
+	}
+}
+
+// Without a Logf, what goes wrong where nothing can answer for it still reaches standard error, as the core logs it.
+func TestServerLogsInternalErrorsToStandardErrorWithoutALogger(t *testing.T) {
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = write
+	s := makeServer(t, "script-token", "")
+	os.Stderr = saved
+	if err := s.server.Runlight.Store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A short link's address reads the link domains, which a closed database cannot give.
+	if r := s.do("GET", "/sale", "", ""); r.Status != 500 {
+		t.Fatalf("answered %d", r.Status)
+	}
+	write.Close()
+	logged, _ := io.ReadAll(read)
+	if !strings.HasPrefix(string(logged), "Runlight: ") {
+		t.Errorf("standard error got %q", logged)
 	}
 }
