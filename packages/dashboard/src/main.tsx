@@ -249,12 +249,15 @@ function App() {
 
   // Show loading placeholders when a refresh takes longer than 300 ms.
   const [slow, setSlow] = useState(false);
+  // The view's numbers failed to load: the cards and chart stand empty under the error, rather than loading.
+  const [failed, setFailed] = useState(false);
   // On the standalone server the sites come first, so a server with none yet asks for nothing that would fail.
   const noSites = install.managed && !sites?.length;
   useEffect(() => {
     if (noSites) return;
     let live = true;
     const timer = setTimeout(() => live && setSlow(true), 300);
+    setFailed(false);
     Promise.all([api.stats(view), api.series(view)])
       .then(([s, series]) => {
         if (!live) return;
@@ -269,6 +272,7 @@ function App() {
         setStats(null);
         setPoints([]);
         setPreviousPoints(undefined);
+        setFailed(true);
         fail(e);
       })
       .finally(() => {
@@ -446,7 +450,7 @@ function App() {
             />
           </div>
         </div>
-        {waiting ? null : stats && !slow ? <Headline view={view} stats={stats.stats} previous={stats.previous} compare={stats.compare} /> : <p class="headline" role="status" aria-label={t("common.loading")}><span class="headline-placeholder" aria-hidden="true" /></p>}
+        {waiting || failed ? null : stats && !slow ? <Headline view={view} stats={stats.stats} previous={stats.previous} compare={stats.compare} /> : <p class="headline" role="status" aria-label={t("common.loading")}><span class="headline-placeholder" aria-hidden="true" /></p>}
         {view.filters.length ? (
           <div class="filters">
             {view.filters.map((f) => (
@@ -588,7 +592,7 @@ function App() {
                   <span class={`swatch s${m.slot}`} />
                   {metricLabel(m)}
                 </span>
-                <span class="metric-value">{!stats || slow ? <span class="metric-placeholder" aria-label={t("common.loading")} /> : value === undefined ? " " : m.format(value)}</span>
+                <span class="metric-value">{failed ? "\u00a0" : !stats || slow ? <span class="metric-placeholder" aria-label={t("common.loading")} /> : value === undefined ? " " : m.format(value)}</span>
                 <span class="metric-foot">
                   {stats && !slow ? <Delta now={stats.stats[m.key]} before={stats.previous?.[m.key]} lowerIsBetter={m.lowerIsBetter} compared={Boolean(stats.previous?.visits)} /> : null}
                 </span>
@@ -604,6 +608,8 @@ function App() {
             interval={stats.range.interval}
             timezone={stats.range.timezone}
           />
+        ) : failed ? (
+          <div class="chart" />
         ) : (
           <div class="chart chart-loading"><Loading chart /></div>
         )}
