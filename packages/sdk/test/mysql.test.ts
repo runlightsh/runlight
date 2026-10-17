@@ -105,7 +105,7 @@ for (const kind of STORES) {
     assert.deepEqual(read.rows.map((r: { value: string }) => r.value), ["v".repeat(500)]);
     // A day of them adds up the same way.
     t.advance(26 * HOUR);
-    assert.ok((await t.rl.buildRollups()) >= 1);
+    if (t.rl.store.keepsRollups) assert.ok((await t.rl.buildRollups()) >= 1);
     assert.ok(((await t.get("/api/breakdown?period=7d&dimension=page")).rows as Array<{ value: string }>).some((r) => r.value === path.slice(0, 1000)));
   });
 

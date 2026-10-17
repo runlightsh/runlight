@@ -63,6 +63,16 @@
         "default": "./dist/mysql.cjs"
       }
     },
+    "./clickhouse": {
+      "import": {
+        "types": "./dist/clickhouse.d.ts",
+        "default": "./dist/clickhouse.js"
+      },
+      "require": {
+        "types": "./dist/clickhouse.d.cts",
+        "default": "./dist/clickhouse.cjs"
+      }
+    },
     "./node": {
       "import": {
         "types": "./dist/node.d.ts",

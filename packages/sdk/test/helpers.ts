@@ -1,24 +1,26 @@
 import pg from "pg";
 import mysql2 from "mysql2/promise";
 import { runlight, type RunlightOptions } from "../src/index.js";
-import type { SqlStore } from "../src/store.js";
+import type { Db, SqlStore } from "../src/store.js";
 import { postgres } from "../src/stores/postgres.js";
 import { mysql } from "../src/stores/mysql.js";
 import { sqlite } from "../src/stores/sqlite.js";
 import { libsql } from "../src/stores/libsql.js";
 import { d1 } from "../src/stores/d1.js";
+import { ClickHouseStore, clickhouse } from "../src/stores/clickhouse.js";
 import { createClient } from "@libsql/client";
 import Database from "better-sqlite3";
 
-export type StoreKind = "sqlite" | "postgres" | "libsql" | "d1" | "mysql" | "sqlite+prefix" | "postgres+prefix" | "mysql+prefix";
+export type StoreKind = "sqlite" | "postgres" | "libsql" | "d1" | "mysql" | "clickhouse" | "sqlite+prefix" | "postgres+prefix" | "mysql+prefix";
 
 /** The table prefix the "+prefix" stores use in place of rl_, as WordPress would give one. */
 export const TEST_PREFIX = "wp_rl_";
 
 /**
  * SQLite, libSQL, and D1 always; Postgres too when RUNLIGHT_TEST_PG holds a connection string, and MySQL or
- * MariaDB when RUNLIGHT_TEST_MYSQL holds a connection URL. Each of SQLite, Postgres, and MySQL also runs once
- * more with its tables under another prefix.
+ * MariaDB when RUNLIGHT_TEST_MYSQL holds a connection URL, and ClickHouse (with SQLite for the rest) when
+ * RUNLIGHT_TEST_CLICKHOUSE holds its URL. Each of SQLite, Postgres, and MySQL also runs once more with its
+ * tables under another prefix.
  */
 export const STORES: StoreKind[] = [
   "sqlite",
@@ -27,7 +29,38 @@ export const STORES: StoreKind[] = [
   "sqlite+prefix",
   ...(process.env.RUNLIGHT_TEST_PG ? (["postgres", "postgres+prefix"] as const) : []),
   ...(process.env.RUNLIGHT_TEST_MYSQL ? (["mysql", "mysql+prefix"] as const) : []),
+  ...(process.env.RUNLIGHT_TEST_CLICKHOUSE ? (["clickhouse"] as const) : []),
 ];
+
+/** A visit's attributes, all blank, for a test that opens one through the store. */
+export const BLANK_VISIT = {
+  hostname: "example.com", referrerHost: "", referrerPath: "", source: "", channel: "Direct", utmSource: "", utmMedium: "", utmCampaign: "", utmTerm: "",
+  utmContent: "", country: "", region: "", city: "", browser: "", browserVersion: "", os: "", osVersion: "", device: "", screen: "", language: "",
+};
+
+/** The stores that add up each day into rollups: all but ClickHouse, which reads the visits themselves. */
+export const ROLLUP_STORES = STORES.filter((kind) => kind !== "clickhouse");
+
+/** The database a store keeps its visits and events in, for a test that reads them as they are stored. */
+export function visitsDb(store: SqlStore): Db {
+  return store instanceof ClickHouseStore ? store.clickhouse : store.db;
+}
+
+/** A store with its visits in a new ClickHouse database of its own, dropped when it closes, and the rest in SQLite. */
+function freshClickhouse(): SqlStore {
+  const base = new URL(process.env.RUNLIGHT_TEST_CLICKHOUSE!);
+  base.pathname = `/rl_test_${Math.random().toString(36).slice(2, 10)}`;
+  const store = clickhouse({ url: base.href, store: sqlite({ path: ":memory:" }) });
+  const close = store.close.bind(store);
+  let closed: Promise<void> | null = null;
+  store.close = () =>
+    (closed ??= (async () => {
+      await store.clickhouse.dropDatabase();
+      await close();
+    })());
+  cleanups.push(() => store.close());
+  return store;
+}
 
 /** A new, empty MySQL database of its own, dropped by cleanup(), and a URL that reaches it. */
 export function freshMysqlDatabase(): { url: string; ready: Promise<void> } {
@@ -87,6 +120,7 @@ export async function cleanup(): Promise<void> {
 /** A fresh store: an in-memory SQLite, or a Postgres schema or MySQL database of its own. */
 export function freshStore(kind: StoreKind): SqlStore {
   if (kind === "sqlite+prefix") return sqlite({ path: ":memory:", prefix: TEST_PREFIX });
+  if (kind === "clickhouse") return freshClickhouse();
   if (kind === "mysql+prefix" || kind === "postgres+prefix") return freshStoreOf(kind === "mysql+prefix" ? "mysql" : "postgres", TEST_PREFIX);
   return freshStoreOf(kind);
 }

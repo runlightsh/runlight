@@ -13,10 +13,11 @@ import { recordedPath } from "./sources.js";
  * The little a store needs from a database driver. SQL uses `?` placeholders and
  * "double quotes" around a name that is a keyword somewhere; the Postgres driver
  * numbers the placeholders, and the MySQL driver fills them in and quotes names
- * its own way.
+ * its own way. ClickHouse holds only the visits and events, for a ClickHouseStore,
+ * and is only ever read through this; its driver types the placeholders.
  */
 export interface Db {
-  dialect: "sqlite" | "postgres" | "mysql";
+  dialect: "sqlite" | "postgres" | "mysql" | "clickhouse";
   all<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   run(sql: string, params?: unknown[]): Promise<void>;
   /** Runs an UPDATE or DELETE and says how many rows it matched. MySQL has no RETURNING, so its driver has this. */
@@ -408,7 +409,7 @@ export function prefixed(inner: Db, prefix: string): Db {
 const PIECE_MS = 86_400_000;
 
 /** Text cut to at most `max` characters, as a VARCHAR(max) holds it, never through the middle of one. */
-function clip(text: string, max: number): string {
+export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   return Array.from(text).slice(0, max).join("");
 }
@@ -571,20 +572,24 @@ function upsert(dialect: Db["dialect"], table: string, columns: string[], key: s
   return `${insert} ON CONFLICT (${key.join(", ")}) DO ${update.length ? `UPDATE SET ${update.map((c) => `${c} = excluded.${c}`).join(", ")}` : "NOTHING"}`;
 }
 
-/** Whole-number division, which MySQL's `/` is not. */
-const div = (dialect: Db["dialect"], a: string, b: number): string => (dialect === "mysql" ? `(${a} DIV ${b})` : `(${a} / ${b})`);
+/** Whole-number division, which MySQL's and ClickHouse's `/` is not. */
+const div = (dialect: Db["dialect"], a: string, b: number): string => (dialect === "mysql" ? `(${a} DIV ${b})` : dialect === "clickhouse" ? `intDiv(${a}, ${b})` : `(${a} / ${b})`);
 
 /** A value as text: MySQL casts to CHAR, and has no TEXT type to cast to. */
 const asText = (dialect: Db["dialect"], value: string): string => `CAST(${value} AS ${dialect === "mysql" ? "CHAR" : "TEXT"})`;
 
 /**
- * A table of buckets (i, bs, be) for a WITH clause. Postgres is told the first row's types; MySQL
- * and MariaDB write a table of values differently from each other, so they get a UNION of rows.
+ * A table of buckets (i, bs, be) as a WITH clause's `b`. Postgres is told the first row's types; MySQL
+ * and MariaDB write a table of values differently from each other, and ClickHouse has no VALUES in
+ * FROM, so they get a UNION of rows, which names its own columns.
  */
 function bucketTable(dialect: Db["dialect"], buckets: Bucket[]): string {
-  if (dialect === "mysql") return buckets.map((_, i) => (i === 0 ? "SELECT ? AS i, ? AS bs, ? AS be" : "SELECT ?, ?, ?")).join(" UNION ALL ");
+  if (dialect === "mysql" || dialect === "clickhouse") {
+    const union = buckets.map((_, i) => (i === 0 ? "SELECT ? AS i, ? AS bs, ? AS be" : "SELECT ?, ?, ?")).join(" UNION ALL ");
+    return dialect === "clickhouse" ? `b AS (${union})` : `b (i, bs, be) AS (${union})`;
+  }
   const cast = dialect === "postgres";
-  return `VALUES ${buckets.map((_, i) => (cast && i === 0 ? "(CAST(? AS INTEGER), CAST(? AS BIGINT), CAST(? AS BIGINT))" : "(?, ?, ?)")).join(", ")}`;
+  return `b (i, bs, be) AS (VALUES ${buckets.map((_, i) => (cast && i === 0 ? "(CAST(? AS INTEGER), CAST(? AS BIGINT), CAST(? AS BIGINT))" : "(?, ?, ?)")).join(", ")})`;
 }
 
 function linkRow(row: Record<string, unknown>): LinkRow {
@@ -606,6 +611,15 @@ const num = (value: unknown): number => {
 };
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+/**
+ * `col LIKE ?` with a backslash escaping % and _. ClickHouse escapes with a backslash already and has no
+ * ESCAPE clause.
+ */
+const like = (dialect: Db["dialect"], col: string): string => (dialect === "clickhouse" ? `${col} LIKE ?` : `${col} LIKE ? ESCAPE '\\'`);
+
+/** Text in lower case, any letter: ClickHouse's LOWER folds ASCII letters only, and lowerUTF8 the rest. */
+const lower = (dialect: Db["dialect"], col: string): string => (dialect === "clickhouse" ? `lowerUTF8(${col})` : `LOWER(${col})`);
 
 function column(dimension: Filter["dimension"]): string {
   return isSessionDimension(dimension) ? `s.${SESSION_DIMENSIONS[dimension]}` : `e.${EVENT_DIMENSIONS[dimension]}`;
@@ -645,13 +659,13 @@ function condition(filter: Filter, dialect: Db["dialect"], positive = false): { 
     // path is also tried in lower, upper, and title case, encoded each way.
     const title = filter.value.toLowerCase().replace(/(^|[\s\-/_.])(\p{L})/gu, (_, gap: string, letter: string) => gap + letter.toUpperCase());
     const forms = [...new Set([filter.value, filter.value.toLowerCase(), filter.value.toUpperCase(), title].map((f) => asRecorded(f, false)))];
-    const lower = dialect !== "sqlite";
-    const one = lower ? `LOWER(${col}) LIKE ? ESCAPE '\\'` : `${col} LIKE ? ESCAPE '\\'`;
-    return { sql: `(${forms.map(() => one).join(" OR ")})`, params: forms.map((f) => `%${escapeLike(lower ? f.toLowerCase() : f)}%`) };
+    const folds = dialect !== "sqlite";
+    const one = like(dialect, folds ? lower(dialect, col) : col);
+    return { sql: `(${forms.map(() => one).join(" OR ")})`, params: forms.map((f) => `%${escapeLike(folds ? f.toLowerCase() : f)}%`) };
   }
   // Postgres and MySQL lower case any letter, so both sides lowered find any mix. Their LIKE then
   // compares exactly: Postgres's always, MySQL's under Runlight's binary collation.
-  if (dialect !== "sqlite") return { sql: `LOWER(${col}) LIKE ? ESCAPE '\\'`, params: [`%${escapeLike(filter.value.toLowerCase())}%`] };
+  if (dialect !== "sqlite") return { sql: like(dialect, lower(dialect, col)), params: [`%${escapeLike(filter.value.toLowerCase())}%`] };
   // SQLite's LIKE and LOWER ignore case for ASCII letters only, so "über" would never find "Über". GLOB with
   // both cases of every letter finds any mix, Unicode included.
   return { sql: `${col} GLOB ?`, params: [anyCase(filter.value)] };
@@ -746,6 +760,8 @@ export class SqlStore {
   readonly db: Db;
   /** What the store's table and index names start with: `rl_` unless it was given another. */
   readonly prefix: string;
+  /** Whether upkeep adds up each day into rollups for reports to read. A ClickHouseStore keeps none. */
+  readonly keepsRollups: boolean = true;
 
   /**
    * `prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
@@ -1093,7 +1109,8 @@ export class SqlStore {
    * Null when no built day helps.
    */
   private async rollupPlan(query: Omit<Query, "from" | "to">, from: number, to: number): Promise<{ days: Array<{ day: string; start: number; end: number }>; rest: Array<[number, number]> } | null> {
-    if (query.filters.length) return null;
+    // ClickHouse reads the visits themselves faster than the others read their rollups, and keeps none.
+    if (query.filters.length || this.db.dialect === "clickhouse") return null;
     const rows = await this.db.all(`SELECT day, start_at, end_at FROM rl_rollup_days WHERE site = ? AND start_at >= ? AND end_at <= ? ORDER BY start_at`, [query.site, from, to]);
     if (!rows.length) return null;
     const days = rows.map((r) => ({ day: String(r.day), start: num(r.start_at), end: num(r.end_at) }));
@@ -1610,13 +1627,18 @@ export class SqlStore {
     const from = Math.max(query.from, num(first?.t));
     // MySQL takes no LIMIT in an IN list, but does in a table inside one.
     const visits = this.db.dialect === "mysql" ? `SELECT id FROM (${newest("s.id AS id", JOURNEY_VISITS)}) x` : newest("s.id", JOURNEY_VISITS);
+    // ClickHouse has no LAG, and its own leaves the first row NULL only for a column that may be NULL.
+    const lag =
+      this.db.dialect === "clickhouse"
+        ? "lagInFrame(toNullable(e.path)) OVER (PARTITION BY e.session ORDER BY e.ts, e.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+        : "LAG(e.path) OVER (PARTITION BY e.session ORDER BY e.ts, e.id)";
     const rows = await this.db.all(
       // The visits are read as an IN list, which every database probes from the events side, so the
       // plan does not depend on the planner's statistics. Refreshes (the same page twice in a row) are
       // dropped before counting, so they never use up the steps.
       `WITH raw AS (
          SELECT e.session AS session, e.path AS path, e.ts AS ts, e.id AS id,
-           LAG(e.path) OVER (PARTITION BY e.session ORDER BY e.ts, e.id) AS prev
+           ${lag} AS prev
          FROM rl_events e
          WHERE e.site = ? AND e.kind = 'pageview' AND e.ts >= ? AND e.ts < ? AND e.session IN (${visits})),
        v AS (
@@ -1839,8 +1861,8 @@ export class SqlStore {
     if (goal.kind === "page") {
       return goal.match.includes("*")
         ? this.db.dialect !== "sqlite"
-          ? // Postgres's LIKE heeds case, and so does MySQL's under Runlight's binary collation.
-            { sql: `e.kind = 'pageview' AND e.path LIKE ? ESCAPE '\\'`, params: [likePattern(goal.match)] }
+          ? // Postgres's LIKE heeds case, and so do ClickHouse's and MySQL's under Runlight's binary collation.
+            { sql: `e.kind = 'pageview' AND ${like(this.db.dialect, "e.path")}`, params: [likePattern(goal.match)] }
           : // SQLite's LIKE ignores case; GLOB does not, so every database agrees with the others and with exact matches.
             { sql: `e.kind = 'pageview' AND e.path GLOB ?`, params: [globPattern(goal.match)] }
         : { sql: `e.kind = 'pageview' AND e.path = ?`, params: [goal.match] };
@@ -1855,6 +1877,14 @@ export class SqlStore {
       return {
         sql: `(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)`,
         params: [prop, prop],
+      };
+    }
+    if (this.db.dialect === "clickhouse") {
+      // As Postgres's pattern: a JSON number, or text of digits with an optional sign and one decimal point.
+      return {
+        sql: `multiIf(JSONType(e.props, ?) IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(e.props, ?),
+          JSONType(e.props, ?) = 'String' AND match(JSONExtractString(e.props, ?), '^-?[0-9]+([.][0-9]+)?$'), toFloat64OrZero(JSONExtractString(e.props, ?)), 0)`,
+        params: new Array(5).fill(prop),
       };
     }
     const path = `$."${prop}"`;
@@ -1895,6 +1925,12 @@ export class SqlStore {
              WHERE ${where} GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30`,
             params,
           )
+        : this.db.dialect === "clickhouse"
+        ? await this.db.all(
+            `SELECT k AS "key", COUNT(*) AS events FROM ${v.from} ARRAY JOIN JSONExtractKeys(ifNull(e.props, '')) AS k
+             WHERE ${where} GROUP BY k ORDER BY events DESC, k LIMIT 30`,
+            params,
+          )
         : this.db.dialect === "postgres"
         ? await this.db.all(
             `SELECT k AS "key", COUNT(*) AS events FROM ${v.from} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k
@@ -1912,25 +1948,29 @@ export class SqlStore {
   /** The values one property of an event took, with how often and by how many visitors. */
   async eventPropValues(query: Query, event: string, key: string, limit: number): Promise<Array<{ value: string; events: number; visitors: number }>> {
     const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect);
+    // ClickHouse's value names the key three times: text as it is, anything else as its JSON, and JSON null as none.
     const value =
       this.db.dialect === "postgres"
         ? `(e.props::jsonb ->> ?)`
         : this.db.dialect === "mysql"
           ? `(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE ${MYSQL_COLLATION})`
-          : `CAST(json_extract(e.props, ?) AS TEXT)`;
-    const path = this.db.dialect === "postgres" ? key : `$."${key}"`;
+          : this.db.dialect === "clickhouse"
+            ? `multiIf(JSONType(e.props, ?) = 'String', JSONExtractString(e.props, ?), JSONType(e.props, ?) = 'Null', NULL, JSONExtractRaw(e.props, ?))`
+            : `CAST(json_extract(e.props, ?) AS TEXT)`;
+    const path = this.db.dialect === "postgres" || this.db.dialect === "clickhouse" ? key : `$."${key}"`;
+    const paths = new Array(this.db.dialect === "clickhouse" ? 4 : 1).fill(path);
     const rows = await this.db.all(
       `SELECT * FROM (SELECT ${value} AS value, COUNT(*) AS events, COUNT(DISTINCT e.visitor) AS visitors FROM ${v.from}
          WHERE ${v.sql} AND e.kind = 'event' AND e.name = ? AND ${value} IS NOT NULL GROUP BY 1) t
        ORDER BY events DESC, value${this.textOrder} LIMIT ?`,
-      [path, ...v.params, event, path, limit],
+      [...paths, ...v.params, event, ...paths, limit],
     );
     return rows.map((r) => ({ value: String(r.value), events: num(r.events), visitors: num(r.visitors) }));
   }
 
   /** The floating point type to cast to, which MySQL names in one word. */
   private get double(): string {
-    return this.db.dialect === "mysql" ? "DOUBLE" : "DOUBLE PRECISION";
+    return this.db.dialect === "mysql" ? "DOUBLE" : this.db.dialect === "clickhouse" ? "Float64" : "DOUBLE PRECISION";
   }
 
   /** A goal's worth for one converting row, as SQL. */
@@ -2091,7 +2131,7 @@ export class SqlStore {
     if (buckets.length > size) return inPieces(buckets, size, (piece) => this.goalSeries(query, goal, piece));
     const v = visitRows(query.filters, query.site, buckets[0]!.start, buckets[buckets.length - 1]!.end, this.db.dialect);
     const rows = await this.db.all(
-      `WITH b (i, bs, be) AS (${bucketTable(this.db.dialect, buckets)})
+      `WITH ${bucketTable(this.db.dialect, buckets)}
        SELECT b.i AS i, COUNT(*) AS conversions, ${revenue.sql} AS revenue
        FROM ${v.from} CROSS JOIN b
        WHERE ${v.sql} AND s.started_at >= b.bs AND s.started_at < b.be AND ${scope.sql}
@@ -2141,7 +2181,7 @@ export class SqlStore {
     if (buckets.length === 0) return [];
     if (buckets.length > BUCKETS_PER_QUERY) return inPieces(buckets, BUCKETS_PER_QUERY, (piece) => this.linkSeries(site, link, piece));
     const rows = await this.db.all(
-      `WITH b (i, bs, be) AS (${bucketTable(this.db.dialect, buckets)})
+      `WITH ${bucketTable(this.db.dialect, buckets)}
        SELECT b.i AS i, COUNT(*) AS clicks, COUNT(DISTINCT NULLIF(e.visitor, '')) AS visitors
        FROM b JOIN rl_events e ON e.link = ? AND e.ts >= b.bs AND e.ts < b.be
        WHERE e.site = ? AND e.kind = 'click' GROUP BY b.i`,
@@ -2172,6 +2212,7 @@ export class SqlStore {
    * MySQL's columns already sort this way; a value worked out from JSON may not.
    */
   private get textOrder(): string {
+    // SQLite and ClickHouse compare text byte by byte, which for UTF-8 is by code point.
     return this.db.dialect === "postgres" ? ' COLLATE "C"' : this.db.dialect === "mysql" ? ` COLLATE ${MYSQL_COLLATION}` : "";
   }
 
@@ -2271,7 +2312,7 @@ export class SqlStore {
       for (const row of rolled) if (at.has(String(row.day))) bump(at.get(String(row.day))!, row);
     }
     const rows = await this.db.all<Record<string, unknown>>(
-      `WITH b (i, bs, be) AS (${bucketTable(this.db.dialect, buckets)})
+      `WITH ${bucketTable(this.db.dialect, buckets)}
        SELECT b.i AS i, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS n, SUM(${pv ? "COALESCE(pv.n, 0)" : "s.pageviews"}) AS views,
          SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(${DURATION}) AS duration
        FROM b JOIN rl_sessions s ON s.site = ? AND s.started_at >= b.bs AND s.started_at < b.be

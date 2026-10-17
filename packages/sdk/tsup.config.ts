@@ -6,6 +6,7 @@ export default defineConfig({
     sqlite: "src/stores/sqlite.ts",
     postgres: "src/stores/postgres.ts",
     mysql: "src/stores/mysql.ts",
+    clickhouse: "src/stores/clickhouse.ts",
     node: "src/node.ts",
     libsql: "src/stores/libsql.ts",
     d1: "src/stores/d1.ts",

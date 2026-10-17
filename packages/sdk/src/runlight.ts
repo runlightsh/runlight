@@ -695,6 +695,7 @@ export class Runlight {
    * could add to a day after it is built.
    */
   async buildRollups(): Promise<number> {
+    if (!this.store.keepsRollups) return 0;
     // Days rolled up by an earlier way of counting are cleared once, and built again below.
     if ((await this.store.setting("rollup-version")) !== String(ROLLUP_VERSION)) {
       for (const site of this.sites) await this.store.clearRollups(site.id);

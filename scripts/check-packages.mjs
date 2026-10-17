@@ -43,6 +43,7 @@ const expected = {
   "@runlight/sdk/sqlite": ["sqlite"],
   "@runlight/sdk/postgres": ["postgres"],
   "@runlight/sdk/mysql": ["mysql"],
+  "@runlight/sdk/clickhouse": ["clickhouse", "ClickHouseStore"],
   "@runlight/sdk/node": ["toNodeHandler", "observer"],
   "@runlight/sdk/libsql": ["libsql"],
   "@runlight/sdk/d1": ["d1"],
