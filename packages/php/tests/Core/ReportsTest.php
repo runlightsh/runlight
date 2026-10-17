@@ -65,7 +65,8 @@ final class ReportsTest extends TestCase
             self::assertSame($text, Intl::currency($lang, $n, $currency, is_int($n) ? 0 : 2), "$lang $n $currency");
         }
         // Region names change between ICU releases; the fixture's are ICU 78's, as Node 24 has it. With another
-        // release, the names that changed are left out and every other must still match, so this runs everywhere.
+        // release, the names that changed are left out, and so is a region it has no name for yet (Sark, CQ,
+        // came later), and every other must still match, so this runs everywhere.
         $current = (int) INTL_ICU_VERSION === 78;
         $differ = [];
         foreach ($set['region'] as [$code, $name]) {
@@ -73,7 +74,7 @@ final class ReportsTest extends TestCase
             if ($got === $name) {
                 continue;
             }
-            if ($current || $got === '' || $got === $code) {
+            if ($current || $got === '') {
                 $differ[] = "$code: $got (Node: $name)";
             }
         }
