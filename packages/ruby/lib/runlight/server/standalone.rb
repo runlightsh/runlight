@@ -54,8 +54,8 @@ module Runlight
       # - url: the dashboard's public address, such as https://stats.example.com. It can never become a link
       #   domain, short links never answer on it, and emails link to it whatever Host header a request carries.
       # - trustProxy, geo, geoCredit, now, fetcher: as the Core's and the routes' options of those names.
-      # - setupCode: the one-time code that unlocks /setup while no account exists; setupWhere says where it is
-      #   written down, for the page that asks for it.
+      # - setupCode: the one-time code that unlocks /setup while no account exists; setupWhere (true) says it is
+      #   written in setup.txt, for the page that asks for it.
       # - cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
       # - observeKey: one key for every site's AI agent reports.
       def initialize(options)
@@ -160,8 +160,7 @@ module Runlight
       end
 
       # The Rack entry point: answers the request, then does the work left after answering (a retention change's
-      # deletions) once the server has sent the answer. Bodies past the limits the Node server keeps get a 413, and
-      # X-Forwarded-Proto names the scheme, as the Node server reads them.
+      # deletions) once the server has sent the answer. Bodies past the limits the Node server keeps get a 413.
       def call(env)
         limit = Http::Request.limit_for("#{env["SCRIPT_NAME"]}#{env["PATH_INFO"]}")
         method = env["REQUEST_METHOD"].to_s.upcase
@@ -172,10 +171,6 @@ module Runlight
           env["rack.input"] = StringIO.new(text)
         end
         request = Http::Request.from_rack(env)
-        proto = request.headers.get("x-forwarded-proto").to_s.split(",")[0].to_s.strip.downcase
-        if %w[http https].include?(proto) && !request.url.start_with?("#{proto}://")
-          request = request.with(url: request.url.sub(%r{\Ahttps?://}, "#{proto}://"))
-        end
         status, headers, body = handle(request, { "ip" => request.remote_address }).to_rack
         body = [] if method == "HEAD"
         [status, headers, Finished.new(body, -> { idle })]

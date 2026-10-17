@@ -74,17 +74,44 @@ class CoreIngestTest < CoreTestCase
     assert_equal 2, stats["pageviews"]
   end
 
-  on_every_database("a salt is deleted once its day has ended everywhere") do |kind|
+  on_every_database("a salt lasts its day and past midnight only while a visit that began that day goes on") do |kind|
     t = Harness.new(kind)
+    days = -> { t.store.db.all("SELECT day FROM rl_salts ORDER BY day").map { |r| r["day"].to_s } }
     t.track({ "k" => "pageview", "u" => "https://example.com/", "i" => "s1" })
     3.times do |i|
       t.advance(24 * 60 * MIN)
       t.track({ "k" => "pageview", "u" => "https://example.com/", "i" => "s#{i + 2}" })
     end
     t.rl.check
-    # October 9th at noon UTC: the earliest timezone is on the 8th and still needs the 7th.
-    days = t.store.db.all("SELECT day FROM rl_salts ORDER BY day").map { |r| r["day"].to_s }
-    assert_equal %w[2026-10-07 2026-10-08 2026-10-09], days
+    # October 9th at noon UTC: no visit from the 8th is still going, so only today's salt is left.
+    assert_equal %w[2026-10-09], days.call
+
+    # A visit that runs past midnight keeps its day's salt until it ends, and stays one visit.
+    t.advance((11 * 60 * MIN) + (50 * MIN))
+    t.track({ "k" => "pageview", "u" => "https://example.com/late", "i" => "m1" })
+    t.advance(20 * MIN)
+    t.track({ "k" => "pageview", "u" => "https://example.com/later", "i" => "m2" })
+    t.rl.check
+    assert_equal %w[2026-10-09 2026-10-10], days.call, "the visit is still going"
+    t.advance(31 * MIN)
+    t.rl.check
+    assert_equal %w[2026-10-10], days.call
+    stats = t.stats(t.query("2026-10-09", "2026-10-10"))
+    assert_equal [2, 3], [stats["visits"], stats["pageviews"]], "the visit across midnight is one visit"
+  end
+
+  on_every_database("each sites timezone keeps the salts its own visits need") do |kind|
+    # Toronto is still on the 9th when UTC reaches the 10th.
+    t = Harness.new(kind, { "sites" => [{ "id" => "utc", "name" => "UTC", "hostnames" => ["example.com"], "timezone" => "UTC" },
+                                        { "id" => "to", "name" => "Toronto", "hostnames" => ["example.org"], "timezone" => "America/Toronto" }] })
+    t.advance((-12 * 60 * MIN) + (2 * 60 * MIN))
+    t.rl.check
+    days = -> { t.store.db.all("SELECT day FROM rl_salts ORDER BY day").map { |r| r["day"].to_s } }
+    days.call.each { |day| assert_includes %w[2026-10-05 2026-10-06], day }
+    t.track({ "k" => "pageview", "u" => "https://example.org/", "i" => "to1" })
+    t.track({ "k" => "pageview", "u" => "https://example.com/", "i" => "utc1" })
+    t.rl.check
+    assert_equal %w[2026-10-05 2026-10-06], days.call, "today in each timezone"
   end
 
   on_every_database("a visitor is one visitor for the whole of the sites own day") do |kind|

@@ -59,6 +59,39 @@ class AccountsAccountsTest < Minitest::Test
     end
   end
 
+  def test_signing_in_hashes_a_password_made_at_the_old_cost_again_and_a_wrong_password_changes_nothing
+    each_kind do |kind|
+      store = store(kind)
+      accounts = Accounts.new(store, SECRET)
+      user = accounts.set_password("owner@example.com", "a long password", NOW)
+      salt = Crypto.random_bytes(16)
+      old = "scrypt$#{Crypto.base64url(salt)}$#{Crypto.base64url(Runlight::Accounts::Scrypt.derive("a long password", salt, 16_384, 8, 1, 32))}"
+      store.db.run("UPDATE rl_users SET hash = ? WHERE id = ?", [old, user["id"]])
+      assert_nil accounts.sign_in("owner@example.com", "a wrong password")
+      assert_equal old, accounts.by_id(user["id"])["hash"]
+      signed_in = accounts.sign_in("owner@example.com", "a long password")
+      assert_match(/\Ascrypt\$32768\$8\$3\$/, signed_in["hash"], "made again at the new cost")
+      assert_equal signed_in["hash"], accounts.by_id(user["id"])["hash"]
+      refute_nil accounts.sign_in("owner@example.com", "a long password"), "and it still signs in"
+    end
+  end
+
+  def test_forgetting_a_site_removes_its_accounts_and_invitations_only
+    each_kind do |kind|
+      accounts = Accounts.new(store(kind), SECRET)
+      owner = accounts.set_password("owner@example.com", "a long password", NOW)
+      mine = accounts.set_password("mine@example.com", "a long password", NOW, "member", "blog")
+      other = accounts.set_password("other@example.com", "a long password", NOW, "viewer", "shop")
+      accounts.invite("later@example.com", "viewer", owner["email"], NOW, "blog")
+      accounts.invite("shop@example.com", "viewer", owner["email"], NOW, "shop")
+      accounts.forget_site("blog")
+      assert_nil accounts.by_id(mine["id"])
+      refute_nil accounts.by_id(other["id"])
+      refute_nil accounts.by_id(owner["id"])
+      assert_equal ["shop@example.com"], accounts.invites(NOW).map { |i| i["email"] }
+    end
+  end
+
   def test_roles_handing_over_and_removing
     each_kind do |kind|
       accounts = Accounts.new(store(kind), SECRET)
@@ -133,8 +166,7 @@ class AccountsAccountsTest < Minitest::Test
       assert_nil accounts.from_session("#{id}.later.#{signature}", NOW)
 
       pending = accounts.pending_for(user, NOW)
-      assert_equal({ "user" => user, "real" => true }, accounts.from_pending(pending, NOW))
-      assert_equal({ "user" => user, "real" => false }, accounts.from_pending(accounts.decoy_for(user, NOW), NOW))
+      assert_equal user, accounts.from_pending(pending, NOW)
       assert_nil accounts.from_pending(session, NOW), "a session is not a code-step ticket"
       assert_nil accounts.from_pending(pending, NOW + (5 * 60_000))
 

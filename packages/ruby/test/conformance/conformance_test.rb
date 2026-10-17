@@ -34,7 +34,7 @@ class ConformanceTest < Minitest::Test
 
   def play_on(kind, name)
     missing = Conformance::CoreTarget.missing
-    skip "Nothing to replay the scenarios against yet: #{missing}" if missing
+    flunk "Nothing to replay the scenarios against: #{missing}" if missing
 
     scenario = Conformance::Scenarios.named(name)
     store = Conformance::TestStores.store(kind)

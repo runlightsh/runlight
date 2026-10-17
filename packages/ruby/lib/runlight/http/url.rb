@@ -273,12 +273,17 @@ module Runlight
       def ipv4(host)
         parts = host.split(".", -1)
         parts.pop if parts.last == ""
-        return nil if parts.empty? || parts.length > 4
+        return nil if parts.empty?
         return nil unless parts.last.match?(/\A(0x[0-9a-f]*|[0-9]+)\z/)
+
+        # A host ending in a number is an address, so too many parts, or a digit past 7 in a part that starts with
+        # a 0 (octal), is no host at all, as new URL() finds.
+        raise Invalid, "Invalid URL" if parts.length > 4
 
         numbers = parts.map do |part|
           if (m = part.match(/\A0x([0-9a-f]*)\z/)) then m[1].empty? ? 0 : m[1].to_i(16)
           elsif part.match?(/\A0[0-7]+\z/) then part.to_i(8)
+          elsif part.match?(/\A0[0-9]+\z/) then raise Invalid, "Invalid URL"
           elsif part.match?(/\A[0-9]+\z/) then part.to_i
           else raise Invalid, "Invalid URL"
           end

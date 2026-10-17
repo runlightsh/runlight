@@ -42,7 +42,9 @@ module Runlight
       values.map do |v|
         s = v.nil? || v.equal?(UNDEFINED) ? "" : Js.string(v)
         s = "'#{s}" if s.match?(/\A[=+\-@\t\r]/) && !s.match?(/\A-?\d+(\.\d+)?\z/)
-        s.match?(/[",\n\r]/) ? "\"#{s.gsub('"', '""')}\"" : s
+        # Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an
+        # unquoted cell there, and what follows could start with = and run as a formula.
+        s.match?(/[",;\t\n\r]/) ? "\"#{s.gsub('"', '""')}\"" : s
       end.join(",")
     end
 

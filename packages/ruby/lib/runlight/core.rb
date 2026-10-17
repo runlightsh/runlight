@@ -743,13 +743,15 @@ module Runlight
       months = retention(site)
       return nil if months.nil?
 
-      # setUTCMonth: the same day and time that many months back, a day past the month's end running on.
+      # Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
       at = now
       ms = at % 1000
       time = Time.at((at - ms) / 1000).utc
       total = (time.year * 12) + (time.month - 1) - months
-      first = Time.utc(total.div(12), (total % 12) + 1, 1, time.hour, time.min, time.sec)
-      ((first.to_i + ((time.day - 1) * 86_400)) * 1000) + ms
+      year = total.div(12)
+      month = (total % 12) + 1
+      last = (Time.utc(month == 12 ? year + 1 : year, month == 12 ? 1 : month + 1, 1) - 86_400).day
+      (Time.utc(year, month, [time.day, last].min, time.hour, time.min, time.sec).to_i * 1000) + ms
     end
 
     def site(id = nil)
@@ -1025,11 +1027,10 @@ module Runlight
       }
     end
 
-    # Sites in name order, as TS sorts them with localeCompare: letters before case, as a collator puts them.
+    # Sites in name order, as TS sorts them with localeCompare, in the order the assistant's collation gives.
     def by_name(sites)
       sites.each_with_index.sort do |(a, i), (b, j)|
-        order = Js.lower(a["name"]) <=> Js.lower(b["name"])
-        order = Js.compare(b["name"], a["name"]) if order.zero?
+        order = Assistant.locale_compare(a["name"], b["name"])
         order.zero? ? i <=> j : order
       end.map(&:first)
     end
@@ -1293,11 +1294,28 @@ module Runlight
       @salts[timezone] = { "day" => day, "today" => today, "yesterday" => yesterday }
     end
 
-    # Deletes salts whose day has ended everywhere. The earliest timezone is a
-    # day behind UTC and still needs its yesterday, so a salt goes two UTC days
-    # after its date.
+    # Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
+    # site's timezone, and after midnight only while a visit that began that day there is still going, since
+    # it carries on under the visitor it began with. So a salt lasts its day and the visits that run past it.
     def drop_old_salts(at)
-      @store.drop_salts_before(Time.at((at - (2 * 86_400_000)).div(1000)).utc.strftime("%Y-%m-%d"))
+      zones = {}
+      sites.each { |site| (zones[site["timezone"]] ||= []) << site["id"] }
+      return if zones.empty?
+
+      needed = []
+      zones.each do |timezone, ids|
+        today = Dates.local_date(at, timezone)
+        needed << today
+        yesterday = Dates.add_days(today, -1)
+        if @store.visit_open(ids, Dates.start_of(yesterday, timezone), Dates.start_of(today, timezone), at - SESSION_IDLE_MS)
+          needed << yesterday
+        else
+          # Nor is it kept here: no visit is left for it to find.
+          cached = @salts[timezone]
+          cached["yesterday"] = nil if !cached.nil? && cached["day"] == today
+        end
+      end
+      @store.drop_salts_except(needed)
     end
 
     # The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.
@@ -1398,7 +1416,8 @@ module Runlight
         "utmContent" => page["utm"]["content"],
       ).merge(location).merge(parsed).merge("screen" => client["screen"], "language" => client["language"])
       @store.insert_session(row)
-      session
+      # Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+      @store.settle_open_session(site["id"], candidates, at - SESSION_IDLE_MS, session)
     end
 
     # The link domains, read at most every 30 seconds. Every request to a

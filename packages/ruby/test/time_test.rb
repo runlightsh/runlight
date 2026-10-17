@@ -168,6 +168,15 @@ class TimeTest < Minitest::Test
     end
   end
 
+  def test_a_day_where_clocks_fall_back_across_midnight_begins_at_the_first_midnight
+    # Amman in 2019, Gaza and Hebron in 2020, an hour each, and three hours at Casey station in 2019.
+    [["2019-10-25", "Asia/Amman"], ["2020-10-24", "Asia/Gaza"], ["2020-10-24", "Asia/Hebron"], ["2019-03-17", "Antarctica/Casey"]].each do |date, zone|
+      start = Dates.start_of(date, zone)
+      assert_equal date, Dates.local_date(start, zone), zone
+      assert_operator Dates.local_date(start - 1, zone), :<, date, "#{zone}: the moment before is the day before"
+    end
+  end
+
   def test_a_date_with_a_month_or_day_that_does_not_exist_is_not_a_date
     %w[2026-13-01 2026-00-05 2026-02-30 2026-04-31 2026-1-01 9999-12-31 0001-01-01].each do |bad|
       refute Dates.date?(bad), bad

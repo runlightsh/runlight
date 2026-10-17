@@ -27,6 +27,20 @@ class UrlTest < Minitest::Test
     end
   end
 
+  # As new URL() reads them in Node: a host that ends in a number is an address or no host at all.
+  def test_an_ipv4_host_with_an_invalid_octal_digit_or_more_than_four_parts_is_no_host
+    {
+      "https://1.2.3.4.5/" => nil, "https://09.0.0.1/" => nil, "https://08/" => nil, "https://a.b.5/" => nil,
+      "https://0x7f.1/" => "127.0.0.1", "https://017.0.0.1/" => "15.0.0.1", "https://1.2.3.4./" => "1.2.3.4",
+      "https://127.1/" => "127.0.0.1", "https://1.2.3.4.example.com/" => "1.2.3.4.example.com", "https://0/" => "0.0.0.0", "https://00/" => "0.0.0.0"
+    }.each do |input, hostname|
+      url = Runlight::Http::Url.parse(input)
+      if hostname.nil? then assert_nil url, input
+      else assert_equal hostname, url&.hostname, input
+      end
+    end
+  end
+
   def test_queries
     fixture["queries"].each do |c|
       params = Runlight::Http::SearchParams.new(c["input"])

@@ -26,6 +26,8 @@ module Runlight
       MAX_REDIRECTS = 20
       REDIRECTS = [301, 302, 303, 307, 308].freeze
       TIMED_OUT = "The operation was aborted due to timeout"
+      # Sent only to the origin they were given to.
+      CREDENTIALS = %w[authorization cookie proxy-authorization x-api-key].freeze
 
       def fetch(url, init = {})
         deadline = monotonic + ((init["timeoutMs"] || 30_000).to_i / 1000.0)
@@ -45,6 +47,16 @@ module Runlight
           target = Url.parse(location, url)
           raise FetchError, "fetch failed" if target.nil? || !%w[http: https:].include?(target.protocol)
 
+          here = Url.parse(url)
+          # Never from an encrypted address to a plain one, where anything still sent could be read on the way.
+          raise FetchError, "fetch failed: a redirect from https to http" if here.protocol == "https:" && target.protocol == "http:"
+
+          # Credentials are for the address they were given to, so they go no further than its origin, as
+          # fetch() drops them.
+          if target.origin != here.origin
+            headers = headers.dup
+            CREDENTIALS.each { |name| headers.delete(name) }
+          end
           url = target.href
           next unless response.status == 303 || ([301, 302].include?(response.status) && method == "POST")
 

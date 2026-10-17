@@ -54,7 +54,7 @@ module Runlight
       CSS
 
       # Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D).
-      AUTH_JS = <<~'JS'.chomp
+      AUTH_JS_SOURCE = <<~'JS'.chomp
         (() => {
           const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
           function strength(password, avoid = []) {
@@ -157,11 +157,11 @@ module Runlight
         })();
       JS
 
-      THEME_BUTTON = '<button type="button" class="theme" aria-label="Switch theme"><svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true">' \
-                     '<circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>' \
-                     '<svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg>' \
-                     '<svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg></button>'
-      private_constant :THEME_BUTTON
+      THEME_ICONS = '<svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true">' \
+                    '<circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>' \
+                    '<svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg>' \
+                    '<svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg>'
+      private_constant :THEME_ICONS, :AUTH_JS_SOURCE
 
       ESCAPES = { "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;", "'" => "&#39;" }.freeze
       private_constant :ESCAPES
@@ -177,11 +177,31 @@ module Runlight
         Version.build["icon"].to_s
       end
 
-      def page(base, title, body)
+      # The script, with its words in a language the dashboard speaks. English is served as auth.js, the others as
+      # auth.js?lang=fr and so on.
+      def auth_js(lang = "en")
+        translator = Messages.translator(lang)
+        t = translator["t"]
+        q = ->(key) { Json.encode(t.call(key)) }
+        theme = translator["lang"] == "en" ? '"Theme: " + c' : "c === \"dark\" ? #{q.call("auth.themeDark")} : #{q.call("auth.themeLight")}"
+        strength = (0..4).map { |n| q.call("account.strength#{n}") }.join(", ")
+        AUTH_JS_SOURCE
+          .sub('button.title = c === "system" ? "Theme: device setting" : "Theme: " + c;',
+               "button.title = c === \"system\" ? #{q.call("auth.themeSystem")} : #{theme};")
+          .sub('eye.setAttribute("aria-label", shown ? "Hide password" : "Show password");',
+               "eye.setAttribute(\"aria-label\", shown ? #{q.call("auth.hidePassword")} : #{q.call("auth.showPassword")});")
+          .sub('eye.title = shown ? "Hide password" : "Show password";',
+               "eye.title = shown ? #{q.call("auth.hidePassword")} : #{q.call("auth.showPassword")};")
+          .sub('["Too short", "Weak", "Fair", "Good", "Strong"][score]', "[#{strength}][score]")
+      end
+
+      def page(base, lang, title, body)
         b = esc(base)
+        translator = Messages.translator(lang)
+        code = translator["lang"]
         <<~HTML
           <!doctype html>
-          <html lang="en">
+          <html lang="#{code}">
           <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -189,14 +209,14 @@ module Runlight
           <title>#{esc(title)} | Runlight</title>
           <link rel="icon" href="#{icon}">
           <link rel="stylesheet" href="#{b}/auth.css">
-          <script src="#{b}/auth.js"></script>
+          <script src="#{b}/auth.js#{code == "en" ? "" : "?lang=#{code}"}"></script>
           </head>
           <body>
           <main>
           <p class="brand">#{MARK}Runlight</p>
           #{body}
           </main>
-          #{THEME_BUTTON}
+          <button type="button" class="theme" aria-label="#{esc(translator["t"].call("auth.switchTheme"))}">#{THEME_ICONS}</button>
           </body>
           </html>
         HTML
@@ -207,115 +227,134 @@ module Runlight
       end
 
       # opts: "error", "email", "next" (all optional), and "forgot".
-      def login_page(base, opts)
+      def login_page(base, opts, lang = "en")
         b = esc(base)
-        page(base, "Sign in", <<~HTML.chomp)
-          <h1>Sign in</h1>
-          <p>Sign in to see your sites.</p>
+        translator = Messages.translator(lang)
+        t = translator["t"]
+        h = translator["html"]
+        link = "<a href=\"#{esc(opts["forgot"])}\" target=\"_blank\" rel=\"noopener\">#{h.call("auth.forgotLink")}</a>"
+        page(base, lang, t.call("auth.signIn"), <<~HTML.chomp)
+          <h1>#{h.call("auth.signIn")}</h1>
+          <p>#{h.call("auth.signInIntro")}</p>
           #{error(opts["error"])}
           <form method="post" action="#{b}/login">
           <input type="hidden" name="next" value="#{esc(opts["next"] || "#{base}/")}">
-          <label>Email<input type="email" name="email" autocomplete="username" required autofocus value="#{esc(opts["email"] || "")}"></label>
-          <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-          <button type="submit">Sign in</button>
+          <label>#{h.call("auth.email")}<input type="email" name="email" autocomplete="username" required autofocus value="#{esc(opts["email"] || "")}"></label>
+          <label>#{h.call("auth.password")}<input type="password" name="password" autocomplete="current-password" required></label>
+          <button type="submit">#{h.call("auth.signIn")}</button>
           </form>
-          <p class="hint">If you have forgotten your password, <a href="#{esc(opts["forgot"])}" target="_blank" rel="noopener">the docs say how to set a new one</a>.</p>
+          <p class="hint">#{h.call("auth.forgot", { "link" => link })}</p>
         HTML
       end
 
       # The second step of signing in, for an account with two-factor on. opts: "pending", "next", and "error".
-      def code_page(base, opts)
+      def code_page(base, opts, lang = "en")
         b = esc(base)
-        page(base, "Enter your code", <<~HTML.chomp)
-          <h1>Enter your code</h1>
-          <p>Open your authenticator app and enter the six-digit code for Runlight.</p>
+        translator = Messages.translator(lang)
+        h = translator["html"]
+        page(base, lang, translator["t"].call("auth.codeTitle"), <<~HTML.chomp)
+          <h1>#{h.call("auth.codeTitle")}</h1>
+          <p>#{h.call("auth.codeIntro")}</p>
           #{error(opts["error"])}
           <form method="post" action="#{b}/login/code">
           <input type="hidden" name="pending" value="#{esc(opts["pending"])}">
           <input type="hidden" name="next" value="#{esc(opts["next"])}">
-          <label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
-          <button type="submit">Sign in</button>
+          <label>#{h.call("auth.code")}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
+          <button type="submit">#{h.call("auth.signIn")}</button>
           </form>
-          <p class="hint">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>
+          <p class="hint">#{h.call("auth.codeHint")}</p>
         HTML
       end
 
       # What someone invited with a role can do, after "as".
-      def role_text(role, site = nil)
-        return role == "viewer" ? "a viewer, who can read the stats for #{site} only" : "a member, who can change the settings of #{site} only" unless site.nil?
-        return "a viewer, who can read every site's stats" if role == "viewer"
-        return "a member, who can change the settings of every site" if role == "member"
+      def role_text(role, site = nil, lang = "en")
+        t = Messages.translator(lang)["t"]
+        return t.call(role == "viewer" ? "auth.roleViewerSite" : "auth.roleMemberSite", { "site" => site }) unless site.nil?
+        return t.call("auth.roleViewer") if role == "viewer"
+        return t.call("auth.roleMember") if role == "member"
 
-        "an admin, who can change everything and manage people"
+        t.call("auth.roleAdmin")
       end
 
       # Where an invited person chooses a password and joins. opts: "code", "email", "role", "host", and "error".
-      def invite_page(base, opts)
+      def invite_page(base, opts, lang = "en")
         b = esc(base)
-        page(base, "Join Runlight", <<~HTML.chomp)
-          <h1>Join Runlight</h1>
-          <p>You were invited to #{esc(opts["host"])} as #{esc(role_text(opts["role"], opts["site"]))}. Choose a password to finish.</p>
+        translator = Messages.translator(lang)
+        h = translator["html"]
+        page(base, lang, translator["t"].call("auth.joinTitle"), <<~HTML.chomp)
+          <h1>#{h.call("auth.joinTitle")}</h1>
+          <p>#{h.call("auth.joinIntro", { "host" => esc(opts["host"]), "role" => esc(role_text(opts["role"], opts["site"], lang)) })}</p>
           #{error(opts["error"])}
           <form method="post" action="#{b}/invite">
           <input type="hidden" name="code" value="#{esc(opts["code"])}">
-          <label>Email<input type="email" value="#{esc(opts["email"])}" disabled></label>
-          <label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
-          <label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-          <button type="submit">Join</button>
+          <label>#{h.call("auth.email")}<input type="email" value="#{esc(opts["email"])}" disabled></label>
+          <label>#{h.call("auth.password")}<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
+          <label>#{h.call("auth.passwordAgain")}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+          <button type="submit">#{h.call("auth.join")}</button>
           </form>
-          <p class="hint">Use at least ten characters.</p>
+          <p class="hint">#{h.call("auth.passwordHint")}</p>
         HTML
       end
 
-      def invite_gone_page(base)
-        page(base, "This invite no longer works", <<~HTML.chomp)
-          <h1>This invite no longer works</h1>
-          <p>It has expired or was already used. Ask whoever invited you to send a new one.</p>
+      def invite_gone_page(base, lang = "en")
+        translator = Messages.translator(lang)
+        h = translator["html"]
+        page(base, lang, translator["t"].call("auth.inviteGoneTitle"), <<~HTML.chomp)
+          <h1>#{h.call("auth.inviteGoneTitle")}</h1>
+          <p>#{h.call("auth.inviteGone")}</p>
         HTML
       end
 
       # opts: "code", and optionally "error", "email", and "askCode".
-      def setup_page(base, opts)
+      def setup_page(base, opts, lang = "en")
         b = esc(base)
+        translator = Messages.translator(lang)
+        h = translator["html"]
         code = esc(opts["code"])
         field = if Js.truthy?(opts["askCode"])
-                  "<label>Your RUNLIGHT_TOKEN<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\"#{code}\"></label>"
+                  "<label>#{h.call("auth.setupToken")}<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\"#{code}\"></label>"
                 else
                   "<input type=\"hidden\" name=\"code\" value=\"#{code}\">"
                 end
-        page(base, "Create your account", <<~HTML.chomp)
-          <h1>Create your account</h1>
-          <p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>
+        page(base, lang, translator["t"].call("auth.setupTitle"), <<~HTML.chomp)
+          <h1>#{h.call("auth.setupTitle")}</h1>
+          <p>#{h.call("auth.setupIntro")}</p>
           #{error(opts["error"])}
           <form method="post" action="#{b}/setup">
           #{field}
-          <label>Email<input type="email" name="email" autocomplete="username" required autofocus value="#{esc(opts["email"] || "")}"></label>
-          <label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
-          <label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-          <button type="submit">Create account</button>
+          <label>#{h.call("auth.email")}<input type="email" name="email" autocomplete="username" required autofocus value="#{esc(opts["email"] || "")}"></label>
+          <label>#{h.call("auth.password")}<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+          <label>#{h.call("auth.passwordAgain")}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+          <button type="submit">#{h.call("auth.createAccount")}</button>
           </form>
-          <p class="hint">Use at least ten characters.</p>
+          <p class="hint">#{h.call("auth.passwordHint")}</p>
         HTML
       end
 
-      # For a server with no account yet, which prints a setup link with a one-time code in its log.
-      def setup_locked_page(base, where = nil)
-        where ||= "printed in the server's log when it started"
-        page(base, "Finish setting up", <<~HTML.chomp)
-          <h1>Finish setting up</h1>
-          <p>Runlight has no account yet. Open the setup link #{where}, which carries a one-time code, to create the first account.</p>
+      # For a server with no account yet, which prints a setup link with a one-time code in its log. `file` says the
+      # standalone server keeps it in setup.txt in its data folder instead.
+      def setup_locked_page(base, file = false, lang = "en")
+        translator = Messages.translator(lang)
+        h = translator["html"]
+        text = file ? h.call("auth.setupLockedFile", { "command" => "<code>runlight setup</code>" }) : h.call("auth.setupLocked")
+        page(base, lang, translator["t"].call("auth.finishTitle"), <<~HTML.chomp)
+          <h1>#{h.call("auth.finishTitle")}</h1>
+          <p>#{text}</p>
         HTML
       end
 
       # For an app with accounts on but nothing to prove the first account with.
-      def setup_needs_token_page(base)
-        page(base, "Finish setting up", <<~HTML.chomp)
-          <h1>Finish setting up</h1>
-          <p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>
+      def setup_needs_token_page(base, lang = "en")
+        translator = Messages.translator(lang)
+        h = translator["html"]
+        page(base, lang, translator["t"].call("auth.finishTitle"), <<~HTML.chomp)
+          <h1>#{h.call("auth.finishTitle")}</h1>
+          <p>#{h.call("auth.setupNeedsToken")}</p>
         HTML
       end
 
       private_class_method :esc, :icon, :page, :error
+      AUTH_JS = auth_js("en")
     end
   end
 end

@@ -28,8 +28,8 @@ module Runlight
 
       # options: "runlight" (the Core, or anything with store, mail_settings, send_mail, and client_ip), "secret",
       # "base", "now" (a callable giving milliseconds), "firstAccount", "home" (optional, a callable giving the
-      # install's own origin or nil), "forgot", and "setupWhere" (optional), which says where to find the setup
-      # link with the one-time code, when it is not in a log (HTML).
+      # install's own origin or nil), "forgot", and "setupWhere" (optional, true), which says the setup
+      # link with the one-time code is in the file setup.txt, not in a log.
       def initialize(options)
         @rl = options["runlight"]
         @store = @rl.store
@@ -58,8 +58,6 @@ module Runlight
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
         @code_tries = Throttle.new(@store, "code", 5)
-        # A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-        @decoy_tries = Throttle.new(@store, "decoy", 5)
         @confirm_tries = Throttle.new(@store, "confirm", 5)
         @rechecks = Throttle.new(@store, "recheck", 10)
       end
@@ -142,7 +140,7 @@ module Runlight
 
         # The dashboard itself: straight to sign-in, or to setting up the first account.
         if (path == "/" || path == "") && request.method == "GET" && signed_in(request).nil?
-          return @first == "open" || @asks_for_token ? redirect("#{@base}/setup") : setup_locked unless has_account?
+          return @first == "open" || @asks_for_token ? redirect("#{@base}/setup") : setup_locked(Messages.accepted_language(request)) unless has_account?
 
           search = Http::Url.new(request.url).search
           return redirect("#{@base}/login#{search == "" ? "" : "?next=#{Js.encode_uri_component("#{@home_path}#{search}")}"}")
@@ -270,8 +268,15 @@ module Runlight
       end
 
       # Why there is no setup form.
-      def setup_locked
-        html(@first == "locked" ? Pages.setup_needs_token_page(@base) : Pages.setup_locked_page(@base, @setup_where), 403)
+      def setup_locked(lang)
+        html(@first == "locked" ? Pages.setup_needs_token_page(@base, lang) : Pages.setup_locked_page(@base, Js.truthy?(@setup_where), lang), 403)
+      end
+
+      # An account's problem in the visitor's language, where the dashboard has words for it; English as it was raised.
+      def reason(lang, error)
+        key = "error.#{error.is_a?(AccountError) ? error.code : ""}"
+        t = Messages.translator(lang)["t"]
+        lang == "en" || t.call(key) == key ? error.message : t.call(key, error.is_a?(AccountError) ? error.params : {})
       end
 
       # Emails an invite through the mail service when there is one. The link
@@ -340,11 +345,13 @@ module Runlight
         query = url.search_params
         method = request.method
         base = @base
+        lang = Messages.accepted_language(request)
+        t = Messages.translator(lang)["t"]
         if path == "/auth.css"
           return Http::Response.new(Pages::AUTH_CSS, status: 200, headers: { "content-type" => "text/css; charset=utf-8", "cache-control" => "public, max-age=3600" })
         end
         if path == "/auth.js"
-          return Http::Response.new(Pages::AUTH_JS, status: 200, headers: { "content-type" => "application/javascript; charset=utf-8", "cache-control" => "public, max-age=3600" })
+          return Http::Response.new(Pages.auth_js(query.get("lang") || "en"), status: 200, headers: { "content-type" => "application/javascript; charset=utf-8", "cache-control" => "public, max-age=3600" })
         end
 
         if path == "/setup"
@@ -352,43 +359,43 @@ module Runlight
 
           if method == "GET"
             code = query.get("code") || ""
-            return setup_locked if @first == "locked"
+            return setup_locked(lang) if @first == "locked"
             # The app's token is typed in; the server's code comes in the link it printed.
-            return html(Pages.setup_page(base, { "code" => "", "askCode" => @asks_for_token })) if @asks_for_token || @first == "open"
+            return html(Pages.setup_page(base, { "code" => "", "askCode" => @asks_for_token }, lang)) if @asks_for_token || @first == "open"
 
-            return setup_ok(code) ? html(Pages.setup_page(base, { "code" => code })) : setup_locked
+            return setup_ok(code) ? html(Pages.setup_page(base, { "code" => code }, lang)) : setup_locked(lang)
           end
           if method == "POST"
             form = Http::SearchParams.new(request.text)
             code = form.get("code") || ""
             unless setup_ok(code)
               if @asks_for_token
-                return html(Pages.setup_page(base, { "code" => "", "askCode" => true, "error" => "That is not this app's RUNLIGHT_TOKEN.", "email" => form.get("email") || "" }), 403)
+                return html(Pages.setup_page(base, { "code" => "", "askCode" => true, "error" => t.call("auth.tokenWrong"), "email" => form.get("email") || "" }, lang), 403)
               end
 
-              return setup_locked
+              return setup_locked(lang)
             end
             again = ->(error) { { "code" => @asks_for_token ? "" : code, "askCode" => @asks_for_token, "error" => error, "email" => form.get("email") || "" } }
             # Asked twice, since a typo here would lock the first owner out.
-            return html(Pages.setup_page(base, again.call("The two passwords are not the same.")), 400) if (form.get("password") || "") != (form.get("again") || "")
+            return html(Pages.setup_page(base, again.call(t.call("auth.mismatch")), lang), 400) if (form.get("password") || "") != (form.get("again") || "")
 
             begin
               user = @accounts.set_password(form.get("email") || "", form.get("password") || "", now)
               @existing = true
               return redirect(@home_path, { "set-cookie" => session_cookie(request, @accounts.session_for(user, now), Accounts::SESSION_MS / 1000) })
             rescue RangeError => e
-              return html(Pages.setup_page(base, again.call(e.message)), 400)
+              return html(Pages.setup_page(base, again.call(reason(lang, e)), lang), 400)
             end
           end
         end
 
         if path == "/login"
           unless has_account?
-            return setup_locked if @first == "locked"
+            return setup_locked(lang) if @first == "locked"
 
-            return @first == "open" || @asks_for_token ? redirect("#{base}/setup") : setup_locked
+            return @first == "open" || @asks_for_token ? redirect("#{base}/setup") : setup_locked(lang)
           end
-          return html(Pages.login_page(base, { "next" => safe_next(query.get("next")), "forgot" => @forgot })) if method == "GET"
+          return html(Pages.login_page(base, { "next" => safe_next(query.get("next")), "forgot" => @forgot }, lang)) if method == "GET"
           return login(request, context) if method == "POST"
         end
 
@@ -397,9 +404,9 @@ module Runlight
           next_path = safe_next(query.get("next"))
           user = @accounts.from_link(query.get("ticket") || "", now)
           if user.nil?
-            return html(Pages.login_page(base, { "error" => "That sign-in link has run out. Sign in again.", "next" => next_path, "forgot" => @forgot }), 410)
+            return html(Pages.login_page(base, { "error" => t.call("auth.linkExpired"), "next" => next_path, "forgot" => @forgot }, lang), 410)
           end
-          return html(Pages.code_page(base, { "pending" => @accounts.pending_for(user, now), "next" => next_path })) if user["twoFactor"]
+          return html(Pages.code_page(base, { "pending" => @accounts.pending_for(user, now), "next" => next_path }, lang)) if user["twoFactor"]
 
           return signed_in_to(request, user, next_path)
         end
@@ -408,18 +415,16 @@ module Runlight
           ready
           form = Http::SearchParams.new(request.text)
           next_path = safe_next(form.get("next"))
-          pending = @accounts.from_pending(form.get("pending") || "", now)
-          return redirect("#{base}/login?next=#{Js.encode_uri_component(next_path)}") if pending.nil?
+          user = @accounts.from_pending(form.get("pending") || "", now)
+          return redirect("#{base}/login?next=#{Js.encode_uri_component(next_path)}") if user.nil?
 
-          user = pending["user"]
-          real = pending["real"]
           # Counted before the check, so a burst cannot get past five.
-          unless (real ? @code_tries : @decoy_tries).take(user["id"], now)
-            return html(Pages.code_page(base, { "pending" => form.get("pending") || "", "next" => next_path, "error" => "Too many tries. Wait fifteen minutes and try again." }), 429)
+          unless @code_tries.take(user["id"], now)
+            return html(Pages.code_page(base, { "pending" => form.get("pending") || "", "next" => next_path, "error" => t.call("error.too_many_tries") }, lang), 429)
           end
-          if !real || !@accounts.check_second_factor(user["id"], form.get("code") || "", now)
+          unless @accounts.check_second_factor(user["id"], form.get("code") || "", now)
             return html(Pages.code_page(base, { "pending" => form.get("pending") || "", "next" => next_path,
-                                                "error" => "That code is not right. Check the time on your phone, or use a recovery code." }), 401)
+                                                "error" => t.call("auth.codeWrong") }, lang), 401)
           end
 
           @code_tries.clear(user["id"], now)
@@ -432,29 +437,29 @@ module Runlight
           if method == "GET"
             code = query.get("code") || ""
             invite = @accounts.invite_by_code(code, now)
-            return html(Pages.invite_gone_page(base), 410) if invite.nil?
+            return html(Pages.invite_gone_page(base, lang), 410) if invite.nil?
 
-            return html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host }))
+            return html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host }, lang))
           end
           if method == "POST"
             form = Http::SearchParams.new(request.text)
             code = form.get("code") || ""
             invite = @accounts.invite_by_code(code, now)
-            return html(Pages.invite_gone_page(base), 410) if invite.nil?
+            return html(Pages.invite_gone_page(base, lang), 410) if invite.nil?
 
             again = lambda do |error|
-              html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host, "error" => error }), 400)
+              html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host, "error" => error }, lang), 400)
             end
-            return again.call("The two passwords are not the same.") if (form.get("password") || "") != (form.get("again") || "")
+            return again.call(t.call("auth.mismatch")) if (form.get("password") || "") != (form.get("again") || "")
 
             begin
               user = @accounts.accept_invite(code, form.get("password") || "", now)
               @existing = true
               return redirect(@home_path, { "set-cookie" => session_cookie(request, @accounts.session_for(user, now), Accounts::SESSION_MS / 1000) })
             rescue RangeError => e
-              return html(Pages.invite_gone_page(base), 410) if e.is_a?(AccountError) && e.code == "invite_gone"
+              return html(Pages.invite_gone_page(base, lang), 410) if e.is_a?(AccountError) && e.code == "invite_gone"
 
-              return again.call(e.message)
+              return again.call(reason(lang, e))
             end
           end
         end
@@ -471,8 +476,10 @@ module Runlight
         account = Js.lower(Js.trim(email))
         ip = @rl.client_ip(request, context)
         pair = "#{account}\n#{ip == "" ? "unknown" : ip}"
-        login_page = ->(opts) { Pages.login_page(base, opts.merge("next" => next_path, "forgot" => @forgot) { |_k, mine, _theirs| mine }) }
-        too_many = -> { html(login_page.call({ "error" => "Too many tries. Wait fifteen minutes and try again.", "email" => email }), 429) }
+        lang = Messages.accepted_language(request)
+        t = Messages.translator(lang)["t"]
+        login_page = ->(opts) { Pages.login_page(base, opts.merge("next" => next_path, "forgot" => @forgot) { |_k, mine, _theirs| mine }, lang) }
+        too_many = -> { html(login_page.call({ "error" => t.call("error.too_many_tries"), "email" => email }), 429) }
         return too_many.call if ip != "" && !@per_ip.take(ip, now)
         return too_many.call unless @per_address.take(pair, now)
 
@@ -480,10 +487,11 @@ module Runlight
         known = @accounts.by_email(account)
         trusted = !known.nil? && @accounts.trusts_device(read_cookie(request, DEVICE_COOKIE), known)
         over = !trusted && !@per_account.take(account, now)
-        # Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-        # addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-        # where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-        if over && !(known && known["twoFactor"])
+        # Past the account's limit, a right password and a wrong one get the same answer, and so does every
+        # account, with two-factor on or not, and an email with no account, so guessing from many addresses
+        # learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+        # leads to the code step when two-factor is on.
+        if over
           home = home_origin
           return too_many.call if !@rl.mail_settings || home.nil? || home == ""
 
@@ -497,27 +505,24 @@ module Runlight
               warn "Runlight: could not send a sign-in link #{e.message}"
             end
           end
-          return html(login_page.call({ "error" => "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
-                                        "email" => email }), 429)
+          return html(login_page.call({ "error" => t.call("auth.tooManyLink"), "email" => email }), 429)
         end
         user = @accounts.sign_in(email, password)
-        if user.nil?
-          return html(Pages.code_page(base, { "pending" => @accounts.decoy_for(known, now), "next" => next_path })) if over && !known.nil?
+        return html(login_page.call({ "error" => t.call("auth.wrongPassword"), "email" => email }), 401) if user.nil?
 
-          return html(login_page.call({ "error" => "That email and password do not match an account.", "email" => email }), 401)
-        end
+
         @per_address.clear(pair, now)
         @per_ip.forgive(ip, now) if ip != ""
-        @per_account.forgive(account, now) if !over && !trusted
+        @per_account.forgive(account, now) unless trusted
         # With two-factor on, the password only earns the second step.
-        return html(Pages.code_page(base, { "pending" => @accounts.pending_for(user, now), "next" => next_path })) if user["twoFactor"]
+        return html(Pages.code_page(base, { "pending" => @accounts.pending_for(user, now), "next" => next_path }, lang)) if user["twoFactor"]
 
         signed_in_to(request, user, next_path)
       rescue AccountError => e
         # Too many password checks already waiting, so this one was never run: try again in a moment.
         raise unless e.code == "busy"
 
-        html(login_page.call({ "error" => e.message, "email" => email }), 503, { "retry-after" => "5" })
+        html(login_page.call({ "error" => reason(lang, e), "email" => email }), 503, { "retry-after" => "5" })
       end
 
       def recheck(user, input, name, wrong)

@@ -135,7 +135,7 @@ class StoreRecordsTest < StoreTestCase
     assert_equal "first", store.salt("2026-10-06", "first")
     assert_equal "first", store.salt("2026-10-06", "second"), "two racing callers agree on one"
     store.salt("2026-10-05", "old")
-    store.drop_salts_before("2026-10-06")
+    store.drop_salts_except(["2026-10-06"])
     assert_nil store.salt_if_exists("2026-10-05")
     assert_equal "first", store.salt_if_exists("2026-10-06")
 

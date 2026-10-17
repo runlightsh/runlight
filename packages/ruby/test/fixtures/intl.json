@@ -1,6 +1,6 @@
 {
  "description": "Intl.NumberFormat, DateTimeFormat, and DisplayNames as reports.ts uses them, from Node's ICU.",
- "node": "v24.14.1",
+ "icu": "78.2",
  "cases": [
   {
    "lang": "en",

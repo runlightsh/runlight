@@ -43,7 +43,21 @@ module Runlight
         own = table(code)["#{key}_#{form}"] || table(code)["#{key}_other"]
         !own.nil? && own != "" ? fill.call(own, vars) : t.call("#{key}_other", vars)
       end
-      { "t" => t, "tn" => tn, "lang" => code }
+      # A message for a page: its own text escaped, then each {name} filled with HTML the caller made safe.
+      html = lambda do |key, vars = {}|
+        t.call(key).gsub(/[&<>]/, "&" => "&amp;", "<" => "&lt;", ">" => "&gt;")
+                   .gsub(/\{(\w+)\}/) { vars.key?(Regexp.last_match(1)) ? vars[Regexp.last_match(1)] : Regexp.last_match(0) }
+      end
+      { "t" => t, "tn" => tn, "html" => html, "lang" => code }
+    end
+
+    # The first language a browser asks for that the dashboard speaks, else English.
+    def accepted_language(request)
+      (request.headers.get("accept-language") || "").split(",", -1).each do |part|
+        code = Js.lower(Js.slice(Js.trim(part.split(";", -1).first.to_s), 0, 2))
+        return code if languages.include?(code)
+      end
+      "en"
     end
 
     # Intl.PluralRules(lang).select(n) for the dashboard's languages, by CLDR's cardinal rules. As there, the

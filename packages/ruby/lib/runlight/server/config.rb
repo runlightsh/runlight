@@ -199,7 +199,7 @@ module Runlight
         settings["geo"] = geo unless geo.nil?
         unless code.nil?
           settings["setupCode"] = code
-          settings["setupWhere"] = "in the file setup.txt in Runlight's data folder (<code>runlight setup</code> prints it too)"
+          settings["setupWhere"] = true
         end
         Standalone.new(settings.merge(Options.normalize(options)))
       end
