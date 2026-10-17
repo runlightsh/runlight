@@ -20,6 +20,7 @@
 import { hmac, randomId, sha256 } from "./hash.js";
 import { seal, unseal } from "./mail/secret.js";
 import { RateLimit } from "./limit.js";
+import { acceptedLanguage, translator } from "./messages.js";
 import type { RequestContext, Runlight } from "./runlight.js";
 import type { TokenRow } from "./store.js";
 
@@ -200,12 +201,14 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
 
   if (path === "/oauth/authorize" && (request.method === "GET" || request.method === "POST")) {
     await runlight.init();
+    const { html, lang } = translator(acceptedLanguage(request));
+    const page = (title: string, body: string, status = 200) => pageIn(lang, title, body, status);
     const form = request.method === "POST" ? new URLSearchParams(await request.text()) : url.searchParams;
     const clientId = form.get("client_id") ?? "";
     const client = (await clientFor(runlight, clientId))?.client ?? null;
     const redirect = form.get("redirect_uri") ?? "";
     // Without a known client and one of its own addresses there is nowhere safe to send an answer.
-    if (!client || !client.redirects.includes(redirect)) return page("This app is not registered", "<p>Start connecting again from the app.</p>", 400);
+    if (!client || !client.redirects.includes(redirect)) return page(html("oauth.unregisteredTitle"), `<p>${html("oauth.startAgain")}</p>`, 400);
     const back = (params: Record<string, string>) => {
       const to = new URL(redirect);
       for (const [k, v] of Object.entries(params)) to.searchParams.set(k, v);
@@ -216,7 +219,7 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     // Anyone can register an app with any address, so until an owner has allowed it once, a request
     // it got wrong ends on a page here rather than sending a visitor who is not signed in on to it.
     const refuse = (params: Record<string, string>) =>
-      client.usedAt ? back(params) : page("This app asked in a way Runlight does not support", `<p>${esc(client.name)} sent ${esc(params.error_description ?? params.error!)}. Start connecting again from the app.</p>`, 400);
+      client.usedAt ? back(params) : page(html("oauth.unsupportedTitle"), `<p>${html("oauth.unsupported", { app: esc(client.name), error: esc(params.error_description ?? params.error!) })}</p>`, 400);
     if (form.get("response_type") !== "code") return refuse({ error: "unsupported_response_type" });
     const challenge = form.get("code_challenge") ?? "";
     if (form.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43,128}$/.test(challenge)) return refuse({ error: "invalid_request", error_description: "PKCE with S256 is required" });
@@ -232,12 +235,12 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     if (!(await ctx.isOwner(request))) {
       // Someone signed in who may only read would be sent to sign in again and again.
       if (ctx.isReader && (await ctx.isReader(request))) {
-        return page("Ask an owner to connect this", `<p>You are signed in as a viewer, and only an owner of this Runlight can connect ${esc(client.name)}.</p>`, 403);
+        return page(html("oauth.viewerTitle"), `<p>${html("oauth.viewer", { app: esc(client.name) })}</p>`, 403);
       }
       // The site stays, since on the way in it only says which one to offer first.
       const here = `${url.pathname}?${new URLSearchParams([...form.entries()].filter(([k]) => k !== "decision")).toString()}`;
       if (ctx.signIn) return new Response(null, { status: 303, headers: { location: `${ctx.signIn}?next=${encodeURIComponent(here)}`, "cache-control": "no-store" } });
-      return page("Sign in first", `<p>Open your Runlight dashboard at <a href="${esc(base || "/")}">${esc(url.host + (base || "/"))}</a> and sign in, then connect ${esc(client.name)} again.</p>`, 401);
+      return page(html("oauth.signInTitle"), `<p>${html("oauth.signIn", { link: `<a href="${esc(base || "/")}">${esc(url.host + (base || "/"))}</a>`, app: esc(client.name) })}</p>`, 401);
     }
 
     if (request.method === "GET") {
@@ -245,21 +248,21 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
         .map((k) => (form.get(k) !== null ? `<input type="hidden" name="${k}" value="${esc(form.get(k)!)}">` : ""))
         .join("");
       // The app names itself, so the page also shows where the answer goes, which it cannot fake.
-      const sendsTo = `<p class="note">Allowing sends you back to <strong>${esc(new URL(redirect).host)}</strong>. Only allow it if you started connecting there.</p>`;
+      const sendsTo = `<p class="note">${html("oauth.sendsTo", { host: `<strong>${esc(new URL(redirect).host)}</strong>` })}</p>`;
       if (cms) {
         if (!counting.length && !runlight.managedSites) {
-          return page("Add this site first", `<p>No site in this Runlight counts <strong>${esc(host)}</strong>. Add it to a site's domains in your code, then connect again from ${esc(client.name)}.</p>`, 400);
+          return page(html("oauth.addSiteTitle"), `<p>${html("oauth.addSite", { host: `<strong>${esc(host)}</strong>`, app: esc(client.name) })}</p>`, 400);
         }
-        const choices = counting.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("") + (runlight.managedSites && !counting.length ? `<option value="new">A new site for ${esc(host)}</option>` : "");
+        const choices = counting.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("") + (runlight.managedSites && !counting.length ? `<option value="new">${html("oauth.newSite", { host: esc(host) })}</option>` : "");
         return page(
-          `Connect ${esc(client.name)}`,
-          `<p><strong>${esc(client.name)}</strong> wants to count <strong>${esc(host)}</strong> in this Runlight.</p>
-<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+          html("oauth.connectTitle", { app: esc(client.name) }),
+          `<p>${html("oauth.cmsIntro", { app: `<strong>${esc(client.name)}</strong>`, host: `<strong>${esc(host)}</strong>` })}</p>
+<p>${html("oauth.cmsDetail")}</p>
 ${sendsTo}
 <form method="post" action="${esc(base)}/oauth/authorize">${hidden}
-<label>Site<select name="site">${choices}</select></label>
-<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in ${esc(client.name)}.</p>
-<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`,
+<label>${html("app.site")}<select name="site">${choices}</select></label>
+<p class="note">${html("oauth.cmsNote", { app: esc(client.name) })}</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">${html("oauth.deny")}</button><button type="submit" name="decision" value="allow">${html("oauth.allow")}</button></div></form>`,
         );
       }
       if (manage) {
@@ -268,30 +271,30 @@ ${sendsTo}
         const wanted = form.get("site") ?? "";
         const choices = sites.map((s) => `<option value="${esc(s.id)}"${s.id === wanted ? " selected" : ""}>${esc(s.name)}</option>`).join("");
         return page(
-          `Connect ${esc(client.name)}`,
-          `<p><strong>${esc(client.name)}</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>
-<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>
+          html("oauth.connectTitle", { app: esc(client.name) }),
+          `<p>${html("oauth.manageIntro", { app: `<strong>${esc(client.name)}</strong>` })}</p>
+<p>${html("oauth.manageDetail")}</p>
 ${sendsTo}
 <form method="post" action="${esc(base)}/oauth/authorize">${hidden}
-<label>Site<select name="site">${choices}</select></label>
-<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects ${esc(client.name)}.</p>
-<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`,
+<label>${html("app.site")}<select name="site">${choices}</select></label>
+<p class="note">${html("oauth.manageNote", { app: esc(client.name) })}</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">${html("oauth.deny")}</button><button type="submit" name="decision" value="allow">${html("oauth.allow")}</button></div></form>`,
         );
       }
-      const options = runlight.sites.map((s) => `<option value="${esc(s.id)}">${esc(s.name)} only</option>`).join("");
+      const options = runlight.sites.map((s) => `<option value="${esc(s.id)}">${html("oauth.siteOnly", { site: esc(s.name) })}</option>`).join("");
       return page(
-        `Connect ${esc(client.name)}`,
-        `<p><strong>${esc(client.name)}</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>
+        html("oauth.connectTitle", { app: esc(client.name) }),
+        `<p>${html("oauth.readIntro", { app: `<strong>${esc(client.name)}</strong>` })}</p>
 ${sendsTo}
 <form method="post" action="${esc(base)}/oauth/authorize">${hidden}
-<label>Which sites it can read<select name="site"><option value="">Every site</option>${runlight.sites.length > 1 ? options : ""}</select></label>
-<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>
-<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>`,
+<label>${html("oauth.readSites")}<select name="site"><option value="">${html("tokens.allSites")}</option>${runlight.sites.length > 1 ? options : ""}</select></label>
+<p class="note">${html("oauth.readNote")}</p>
+<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">${html("oauth.deny")}</button><button type="submit" name="decision" value="allow">${html("oauth.allow")}</button></div></form>`,
       );
     }
     // The consent form posts here from this page only; a form from another site is refused.
     const origin = request.headers.get("origin");
-    if (origin && origin !== url.origin) return page("This request came from another site", "<p>Start connecting again from the app.</p>", 403);
+    if (origin && origin !== url.origin) return page(html("oauth.anotherSiteTitle"), `<p>${html("oauth.startAgain")}</p>`, 403);
     if (form.get("decision") !== "allow") return back({ error: "access_denied" });
     let site = form.get("site") ?? "";
     if (cms) {
@@ -377,9 +380,10 @@ async function register(runlight: Runlight, name: string, redirects: string[]): 
   return json({ client_id: id, client_name: client.name, redirect_uris: redirects, token_endpoint_auth_method: "none", grant_types: ["authorization_code"], response_types: ["code"] }, 201);
 }
 
-function page(title: string, body: string, status = 200): Response {
+/** A page in the visitor's language, with a title already written as HTML. */
+function pageIn(lang: string, title: string, body: string, status = 200): Response {
   return new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title} | Runlight</title>
+    `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title} | Runlight</title>
 <style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a8a93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style></head><body><main><h1>${title}</h1>${body}</main></body></html>`,
     {
       status,

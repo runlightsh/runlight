@@ -263,7 +263,14 @@ function App() {
         setPoints(series.points);
         setPreviousPoints(series.previous);
       })
-      .catch((e: Error) => live && fail(e))
+      .catch((e: Error) => {
+        if (!live) return;
+        // The numbers on screen were for the view before; only the error shows now, not them under the new view.
+        setStats(null);
+        setPoints([]);
+        setPreviousPoints(undefined);
+        fail(e);
+      })
       .finally(() => {
         clearTimeout(timer);
         if (live) setSlow(false);

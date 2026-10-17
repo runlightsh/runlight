@@ -455,7 +455,7 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
       ) : null}
       {input.valueMode === "prop" ? (
         <div class="code small">
-          <pre>
+          <pre tabIndex={0}>
             <code>{`runlight(${JSON.stringify(input.match || "Purchase")}, { ${JSON.stringify(input.valueProp || "revenue")}: 49.99 })`}</code>
           </pre>
         </div>

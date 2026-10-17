@@ -28,5 +28,17 @@ export function translator(lang: string) {
     const own = table(code)[`${key}_${form}`] ?? table(code)[`${key}_other`];
     return own ? fill(own, vars) : t(`${key}_other`, vars);
   };
-  return { t, tn, lang: code };
+  // A message for a page: its own text escaped, then each {name} filled with HTML the caller made safe.
+  const html = (key: string, vars: Record<string, string> = {}) =>
+    t(key).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!).replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
+  return { t, tn, html, lang: code };
+}
+
+/** The first language a browser asks for that the dashboard speaks, else English. */
+export function acceptedLanguage(request: Request): string {
+  for (const part of (request.headers.get("accept-language") ?? "").split(",")) {
+    const code = part.split(";")[0]!.trim().slice(0, 2).toLowerCase();
+    if (languages().includes(code)) return code;
+  }
+  return "en";
 }

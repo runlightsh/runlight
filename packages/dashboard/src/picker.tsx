@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { day as dayText, monthTitle, weekdays } from "./format.js";
 import { t, type Key } from "./i18n.js";
 
@@ -138,18 +138,31 @@ export function Calendar({ from, to, today, onApply, onCancel, applyLabel }: {
 }
 
 export function useFlyout() {
-  const [open, setOpen] = useState(false);
+  const [open, setShown] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  /** Closing with focus inside hands it back to the button that opened it, rather than letting it fall to the page. */
+  const setOpen = useCallback((next: boolean) => {
+    if (!next && root.current?.contains(document.activeElement)) root.current.querySelector<HTMLElement>("[aria-expanded]")?.focus();
+    setShown(next);
+  }, []);
   useEffect(() => {
     if (!open) return;
     const close = (e: Event) => {
       if (e instanceof KeyboardEvent ? e.key === "Escape" : !root.current?.contains(e.target as Node)) setOpen(false);
     };
+    // Tabbing past its end closes it too; focus stays where it went. A click inside on nothing focusable
+    // moves focus nowhere, and a click outside is the pointerdown above.
+    const left = (e: FocusEvent) => {
+      if (e.relatedTarget && !root.current?.contains(e.relatedTarget as Node)) setShown(false);
+    };
+    const box = root.current;
     document.addEventListener("pointerdown", close);
     document.addEventListener("keydown", close);
+    box?.addEventListener("focusout", left);
     return () => {
       document.removeEventListener("pointerdown", close);
       document.removeEventListener("keydown", close);
+      box?.removeEventListener("focusout", left);
     };
   }, [open]);
   return { open, setOpen, root };
