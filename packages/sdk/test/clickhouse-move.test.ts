@@ -149,6 +149,27 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     assert.deepEqual(await reports(after), expected);
   });
 
+  test(`${kind}: a copy that loses its connection part way tries again without counting anything twice`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    const before = server(rows, clock);
+    await history(before, clock);
+    const expected = await reports(before);
+
+    const store = switched(rows, false);
+    await store.migrate();
+    // The visits of an older day go in, then the connection drops before its events do.
+    const insert = store.clickhouse.insert.bind(store.clickhouse);
+    let inserts = 0;
+    store.clickhouse.insert = async (table, batch, options) => {
+      if (++inserts === 4) throw new TypeError("fetch failed", { cause: new Error("other side closed") });
+      return insert(table, batch, options);
+    };
+    assert.equal((await store.copy())?.done, true);
+    assert.ok(inserts > 4);
+    assert.deepEqual(await reports(server(store, clock)), expected);
+  });
+
   test(`${kind}: two processes copying at once copy each visit once`, async () => {
     const clock = { now: Date.now() };
     const rows = freshStore(kind);

@@ -51,6 +51,9 @@ const RECENT_MS = EVENT_TAIL_MS + 30 * 60_000;
 /** How many rows are read from one store and written to the other at a time. */
 const COPY_BATCH = 5_000;
 
+/** How many times in a row a piece of the copy may fail, a second's pause doubling each time up to five minutes, before the copy stops. */
+const COPY_TRIES = 10;
+
 /** How long one process's claim on the copy lasts, unless it renews it. */
 const LEASE_MS = 120_000;
 
@@ -817,6 +820,7 @@ export class ClickHouseStore extends SqlStore {
    */
   async copy(onProgress?: (state: MoveState) => void): Promise<MoveState | null> {
     let first = true;
+    let failed = 0;
     for (;;) {
       if (this.closed) return this.moveState();
       const state = await this.moveState();
@@ -829,8 +833,21 @@ export class ClickHouseStore extends SqlStore {
         await this.pause(5_000);
         continue;
       }
-      const next = await this.copyStep(state, first);
+      let next: MoveState;
+      try {
+        next = await this.copyStep(state, first);
+      } catch (error) {
+        // A dropped connection or a busy database: the piece is cleared and copied again after a pause.
+        if (this.closed || ++failed >= COPY_TRIES) throw error;
+        const wait = Math.min(1_000 * 2 ** (failed - 1), 300_000);
+        const reason = error instanceof Error ? [error.message, (error.cause as Error | undefined)?.message].filter(Boolean).join(": ") : String(error);
+        console.error(`Runlight: copying visits into ClickHouse failed (${reason}), and tries again in ${Math.round(wait / 1000)} s`);
+        first = true;
+        await this.pause(wait);
+        continue;
+      }
       first = false;
+      failed = 0;
       onProgress?.(next);
     }
   }
