@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.1.8 - 2026-10-16
 
 ### Changed
 - Updated the Runlight library to 0.1.8, with shorter-lived daily salts, stronger password hashing, faster reports on big sites, and dashboard accessibility fixes.
