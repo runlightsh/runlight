@@ -18,6 +18,7 @@ import { mkdirSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import path from "node:path";
 import type { SqlStore } from "@runlight/sdk";
+import type { ClickHouseStore } from "@runlight/sdk/clickhouse";
 import { BodyTooLarge, toRequest, writeResponse } from "@runlight/sdk/node";
 import { Geo, fileLookup } from "./geo.js";
 import { secretIn } from "./secret.js";
@@ -33,6 +34,7 @@ Usage:
   npx @runlight/server                      Start the server
   npx @runlight/server password <email>     Make an account, or give one a new password
   npx @runlight/server agents --log <file>  Count AI agents from a web server's access log
+  npx @runlight/server clickhouse <command> Move the visits into ClickHouse, and back (see clickhouse --help)
   npx @runlight/server --version            Print the version
 
 Settings are environment variables. PORT (3000) and HOST (0.0.0.0) set where it
@@ -52,12 +54,18 @@ off, or to the path of your own MMDB file.
 Docs: https://runlight.sh/docs/server/
 `;
 
-async function openStore(dataDir: string): Promise<SqlStore> {
+async function openStore(dataDir: string, copyInBackground = true): Promise<SqlStore> {
   const rows = await openRowStore(dataDir);
   const url = env("CLICKHOUSE_URL");
   if (!url) return rows;
   const { clickhouse } = await import("@runlight/sdk/clickhouse");
-  return clickhouse({ url, store: rows });
+  return clickhouse({ url, store: rows, copyInBackground });
+}
+
+/** The database that holds everything but the visits, as the startup log and the clickhouse commands name it. */
+function rowDatabase(dataDir: string): string {
+  const database = env("DATABASE_URL") ?? "";
+  return /^postgres(ql)?:\/\//.test(database) ? "Postgres" : /^mysql:\/\//.test(database) ? "MySQL" : /^mariadb:\/\//.test(database) ? "MariaDB" : path.join(dataDir, "runlight.db");
 }
 
 /** Where everything but the visits lives, and the visits too without ClickHouse. */
@@ -116,6 +124,20 @@ async function agents(args: string[]): Promise<void> {
   await runAgents({ log: path.resolve(log), to, key, follow: args.includes("--follow"), ...(site ? { site } : {}), ...(state ? { state: path.resolve(state) } : {}) });
 }
 
+async function clickhouseCommand(args: string[], dataDir: string): Promise<void> {
+  const { CLICKHOUSE_HELP, runClickhouse } = await import("./clickhouse.js");
+  if (!args[0] || args.includes("--help") || args.includes("-h")) return void process.stdout.write(CLICKHOUSE_HELP);
+  if (!env("CLICKHOUSE_URL")) throw new Error("Set CLICKHOUSE_URL to the ClickHouse to use, such as https://user:password@host:8443/runlight");
+  const store = (await openStore(dataDir, false)) as ClickHouseStore;
+  try {
+    // The other database's tables, as the server makes them, so a first run of these finds them.
+    await store.migrateOther();
+    await runClickhouse(args, store, rowDatabase(dataDir));
+  } finally {
+    await store.close();
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === "--help" || command === "-h" || command === "help") return void process.stdout.write(HELP);
@@ -124,6 +146,7 @@ async function main(): Promise<void> {
 
   const dataDir = path.resolve(env("DATA_DIR") ?? "./runlight-data");
   mkdirSync(dataDir, { recursive: true });
+  if (command === "clickhouse") return clickhouseCommand(args, dataDir);
   const store = await openStore(dataDir);
   const geoSetting = env("RUNLIGHT_GEO") ?? "city";
   const geo = geoSetting === "city" || geoSetting === "country" ? new Geo(path.join(dataDir, "geo"), geoSetting) : null;
@@ -185,9 +208,7 @@ async function main(): Promise<void> {
   http.listen(port, host, async () => {
     const shown = host === "0.0.0.0" || host === "::" ? "localhost" : host;
     console.log(`Runlight ${VERSION} is listening on http://${shown}:${port}`);
-    const database = env("DATABASE_URL") ?? "";
-    const where = /^postgres(ql)?:\/\//.test(database) ? "Postgres" : /^mysql:\/\//.test(database) ? "MySQL" : /^mariadb:\/\//.test(database) ? "MariaDB" : path.join(dataDir, "runlight.db");
-    console.log(`Data: ${where}`);
+    console.log(`Data: ${rowDatabase(dataDir)}`);
     if (env("CLICKHOUSE_URL")) console.log(`Visits: ClickHouse, ${new URL(env("CLICKHOUSE_URL")!).host}`);
     if ((await server.accounts.count()) === 0) {
       console.log(`\nNo account yet. Open this link to create the first one:\n  http://${shown}:${port}/setup?code=${server.setupCode}\n`);

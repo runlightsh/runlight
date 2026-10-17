@@ -15,6 +15,22 @@ export interface ClickHouseOptions {
   maxQueries?: number;
   /** The longest one query may run, in milliseconds. Default 120000. 0 means no limit. */
   queryTimeout?: number;
+  /**
+   * Copies the visits `store` already holds into ClickHouse in the background, newest first. Default true.
+   * The visits of the last two days are copied before the store is ready either way, so a visit going on
+   * when ClickHouse took over carries on. False leaves the rest for `copy()`, as the server's `clickhouse
+   * copy` command runs it.
+   */
+  copyInBackground?: boolean;
+}
+
+/** How far copying the other store's visits into ClickHouse has got. */
+export interface MoveState {
+  /** When ClickHouse took over. The other store holds every visit that started before it. */
+  at: number;
+  /** Every visit that started from here until `at` is in ClickHouse. */
+  through: number;
+  done: boolean;
 }
 
 /** The fetch there was when Runlight loaded, so an app or a test that wraps the global one later cannot reach ClickHouse's requests. */
@@ -25,6 +41,60 @@ const NO_ENTRY = "9223372036854775807";
 
 /** How many visits' keys are remembered, so a hit need not look its visit up. */
 const KEYS_KEPT = 50_000;
+
+/**
+ * The visits a hit can still reach: one that began up to EVENT_TAIL_MS ago and was active in the last
+ * half hour. They are copied first, before any hit is counted, and no hit reaches an older one.
+ */
+const RECENT_MS = EVENT_TAIL_MS + 30 * 60_000;
+
+/** How many rows are read from one store and written to the other at a time. */
+const COPY_BATCH = 5_000;
+
+/** How long one process's claim on the copy lasts, unless it renews it. */
+const LEASE_MS = 120_000;
+
+/** The setting in the other store that says which process is copying. */
+const LEASE_KEY = "clickhouse-copy";
+
+/** The text columns of a visit, alike in both stores. */
+const VISIT_TEXT = [
+  "hostname", "referrer_host", "referrer_path", "source", "channel", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+  "country", "region", "city", "browser", "browser_version", "os", "os_version", "device", "screen", "language",
+] as const;
+
+/** The columns of an event, alike in both stores. */
+const EVENT_COLUMNS = ["site", "ts", "kind", "visitor", "session", "pageview", "path", "hostname", "title", "name", "props", "engaged_ms", "scroll", "link"] as const;
+
+const text = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+const int = (v: unknown) => Number(v ?? 0);
+
+/** A visit from the other store as one row of ClickHouse's: all of it at once, as if every hit were in. */
+function visitFrom(r: Record<string, unknown>): Record<string, unknown> {
+  const startedAt = int(r.started_at);
+  const lastAt = int(r.last_at);
+  return {
+    site: text(r.site), started_at: startedAt, id: text(r.id), visitor: text(r.visitor), last_at: lastAt,
+    pageviews: int(r.pageviews), events: int(r.events), engaged_ms: int(r.engaged_ms), engaged_unknown: r.engaged_ms === null || r.engaged_ms === undefined ? 1 : 0,
+    imported: int(r.imported) ? 1 : 0,
+    // The first page was seen when the visit began and the last when it was last active, which is as
+    // early and as late as any hit after the copy can be.
+    entry: text(r.entry_path) ? [startedAt, text(r.entry_path)] : [NO_ENTRY, ""],
+    exit: text(r.exit_path) ? [lastAt, text(r.exit_path)] : [0, ""],
+    ...Object.fromEntries(VISIT_TEXT.map((col) => [col, text(r[col])])),
+  };
+}
+
+/** An event from the other store, with the start of its visit, or 0 when it has none, as ingest writes it. */
+function eventFrom(r: Record<string, unknown>): Record<string, unknown> {
+  return {
+    site: text(r.site), ts: int(r.ts), kind: text(r.kind), visitor: text(r.visitor), session: text(r.session),
+    started_at: r.visit_started === null || r.visit_started === undefined ? 0 : int(r.visit_started),
+    pageview: text(r.pageview), path: text(r.path), hostname: text(r.hostname), title: text(r.title), name: text(r.name),
+    props: r.props === null || r.props === undefined ? null : String(r.props), engaged_ms: int(r.engaged_ms),
+    scroll: r.scroll === null || r.scroll === undefined ? null : int(r.scroll), link: text(r.link),
+  };
+}
 
 /**
  * Runlight's visits and events in ClickHouse. Each hit adds a row of what changed (one more pageview,
@@ -241,28 +311,55 @@ export class ClickHouseStore extends SqlStore {
   private readonly rows: SqlStore;
   private readonly keys: Map<string, VisitKey>;
   private schema: Promise<void> | null = null;
+  private readonly background: boolean;
+  /** The copy running in the background, if one is. */
+  private copying: Promise<void> | null = null;
+  private closed = false;
+  /** Wakes the background copy from its wait, so closing need not wait it out. */
+  private wake: (() => void) | null = null;
+  /** Who this process is, in the claim on the copy, and the claim as last written. */
+  private readonly owner = crypto.randomUUID();
+  private claimed: string | null = null;
+  private metaAt = 0;
 
-  constructor(rows: SqlStore, clickhouse: ClickHouseDb, keys: Map<string, VisitKey> = new Map()) {
+  constructor(rows: SqlStore, clickhouse: ClickHouseDb, keys: Map<string, VisitKey> = new Map(), copyInBackground = false) {
     super(rows.db, rows.prefix);
     this.rows = rows;
     this.clickhouse = clickhouse;
     this.visits = new SqlStore(clickhouse);
     this.keys = keys;
+    this.background = copyInBackground;
   }
 
-  /** The tables in the other store, then ClickHouse's. Safe to call any number of times. */
+  /**
+   * The tables in the other store, then ClickHouse's. Safe to call any number of times. When the other store
+   * has visits and ClickHouse none, it starts copying them: the last two days now, the rest after.
+   */
   override async migrate(): Promise<void> {
     await super.migrate();
     this.schema ??= (async () => {
       await this.clickhouse.createDatabase();
       for (const statement of SCHEMA) await this.clickhouse.run(statement);
-      const [found] = await this.clickhouse.all<{ value: string }>(`SELECT argMax(value, at) AS value FROM rl_meta WHERE "key" = 'schema'`);
-      if (found?.value !== String(SCHEMA_VERSION)) await this.clickhouse.insert("rl_meta", [{ key: "schema", value: String(SCHEMA_VERSION), at: Date.now() }], { batched: true });
+      if ((await this.meta("schema")) !== String(SCHEMA_VERSION)) await this.setMeta("schema", String(SCHEMA_VERSION));
+      await this.prepareMove();
     })().catch((error) => {
       this.schema = null;
       throw error;
     });
     return this.schema;
+  }
+
+  /** The other store's tables only, leaving ClickHouse and the copy be, for the server's clickhouse commands. */
+  async migrateOther(): Promise<void> {
+    await super.migrate();
+  }
+
+  override async close(): Promise<void> {
+    this.closed = true;
+    this.wake?.();
+    await this.copying;
+    await this.release().catch(() => {});
+    await super.close();
   }
 
   override async transaction<T>(fn: (store: SqlStore) => Promise<T>): Promise<T> {
@@ -610,6 +707,298 @@ export class ClickHouseStore extends SqlStore {
       await this.clickhouse.run(`ALTER TABLE rl_events UPDATE name = ? WHERE site = ? AND kind = 'event' AND name = ?`, [g.name, g.site, before.name]);
     }
   }
+
+  // Moving: the visits the other store held before ClickHouse took over, copied across, newest first.
+  // One process copies at a time, by a claim in the other store's settings, and records how far it got
+  // in ClickHouse, so a restart carries on from there.
+
+  private async meta(key: string): Promise<string | null> {
+    const [row] = await this.clickhouse.all<{ value: string | null }>(`SELECT argMax(value, at) AS value FROM rl_meta WHERE "key" = ?`, [key]);
+    return row?.value ?? null;
+  }
+
+  private async setMeta(key: string, value: string): Promise<void> {
+    // The newest write wins, so two written in the same millisecond still go in order.
+    this.metaAt = Math.max(Date.now(), this.metaAt + 1);
+    await this.clickhouse.insert("rl_meta", [{ key, value, at: this.metaAt }], { batched: true });
+  }
+
+  /** How far the copy has got, or null when there has been none, or it was undone by `copyBack()`. */
+  async moveState(): Promise<MoveState | null> {
+    const value = await this.meta("move");
+    return value ? (JSON.parse(value) as MoveState) : null;
+  }
+
+  /** The start of the oldest visit copied so far, while the copy is still going, for the dashboard to say. */
+  override async moving(): Promise<{ through: number } | null> {
+    const state = await this.moveState();
+    return state && !state.done ? { through: state.through } : null;
+  }
+
+  /** Claims the copy for this process, or renews its claim. False while another process holds it. */
+  private async claim(): Promise<boolean> {
+    const mine = JSON.stringify({ by: this.owner, until: Date.now() + LEASE_MS });
+    const held = await this.settingOrAdd(LEASE_KEY, () => mine);
+    if (held !== mine) {
+      const { by, until } = JSON.parse(held) as { by: string; until: number };
+      if (by !== this.owner && until > Date.now()) return false;
+      if (!(await this.swapSetting(LEASE_KEY, held, mine))) return false;
+    }
+    this.claimed = mine;
+    return true;
+  }
+
+  private async release(): Promise<void> {
+    if (!this.claimed) return;
+    await this.swapSetting(LEASE_KEY, this.claimed, JSON.stringify({ by: "", until: 0 }));
+    this.claimed = null;
+  }
+
+  /** Waits up to `ms`, or until the store closes. */
+  private async pause(ms: number): Promise<void> {
+    if (this.closed) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref?.();
+      this.wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    this.wake = null;
+  }
+
+  /**
+   * On the first start with ClickHouse, decides whether there is anything to copy. Then copies the visits a
+   * hit can still reach before the store is ready, so a visit going on at the switch carries on rather than
+   * starting again, and starts copying the rest in the background.
+   */
+  private async prepareMove(): Promise<void> {
+    const deadline = Date.now() + 10 * 60_000;
+    for (;;) {
+      let state = await this.moveState();
+      if (state?.done) return;
+      if (state && state.through < state.at) break;
+      if (await this.claim()) {
+        state ??= await this.planMove();
+        if (!state.done) await this.copyStep(state, true);
+        break;
+      }
+      // Another process is copying the newest visits; this one starts once they are in.
+      if (Date.now() > deadline) throw new Error("Runlight: another process has been copying the newest visits into ClickHouse for ten minutes. Try again shortly.");
+      await this.pause(1_000);
+    }
+    if (this.background) {
+      this.copying ??= this.copy().then(
+        () => {},
+        (error) => console.error("Runlight: copying visits into ClickHouse stopped, and carries on at the next start", error),
+      );
+    } else {
+      // Left for copy(), here or in another process, which need not wait for this claim to run out.
+      await this.release();
+    }
+  }
+
+  /** The first time: a copy to make when the other store has visits and ClickHouse has none. */
+  private async planMove(): Promise<MoveState> {
+    const at = Date.now();
+    const any = async (db: Db, table: string) => (await db.all(`SELECT 1 AS x FROM ${table} LIMIT 1`)).length > 0;
+    const needed = ((await any(this.db, "rl_sessions")) || (await any(this.db, "rl_events"))) && !(await any(this.clickhouse, "rl_visits")) && !(await any(this.clickhouse, "rl_events"));
+    const state = { at, through: at, done: !needed };
+    await this.setMeta("move", JSON.stringify(state));
+    return state;
+  }
+
+  /**
+   * Copies every visit and event from the other store that ClickHouse does not have yet, newest first, and
+   * returns once all are in. Runs in the background unless `copyInBackground` is false; the server's
+   * `clickhouse copy` command runs it in the foreground. While another process holds the copy, it waits.
+   */
+  async copy(onProgress?: (state: MoveState) => void): Promise<MoveState | null> {
+    let first = true;
+    for (;;) {
+      if (this.closed) return this.moveState();
+      const state = await this.moveState();
+      if (!state || state.done) {
+        await this.release();
+        return state;
+      }
+      if (!(await this.claim())) {
+        first = true;
+        await this.pause(5_000);
+        continue;
+      }
+      const next = await this.copyStep(state, first);
+      first = false;
+      onProgress?.(next);
+    }
+  }
+
+  /**
+   * Copies the next piece back in time, and records it as copied. `resuming` first clears what a process
+   * stopped part way through it left in ClickHouse, which nothing else writes to: the piece of the last two
+   * days is copied before any hit is counted, and no hit reaches an older visit.
+   */
+  private async copyStep(state: MoveState, resuming: boolean): Promise<MoveState> {
+    const sites = (await this.db.all<{ id: string }>(`SELECT id FROM rl_sites`)).map((s) => String(s.id));
+    const to = state.through;
+    let from: number;
+    if (to === state.at) from = to - RECENT_MS;
+    else {
+      // A day back from the newest start before this point, skipping straight over stretches with none.
+      let latest: number | null = null;
+      for (const site of sites) {
+        for (const [table, col] of [["rl_sessions", "started_at"], ["rl_events", "ts"]] as const) {
+          const [row] = await this.db.all(`SELECT MAX(${col}) AS t FROM ${table} WHERE site = ? AND ${col} < ?`, [site, to]);
+          if (row?.t !== null && row?.t !== undefined) latest = Math.max(latest ?? -Infinity, Number(row.t));
+        }
+      }
+      if (latest === null) {
+        const done = { ...state, done: true };
+        await this.setMeta("move", JSON.stringify(done));
+        return done;
+      }
+      from = latest + 1 - 86_400_000;
+    }
+    if (resuming) {
+      await this.clickhouse.run(`DELETE FROM rl_visits WHERE started_at >= ? AND started_at < ?`, [from, to]);
+      await this.clickhouse.run(`DELETE FROM rl_events WHERE (started_at >= ? AND started_at < ?) OR (started_at = 0 AND ts >= ? AND ts < ?)`, [from, to, from, to]);
+    }
+    for (const site of sites) await this.copyPiece(site, from, to);
+    if (!(await this.claim())) throw new Error("Runlight: another process took over copying visits into ClickHouse");
+    const next = { ...state, through: from };
+    await this.setMeta("move", JSON.stringify(next));
+    return next;
+  }
+
+  /** One site's visits that started in [from, to), and their events, with the events that have no visit in it. */
+  private async copyPiece(site: string, from: number, to: number): Promise<void> {
+    let after: { at: number; id: string } | null = null;
+    for (;;) {
+      const rows: Array<Record<string, unknown>> = await this.db.all(
+        `SELECT * FROM rl_sessions WHERE site = ? AND started_at >= ? AND started_at < ?${after ? " AND (started_at > ? OR (started_at = ? AND id > ?))" : ""}
+         ORDER BY started_at, id LIMIT ${COPY_BATCH}`,
+        after ? [site, from, to, after.at, after.at, after.id] : [site, from, to],
+      );
+      if (!rows.length) break;
+      await this.clickhouse.insert("rl_visits", rows.map(visitFrom), { batched: true });
+      if (rows.length < COPY_BATCH) break;
+      const last = rows[rows.length - 1]!;
+      after = { at: Number(last.started_at), id: String(last.id) };
+      await this.claim();
+    }
+    // A visit's events come within EVENT_TAIL_MS of its start, and an event with no visit goes by its own time.
+    let next: { ts: number; id: number } | null = null;
+    for (;;) {
+      const rows: Array<Record<string, unknown>> = await this.db.all(
+        `SELECT ${EVENT_COLUMNS.map((c) => `e.${c}`).join(", ")}, e.id AS row_id, s.started_at AS visit_started
+         FROM rl_events e LEFT JOIN rl_sessions s ON s.id = e.session
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ?
+           AND ((s.started_at >= ? AND s.started_at < ?) OR (s.id IS NULL AND e.ts >= ? AND e.ts < ?))${next ? " AND (e.ts > ? OR (e.ts = ? AND e.id > ?))" : ""}
+         ORDER BY e.ts, e.id LIMIT ${COPY_BATCH}`,
+        [site, from - 3_600_000, to + EVENT_TAIL_MS, from, to, from, to, ...(next ? [next.ts, next.ts, next.id] : [])],
+      );
+      if (!rows.length) break;
+      await this.clickhouse.insert("rl_events", rows.map(eventFrom), { batched: true });
+      if (rows.length < COPY_BATCH) break;
+      const last = rows[rows.length - 1]!;
+      next = { ts: Number(last.ts), id: Number(last.row_id) };
+      await this.claim();
+    }
+  }
+
+  /** How many visits and events each store holds, for the server's `clickhouse status` command. */
+  async counts(): Promise<{ clickhouse: { visits: number; events: number }; other: { visits: number; events: number; copied: number | null } }> {
+    const count = async (db: Db, sql: string, params: unknown[] = []) => Number((await db.all<{ n: unknown }>(sql, params))[0]?.n ?? 0);
+    const state = await this.moveState();
+    return {
+      clickhouse: { visits: await count(this.clickhouse, `SELECT uniqExact(id) AS n FROM rl_visits`), events: await count(this.clickhouse, `SELECT count() AS n FROM rl_events`) },
+      other: {
+        visits: await count(this.db, `SELECT COUNT(*) AS n FROM rl_sessions`),
+        events: await count(this.db, `SELECT COUNT(*) AS n FROM rl_events`),
+        copied: state && !state.done ? await count(this.db, `SELECT COUNT(*) AS n FROM rl_sessions WHERE started_at >= ? AND started_at < ?`, [state.through, state.at]) : null,
+      },
+    };
+  }
+
+  /**
+   * Empties the other store's visits, events, and rollups once every one is in ClickHouse, which reads
+   * them from then on. For the server's `clickhouse drop-old` command.
+   */
+  async dropOld(): Promise<void> {
+    const state = await this.moveState();
+    if (state && !state.done) throw new Error("Runlight: visits are still being copied into ClickHouse. Run clickhouse copy to finish first.");
+    await this.emptyOther();
+  }
+
+  private async emptyOther(): Promise<void> {
+    const sites = (await this.db.all<{ id: string }>(`SELECT id FROM rl_sites`)).map((s) => String(s.id));
+    // A day at a time, as retention deletes, so a big history does not hold the database for minutes.
+    for (const site of sites) {
+      await this.rows.dropBefore(site, Number.MAX_SAFE_INTEGER);
+      await this.rows.clearRollups(site);
+    }
+    for (const table of ["rl_events", "rl_sessions", "rl_rollups", "rl_rollup_days"]) await this.db.run(`DELETE FROM ${table}`);
+  }
+
+  /**
+   * Copies every visit and event in ClickHouse into the other store, in place of what it held, then empties
+   * ClickHouse, for going back to the other store alone. Only with the copy done and the server stopped;
+   * the server's `clickhouse copy --back` command runs it. Rollups are built again from the rows.
+   */
+  async copyBack(onProgress?: (copied: { visits: number; events: number }) => void): Promise<void> {
+    const state = await this.moveState();
+    if (state && !state.done) throw new Error("Runlight: visits are still being copied into ClickHouse. Run clickhouse copy to finish first.");
+    await this.emptyOther();
+    const copied = { visits: 0, events: 0 };
+    const sites = (await this.clickhouse.all<{ site: string }>(`SELECT DISTINCT site FROM rl_visits UNION DISTINCT SELECT DISTINCT site FROM rl_events`)).map((s) => s.site);
+    const visitColumns = ["id", "site", "visitor", "started_at", "last_at", "entry_path", "exit_path", "pageviews", "events", "engaged_ms", "imported", ...VISIT_TEXT];
+    for (const site of sites) {
+      let after: { at: number; id: string } | null = null;
+      for (;;) {
+        const rows: Array<Record<string, unknown>> = await this.clickhouse.all(
+          `SELECT ${visitColumns.join(", ")} FROM rl_sessions WHERE site = ?${after ? " AND (started_at > ? OR (started_at = ? AND id > ?))" : ""} ORDER BY started_at, id LIMIT ${COPY_BATCH}`,
+          after ? [site, after.at, after.at, after.id] : [site],
+        );
+        if (!rows.length) break;
+        await this.insertRows("rl_sessions", visitColumns, rows);
+        copied.visits += rows.length;
+        onProgress?.(copied);
+        if (rows.length < COPY_BATCH) break;
+        const last = rows[rows.length - 1]!;
+        after = { at: Number(last.started_at), id: String(last.id) };
+      }
+      let next: { ts: number; id: string } | null = null;
+      for (;;) {
+        const rows: Array<Record<string, unknown>> = await this.clickhouse.all(
+          `SELECT ${EVENT_COLUMNS.join(", ")}, toString(id) AS row_id FROM rl_events WHERE site = ?${next ? " AND (ts > ? OR (ts = ? AND toString(id) > ?))" : ""} ORDER BY ts, row_id LIMIT ${COPY_BATCH}`,
+          next ? [site, next.ts, next.ts, next.id] : [site],
+        );
+        if (!rows.length) break;
+        await this.insertRows("rl_events", [...EVENT_COLUMNS], rows);
+        copied.events += rows.length;
+        onProgress?.(copied);
+        if (rows.length < COPY_BATCH) break;
+        const last = rows[rows.length - 1]!;
+        next = { ts: Number(last.ts), id: String(last.row_id) };
+      }
+    }
+    await this.clickhouse.run(`TRUNCATE TABLE rl_visits`);
+    await this.clickhouse.run(`TRUNCATE TABLE rl_events`);
+    this.keys.clear();
+    // Switched on again later, ClickHouse copies everything afresh.
+    await this.setMeta("move", "");
+  }
+
+  /** Rows into the other store, a few hundred to a statement, each statement its own transaction. */
+  private async insertRows(table: string, columns: string[], rows: Array<Record<string, unknown>>): Promise<void> {
+    const per = Math.floor(6_000 / columns.length);
+    for (let i = 0; i < rows.length; i += per) {
+      const piece = rows.slice(i, i + per);
+      const values = piece.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ");
+      await this.rows.transaction((store) => store.db.run(`INSERT INTO ${table} (${columns.join(", ")}) VALUES ${values}`, piece.flatMap((r) => columns.map((c) => r[c] ?? null))));
+    }
+  }
 }
 
 /**
@@ -617,5 +1006,5 @@ export class ClickHouseStore extends SqlStore {
  * Worth it past a few million visits a month, or for reports filtered over long ranges.
  */
 export function clickhouse(options: ClickHouseOptions): ClickHouseStore {
-  return new ClickHouseStore(options.store, clickhouseDb(options));
+  return new ClickHouseStore(options.store, clickhouseDb(options), new Map(), options.copyInBackground ?? true);
 }

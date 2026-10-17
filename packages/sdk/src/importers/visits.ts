@@ -189,6 +189,8 @@ async function writeStep(
 ): Promise<{ pageviews: number; events: number; visits: number }> {
   const site = runlight.site(siteId);
   if (!site) throw new ImportError("Unknown site", "unknown_site");
+  // The copy would bring in, beside these, what an earlier import of the same days left in the old database.
+  if (await runlight.store.moving()) throw new ImportError("Visits are still being copied into ClickHouse. Import once that has finished.", "import_moving");
   const counts = { pageviews: 0, events: 0, visits: 0 };
   await runlight.store.transaction(async (store) => {
     // Days this step writes into are added up again later, with the imported visits in them.

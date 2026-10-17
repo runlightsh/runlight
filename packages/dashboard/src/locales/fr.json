@@ -1,5 +1,6 @@
 {
   "app.site": "Site",
+  "app.moving": "Les visites plus anciennes sont en cours de copie vers ClickHouse. Les rapports remontent pour l’instant jusqu’au {day}, et plus loin à mesure que la copie avance.",
   "app.confirmDelete": "Supprimer {name} ?",
   "app.signedOut": "Ouvrez cette page une fois avec {token} suivi de votre {env} pour vous connecter.",
   "app.live.title": "Visiteurs des cinq dernières minutes",
@@ -1019,6 +1020,7 @@
   "error.import_umami_login": "Saisissez une clé d’API, ou un nom d’utilisateur et un mot de passe.",
   "error.import_website": "Choisissez le site Umami à importer.",
   "error.import_csv_batch": "Envoyez au plus {max} lignes à la fois.",
+  "error.import_moving": "Les visites sont encore en cours de copie vers ClickHouse. Importez une fois la copie terminée.",
   "error.import_csv_format": "Ce fichier n’est ni un export Umami ni au format de visites de Runlight. Vérifiez sa ligne d’en-tête.",
   "error.install_refused": "Cette installation a refusé le jeton.",
   "error.install_token": "Saisissez un jeton d’API de cette installation.",
