@@ -42,9 +42,34 @@ class CryptoTest < Minitest::Test
 
   def test_new_hashes_use_scrypt_and_check
     hash = Crypto.hash_password("a long password")
-    assert_match(/\Ascrypt\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}\z/, hash)
+    assert_match(/\Ascrypt\$32768\$8\$3\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}\z/, hash)
     assert Crypto.check_password("a long password", hash)
     refute_equal hash, Crypto.hash_password("a long password"), "a new salt each time"
+  end
+
+  def test_new_password_hashes_record_their_scrypt_cost_and_a_cost_out_of_bounds_is_refused_not_run
+    made = Crypto.hash_password("a long password")
+    assert_match(/\Ascrypt\$32768\$8\$3\$[\w-]+\$[\w-]+\z/, made)
+    assert Crypto.check_password("a long password", made)
+    refute Crypto.check_password("a long passwore", made)
+    # The same bytes any language's scrypt gives for that cost, so every port can check them.
+    _, _, _, _, salt, key = made.split("$")
+    again = Scrypt.derive("a long password", Crypto.from_base64url(salt), 32_768, 8, 3, 32)
+    assert_equal key, Crypto.base64url(again)
+    %w[2097152$8$1 30000$8$1 1$8$1 16384$33$1 16384$8$17 16384$0$1 x$8$1].each do |cost|
+      refute Crypto.check_password("a long password", "scrypt$#{cost}$#{salt}$#{key}"), cost
+    end
+  end
+
+  def test_a_hash_at_the_old_cost_still_checks_and_is_weaker_than_a_new_one
+    salt = Crypto.random_bytes(16)
+    old = "scrypt$#{Crypto.base64url(salt)}$#{Crypto.base64url(Scrypt.derive("a long password", salt, 16_384, 8, 1, 32))}"
+    assert Crypto.check_password("a long password", old)
+    assert Crypto.weaker_than_now?(old)
+    assert Crypto.weaker_than_now?("pbkdf2$100000$#{Crypto.base64url(salt)}$#{Crypto.base64url("k" * 32)}")
+    refute Crypto.weaker_than_now?(Crypto.hash_password("a long password"))
+    refute Crypto.weaker_than_now?("scrypt$2097152$8$1$a$b"), "a cost out of bounds is not rehashed"
+    refute Crypto.weaker_than_now?("bcrypt$x")
   end
 
   def test_check_password_answers_as_type_script_does

@@ -113,6 +113,18 @@ class RackAppTest < Minitest::Test
     assert_equal "a@b", request.headers.get("host"), "the header is kept as it came"
   end
 
+  def test_the_first_x_forwarded_proto_of_http_or_https_names_the_scheme_as_the_node_server_reads_it
+    url = lambda do |env|
+      Runlight::Http::Request.from_rack(Rack::MockRequest.env_for("/runlight/x", { "HTTP_HOST" => "stats.example.com" }.merge(env))).url
+    end
+    assert_equal "http://stats.example.com/runlight/x", url.call({})
+    assert_equal "https://stats.example.com/runlight/x", url.call("HTTP_X_FORWARDED_PROTO" => "https")
+    assert_equal "https://stats.example.com/runlight/x", url.call("HTTP_X_FORWARDED_PROTO" => " HTTPS , http")
+    assert_equal "http://stats.example.com/runlight/x", url.call("HTTP_X_FORWARDED_PROTO" => "http, https", "rack.url_scheme" => "https")
+    assert_equal "http://stats.example.com/runlight/x", url.call("HTTP_X_FORWARDED_PROTO" => "ftp"), "another value is ignored"
+    assert_equal "https://stats.example.com/runlight/x", url.call("HTTP_X_FORWARDED_PROTO" => "", "rack.url_scheme" => "https")
+  end
+
   def test_the_apps_requests_do_not_wait_for_runlight_to_make_its_tables
     started = Queue.new
     go = Queue.new

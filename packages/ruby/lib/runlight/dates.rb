@@ -211,6 +211,14 @@ module Runlight
 
         at += 15 * 60_000
       end
+      # Where clocks fall back across that hour (midnight in Amman in 2019, three hours at Casey station), it
+      # happens twice; the day begins at the first.
+      return at if offset(at - (3 * 3_600_000), timezone) == offset(at, timezone)
+
+      (3 * 60).step(15, -15) do |back|
+        ly, lm, ld, lh = parts(at - (back * 60_000), timezone)
+        return at - (back * 60_000) if utc(ly, lm - 1, ld, lh) == guess
+      end
       at
     end
 

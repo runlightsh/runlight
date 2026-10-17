@@ -122,6 +122,8 @@ module Runlight
           # MySQL takes an index that leads with the site as a way to read all of a site's rows, even where a
           # range of time would read far fewer, so there an index for looking a value up leads with that value.
           "CREATE INDEX IF NOT EXISTS rl_sessions_visitor ON rl_sessions (#{my ? "visitor, site" : "site, visitor"}, last_at)",
+          # Keep exact visitor counts in index order without loading every session row.
+          *(dialect == "sqlite" ? ["CREATE INDEX IF NOT EXISTS rl_sessions_visit_visitors ON rl_sessions (site, visitor, started_at) WHERE pageviews > 0 OR events > 0"] : []),
           "CREATE TABLE IF NOT EXISTS rl_events (
       id #{id}, site #{site} NOT NULL, ts BIGINT NOT NULL, kind #{str.(20)} NOT NULL,
       visitor #{text.(100)}, session #{text.(100)}, pageview #{text.(100)},
@@ -134,6 +136,7 @@ module Runlight
           # Page and event filters find the visits they pick through these, rather than reading every row in the range.
           # MySQL indexes the first 255 characters of a path, which is enough to find it.
           "CREATE INDEX IF NOT EXISTS rl_events_site_path ON rl_events (#{my ? "path(255), site" : "site, path"}, ts)",
+          *(dialect == "sqlite" ? ["CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'"] : []),
           # MySQL has no partial index, so its index of event names holds the kind too.
           if my
             "CREATE INDEX IF NOT EXISTS rl_events_site_name ON rl_events (name, site, kind, ts)"
@@ -276,6 +279,11 @@ module Runlight
         return (value.frac.zero? ? value.to_i : value.to_f) if value.is_a?(BigDecimal)
 
         Js.number(value)
+      end
+
+      # Text cut to at most `max` characters, as a VARCHAR(max) holds it, never through the middle of one.
+      def clip(text, max)
+        text.is_a?(String) && text.length > max ? text[0, max] : text
       end
 
       # String(value ?? "") for text a driver read, as valid UTF-8.

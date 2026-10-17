@@ -385,6 +385,30 @@ class AccountsWebTest < Minitest::Test
     refute_nil accounts.by_email("jon@example.com")
   end
 
+  def test_past_an_accounts_limit_every_account_and_unknown_email_gets_the_same_answer
+    web = web({ "token" => "app-token" }, "https://stats.example.com")
+    owner(web)
+    @rl.mail = { "service" => "smtp", "from" => "runlight@example.com" }
+    # Two-factor on for the account, and its limit and an unknown email's reached.
+    @rl.store.db.run("UPDATE rl_users SET totp_secret = ? WHERE email = ?", [Runlight::Accounts::Crypto.seal_text("JBSWY3DPEHPK3PXP", "k" * 64), "jon@example.com"])
+    throttle = Runlight::Accounts::Throttle.new(@rl.store, "account", 50)
+    50.times do
+      throttle.record_failure("jon@example.com", @now)
+      throttle.record_failure("nobody@example.com", @now)
+    end
+    known = handle(web, form("/login", { "email" => "jon@example.com", "password" => "a wrong password" }))
+    unknown = handle(web, form("/login", { "email" => "nobody@example.com", "password" => "a wrong password" }))
+    assert_equal [429, 429], [known.status, unknown.status]
+    assert_includes known.text, "Too many tries for this account"
+    refute_includes known.text, "name=\"pending\"", "no code step, which would tell the account from the email"
+    assert_equal known.text.sub("jon@example.com", "nobody@example.com"), unknown.text
+    # The right password still gets a link, which leads to the code step.
+    right = handle(web, form("/login", { "email" => "jon@example.com", "password" => "a long password" }))
+    assert_equal 429, right.status
+    @rl.idle
+    assert_equal 1, @rl.sent.length
+  end
+
   def test_a_session_cookie_that_is_not_valid_percent_encoding_reads_as_signed_out
     web = web()
     assert_nil web.signed_in(req("/", "GET", { "cookie" => "runlight_session=%E0%A4%A" }))

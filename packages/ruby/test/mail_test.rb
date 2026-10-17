@@ -360,7 +360,8 @@ class MailTest < Minitest::Test
     assert_match(%r{\A<https://stats\.example\.com/runlight/unsubscribe/[a-f0-9]{32}>\z}, sent[1]["headers"]["List-Unsubscribe"])
     assert_equal "List-Unsubscribe=One-Click", sent[1]["headers"]["List-Unsubscribe-Post"]
 
-    # A failure comes back as a mail error naming the mailer.
+    # A failure comes back as a mail error naming the mailer. (A test through one mailer goes at most once a minute.)
+    now += 60_000
     fail_with = "SMTP connect() failed"
     failed = call.call("POST", "/api/mail/test", { "to" => "jon@example.com" })
     assert_equal 400, failed.status
@@ -382,6 +383,10 @@ class MailTest < Minitest::Test
     assert_equal 200, call.call("DELETE", "/api/mail").status
     assert_equal "app", get.call("/api/mail")["source"]
     assert_equal 200, call.call("POST", "/api/mail/test", { "to" => "jon@example.com" }).status
+    assert_equal 3, sent.length
+    # Another test through it straight away waits a minute, so the button cannot flood an inbox.
+    again = call.call("POST", "/api/mail/test", { "to" => "jon@example.com" })
+    assert_equal [429, "test_soon"], [again.status, Runlight::Json.decode(again.text)["code"]]
     assert_equal 3, sent.length
   end
 

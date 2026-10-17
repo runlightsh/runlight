@@ -49,9 +49,9 @@ class ServerStandaloneTest < Minitest::Test
 
   def test_a_new_server_is_locked_until_the_setup_code_makes_the_first_account
     each_kind do |kind|
-      server = make({ "setupWhere" => "in setup.txt" }, kind)
+      server = make({ "setupWhere" => true }, kind)
       assert_equal 403, server.handle(req("/")).status, "the dashboard waits for setup"
-      assert_includes server.handle(req("/")).text, "Open the setup link in setup.txt"
+      assert_includes server.handle(req("/")).text, "Open the setup link in the file setup.txt in Runlight's data folder (<code>runlight setup</code> prints it too), which carries"
       assert_equal 403, server.handle(req("/setup?code=wrong")).status
       assert_equal 403, server.handle(form("/setup", { "code" => "wrong", "email" => "a@b.co", "password" => "long enough pw" })).status
       assert_equal 200, server.handle(req("/setup?code=#{CODE}")).status

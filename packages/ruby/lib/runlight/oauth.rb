@@ -54,14 +54,27 @@ module Runlight
       base64url(OpenSSL::Digest::SHA256.digest(verifier))
     end
 
-    # The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
+    # The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+    # replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
+    # database alone cannot report for the site; one kept before as plain text is sealed the next time it is read.
     def agents_key(runlight, site, replace = false)
       name = "observe-key:#{site}"
-      return runlight.store.setting_or_add(name) { "rlo_#{Hashing.random_id(20)}" } unless replace
-
+      unless replace
+        made = Mail::Secret.seal("rlo_#{Hashing.random_id(20)}", runlight.secret)
+        stored = runlight.store.setting_or_add(name) { made }
+        key = open_agents_key(runlight, stored)
+        runlight.store.set_setting(name, Mail::Secret.seal(key, runlight.secret)) if key && stored.start_with?("rlo_")
+        # One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
+        return key if key
+      end
       key = "rlo_#{Hashing.random_id(20)}"
-      runlight.store.set_setting(name, key)
+      runlight.store.set_setting(name, Mail::Secret.seal(key, runlight.secret))
       key
+    end
+
+    # A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. Nil when it cannot be opened.
+    def open_agents_key(runlight, stored)
+      stored.start_with?("rlo_") ? stored : Mail::Secret.unseal(stored, runlight.secret)
     end
 
     # The URL that a 401 from the MCP endpoint points clients at, to start OAuth.
@@ -120,13 +133,17 @@ module Runlight
 
       if path == "/oauth/authorize" && (request.method == "GET" || request.method == "POST")
         runlight.init
+        translator = Messages.translator(Messages.accepted_language(request))
+        h = translator["html"]
+        lang = translator["lang"]
+        page = ->(title, body, status = 200) { page_in(lang, title, body, status) }
         form = request.method == "POST" ? Http::SearchParams.new(request.text) : url.search_params
         client_id = form.get("client_id") || ""
         client = client_for(runlight, client_id)&.fetch("client", nil)
         redirect = form.get("redirect_uri") || ""
         # Without a known client and one of its own addresses there is nowhere safe to send an answer.
         if client.nil? || !Array(client["redirects"]).include?(redirect)
-          return page("This app is not registered", "<p>Start connecting again from the app.</p>", 400)
+          return page.call(h.call("oauth.unregisteredTitle"), "<p>#{h.call("oauth.startAgain")}</p>", 400)
         end
 
         back = lambda do |params|
@@ -144,8 +161,8 @@ module Runlight
           if client.key?("usedAt") && Js.truthy?(client["usedAt"])
             back.call(params)
           else
-            page("This app asked in a way Runlight does not support",
-                 "<p>#{esc(client["name"].to_s)} sent #{esc(params["error_description"] || params["error"])}. Start connecting again from the app.</p>", 400)
+            page.call(h.call("oauth.unsupportedTitle"),
+                      "<p>#{h.call("oauth.unsupported", { "app" => esc(client["name"].to_s), "error" => esc(params["error_description"] || params["error"]) })}</p>", 400)
           end
         end
         return refuse.call({ "error" => "unsupported_response_type" }) if form.get("response_type") != "code"
@@ -168,7 +185,7 @@ module Runlight
         unless ctx["isOwner"].call(request)
           # Someone signed in who may only read would be sent to sign in again and again.
           if ctx["isReader"]&.call(request)
-            return page("Ask an owner to connect this", "<p>You are signed in as a viewer, and only an owner of this Runlight can connect #{esc(name)}.</p>", 403)
+            return page.call(h.call("oauth.viewerTitle"), "<p>#{h.call("oauth.viewer", { "app" => esc(name) })}</p>", 403)
           end
 
           # The site stays, since on the way in it only says which one to offer first.
@@ -180,7 +197,8 @@ module Runlight
           end
 
           home = base == "" ? "/" : base
-          return page("Sign in first", "<p>Open your Runlight dashboard at <a href=\"#{esc(home)}\">#{esc("#{url.host}#{home}")}</a> and sign in, then connect #{esc(name)} again.</p>", 401)
+          return page.call(h.call("oauth.signInTitle"),
+                           "<p>#{h.call("oauth.signIn", { "link" => "<a href=\"#{esc(home)}\">#{esc("#{url.host}#{home}")}</a>", "app" => esc(name) })}</p>", 401)
         end
 
         if request.method == "GET"
@@ -189,26 +207,27 @@ module Runlight
             hidden << "<input type=\"hidden\" name=\"#{k}\" value=\"#{esc(form.get(k))}\">" unless form.get(k).nil?
           end
           # The app names itself, so the page also shows where the answer goes, which it cannot fake.
-          sends_to = "<p class=\"note\">Allowing sends you back to <strong>#{esc(Http::Url.new(redirect).host)}</strong>. Only allow it if you started connecting there.</p>"
+          sends_to = "<p class=\"note\">#{h.call("oauth.sendsTo", { "host" => "<strong>#{esc(Http::Url.new(redirect).host)}</strong>" })}</p>"
+          buttons = "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">#{h.call("oauth.deny")}</button>" \
+                    "<button type=\"submit\" name=\"decision\" value=\"allow\">#{h.call("oauth.allow")}</button></div></form>"
           if cms
             if counting.empty? && !runlight.managed_sites
-              return page("Add this site first",
-                          "<p>No site in this Runlight counts <strong>#{esc(host)}</strong>. Add it to a site's domains in your code, then connect again from #{esc(name)}.</p>", 400)
+              return page.call(h.call("oauth.addSiteTitle"),
+                               "<p>#{h.call("oauth.addSite", { "host" => "<strong>#{esc(host)}</strong>", "app" => esc(name) })}</p>", 400)
             end
 
             choices = +""
             counting.each { |s| choices << "<option value=\"#{esc(s["id"])}\">#{esc(s["name"])}</option>" }
-            choices << "<option value=\"new\">A new site for #{esc(host)}</option>" if runlight.managed_sites && counting.empty?
-            return page(
-              "Connect #{esc(name)}",
-              "<p><strong>#{esc(name)}</strong> wants to count <strong>#{esc(host)}</strong> in this Runlight.</p>\n" \
-              "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's " \
-              "read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>\n" \
+            choices << "<option value=\"new\">#{h.call("oauth.newSite", { "host" => esc(host) })}</option>" if runlight.managed_sites && counting.empty?
+            return page.call(
+              h.call("oauth.connectTitle", { "app" => esc(name) }),
+              "<p>#{h.call("oauth.cmsIntro", { "app" => "<strong>#{esc(name)}</strong>", "host" => "<strong>#{esc(host)}</strong>" })}</p>\n" \
+              "<p>#{h.call("oauth.cmsDetail")}</p>\n" \
               "#{sends_to}\n" \
               "<form method=\"post\" action=\"#{esc(base)}/oauth/authorize\">#{hidden}\n" \
-              "<label>Site<select name=\"site\">#{choices}</select></label>\n" \
-              "<p class=\"note\">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in #{esc(name)}.</p>\n" \
-              '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+              "<label>#{h.call("app.site")}<select name=\"site\">#{choices}</select></label>\n" \
+              "<p class=\"note\">#{h.call("oauth.cmsNote", { "app" => esc(name) })}</p>\n" \
+              "#{buttons}",
             )
           end
           sites = runlight.sites
@@ -221,33 +240,32 @@ module Runlight
 
               choices << "<option value=\"#{esc(s["id"])}\"#{s["id"] == wanted ? " selected" : ""}>#{esc(s["name"])}</option>"
             end
-            return page(
-              "Connect #{esc(name)}",
-              "<p><strong>#{esc(name)}</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>\n" \
-              "<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, " \
-              "timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>\n" \
+            return page.call(
+              h.call("oauth.connectTitle", { "app" => esc(name) }),
+              "<p>#{h.call("oauth.manageIntro", { "app" => "<strong>#{esc(name)}</strong>" })}</p>\n" \
+              "<p>#{h.call("oauth.manageDetail")}</p>\n" \
               "#{sends_to}\n" \
               "<form method=\"post\" action=\"#{esc(base)}/oauth/authorize\">#{hidden}\n" \
-              "<label>Site<select name=\"site\">#{choices}</select></label>\n" \
-              "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects #{esc(name)}.</p>\n" \
-              '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+              "<label>#{h.call("app.site")}<select name=\"site\">#{choices}</select></label>\n" \
+              "<p class=\"note\">#{h.call("oauth.manageNote", { "app" => esc(name) })}</p>\n" \
+              "#{buttons}",
             )
           end
           options = +""
-          sites.each { |s| options << "<option value=\"#{esc(s["id"])}\">#{esc(s["name"])} only</option>" }
-          return page(
-            "Connect #{esc(name)}",
-            "<p><strong>#{esc(name)}</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>\n" \
+          sites.each { |s| options << "<option value=\"#{esc(s["id"])}\">#{h.call("oauth.siteOnly", { "site" => esc(s["name"]) })}</option>" }
+          return page.call(
+            h.call("oauth.connectTitle", { "app" => esc(name) }),
+            "<p>#{h.call("oauth.readIntro", { "app" => "<strong>#{esc(name)}</strong>" })}</p>\n" \
             "#{sends_to}\n" \
             "<form method=\"post\" action=\"#{esc(base)}/oauth/authorize\">#{hidden}\n" \
-            "<label>Which sites it can read<select name=\"site\"><option value=\"\">Every site</option>#{sites.length > 1 ? options : ""}</select></label>\n" \
-            "<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>\n" \
-            '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>',
+            "<label>#{h.call("oauth.readSites")}<select name=\"site\"><option value=\"\">#{h.call("tokens.allSites")}</option>#{sites.length > 1 ? options : ""}</select></label>\n" \
+            "<p class=\"note\">#{h.call("oauth.readNote")}</p>\n" \
+            "#{buttons}",
           )
         end
         # The consent form posts here from this page only; a form from another site is refused.
         origin = request.headers.get("origin")
-        return page("This request came from another site", "<p>Start connecting again from the app.</p>", 403) if !origin.nil? && origin != "" && origin != url.origin
+        return page.call(h.call("oauth.anotherSiteTitle"), "<p>#{h.call("oauth.startAgain")}</p>", 403) if !origin.nil? && origin != "" && origin != url.origin
         return back.call({ "error" => "access_denied" }) if form.get("decision") != "allow"
 
         site = form.get("site") || ""
@@ -391,7 +409,7 @@ module Runlight
     end
 
     def json(body, status = 200)
-      Http::Response.new(Json.encode(body), status: status, headers: { "content-type" => "application/json; charset=utf-8", "cache-control" => "no-store" }.merge(CORS))
+      Http::Response.new(Json.encode(body), status: status, headers: { "content-type" => "application/json; charset=utf-8", "cache-control" => "no-store", "x-content-type-options" => "nosniff" }.merge(CORS))
     end
 
     def oauth_error(error, description, status = 400)
@@ -455,9 +473,10 @@ module Runlight
              "grant_types" => ["authorization_code"], "response_types" => ["code"] }, 201)
     end
 
-    def page(title, body, status = 200)
+    # A page in the visitor's language, with a title already written as HTML.
+    def page_in(lang, title, body, status = 200)
       Http::Response.new(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>#{title} | Runlight</title>\n" \
+        "<!doctype html><html lang=\"#{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>#{title} | Runlight</title>\n" \
         '<style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 16 16\'%3E%3Cpath d=\'M4 6l4 4 4-4\' fill=\'none\' stroke=\'%238a8a93\' stroke-width=\'1.6\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style></head><body><main><h1>' \
         "#{title}</h1>#{body}</main></body></html>",
         status: status,
@@ -474,6 +493,6 @@ module Runlight
     end
 
     private_class_method :base64url, :from_base64url, :client_key, :client_for, :site_host, :constant_time_equal, :esc, :json, :oauth_error,
-                         :allowed_redirect, :json_form, :allow_registration, :register, :page
+                         :allowed_redirect, :json_form, :allow_registration, :register, :page_in
   end
 end

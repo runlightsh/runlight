@@ -12,10 +12,12 @@ module Runlight
     # TOTP, the otpauth address, recovery codes, and the signature on session cookies) are here too, as
     # functions of their inputs alone, so the accounts class can call them.
     module Crypto
-      SCRYPT_N = 16_384
-      SCRYPT_R = 8
-      SCRYPT_P = 1
-      private_constant :SCRYPT_N, :SCRYPT_R, :SCRYPT_P
+      # What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check. Each hash records its own cost,
+      # so this can rise again.
+      SCRYPT = { n: 32_768, r: 8, p: 3 }.freeze
+      # What a hash written as scrypt$salt$key costs: the setting before hashes recorded theirs.
+      SCRYPT_BEFORE = { n: 16_384, r: 8, p: 1 }.freeze
+      private_constant :SCRYPT, :SCRYPT_BEFORE
 
       # As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on.
       PBKDF2_ROUNDS = 100_000
@@ -71,10 +73,10 @@ module Runlight
         same_bytes(a, b)
       end
 
-      # A password hash, in the scrypt form the standalone server has always written.
+      # A password hash, scrypt$N$r$p$salt$key: it records its cost, which can rise later.
       def hash_password(password)
         salt = random_bytes(16)
-        "scrypt$#{base64url(salt)}$#{base64url(scrypt(password, salt, 32))}"
+        "scrypt$#{SCRYPT[:n]}$#{SCRYPT[:r]}$#{SCRYPT[:p]}$#{base64url(salt)}$#{base64url(scrypt(password, salt, 32, SCRYPT))}"
       end
 
       # Whether a password matches a hash, scrypt or PBKDF2. A stored key under MIN_KEY_BYTES is refused,
@@ -88,12 +90,15 @@ module Runlight
         rescue ArgumentError
           nil
         end
-        if parts[0] == "scrypt" && parts.length == 3
-          expected = decode.call(parts[2])
-          salt = decode.call(parts[1])
+        if parts[0] == "scrypt" && [3, 6].include?(parts.length)
+          cost = scrypt_cost(parts)
+          return false if cost.nil?
+
+          expected = decode.call(parts[-1])
+          salt = decode.call(parts[-2])
           return false if expected.nil? || salt.nil? || expected.bytesize < MIN_KEY_BYTES
 
-          return same_bytes(scrypt(password, salt, expected.bytesize), expected)
+          return same_bytes(scrypt(password, salt, expected.bytesize, cost), expected)
         end
         if parts[0] == "pbkdf2" && parts.length == 4
           rounds = Js.number(parts[1])
@@ -108,8 +113,31 @@ module Runlight
         false
       end
 
-      def scrypt(password, salt, length)
-        length.zero? ? "".b : Scrypt.derive(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, length)
+      # Whether a stored hash costs less than a new one would, so the password it matched is hashed again: an
+      # scrypt hash with a lower cost, or a PBKDF2 one.
+      def weaker_than_now?(stored)
+        parts = stored.split("$", -1)
+        return true if parts[0] == "pbkdf2"
+        return false if parts[0] != "scrypt"
+
+        cost = scrypt_cost(parts)
+        !cost.nil? && cost[:n] * cost[:r] * cost[:p] < SCRYPT[:n] * SCRYPT[:r] * SCRYPT[:p]
+      end
+
+      # A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key).
+      # Nil for one out of bounds, so a stored hash cannot ask for a huge amount of memory or time.
+      def scrypt_cost(parts)
+        return SCRYPT_BEFORE if parts.length == 3
+
+        n, r, p = parts[1, 3].map { |part| Js.number(part) }
+        whole = ->(v, max) { v.is_a?(Integer) && v >= 1 && v <= max }
+        return nil unless whole.call(n, 1 << 20) && n >= 2 && (n & (n - 1)).zero? && whole.call(r, 32) && whole.call(p, 16)
+
+        { n: n, r: r, p: p }
+      end
+
+      def scrypt(password, salt, length, cost)
+        length.zero? ? "".b : Scrypt.derive(password, salt, cost[:n], cost[:r], cost[:p], length)
       end
 
       def pbkdf2(password, salt, rounds, length)
@@ -251,7 +279,7 @@ module Runlight
         base64url(hmac("SHA-256", secret, "#{body}.#{hash}"))
       end
 
-      private_class_method :scrypt, :pbkdf2, :same_bytes, :seal_key, :decode_utf8
+      private_class_method :scrypt, :scrypt_cost, :pbkdf2, :same_bytes, :seal_key, :decode_utf8
     end
   end
 end

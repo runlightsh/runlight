@@ -151,21 +151,9 @@ module Runlight
         ticket("pending", user, now + (5 * 60_000))
       end
 
-      # A ticket that looks and acts like pending_for's, except that no code ever
-      # passes with it. A wrong password gets one once an account with
-      # two-factor has had too many, so the answer never tells a right password.
-      def decoy_for(user, now)
-        ticket("decoy", user, now + (5 * 60_000))
-      end
-
-      # The account a code-step ticket names, and whether a right code may sign in with it:
-      # {"user" => user, "real" => bool}, or nil.
+      # The account a code-step ticket names, or nil.
       def from_pending(value, now)
-        user = from_ticket("pending", value, now)
-        return { "user" => user, "real" => true } unless user.nil?
-
-        decoy = from_ticket("decoy", value, now)
-        decoy.nil? ? nil : { "user" => decoy, "real" => false }
+        from_ticket("pending", value, now)
       end
 
       # A ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it.
@@ -245,6 +233,20 @@ module Runlight
 
           @store.db.run("UPDATE rl_users SET role = 'owner' WHERE id = ?", [to])
           @store.db.run("UPDATE rl_users SET role = 'admin' WHERE id = ?", [from])
+        end
+        nil
+      end
+
+      # Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+      # same id, from its domain, and they must not find their way into it.
+      def forget_site(site)
+        init
+        turn do
+          list.select { |u| u["site"] == site }.each do |user|
+            @store.db.run("DELETE FROM rl_users WHERE id = ?", [user["id"]])
+            @store.set_setting("login-link-used:#{user["id"]}", nil)
+          end
+          @store.db.run("DELETE FROM rl_invites WHERE site = ?", [site])
         end
         nil
       end
@@ -367,7 +369,13 @@ module Runlight
           self.class.slot { Crypto.check_password(password, hash) }
           return nil
         end
-        self.class.slot { Crypto.check_password(password, user["hash"]) } ? user : nil
+        return nil unless self.class.slot { Crypto.check_password(password, user["hash"]) }
+        return user unless Crypto.weaker_than_now?(user["hash"])
+
+        # A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+        hash = self.class.slot { Crypto.hash_password(password) }
+        @store.db.run("UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", [hash, user["id"], user["hash"]])
+        by_id(user["id"]) || user
       end
 
       # A cookie value naming the user and when it expires, signed with the

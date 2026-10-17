@@ -279,15 +279,6 @@ module Runlight
         )
       end
 
-      # The first language a browser asks for that the dashboard speaks, else English.
-      def accepted_language(request)
-        (request.headers.get("accept-language") || "").split(",", -1).each do |part|
-          code = Js.lower(Js.slice(Js.trim(part.split(";", -1).first.to_s), 0, 2))
-          return code if Messages.languages.include?(code)
-        end
-        "en"
-      end
-
       # Rows of objects as CSV, with a column for every key the first row has, in the units a spreadsheet reads.
       def rows_csv(rows, sheet)
         readable = rows.map { |r| sheet_row(r, sheet) }
@@ -467,11 +458,12 @@ module Runlight
         out
       end
 
-      # `Math.min(1000, Math.max(1, Number(value) || fallback))`.
-      def limit(value, fallback)
+      # A whole number from a query, within 1 and `max`, or `fallback` for anything else: a fraction, a huge
+      # number, or text.
+      def whole_param(value, fallback, max)
         n = Js.number(value)
-        n = fallback if (n.is_a?(Float) && n.nan?) || n.zero?
-        [1000, [1, n].max].min
+        n = n.to_i if n.is_a?(Float) && n.finite? && n == n.floor
+        n.is_a?(Integer) && n.abs <= 9_007_199_254_740_991 && n >= 1 ? [n, max].min : fallback
       end
 
       # A number as a whole one for SQL, as PHP's (int) cast makes it.
@@ -1200,8 +1192,9 @@ module Runlight
                 fields[f["name"]] = value.nil? ? "" : Js.string(value)
               end
             end
-            # A hub with a manage token learns which service sends the reports and from where, nothing more.
-            via_manage = @managed.key?(request)
+            # A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+            # from where, nothing more: a webhook's address is often its own credential.
+            via_manage = @managed.key?(request) || !session_scope(request)&.dig("site").nil?
             answer = {
               "source" => known["source"],
               "service" => known["source"] == "app" ? "" : known["service"] || "",
@@ -1244,6 +1237,12 @@ module Runlight
           settings = @rl.mail_settings
           return coded("Set up a mail service first", "mail_unset", 400) if settings.nil?
 
+          # One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+          # or use up a service's quota; one just set up can be tried at once.
+          tested = "test:#{settings["source"]}:#{settings["service"]}"
+          last = @lock.synchronize { @sample_sent[tested] || 0 }
+          return coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429) if @rl.now - last < 60_000
+
           t = Messages.translator(text(body, "lang", "en"))["t"]
           name = if settings["source"] == "app"
                    settings["via"] || ""
@@ -1256,6 +1255,8 @@ module Runlight
             "text" => t.call("email.test.body", { "service" => name }),
             "html" => "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">#{escape_html(t.call("email.test.body", { "service" => name }))}</p>",
           })
+          # Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+          @lock.synchronize { @sample_sent[tested] = @rl.now }
           return json({ "ok" => true })
         end
 
@@ -1556,6 +1557,12 @@ module Runlight
         if path == "/api/assistant/chat"
           parsed, body = Js.parse_json(request.text)
           return coded("Unknown site", "unknown_site", 404) unless parsed && Js.object?(body) && Js.get(body, "site") == site
+        end
+        if site_path && json?(request)
+          # Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+          # a hub may, never move it.
+          parsed, body = Js.parse_json(request.text)
+          return coded("Your account cannot change a site's domains", "site_domains", 403) if parsed && body.is_a?(Hash) && body.key?("hostnames")
         end
         url = Http::Url.new(url.href)
         query = url.search_params
@@ -2020,6 +2027,8 @@ module Runlight
         end
         begin
           rl.delete_site(id)
+          # Those kept to the site go with it, so a site made later with the same id is not theirs.
+          @web.accounts.forget_site(id) if @web
           return json({ "ok" => true })
         rescue RangeError => e
           return e.message == "Unknown site" ? coded(e.message, "unknown_site", 404) : refused(e, "site_invalid")
@@ -2049,7 +2058,8 @@ module Runlight
         rl.init
         store.settings_starting_with("observe-key:").each do |row|
           id = row["key"].delete_prefix("observe-key:")
-          key_site = id if id != "" && !row["value"].nil? && constant_time_equal(given, row["value"]) && !rl.site(id).nil?
+          opened = row["value"].nil? ? nil : OAuth.open_agents_key(rl, row["value"])
+          key_site = id if id != "" && !opened.nil? && constant_time_equal(given, opened) && !rl.site(id).nil?
         end
         return coded("Unauthorized", "unauthorized", 401) if key_site.nil?
       end
@@ -2433,9 +2443,10 @@ module Runlight
         # Journeys reads the newest visits up to a cap; say when it was reached.
         read = store.journey_pages(query, Journeys::PAGES_PER_VISIT)
         options = { "steps" => Js.number(params.get("steps") || 5) }
-        options["start"] = params.get("start") if Js.truthy?(params.get("start"))
-        options["end"] = params.get("end") if Js.truthy?(params.get("end"))
-        options["through"] = { "step" => Js.number(through[1]), "value" => through[2] } unless through.nil?
+        # Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+        options["start"] = Sources.recorded_path(params.get("start")) || params.get("start") if Js.truthy?(params.get("start"))
+        options["end"] = Sources.recorded_path(params.get("end")) || params.get("end") if Js.truthy?(params.get("end"))
+        options["through"] = { "step" => Js.number(through[1]), "value" => Sources.recorded_path(through[2]) || through[2] } unless through.nil?
         answer = { "site" => site["id"], "range" => range_out }.merge(Journeys.journeys(read["rows"], options)) { |_key, mine, _theirs| mine }
         answer["sampled"] = Store::SqlStore::JOURNEY_VISITS if read["sampled"]
         return json(answer)
@@ -2463,8 +2474,8 @@ module Runlight
         return coded("Bad property name", "property_bad", 400) if !asked.nil? && !safe.call(asked)
 
         key = asked || keys.find { |k| safe.call(k["key"].to_s) }&.[]("key")
-        count = limit(params.get("limit"), 100)
-        rows = !key.nil? && key != "" ? store.event_prop_values(query, event, key, whole(count)) : []
+        count = whole_param(params.get("limit"), 100, 1000)
+        rows = !key.nil? && key != "" ? store.event_prop_values(query, event, key, count) : []
         return json({ "site" => site["id"], "range" => range_out, "event" => event, "keys" => keys, "key" => key, "rows" => rows })
       end
 
@@ -2472,10 +2483,13 @@ module Runlight
         dimension = params.get("dimension") || ""
         return coded("Unknown dimension \"#{dimension}\"", "unknown_dimension", 400, { "dimension" => dimension }) unless Query.dimension?(dimension)
 
-        count = limit(params.get("limit"), 10)
-        page = Js.number(params.get("page"))
-        page = [1, (page.is_a?(Float) && page.nan?) || page.zero? ? 1 : page].max
-        rows = store.breakdown(query, dimension, whole(count), whole((page - 1) * count))
+        count = whole_param(params.get("limit"), 10, 1000)
+        page = whole_param(params.get("page"), 1, 100_000)
+        if dimension == "hostname" && params.get("suggestions") == "1" && params.get("format") != "csv"
+          return json({ "site" => site["id"], "range" => range_out, "dimension" => dimension, "rows" => store.hostname_suggestions(query, [count, 50].min) })
+        end
+
+        rows = store.breakdown(query, dimension, count, (page - 1) * count)
         if params.get("format") == "csv"
           return download("#{site["id"]}-#{dimension}-#{range["fromDate"]}-#{range["toDate"]}.csv",
                           rows_csv(rows, { "timezone" => site["timezone"], "dimension" => dimension }), "text/csv; charset=utf-8")
@@ -2560,7 +2574,7 @@ module Runlight
       # The relay page the picker opens with its choice in the fragment, which never reaches a server. Its
       # script hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
       if path == "/pick-return" && method == "GET"
-        translator = Messages.translator(accepted_language(request))
+        translator = Messages.translator(Messages.accepted_language(request))
         t = translator["t"]
         return small_page(
           translator["lang"],
@@ -2646,7 +2660,7 @@ module Runlight
         rl.init
         found = redeem_embed(url.search_params.get("ticket") || "")
         if found.nil?
-          translator = Messages.translator(accepted_language(request))
+          translator = Messages.translator(Messages.accepted_language(request))
           t = translator["t"]
           return small_page(translator["lang"], "<h1>#{escape_html(t.call("embed.goneTitle"))}</h1><p>#{escape_html(t.call("embed.gone"))}</p>", 404)
         end
@@ -2666,7 +2680,7 @@ module Runlight
         id = share_page[1]
         share = id.match?(SHARE_ID) ? store.share_by_id(id) : nil
         if share.nil?
-          translator = Messages.translator(accepted_language(request))
+          translator = Messages.translator(Messages.accepted_language(request))
           t = translator["t"]
           return small_page(translator["lang"], "<h1>#{escape_html(t.call("share.goneTitle"))}</h1><p>#{escape_html(t.call("share.gone"))}</p>", 404)
         end

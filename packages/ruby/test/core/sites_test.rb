@@ -111,13 +111,28 @@ class CoreSitesTest < CoreTestCase
     assert_nil t.rl.retention("default")
   end
 
-  def test_retention_counts_back_calendar_months_as_set_utc_month_does
+  def test_sites_sort_by_name_as_the_assistants_collation_and_node_order_them
+    names = ["beta", "Beta", "alpha", "Alpha", "álpha", "zed", "Zed", "10 shop", "9 shop", "shop-2", "shop 1", "_x", "éclair", "eclair", "Eclair", "ab", "a b", "a-b"]
+    # What names.sort((a, b) => a.localeCompare(b)) gives in Node.
+    expected = ["_x", "10 shop", "9 shop", "a b", "a-b", "ab", "alpha", "Alpha", "álpha", "beta", "Beta", "eclair", "Eclair", "éclair", "shop 1", "shop-2", "zed", "Zed"]
+    rl = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(":memory:") })
+    sorted = rl.send(:by_name, names.each_with_index.map { |name, i| { "id" => "s#{i}", "name" => name } })
+    assert_equal expected, sorted.map { |s| s["name"] }
+    twins = rl.send(:by_name, [{ "id" => "second", "name" => "Same" }, { "id" => "first", "name" => "Same" }])
+    assert_equal %w[second first], twins.map { |s| s["id"] }, "equal names keep their order"
+  end
+
+  def test_retention_counts_back_calendar_months_within_the_month
     t = Harness.new("sqlite")
     t.rl.init
     t.rl.set_retention("default", 6)
     t.now = utc(2026, 8, 31, 10, 30) + 123
-    # February 31st runs on to March 3rd, as JavaScript's dates do.
-    assert_equal utc(2026, 3, 3, 10, 30) + 123, t.rl.retention_cutoff("default")
+    # February 31st does not exist: the day is kept within its month, the 28th.
+    assert_equal utc(2026, 2, 28, 10, 30) + 123, t.rl.retention_cutoff("default")
+    t.now = utc(2028, 8, 31, 10, 30)
+    assert_equal utc(2028, 2, 29, 10, 30), t.rl.retention_cutoff("default"), "or the 29th in a leap year"
+    t.now = utc(2026, 3, 15, 8)
+    assert_equal utc(2025, 9, 15, 8), t.rl.retention_cutoff("default"), "and a day that exists stays as it is"
   end
 
   def test_deleting_a_site_forgets_its_retention_its_plugin_key_and_its_umami_import_progress

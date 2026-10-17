@@ -21,6 +21,10 @@ class ZipTest < Minitest::Test
     assert_equal "'=SUM(A1),'+1,-2,\"a,b\",\"say \"\"hi\"\"\",12", Zip.csv_row(["=SUM(A1)", "+1", "-2", "a,b", 'say "hi"', 12])
   end
 
+  def test_a_value_with_a_semicolon_or_a_tab_is_quoted_so_no_locale_splits_a_formula_out_of_it
+    assert_equal "\"x;=1+1\",\"a\tb\",'=1+1,plain", Zip.csv_row(["x;=1+1", "a\tb", "=1+1", "plain"])
+  end
+
   def test_rows
     Fixtures.load("zip")["rows"].each do |c|
       assert_equal c["row"], Zip.csv_row([cell(c["cell"])]), Fixtures.label(c["cell"])

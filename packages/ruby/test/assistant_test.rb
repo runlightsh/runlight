@@ -98,6 +98,19 @@ class AssistantTest < Minitest::Test
     assert_equal 3, log.length
   end
 
+  def test_a_question_carries_at_most_24000_characters_of_earlier_turns_however_much_history_the_browser_sends
+    # Nineteen made-up turns of 8,000 characters each, then the question.
+    history = Array.new(19) { |i| { "role" => i.odd? ? "assistant" : "user", "content" => "#{i} #{"x" * 7998}" } }
+    fetcher = RecordingFetcher.new([Response.new(Json.encode({ "stop_reason" => "end_turn", "content" => [{ "type" => "text", "text" => "Three." }] }))])
+    Assistant.chat({ "provider" => "anthropic", "model" => "m", "baseUrl" => "", "key" => "k" }, history + [{ "role" => "user", "content" => "How many visitors?" }],
+                   CONTEXT, McpApi.read_api([]), fetcher)
+    sent = Json.decode(fetcher.requests[0]["body"])["messages"]
+    characters = sent.select { |m| m["content"].is_a?(String) }.sum { |m| Runlight::Js.length(m["content"]) }
+    assert_operator characters, :<=, 24_000
+    assert_equal "user", sent[0]["role"], "still starting with a question"
+    assert_includes sent.last["content"], "How many visitors?"
+  end
+
   def test_a_cancelled_question_stops_before_its_next_request
     fetcher = RecordingFetcher.new([])
     error = assert_raises(Runlight::AssistantError) do

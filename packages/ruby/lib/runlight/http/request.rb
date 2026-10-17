@@ -32,6 +32,9 @@ module Runlight
       # the path's limit raises TooLarge once one byte past it has been read.
       def self.from_rack(env, read_body: true)
         scheme = env["rack.url_scheme"] || "http"
+        # The first X-Forwarded-Proto of http or https names the scheme, as the Node server reads it.
+        proto = env["HTTP_X_FORWARDED_PROTO"].to_s.split(",", -1)[0].to_s.strip.downcase
+        scheme = proto if %w[http https].include?(proto)
         # A Host header no URL can hold (a space, a bad port, a userinfo @) is read as the server's own name, as
         # an absent one is, so the request still has a URL; the header itself is kept as it came.
         host = env["HTTP_HOST"].to_s

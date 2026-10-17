@@ -14,11 +14,12 @@ module Conformance
       @links = @rl.link_handler
     end
 
-    # nil when the core, its routes, and Stores.from_db are all here and load, else why not.
+    # nil when the core, its routes, and Stores.from_db are all here and load, else why not. The replay fails
+    # on a reason, rather than skipping, so a core that cannot load never passes as a run with nothing to check.
     def self.missing
       lib = File.expand_path("../../lib/runlight", __dir__)
       %w[core routes store/sql_store].each do |file|
-        return "lib/runlight/#{file}.rb is not here yet" unless File.exist?(File.join(lib, "#{file}.rb"))
+        return "lib/runlight/#{file}.rb is missing" unless File.exist?(File.join(lib, "#{file}.rb"))
       end
       Runlight::Core
       Runlight::Routes

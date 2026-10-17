@@ -28,6 +28,8 @@ module Runlight
       { "id" => "custom", "name" => "Another OpenAI-compatible service", "protocol" => "openai", "baseUrl" => "", "model" => "", "key" => "optional" },
     ].freeze
 
+    # The most text of earlier turns a question carries, about six thousand tokens.
+    MAX_HISTORY_CHARS = 24_000
     MAX_ROUNDS = 8
     # However many rounds a question takes, the answer comes within this long or the assistant stops.
     DEADLINE_MS = 120_000
@@ -200,6 +202,12 @@ module Runlight
         else
           history << { "role" => m["role"], "content" => content }
         end
+      end
+      # The browser sends the history, so its whole length is held too, the oldest turns dropped first: each
+      # tool round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+      while history.length > 1 && history.sum { |h| Js.length(h["content"]) } > MAX_HISTORY_CHARS
+        history.shift
+        history.shift while history.length > 1 && history[0]["role"] != "user"
       end
 
       if provider["protocol"] == "anthropic"
@@ -412,6 +420,6 @@ module Runlight
     end
 
     private_class_method :provider, :system_prompt, :in_time, :service_message, :post, :tool_text, :clock, :first_message, :unreadable, :blank?,
-                         :locale_compare, :collation_key, :refused
+                         :collation_key, :refused
   end
 end
