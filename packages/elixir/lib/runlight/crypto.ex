@@ -4,7 +4,7 @@ defmodule Runlight.Crypto do
   # accounts/crypto.ts and mail/secret.ts): byte-identical formats, so one
   # database can be served by either implementation.
   #
-  # Passwords are hashed with PBKDF2-SHA-256 (100,000 rounds, the SDK's own
+  # Passwords are hashed with PBKDF2-SHA-256 (600,000 rounds, the SDK's own
   # second form), which Erlang's crypto computes natively; a scrypt hash
   # written by the Node SDK still checks out, through the scrypt here.
 
@@ -74,7 +74,7 @@ defmodule Runlight.Crypto do
 
   # Passwords
 
-  @pbkdf2_rounds 100_000
+  @pbkdf2_rounds 600_000
   # The shortest stored key accepted. Ours are 32 bytes; an empty or cut key would match too easily, or anything.
   @min_key_bytes 16
 
@@ -90,11 +90,12 @@ defmodule Runlight.Crypto do
   def check_password(password, stored) do
     case String.split(stored, "$") do
       ["scrypt", salt, key] ->
-        with expected when is_binary(expected) and byte_size(expected) >= @min_key_bytes <- from_base64url(key),
-             salt when is_binary(salt) <- from_base64url(salt) do
-          same_bytes?(scrypt(password, salt, 16_384, 8, 1, byte_size(expected)), expected)
-        else
-          _ -> false
+        check_scrypt(password, {16_384, 8, 1}, salt, key)
+
+      ["scrypt", n, r, p, salt, key] ->
+        case scrypt_cost(n, r, p) do
+          nil -> false
+          cost -> check_scrypt(password, cost, salt, key)
         end
 
       ["pbkdf2", rounds, salt, key] ->
@@ -108,6 +109,41 @@ defmodule Runlight.Crypto do
         else
           _ -> false
         end
+
+      _ ->
+        false
+    end
+  end
+
+  defp check_scrypt(password, {n, r, p}, salt, key) do
+    with expected when is_binary(expected) and byte_size(expected) >= @min_key_bytes <- from_base64url(key),
+         salt when is_binary(salt) <- from_base64url(salt) do
+      same_bytes?(scrypt(password, salt, n, r, p, byte_size(expected)), expected)
+    else
+      _ -> false
+    end
+  end
+
+  # A scrypt hash's recorded cost, or nil when out of bounds: N a power of two up to 2^20, and r and p small, so
+  # a stored hash cannot ask for a huge amount of memory or time.
+  defp scrypt_cost(n, r, p) do
+    [n, r, p] = Enum.map([n, r, p], &Runlight.JS.number/1)
+    whole = fn x, max -> Runlight.JS.integer?(x) and x >= 1 and x <= max end
+
+    if whole.(n, 1 <<< 20) and n >= 2 and whole.(r, 32) and whole.(p, 16) and (trunc(n) &&& trunc(n) - 1) == 0,
+      do: {trunc(n), trunc(r), trunc(p)}
+  end
+
+  @doc """
+  Whether a stored hash costs less than a new one would here, so the password it matched is hashed again: a
+  PBKDF2 one with fewer rounds than this writes. A scrypt hash is not made weaker by it.
+  """
+  @spec weaker_than_now?(String.t()) :: boolean()
+  def weaker_than_now?(stored) do
+    case String.split(stored, "$") do
+      ["pbkdf2", rounds, _, _] ->
+        n = Runlight.JS.number(rounds)
+        Runlight.JS.integer?(n) and n >= 1 and n < @pbkdf2_rounds
 
       _ ->
         false

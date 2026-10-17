@@ -330,15 +330,7 @@ defmodule Runlight.Routes do
     )
   end
 
-  # The first language a browser asks for that the dashboard speaks, else English.
-  defp accepted_language(request) do
-    (Request.header(request, "accept-language") || "")
-    |> String.split(",")
-    |> Enum.find_value("en", fn part ->
-      code = part |> String.split(";") |> hd() |> JS.trim() |> JS.slice(0, 2) |> JS.lower()
-      if code in Messages.languages(), do: code
-    end)
-  end
+  defp accepted_language(request), do: Messages.accepted_language(request)
 
   @path_dimensions ["page", "entry", "exit", "ai_page"]
 
@@ -450,6 +442,7 @@ defmodule Runlight.Routes do
   defp set_managed(request, token), do: Process.put({:runlight_managed, request.ref}, token)
   defp member?(request), do: Process.get({:runlight_member, request.ref}) == true
 
+  defp tested_key(settings), do: "#{settings["source"]}:#{settings["service"]}"
   defp state(routes, key), do: State.get(routes.rl.table, {:routes, routes.id, key})
   defp put_state(routes, key, value), do: State.put(routes.rl.table, {:routes, routes.id, key}, value)
 
@@ -1445,8 +1438,9 @@ defmodule Runlight.Routes do
                 end
               end)
 
-            # A hub with a manage token learns which service sends the reports and from where, nothing more.
-            via_manage = managed(request) != nil
+            # A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+            # from where, nothing more: a webhook's address is often its own credential.
+            via_manage = managed(request) != nil or scope_site(routes, request) != nil
             # The app's own mailer, named only when there is one, so the answer without it stays as it was.
             app = rl.app_mailer
 
@@ -1497,6 +1491,11 @@ defmodule Runlight.Routes do
             settings == nil ->
               coded("Set up a mail service first", "mail_unset", 400)
 
+            # One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+            # or use up a service's quota; one just set up can be tried at once.
+            Runlight.now(rl) - (state(routes, {:test, tested_key(settings)}) || 0) < 60_000 ->
+              coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429)
+
             true ->
               lang = Messages.code(body |> JS.prop("lang") |> JS.nullish("en") |> JS.string())
 
@@ -1516,6 +1515,8 @@ defmodule Runlight.Routes do
                   ~s(<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">#{escape_html(text)}</p>)
               })
 
+              # Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+              put_state(routes, {:test, tested_key(settings)}, Runlight.now(rl))
               json(JS.obj(ok: true))
           end
         else
@@ -1994,6 +1995,11 @@ defmodule Runlight.Routes do
         path == "/api/assistant/chat" and chat_site != site ->
           coded("Unknown site", "unknown_site", 404)
 
+        # Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+        # a hub may, never move it.
+        site_path != nil and json?(request) and hub_domains?(request) ->
+          coded("Your account cannot change a site's domains", "site_domains", 403)
+
         true ->
           api_allowed(routes, request, path, with_param(url, "site", site))
       end
@@ -2323,9 +2329,12 @@ defmodule Runlight.Routes do
       Enum.reduce(Store.settings_starting_with(rl.store, "observe-key:"), nil, fn %{key: key, value: value}, found ->
         id = String.replace_prefix(key, "observe-key:", "")
 
-        if id != "" and is_binary(value) and Crypto.constant_time_equal?(given, value) and Runlight.site(rl, id) != nil,
-          do: id,
-          else: found
+        opened = is_binary(value) && Runlight.OAuth.open_agents_key(rl, value)
+
+        if id != "" and is_binary(opened) and Crypto.constant_time_equal?(given, opened) and
+             Runlight.site(rl, id) != nil,
+           do: id,
+           else: found
       end)
     end
   end
@@ -2558,6 +2567,8 @@ defmodule Runlight.Routes do
                    ) do
               try do
                 Runlight.delete_site(rl, id)
+                # Those kept to the site go with it, so a site made later with the same id is not theirs.
+                if routes.web != nil, do: Runlight.Accounts.forget_site(routes.web.accounts, id)
                 json(JS.obj(ok: true))
               rescue
                 error ->
@@ -3411,14 +3422,15 @@ defmodule Runlight.Routes do
       path == "/api/journeys" ->
         through =
           case Regex.run(~r/\A(\d+):(.+)\z/s, SearchParams.get(q, "through") || "") do
-            [_, step, value] -> {JS.number(step), value}
+            [_, step, value] -> {JS.number(step), recorded(value)}
             nil -> nil
           end
 
         # Journeys reads the newest visits up to a cap; say when it was reached.
         %{rows: rows, sampled: sampled} = Store.journey_pages(store, query, Runlight.Journeys.pages_per_visit())
-        start = SearchParams.get(q, "start")
-        finish = SearchParams.get(q, "end")
+        # Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
+        start = if SearchParams.get(q, "start") not in [nil, ""], do: recorded(SearchParams.get(q, "start"))
+        finish = if SearchParams.get(q, "end") not in [nil, ""], do: recorded(SearchParams.get(q, "end"))
 
         options =
           %{steps: JS.number(SearchParams.get(q, "steps") || 5)}
@@ -3477,17 +3489,24 @@ defmodule Runlight.Routes do
           coded(~s(Unknown dimension "#{dimension}"), "unknown_dimension", 400, %{"dimension" => dimension})
         else
           limit = page_number(SearchParams.get(q, "limit"), 10, 1000)
-          page = max(1, JS.or_else(JS.number(SearchParams.get(q, "page")), 1) |> finite_or(1))
-          rows = Store.breakdown(store, query, dimension, limit, JS.floor((page - 1) * limit) |> trunc_int())
+          page = page_number(SearchParams.get(q, "page"), 1, 100_000)
 
-          if SearchParams.get(q, "format") == "csv" do
-            download(
-              "#{site["id"]}-#{dimension}-#{range.from_date}-#{range.to_date}.csv",
-              rows_csv(rows, %{timezone: site["timezone"], dimension: dimension}),
-              "text/csv; charset=utf-8"
-            )
-          else
+          if dimension == "hostname" and SearchParams.get(q, "suggestions") == "1" and
+               SearchParams.get(q, "format") != "csv" do
+            rows = Store.hostname_suggestions(store, query, min(limit, 50))
             json(JS.obj(site: site["id"], range: range_out, dimension: dimension, rows: rows))
+          else
+            rows = Store.breakdown(store, query, dimension, limit, (page - 1) * limit)
+
+            if SearchParams.get(q, "format") == "csv" do
+              download(
+                "#{site["id"]}-#{dimension}-#{range.from_date}-#{range.to_date}.csv",
+                rows_csv(rows, %{timezone: site["timezone"], dimension: dimension}),
+                "text/csv; charset=utf-8"
+              )
+            else
+              json(JS.obj(site: site["id"], range: range_out, dimension: dimension, rows: rows))
+            end
           end
         end
 
@@ -3500,23 +3519,16 @@ defmodule Runlight.Routes do
     end
   end
 
-  defp finite_or(n, fallback), do: if(JS.finite?(n), do: n, else: fallback)
-  defp trunc_int(n), do: n
+  defp recorded(value), do: Runlight.Sources.recorded_path(value) || value
 
-  # `Math.min(max, Math.max(1, Number(value) || fallback))`, as a whole number for SQL.
+  # A whole number from a query, within 1 and `max`, or `fallback` for anything else: a fraction, a huge number,
+  # or text.
   defp page_number(value, fallback, max) do
     n = JS.number(value)
-    n = if JS.truthy?(n), do: n, else: fallback
 
-    n =
-      case n do
-        :infinity -> max
-        :neg_infinity -> 1
-        n -> n
-      end
-
-    n = n |> max(1) |> min(max)
-    if is_float(n), do: n, else: n
+    if JS.integer?(n) and abs(n) <= 9_007_199_254_740_991 and n >= 1,
+      do: min(trunc(n), max),
+      else: fallback
   end
 
   defp rhythm(store, query, site, range_out) do

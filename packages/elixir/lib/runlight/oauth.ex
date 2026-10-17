@@ -15,6 +15,7 @@ defmodule Runlight.OAuth do
   alias Runlight.Http.Response
   alias Runlight.JS
   alias Runlight.JS.Object
+  alias Runlight.Messages
   alias Runlight.RateLimit
   alias Runlight.SearchParams
   alias Runlight.Store
@@ -75,7 +76,11 @@ defmodule Runlight.OAuth do
     Response.new(
       JS.stringify(body),
       status,
-      [{"content-type", "application/json; charset=utf-8"}, {"cache-control", "no-store"}] ++ @cors
+      [
+        {"content-type", "application/json; charset=utf-8"},
+        {"cache-control", "no-store"},
+        {"x-content-type-options", "nosniff"}
+      ] ++ @cors
     )
   end
 
@@ -91,18 +96,39 @@ defmodule Runlight.OAuth do
       Regex.match?(~r/^https:\/\/[^\/]+/, value) or
         Regex.match?(~r/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//, value)
 
-  @doc "The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it."
+  @doc """
+  The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+  replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
+  database alone cannot report for the site; one kept before as plain text is sealed the next time it is read.
+  """
   def agents_key(rl, site, replace \\ false) do
     name = "observe-key:#{site}"
+    made = fn -> "rlo_" <> Hash.random_id(20) end
 
-    if replace do
-      key = "rlo_" <> Hash.random_id(20)
-      Store.set_setting(rl.store, name, key)
-      key
-    else
-      Store.setting_or_add(rl.store, name, fn -> "rlo_" <> Hash.random_id(20) end)
-    end
+    existing =
+      if not replace do
+        sealed = Crypto.seal(made.(), rl.secret)
+        stored = Store.setting_or_add(rl.store, name, fn -> sealed end)
+        key = open_agents_key(rl, stored)
+
+        if key && String.starts_with?(stored, "rlo_"),
+          do: Store.set_setting(rl.store, name, Crypto.seal(key, rl.secret))
+
+        # One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
+        key
+      end
+
+    existing ||
+      (
+        key = made.()
+        Store.set_setting(rl.store, name, Crypto.seal(key, rl.secret))
+        key
+      )
   end
+
+  @doc "A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. Nil when it cannot be opened."
+  def open_agents_key(rl, stored),
+    do: if(String.starts_with?(stored, "rlo_"), do: stored, else: Crypto.unseal(stored, rl.secret))
 
   # A redirect address's host as a site's domains are kept: lowercase, with no port and no www.
   defp site_host(redirect),
@@ -204,10 +230,12 @@ defmodule Runlight.OAuth do
     found = client_for(rl, client_id)
     client = found && found.client
     redirect = get.("redirect_uri") || ""
+    lang = Messages.accepted_language(request)
+    h = &Messages.html(lang, &1, &2)
 
     # Without a known client and one of its own addresses there is nowhere safe to send an answer.
     if client == nil or redirect not in (client["redirects"] || []) do
-      page("This app is not registered", "<p>Start connecting again from the app.</p>", 400)
+      page(lang, h.("oauth.unregisteredTitle", %{}), "<p>#{h.("oauth.startAgain", %{})}</p>", 400)
     else
       back = fn params ->
         to = Url.new(redirect)
@@ -227,8 +255,9 @@ defmodule Runlight.OAuth do
               Enum.find_value(params, fn {k, v} -> if k == "error", do: v end)
 
           page(
-            "This app asked in a way Runlight does not support",
-            "<p>#{esc(client["name"])} sent #{esc(said)}. Start connecting again from the app.</p>",
+            lang,
+            h.("oauth.unsupportedTitle", %{}),
+            "<p>#{h.("oauth.unsupported", %{"app" => esc(client["name"]), "error" => esc(said)})}</p>",
             400
           )
         end
@@ -261,8 +290,9 @@ defmodule Runlight.OAuth do
             # Someone signed in who may only read would be sent to sign in again and again.
             ctx.is_reader && ctx.is_reader.(request) ->
               page(
-                "Ask an owner to connect this",
-                "<p>You are signed in as a viewer, and only an owner of this Runlight can connect #{esc(client["name"])}.</p>",
+                lang,
+                h.("oauth.viewerTitle", %{}),
+                "<p>#{h.("oauth.viewer", %{"app" => esc(client["name"])})}</p>",
                 403
               )
 
@@ -276,15 +306,19 @@ defmodule Runlight.OAuth do
               ])
 
             true ->
+              link =
+                ~s(<a href="#{esc(if base == "", do: "/", else: base)}">#{esc(Url.host(url) <> if(base == "", do: "/", else: base))}</a>)
+
               page(
-                "Sign in first",
-                ~s(<p>Open your Runlight dashboard at <a href="#{esc(if base == "", do: "/", else: base)}">#{esc(Url.host(url) <> if(base == "", do: "/", else: base))}</a> and sign in, then connect #{esc(client["name"])} again.</p>),
+                lang,
+                h.("oauth.signInTitle", %{}),
+                "<p>#{h.("oauth.signIn", %{"link" => link, "app" => esc(client["name"])})}</p>",
                 401
               )
           end
 
         request.method == "GET" ->
-          consent(rl, base, client, form, redirect, if(cms, do: {:cms, host, counting}, else: manage))
+          consent(rl, base, client, form, redirect, lang, if(cms, do: {:cms, host, counting}, else: manage))
 
         true ->
           # The consent form posts here from this page only; a form from another site is refused.
@@ -292,7 +326,7 @@ defmodule Runlight.OAuth do
 
           cond do
             origin not in [nil, ""] and origin != Url.origin(url) ->
-              page("This request came from another site", "<p>Start connecting again from the app.</p>", 403)
+              page(lang, h.("oauth.anotherSiteTitle", %{}), "<p>#{h.("oauth.startAgain", %{})}</p>", 403)
 
             get.("decision") != "allow" ->
               back.([{"error", "access_denied"}])
@@ -385,7 +419,7 @@ defmodule Runlight.OAuth do
     end
   end
 
-  defp consent(rl, base, client, form, redirect, mode) do
+  defp consent(rl, base, client, form, redirect, lang, mode) do
     hidden =
       ~w(response_type client_id redirect_uri code_challenge code_challenge_method state scope resource)
       |> Enum.map_join(fn k ->
@@ -398,46 +432,51 @@ defmodule Runlight.OAuth do
     name = esc(client["name"])
     # The app names itself, so the page also shows where the answer goes, which it cannot fake.
     sends_to =
-      ~s(<p class="note">Allowing sends you back to <strong>#{esc(Url.host(Url.new(redirect)))}</strong>. Only allow it if you started connecting there.</p>)
+      ~s(<p class="note">#{Messages.html(lang, "oauth.sendsTo", %{"host" => "<strong>#{esc(Url.host(Url.new(redirect)))}</strong>"})}</p>)
 
     case mode do
-      {:cms, host, counting} -> cms_consent(rl, base, name, hidden, sends_to, host, counting)
-      true -> manage_consent(rl, base, name, hidden, sends_to, form)
-      false -> read_consent(rl, base, name, hidden, sends_to)
+      {:cms, host, counting} -> cms_consent(rl, base, lang, name, hidden, sends_to, host, counting)
+      true -> manage_consent(rl, base, lang, name, hidden, sends_to, form)
+      false -> read_consent(rl, base, lang, name, hidden, sends_to)
     end
   end
 
-  defp cms_consent(rl, base, name, hidden, sends_to, host, counting) do
+  defp cms_consent(rl, base, lang, name, hidden, sends_to, host, counting) do
+    h = &Messages.html(lang, &1, &2)
+
     if counting == [] and not rl.managed_sites do
       page(
-        "Add this site first",
-        "<p>No site in this Runlight counts <strong>#{esc(host)}</strong>. Add it to a site's domains in your code, then connect again from #{name}.</p>",
+        lang,
+        h.("oauth.addSiteTitle", %{}),
+        "<p>#{h.("oauth.addSite", %{"host" => "<strong>#{esc(host)}</strong>", "app" => name})}</p>",
         400
       )
     else
       choices =
         Enum.map_join(counting, fn s -> ~s(<option value="#{esc(s["id"])}">#{esc(s["name"])}</option>) end) <>
           if(rl.managed_sites and counting == [],
-            do: ~s(<option value="new">A new site for #{esc(host)}</option>),
+            do: ~s(<option value="new">#{h.("oauth.newSite", %{"host" => esc(host)})}</option>),
             else: ""
           )
 
       page(
-        "Connect #{name}",
+        lang,
+        h.("oauth.connectTitle", %{"app" => name}),
         """
-        <p><strong>#{name}</strong> wants to count <strong>#{esc(host)}</strong> in this Runlight.</p>
-        <p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+        <p>#{h.("oauth.cmsIntro", %{"app" => "<strong>#{name}</strong>", "host" => "<strong>#{esc(host)}</strong>"})}</p>
+        <p>#{h.("oauth.cmsDetail", %{})}</p>
         #{sends_to}
         <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
-        <label>Site<select name="site">#{choices}</select></label>
-        <p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in #{name}.</p>
-        <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
+        <label>#{h.("app.site", %{})}<select name="site">#{choices}</select></label>
+        <p class="note">#{h.("oauth.cmsNote", %{"app" => name})}</p>
+        <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">#{h.("oauth.deny", %{})}</button><button type="submit" name="decision" value="allow">#{h.("oauth.allow", %{})}</button></div></form>\
         """
       )
     end
   end
 
-  defp manage_consent(rl, base, name, hidden, sends_to, form) do
+  defp manage_consent(rl, base, lang, name, hidden, sends_to, form) do
+    h = &Messages.html(lang, &1, &2)
     # Changing settings is for one site at a time, so there is no "every site" here.
     sites = Enum.filter(Runlight.sites(rl), &(Runlight.remote(rl, &1["id"]) == nil))
     wanted = SearchParams.get(form, "site") || ""
@@ -448,32 +487,39 @@ defmodule Runlight.OAuth do
       end)
 
     page(
-      "Connect #{name}",
+      lang,
+      h.("oauth.connectTitle", %{"app" => name}),
       """
-      <p><strong>#{name}</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>
-      <p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>
+      <p>#{h.("oauth.manageIntro", %{"app" => "<strong>#{name}</strong>"})}</p>
+      <p>#{h.("oauth.manageDetail", %{})}</p>
       #{sends_to}
       <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
-      <label>Site<select name="site">#{choices}</select></label>
-      <p class="note">Its token appears in Settings, API and AI, where deleting it disconnects #{name}.</p>
-      <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
+      <label>#{h.("app.site", %{})}<select name="site">#{choices}</select></label>
+      <p class="note">#{h.("oauth.manageNote", %{"app" => name})}</p>
+      <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">#{h.("oauth.deny", %{})}</button><button type="submit" name="decision" value="allow">#{h.("oauth.allow", %{})}</button></div></form>\
       """
     )
   end
 
-  defp read_consent(rl, base, name, hidden, sends_to) do
+  defp read_consent(rl, base, lang, name, hidden, sends_to) do
+    h = &Messages.html(lang, &1, &2)
     sites = Runlight.sites(rl)
-    options = Enum.map_join(sites, fn s -> ~s(<option value="#{esc(s["id"])}">#{esc(s["name"])} only</option>) end)
+
+    options =
+      Enum.map_join(sites, fn s ->
+        ~s(<option value="#{esc(s["id"])}">#{h.("oauth.siteOnly", %{"site" => esc(s["name"])})}</option>)
+      end)
 
     page(
-      "Connect #{name}",
+      lang,
+      h.("oauth.connectTitle", %{"app" => name}),
       """
-      <p><strong>#{name}</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>
+      <p>#{h.("oauth.readIntro", %{"app" => "<strong>#{name}</strong>"})}</p>
       #{sends_to}
       <form method="post" action="#{esc(base)}/oauth/authorize">#{hidden}
-      <label>Which sites it can read<select name="site"><option value="">Every site</option>#{if length(sites) > 1, do: options, else: ""}</select></label>
-      <p class="note">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>
-      <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button><button type="submit" name="decision" value="allow">Allow</button></div></form>\
+      <label>#{h.("oauth.readSites", %{})}<select name="site"><option value="">#{h.("tokens.allSites", %{})}</option>#{if length(sites) > 1, do: options, else: ""}</select></label>
+      <p class="note">#{h.("oauth.readNote", %{})}</p>
+      <div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">#{h.("oauth.deny", %{})}</button><button type="submit" name="decision" value="allow">#{h.("oauth.allow", %{})}</button></div></form>\
       """
     )
   end
@@ -614,9 +660,9 @@ defmodule Runlight.OAuth do
     end
   end
 
-  defp page(title, body, status \\ 200) do
+  defp page(lang, title, body, status \\ 200) do
     Response.new(
-      ~s(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>#{title} | Runlight</title>\n) <>
+      ~s(<!doctype html><html lang="#{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>#{title} | Runlight</title>\n) <>
         ~s|<style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a8a93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style></head><body><main><h1>#{title}</h1>#{body}</main></body></html>|,
       status,
       [

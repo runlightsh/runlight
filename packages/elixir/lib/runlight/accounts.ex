@@ -331,22 +331,8 @@ defmodule Runlight.Accounts do
   @doc "A short-lived ticket naming an account whose password checked out and which still owes a code."
   def pending_for(acc, user, now), do: ticket(acc, "pending", user, now + 5 * 60_000)
 
-  @doc "A ticket like pending_for's, except that no code ever passes with it."
-  def decoy_for(acc, user, now), do: ticket(acc, "decoy", user, now + 5 * 60_000)
-
-  @doc "The account a code-step ticket names, and whether a right code may sign in with it."
-  def from_pending(acc, value, now) do
-    case from_ticket(acc, "pending", value, now) do
-      nil ->
-        case from_ticket(acc, "decoy", value, now) do
-          nil -> nil
-          user -> %{user: user, real: false}
-        end
-
-      user ->
-        %{user: user, real: true}
-    end
-  end
+  @doc "The account a code-step ticket names."
+  def from_pending(acc, value, now), do: from_ticket(acc, "pending", value, now)
 
   @doc "A ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it."
   def link_for(acc, user, now), do: ticket(acc, "link", user, now + 15 * 60_000)
@@ -456,6 +442,24 @@ defmodule Runlight.Accounts do
       if next["site"] != nil or next["role"] != "admin", do: refuse("Make them an admin first", "owner_needs_admin")
       run(acc, "UPDATE rl_users SET role = 'owner' WHERE id = ?", [to])
       run(acc, "UPDATE rl_users SET role = 'admin' WHERE id = ?", [from])
+      :ok
+    end)
+  end
+
+  @doc """
+  Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+  same id, from its domain, and they must not find their way into it.
+  """
+  def forget_site(acc, site) do
+    init(acc)
+
+    turn(acc, fn ->
+      for user <- Enum.filter(list(acc), &(&1["site"] == site)) do
+        run(acc, "DELETE FROM rl_users WHERE id = ?", [user["id"]])
+        Store.set_setting(acc.store, "login-link-used:#{user["id"]}", nil)
+      end
+
+      run(acc, "DELETE FROM rl_invites WHERE site = ?", [site])
       :ok
     end)
   end
@@ -652,7 +656,18 @@ defmodule Runlight.Accounts do
         nil
 
       user ->
-        if slot(acc, fn -> Crypto.check_password(password, user["hash"]) end), do: user
+        if slot(acc, fn -> Crypto.check_password(password, user["hash"]) end), do: rehashed(acc, user, password)
+    end
+  end
+
+  # A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+  defp rehashed(acc, user, password) do
+    if Crypto.weaker_than_now?(user["hash"]) do
+      hash = slot(acc, fn -> Crypto.hash_password(password) end)
+      run(acc, "UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", [hash, user["id"], user["hash"]])
+      by_id(acc, user["id"]) || user
+    else
+      user
     end
   end
 

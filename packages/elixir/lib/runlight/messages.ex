@@ -5,6 +5,7 @@ defmodule Runlight.Messages do
   # place (the SDK's messages.ts).
 
   alias Runlight.Assets
+  alias Runlight.Http.Request
   alias Runlight.JS
   alias Runlight.JS.Object
 
@@ -52,6 +53,33 @@ defmodule Runlight.Messages do
     code = code(lang)
     text = Map.get(table(code), key) || Map.get(table("en"), key) || key
     fill(text, vars)
+  end
+
+  @doc """
+  A message for a page: its own text escaped (&, <, >), then each {name} filled with HTML the caller already
+  made safe.
+  """
+  @spec html(String.t(), String.t(), map()) :: String.t()
+  def html(lang, key, vars \\ %{}) do
+    lang
+    |> t(key)
+    |> String.replace(["&", "<", ">"], fn
+      "&" -> "&amp;"
+      "<" -> "&lt;"
+      ">" -> "&gt;"
+    end)
+    |> then(&Regex.replace(~r/\{(\w+)\}/, &1, fn whole, name -> Map.get(vars, name, whole) end))
+  end
+
+  @doc "The first language a browser asks for that the dashboard speaks, else English."
+  @spec accepted_language(struct()) :: String.t()
+  def accepted_language(request) do
+    (Request.header(request, "accept-language") || "")
+    |> String.split(",")
+    |> Enum.find_value("en", fn part ->
+      code = part |> String.split(";") |> hd() |> JS.trim() |> JS.slice(0, 2) |> JS.lower()
+      if code in languages(), do: code
+    end)
   end
 
   @doc "`tn(key, n, vars)`: the plural form for `n` in a language."

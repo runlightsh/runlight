@@ -468,7 +468,24 @@ defmodule Runlight.Store do
 
     window = [site, start, finish + event_tail_ms(), start, finish]
 
+    mark_day = fn store ->
+      run(store, "DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [site, day])
+
+      run(store, "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", [
+        site,
+        day,
+        start,
+        finish
+      ])
+    end
+
     transaction(store, fn store ->
+      # MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two processes
+      # building one day could each add its rows. There the day is marked first: the second waits on that
+      # mark until the first commits, then fails, and the day counts as built elsewhere. Elsewhere the rows'
+      # own key refuses a second set.
+      if dialect == "mysql", do: mark_day.(store)
+
       run(store, "DELETE FROM rl_rollups WHERE site = ? AND day = ?", [site, day])
 
       run(
@@ -504,14 +521,7 @@ defmodule Runlight.Store do
         [site, day] ++ window
       )
 
-      run(store, "DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [site, day])
-
-      run(store, "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", [
-        site,
-        day,
-        start,
-        finish
-      ])
+      if dialect != "mysql", do: mark_day.(store)
     end)
 
     :ok
@@ -874,11 +884,34 @@ defmodule Runlight.Store do
     end
   end
 
-  @doc "Deletes every salt older than `day`, so old hashes can never be recomputed."
-  @spec drop_salts_before(t(), String.t()) :: :ok
-  def drop_salts_before(store, day), do: run(store, "DELETE FROM rl_salts WHERE day < ?", [day])
+  @doc "Deletes every salt but those of these days, so the hashes made with them can never be made again."
+  @spec drop_salts_except(t(), [String.t()]) :: :ok
+  def drop_salts_except(store, days),
+    do: run(store, "DELETE FROM rl_salts WHERE day NOT IN (#{Enum.map_join(days, ", ", fn _ -> "?" end)})", days)
+
+  @doc "Whether a visit to one of these sites that started in a stretch of time was still going at `since`."
+  @spec visit_open?(t(), [String.t()], integer(), integer(), integer()) :: boolean()
+  def visit_open?(store, sites, from, to, since) do
+    # As many sites a statement as keep it under D1's 100.
+    sites
+    |> Enum.chunk_every(Sql.max_params() - 3)
+    |> Enum.any?(fn piece ->
+      all(
+        store,
+        "SELECT 1 AS open FROM rl_sessions WHERE site IN (#{Enum.map_join(piece, ", ", fn _ -> "?" end)}) AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1",
+        piece ++ [from, to, since]
+      ) != []
+    end)
+  end
 
   # Ingest
+
+  # Text cut to at most `max` characters, as a VARCHAR(max) holds it, never through the middle of one.
+  defp clip(nil, _max), do: nil
+
+  defp clip(text, max) do
+    if JS.len16(text) <= max, do: text, else: text |> String.codepoints() |> Enum.take(max) |> Enum.join()
+  end
 
   @doc "The visitor's open session: any of their hashes, active since `since`."
   @spec open_session(t(), String.t(), [String.t()], integer()) :: map() | nil
@@ -898,6 +931,38 @@ defmodule Runlight.Store do
     end
   end
 
+  @doc """
+  After opening a visit: the visitor's earliest visit still going, which is this one unless another process
+  opened one for the same visitor at the same moment. Then both settle on the earliest, and the one that is not
+  drops its own, before anything is counted into it.
+  """
+  @spec settle_open_session(t(), String.t(), [String.t()], integer(), map()) :: map()
+  def settle_open_session(store, site, visitors, since, opened) do
+    # One already counting a hit first: the other process went on with it.
+    rows =
+      all(
+        store,
+        """
+        SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN (#{Enum.map_join(visitors, ", ", fn _ -> "?" end)}) AND last_at >= ?
+               ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1\
+        """,
+        [site] ++ visitors ++ [since]
+      )
+
+    case rows do
+      [row | _] ->
+        first = %{id: str(row["id"]), visitor: str(row["visitor"])}
+
+        if first.id != opened.id,
+          do: run(store, "DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0", [opened.id])
+
+        first
+
+      [] ->
+        opened
+    end
+  end
+
   @doc "Records a new session; `row` is a map with the SessionRow's fields as atoms in snake case."
   @spec insert_session(t(), map()) :: :ok
   def insert_session(store, row) do
@@ -909,32 +974,34 @@ defmodule Runlight.Store do
               browser, browser_version, os, os_version, device, screen, language)
              VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\
       """,
+      # Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps the
+      # same, and no header, however long, can make a row Postgres's indexes refuse.
       [
         row.id,
         row.site,
         row.visitor,
         row.started_at,
         row.started_at,
-        row.hostname,
-        row.referrer_host,
-        row.referrer_path,
-        row.source,
-        row.channel,
-        row.utm_source,
-        row.utm_medium,
-        row.utm_campaign,
-        row.utm_term,
-        row.utm_content,
-        row.country,
-        row.region,
-        row.city,
-        row.browser,
-        row.browser_version,
-        row.os,
-        row.os_version,
-        row.device,
-        row.screen,
-        row.language
+        clip(row.hostname, 255),
+        clip(row.referrer_host, 255),
+        clip(row.referrer_path, 500),
+        clip(row.source, 200),
+        clip(row.channel, 100),
+        clip(row.utm_source, 200),
+        clip(row.utm_medium, 200),
+        clip(row.utm_campaign, 200),
+        clip(row.utm_term, 200),
+        clip(row.utm_content, 200),
+        clip(row.country, 16),
+        clip(row.region, 100),
+        clip(row.city, 100),
+        clip(row.browser, 100),
+        clip(row.browser_version, 100),
+        clip(row.os, 100),
+        clip(row.os_version, 100),
+        clip(row.device, 50),
+        clip(row.screen, 50),
+        clip(row.language, 50)
       ]
     )
   end
@@ -956,7 +1023,7 @@ defmodule Runlight.Store do
           UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,
                      entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?\
           """,
-          [ts, path, path, id]
+          [ts, clip(path, 1000), clip(path, 1000), id]
         )
 
       reopen ->
@@ -1023,10 +1090,10 @@ defmodule Runlight.Store do
         row.visitor,
         row.session,
         row.pageview,
-        row.path,
-        row.hostname,
-        row.title,
-        row.name,
+        clip(row.path, 1000),
+        clip(row.hostname, 255),
+        clip(row.title, 500),
+        clip(row.name, 255),
         if(row.props, do: JS.stringify(row.props)),
         row.engaged_ms,
         row.scroll,
@@ -1506,51 +1573,85 @@ defmodule Runlight.Store do
 
   @spec save_goal(t(), Object.t(), Object.t() | nil) :: :ok
   def save_goal(store, g, before \\ nil) do
+    write = fn store ->
+      run(
+        store,
+        Sql.upsert(
+          dialect(store),
+          "rl_goals",
+          [
+            "id",
+            "site",
+            "name",
+            "kind",
+            ~s("match"),
+            "click_by",
+            "value_mode",
+            "value",
+            "value_prop",
+            "currency",
+            "created_at"
+          ],
+          ["id"],
+          ["name", "kind", ~s("match"), "click_by", "value_mode", "value", "value_prop", "currency"]
+        ),
+        [
+          g["id"],
+          g["site"],
+          g["name"],
+          g["kind"],
+          g["match"],
+          g["clickBy"],
+          g["valueMode"],
+          g["value"],
+          g["valueProp"],
+          g["currency"],
+          g["createdAt"]
+        ]
+      )
+    end
+
     # A click goal is counted by its name, which the tracker sends as the event name. Renaming one renames
     # its past clicks too, so its history stays.
     if before && before["kind"] == "click" && g["kind"] == "click" && before["name"] != g["name"] do
-      run(store, "UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", [
-        g["name"],
-        g["site"],
-        before["name"]
-      ])
+      transaction(store, fn store ->
+        run(store, "UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", [
+          g["name"],
+          g["site"],
+          before["name"]
+        ])
+
+        # The daily rollups count events by name too, and goals read them, so they take the new name as well.
+        # A day that already has events under the new name counts both together now, so it is built again.
+        both =
+          store
+          |> all(
+            """
+            SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?
+                   AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)\
+            """,
+            [g["site"], before["name"], g["site"], g["name"]]
+          )
+          |> Enum.map(&str(&1["day"]))
+
+        for day <- both do
+          run(store, "DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [g["site"], day])
+          run(store, "DELETE FROM rl_rollups WHERE site = ? AND day = ?", [g["site"], day])
+        end
+
+        run(store, "UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?", [
+          g["name"],
+          g["site"],
+          before["name"]
+        ])
+
+        write.(store)
+      end)
+    else
+      write.(store)
     end
 
-    run(
-      store,
-      Sql.upsert(
-        dialect(store),
-        "rl_goals",
-        [
-          "id",
-          "site",
-          "name",
-          "kind",
-          ~s("match"),
-          "click_by",
-          "value_mode",
-          "value",
-          "value_prop",
-          "currency",
-          "created_at"
-        ],
-        ["id"],
-        ["name", "kind", ~s("match"), "click_by", "value_mode", "value", "value_prop", "currency"]
-      ),
-      [
-        g["id"],
-        g["site"],
-        g["name"],
-        g["kind"],
-        g["match"],
-        g["clickBy"],
-        g["valueMode"],
-        g["value"],
-        g["valueProp"],
-        g["currency"],
-        g["createdAt"]
-      ]
-    )
+    :ok
   end
 
   @spec delete_goal(t(), String.t()) :: :ok
@@ -1725,8 +1826,14 @@ defmodule Runlight.Store do
     do: if(dialect(store) == "sqlite", do: "rl_events e INDEXED BY rl_events_site_kind_ts", else: "rl_events e")
 
   @doc "Every goal's totals in one pass over the range's events, by goal id."
-  @spec goal_totals_all(t(), map(), [Object.t()]) :: %{String.t() => Object.t()}
+  @spec goal_totals_all(t(), map(), [Object.t()]) :: Object.t()
   def goal_totals_all(store, query, goals) do
+    totals = goal_totals_map(store, query, goals)
+    # In the goals' own order, as TypeScript's map is.
+    Object.new(for g <- goals, do: {g["id"], totals[g["id"]]})
+  end
+
+  defp goal_totals_map(store, query, goals) do
     # A goal the daily rollups count exactly comes from the built days and the visits of the rest: a page by its
     # whole path, or an event or click by name, worth nothing or a fixed amount. Visitor ids last a day, so each
     # day's visitors add up, as they do for every other report. A pattern or a value sent with each event needs
@@ -2242,6 +2349,44 @@ defmodule Runlight.Store do
         )
       end)
     end
+  end
+
+  @doc "Seeks one matching event per hostname, skipping its remaining events before the next seek."
+  @spec hostname_suggestions(t(), map(), pos_integer()) :: [Object.t()]
+  def hostname_suggestions(store, query, limit) do
+    dialect = dialect(store)
+    {_, v_sql, v_params} = Sql.visit_rows(query.filters, query.site, query.from, query.to, dialect)
+    {within_sql, within_params} = Sql.row_scope(query.filters, ["page", "hostname"], dialect)
+    table = if dialect == "sqlite", do: "rl_events e INDEXED BY rl_events_hostname_suggest", else: "rl_events e"
+
+    suggest = fn after_value ->
+      {after_sql, after_params} =
+        if after_value == nil, do: {"", []}, else: {" AND e.hostname#{text_order(store)} > ?", [after_value]}
+
+      all(
+        store,
+        """
+        SELECT e.hostname AS value FROM #{table} CROSS JOIN rl_sessions s
+               WHERE #{v_sql} AND e.kind = 'pageview'#{within_sql}#{after_sql}
+               ORDER BY e.hostname#{text_order(store)} LIMIT 1\
+        """,
+        v_params ++ within_params ++ after_params
+      )
+    end
+
+    {rows, _} =
+      Enum.reduce_while(1..limit//1, {[], nil}, fn _, {rows, after_value} ->
+        case suggest.(after_value) do
+          [row | _] ->
+            value = str(row["value"])
+            {:cont, {[JS.obj(value: value) | rows], value}}
+
+          [] ->
+            {:halt, {rows, after_value}}
+        end
+      end)
+
+    Enum.reverse(rows)
   end
 
   @doc "The top values of a dimension, `limit` from `offset`."

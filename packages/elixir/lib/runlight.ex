@@ -1282,8 +1282,10 @@ defmodule Runlight do
         days = Integer.floor_div(now, 86_400_000)
         rest = now - days * 86_400_000
         {y, m, d} = JS.civil_from_days(days)
-        # setUTCMonth keeps the day of the month, overflowing into the next month as Date does.
-        JS.date_utc(y, m - 1 - months, d) + rest
+        # Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
+        month = m - 1 - months
+        {_, _, last} = JS.civil_from_days(Integer.floor_div(JS.date_utc(y, month + 1, 1), 86_400_000) - 1)
+        JS.date_utc(y, month, min(d, last)) + rest
     end
   end
 
@@ -1423,8 +1425,43 @@ defmodule Runlight do
     end
   end
 
-  # Deletes salts whose day has ended everywhere: a salt goes two UTC days after its date.
-  defp drop_old_salts(rl, now), do: Store.drop_salts_before(rl.store, JS.iso_day(now - 2 * 86_400_000))
+  # Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a site's
+  # timezone, and after midnight only while a visit that began that day there is still going, since it carries
+  # on under the visitor it began with. So a salt lasts its day and the visits that run past it.
+  defp drop_old_salts(rl, now) do
+    zones = Enum.group_by(sites(rl), & &1["timezone"], & &1["id"])
+
+    if zones != %{} do
+      needed =
+        Enum.reduce(zones, MapSet.new(), fn {timezone, ids}, needed ->
+          today = Time.local_date(now, timezone)
+          yesterday = Time.add_days(today, -1)
+          needed = MapSet.put(needed, today)
+
+          if Store.visit_open?(
+               rl.store,
+               ids,
+               Time.start_of(yesterday, timezone),
+               Time.start_of(today, timezone),
+               now - session_idle_ms()
+             ) do
+            MapSet.put(needed, yesterday)
+          else
+            # Nor is it kept here: no visit is left for it to find.
+            case State.get(rl.table, {:salts, timezone}) do
+              %{day: ^today} = cached -> State.put(rl.table, {:salts, timezone}, %{cached | yesterday: nil})
+              _ -> :ok
+            end
+
+            needed
+          end
+        end)
+
+      Store.drop_salts_except(rl.store, MapSet.to_list(needed))
+    end
+
+    :ok
+  end
 
   # The host a proxy says the request was for, read only when proxy headers are trusted.
   defp forwarded_host(rl, request), do: if(rl.trust_proxy, do: Request.header(request, "x-forwarded-host"))
@@ -1598,7 +1635,8 @@ defmodule Runlight do
             language: client.language
           })
 
-          session
+          # Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+          Store.settle_open_session(rl.store, site["id"], candidates, now - session_idle_ms(), session)
       end
     end)
   end
