@@ -2,6 +2,8 @@
 //! Each takes the base path the routes answer under: "" on the standalone server, and "/runlight" in an app.
 
 use crate::brand::RUNLIGHT_ICON;
+use crate::js::{self, Value};
+use crate::messages::translator;
 
 /// Text made safe for HTML, quotes included.
 fn esc(value: &str) -> String {
@@ -62,8 +64,8 @@ main .eye { width: 32px; height: 30px; margin: 0; background: none; color: var(-
 .eye:hover, .eye[aria-pressed="true"] { color: var(--ink); }
 .eye svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }"#;
 
-/// Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D).
-pub const AUTH_JS: &str = r#"(() => {
+/// The script's English text; `auth_js` puts the words of another language in.
+const AUTH_JS_ENGLISH: &str = r#"(() => {
   const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
   function strength(password, avoid = []) {
     if (password.length < 10) return 0;
@@ -164,13 +166,49 @@ pub const AUTH_JS: &str = r#"(() => {
   });
 })();"#;
 
-const THEME_BUTTON: &str = r#"<button type="button" class="theme" aria-label="Switch theme"><svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg></button>"#;
+/// Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D (Ctrl+Shift+D), with its
+/// words in a language the dashboard speaks. English is served as auth.js, the others as auth.js?lang=fr and so on.
+pub fn auth_js(lang: &str) -> String {
+    let words = translator(lang);
+    let t = |key: &str| words.t(key, &[]);
+    let q = |key: &str| js::stringify(&Value::from(t(key)));
+    let theme = if words.lang == "en" {
+        r#""Theme: " + c"#.to_string()
+    } else {
+        format!(r#"c === "dark" ? {} : {}"#, q("auth.themeDark"), q("auth.themeLight"))
+    };
+    let strength = (0..5).map(|n| q(&format!("account.strength{n}"))).collect::<Vec<_>>().join(", ");
+    AUTH_JS_ENGLISH
+        .replace(
+            r#"button.title = c === "system" ? "Theme: device setting" : "Theme: " + c;"#,
+            &format!(r#"button.title = c === "system" ? {} : {theme};"#, q("auth.themeSystem")),
+        )
+        .replace(
+            r#"eye.setAttribute("aria-label", shown ? "Hide password" : "Show password");"#,
+            &format!(
+                r#"eye.setAttribute("aria-label", shown ? {} : {});"#,
+                q("auth.hidePassword"),
+                q("auth.showPassword")
+            ),
+        )
+        .replace(
+            r#"eye.title = shown ? "Hide password" : "Show password";"#,
+            &format!("eye.title = shown ? {} : {};", q("auth.hidePassword"), q("auth.showPassword")),
+        )
+        .replace(r#"["Too short", "Weak", "Fair", "Good", "Strong"][score]"#, &format!("[{strength}][score]"))
+}
 
-fn page(base: &str, title: &str, body: &str) -> String {
+const THEME_ICONS: &str = r#"<svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg>"#;
+
+fn page(base: &str, lang: &str, title: &str, body: &str) -> String {
     let base = esc(base);
+    let words = translator(lang);
+    let code = words.lang.as_str();
+    let script = if code == "en" { String::new() } else { format!("?lang={code}") };
+    let switch = esc(&words.t("auth.switchTheme", &[]));
     format!(
         r#"<!doctype html>
-<html lang="en">
+<html lang="{code}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -178,14 +216,14 @@ fn page(base: &str, title: &str, body: &str) -> String {
 <title>{title} | Runlight</title>
 <link rel="icon" href="{RUNLIGHT_ICON}">
 <link rel="stylesheet" href="{base}/auth.css">
-<script src="{base}/auth.js"></script>
+<script src="{base}/auth.js{script}"></script>
 </head>
 <body>
 <main>
 <p class="brand">{MARK}Runlight</p>
 {body}
 </main>
-{THEME_BUTTON}
+<button type="button" class="theme" aria-label="{switch}">{THEME_ICONS}</button>
 </body>
 </html>
 "#,
@@ -215,27 +253,35 @@ pub struct LoginPage<'a> {
 }
 
 /// The sign-in page.
-pub fn login_page(base: &str, opts: &LoginPage<'_>) -> String {
+pub fn login_page(base: &str, opts: &LoginPage<'_>, lang: &str) -> String {
+    let words = translator(lang);
+    let h = |key: &str| words.html(key, &[]);
     let next = opts.next.map_or_else(|| format!("{base}/"), str::to_string);
+    let link = format!(r#"<a href="{}" target="_blank" rel="noopener">{}</a>"#, esc(opts.forgot), h("auth.forgotLink"));
     page(
         base,
-        "Sign in",
+        lang,
+        &words.t("auth.signIn", &[]),
         &format!(
-            r#"<h1>Sign in</h1>
-<p>Sign in to see your sites.</p>
+            r#"<h1>{sign_in}</h1>
+<p>{intro}</p>
 {error}
 <form method="post" action="{b}/login">
 <input type="hidden" name="next" value="{next}">
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
-<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
+<label>{email_label}<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
+<label>{password}<input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">{sign_in}</button>
 </form>
-<p class="hint">If you have forgotten your password, <a href="{forgot}" target="_blank" rel="noopener">the docs say how to set a new one</a>.</p>"#,
+<p class="hint">{forgot}</p>"#,
+            sign_in = h("auth.signIn"),
+            intro = h("auth.signInIntro"),
             error = error_line(opts.error),
             b = esc(base),
             next = esc(&next),
+            email_label = h("auth.email"),
+            password = h("auth.password"),
             email = esc(opts.email.unwrap_or("")),
-            forgot = esc(opts.forgot),
+            forgot = words.html("auth.forgot", &[("link", &link)]),
         ),
     )
 }
@@ -252,49 +298,58 @@ pub struct CodePage<'a> {
 }
 
 /// The second step of signing in, for an account with two-factor on.
-pub fn code_page(base: &str, opts: &CodePage<'_>) -> String {
+pub fn code_page(base: &str, opts: &CodePage<'_>, lang: &str) -> String {
+    let words = translator(lang);
+    let h = |key: &str| words.html(key, &[]);
     page(
         base,
-        "Enter your code",
+        lang,
+        &words.t("auth.codeTitle", &[]),
         &format!(
-            r#"<h1>Enter your code</h1>
-<p>Open your authenticator app and enter the six-digit code for Runlight.</p>
+            r#"<h1>{title}</h1>
+<p>{intro}</p>
 {error}
 <form method="post" action="{b}/login/code">
 <input type="hidden" name="pending" value="{pending}">
 <input type="hidden" name="next" value="{next}">
-<label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
-<button type="submit">Sign in</button>
+<label>{code}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
+<button type="submit">{sign_in}</button>
 </form>
-<p class="hint">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>"#,
+<p class="hint">{hint}</p>"#,
+            title = h("auth.codeTitle"),
+            intro = h("auth.codeIntro"),
             error = error_line(opts.error),
             b = esc(base),
             pending = esc(opts.pending),
             next = esc(opts.next),
+            code = h("auth.code"),
+            sign_in = h("auth.signIn"),
+            hint = h("auth.codeHint"),
         ),
     )
 }
 
 /// What someone invited with a role can do, after "as".
-pub fn role_text(role: &str) -> &'static str {
-    match role {
-        "viewer" => "a viewer, who can read every site's stats",
-        "member" => "a member, who can change the settings of every site",
-        _ => "an admin, who can change everything and manage people",
-    }
+pub fn role_text(role: &str, lang: &str) -> String {
+    scoped_role_text(role, None, lang)
 }
 
 /// A role description that includes a site restriction.
-pub fn scoped_role_text(role: &str, site: Option<&str>) -> String {
+pub fn scoped_role_text(role: &str, site: Option<&str>, lang: &str) -> String {
+    let words = translator(lang);
     match site {
-        None => role_text(role).to_owned(),
         Some(site) => {
-            if role == "viewer" {
-                format!("a viewer, who can read the stats for {site} only")
-            } else {
-                format!("a member, who can change the settings of {site} only")
-            }
+            let key = if role == "viewer" { "auth.roleViewerSite" } else { "auth.roleMemberSite" };
+            words.t(key, &[("site", Value::from(site))])
         }
+        None => words.t(
+            match role {
+                "viewer" => "auth.roleViewer",
+                "member" => "auth.roleMember",
+                _ => "auth.roleAdmin",
+            },
+            &[],
+        ),
     }
 }
 
@@ -316,39 +371,49 @@ pub struct InvitePage<'a> {
 }
 
 /// Where an invited person chooses a password and joins.
-pub fn invite_page(base: &str, opts: &InvitePage<'_>) -> String {
+pub fn invite_page(base: &str, opts: &InvitePage<'_>, lang: &str) -> String {
+    let words = translator(lang);
+    let h = |key: &str| words.html(key, &[]);
+    let role = esc(&scoped_role_text(opts.role, opts.site, lang));
     page(
         base,
-        "Join Runlight",
+        lang,
+        &words.t("auth.joinTitle", &[]),
         &format!(
-            r#"<h1>Join Runlight</h1>
-<p>You were invited to {host} as {role}. Choose a password to finish.</p>
+            r#"<h1>{title}</h1>
+<p>{intro}</p>
 {error}
 <form method="post" action="{b}/invite">
 <input type="hidden" name="code" value="{code}">
-<label>Email<input type="email" value="{email}" disabled></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Join</button>
+<label>{email_label}<input type="email" value="{email}" disabled></label>
+<label>{password}<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
+<label>{again}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">{join}</button>
 </form>
-<p class="hint">Use at least ten characters.</p>"#,
-            host = esc(opts.host),
-            role = esc(&scoped_role_text(opts.role, opts.site)),
+<p class="hint">{hint}</p>"#,
+            title = h("auth.joinTitle"),
+            intro = words.html("auth.joinIntro", &[("host", &esc(opts.host)), ("role", &role)]),
             error = error_line(opts.error),
             b = esc(base),
             code = esc(opts.code),
+            email_label = h("auth.email"),
             email = esc(opts.email),
+            password = h("auth.password"),
+            again = h("auth.passwordAgain"),
+            join = h("auth.join"),
+            hint = h("auth.passwordHint"),
         ),
     )
 }
 
 /// For an invite link that has expired or was used.
-pub fn invite_gone_page(base: &str) -> String {
+pub fn invite_gone_page(base: &str, lang: &str) -> String {
+    let words = translator(lang);
     page(
         base,
-        "This invite no longer works",
-        r#"<h1>This invite no longer works</h1>
-<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>"#,
+        lang,
+        &words.t("auth.inviteGoneTitle", &[]),
+        &format!("<h1>{}</h1>\n<p>{}</p>", words.html("auth.inviteGoneTitle", &[]), words.html("auth.inviteGone", &[])),
     )
 }
 
@@ -366,10 +431,13 @@ pub struct SetupPage<'a> {
 }
 
 /// Where the first account is made.
-pub fn setup_page(base: &str, opts: &SetupPage<'_>) -> String {
+pub fn setup_page(base: &str, opts: &SetupPage<'_>, lang: &str) -> String {
+    let words = translator(lang);
+    let h = |key: &str| words.html(key, &[]);
     let code = if opts.ask_code {
         format!(
-            r#"<label>Your RUNLIGHT_TOKEN<input type="password" name="code" autocomplete="off" required value="{}"></label>"#,
+            r#"<label>{}<input type="password" name="code" autocomplete="off" required value="{}"></label>"#,
+            h("auth.setupToken"),
             esc(opts.code)
         )
     } else {
@@ -377,42 +445,51 @@ pub fn setup_page(base: &str, opts: &SetupPage<'_>) -> String {
     };
     page(
         base,
-        "Create your account",
+        lang,
+        &words.t("auth.setupTitle", &[]),
         &format!(
-            r#"<h1>Create your account</h1>
-<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>
+            r#"<h1>{title}</h1>
+<p>{intro}</p>
 {error}
 <form method="post" action="{b}/setup">
 {code}
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Create account</button>
+<label>{email_label}<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
+<label>{password}<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+<label>{again}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">{create}</button>
 </form>
-<p class="hint">Use at least ten characters.</p>"#,
+<p class="hint">{hint}</p>"#,
+            title = h("auth.setupTitle"),
+            intro = h("auth.setupIntro"),
             error = error_line(opts.error),
             b = esc(base),
+            email_label = h("auth.email"),
             email = esc(opts.email.unwrap_or("")),
+            password = h("auth.password"),
+            again = h("auth.passwordAgain"),
+            create = h("auth.createAccount"),
+            hint = h("auth.passwordHint"),
         ),
     )
 }
 
-/// For a server with no account yet, which prints a setup link with a one-time code in its log.
-pub fn setup_locked_page(base: &str) -> String {
+/// A page with a title and one paragraph, both from the table.
+fn notice(base: &str, lang: &str, title: &str, text: &str) -> String {
+    let words = translator(lang);
     page(
         base,
-        "Finish setting up",
-        r#"<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Open the setup link printed in the server's log when it started, which carries a one-time code, to create the first account.</p>"#,
+        lang,
+        &words.t(title, &[]),
+        &format!("<h1>{}</h1>\n<p>{}</p>", words.html(title, &[]), words.html(text, &[])),
     )
 }
 
+/// For a server with no account yet, which prints a setup link with a one-time code in its log.
+pub fn setup_locked_page(base: &str, lang: &str) -> String {
+    notice(base, lang, "auth.finishTitle", "auth.setupLocked")
+}
+
 /// For an app with accounts on but nothing to prove the first account with.
-pub fn setup_needs_token_page(base: &str) -> String {
-    page(
-        base,
-        "Finish setting up",
-        r#"<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>"#,
-    )
+pub fn setup_needs_token_page(base: &str, lang: &str) -> String {
+    notice(base, lang, "auth.finishTitle", "auth.setupNeedsToken")
 }

@@ -416,3 +416,27 @@ fn the_futures_can_be_sent_between_threads() {
     send(&runlight::mcp::mcp_response(&request, &api));
     send(&runlight::mcp::call_tool(&obj! {}, &api));
 }
+
+#[tokio::test]
+async fn a_question_carries_at_most_24000_characters_of_earlier_turns_however_much_history_the_browser_sends() {
+    let f = fixture("assistant");
+    let api = Canned { api: f.at("api").clone(), log: Mutex::new(Vec::new()) };
+    let rec = recording(vec![json(200, r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"Four."}]}"#)]);
+    let fetcher: SharedFetcher = rec.clone();
+    // Twenty made-up turns of 8,000 characters each, then the question.
+    let mut turns: Vec<ChatMessage> = (0..19)
+        .map(|i| ChatMessage {
+            role: if i % 2 == 1 { "assistant" } else { "user" }.into(),
+            content: format!("{i} {}", "x".repeat(7998)),
+        })
+        .collect();
+    turns.push(ChatMessage { role: "user".into(), content: "How many visitors?".into() });
+    assistant::chat(&anthropic(), &turns, &context_en(), &api, &fetcher, &fixed, None).await.unwrap();
+    let sent = rec.sent.lock().unwrap();
+    let body = js::parse(&String::from_utf8(sent[0].1.body.clone().unwrap()).unwrap()).unwrap();
+    let Some(Value::Array(messages)) = body.get("messages") else { panic!("messages") };
+    let text: usize = messages.iter().filter_map(|m| m.get("content").and_then(Value::as_str)).map(js::len16).sum();
+    assert!(text <= 24_000, "{text} characters sent");
+    assert_eq!(messages[0].at("role"), &Value::from("user"), "still starting with a question");
+    assert!(messages.iter().any(|m| m.at("content").as_str().is_some_and(|c| c.contains("How many visitors?"))));
+}

@@ -504,3 +504,103 @@ async fn a_server_code_open_and_locked_setups() {
     );
     assert!(open.handle(&get("/elsewhere"), "/elsewhere").await.unwrap().is_none());
 }
+
+impl App {
+    /// A new account kept to one site, signed in through its invite.
+    async fn invited_to(&self, owner: &str, email: &str, role: &str, site: &str) -> String {
+        let made = self
+            .routes
+            .handle(json(
+                owner,
+                "POST",
+                "/api/people",
+                &runlight::obj! { "site" => site, "email" => email, "role" => role },
+            ))
+            .await;
+        let link = js::str_or_empty(made.json_body().unwrap().get("link"));
+        let code = Url::parse(&link).unwrap().search_params().get("code").unwrap().to_string();
+        let joined = self
+            .routes
+            .handle(form("/invite", &[("code", &code), ("password", "a long password"), ("again", "a long password")]))
+            .await;
+        cookie_of(&joined)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_kept_to_one_site_sees_no_mail_fields_and_cannot_move_the_site() {
+    let app = app(true, None).await;
+    let owner = app.owner().await;
+    let ada = app.invited_to(&owner, "ada@example.com", "member", "default").await;
+    // The owner sees which service sends the reports and its settings; one site's account sees which, nothing more.
+    let whole = app.routes.handle(req("GET", "/api/mail").header("cookie", &owner)).await.json_body().unwrap();
+    assert!(whole.at("fields").as_object().is_some_and(|f| !f.is_empty()), "{}", whole.to_json());
+    let kept = app.routes.handle(req("GET", "/api/mail").header("cookie", &ada)).await.json_body().unwrap();
+    assert_eq!(kept.at("service"), whole.at("service"));
+    assert_eq!(kept.at("fields"), &runlight::obj! {});
+    assert_eq!(kept.at("saved"), &Value::Array(vec![]));
+
+    // It may rename its site, never change where it lives.
+    let moved = app
+        .routes
+        .handle(json(&ada, "PATCH", "/api/sites/default", &runlight::obj! { "hostnames" => "elsewhere.example" }))
+        .await;
+    assert_eq!(moved.status, 403);
+    assert_eq!(moved.json_body().unwrap().at("code").as_str(), Some("site_domains"));
+    let renamed =
+        app.routes.handle(json(&ada, "PATCH", "/api/sites/default", &runlight::obj! { "name" => "Mine" })).await;
+    assert_eq!(
+        renamed.status,
+        200,
+        "{}",
+        js::str_or_empty(renamed.json_body().ok().as_ref().and_then(|b| b.get("error")))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_site_removes_the_accounts_and_invitations_kept_to_it_and_no_one_else() {
+    let store = runlight_sqlx::connect(":memory:").await.unwrap();
+    let mut options = RunlightOptions::new(store);
+    options.managed_sites = true;
+    options.secret = Some("k".repeat(64));
+    let rl = Runlight::new(options).unwrap();
+    let routes = rl
+        .routes(RoutesOptions {
+            token: TokenOption::Given("app-token".into()),
+            accounts: true,
+            ..RoutesOptions::default()
+        })
+        .unwrap();
+    let app = App { rl, routes, now: Arc::new(AtomicI64::new(NOW)), hook: Arc::default() };
+    let owner = app.owner().await;
+    for host in ["alpha.example.com", "beta.example.com"] {
+        let made = app.routes.handle(json(&owner, "POST", "/api/sites", &runlight::obj! { "hostnames" => host })).await;
+        assert_eq!(made.status, 201, "{host}");
+    }
+    app.invited_to(&owner, "ada@example.com", "member", "alpha.example.com").await;
+    app.invited_to(&owner, "bob@example.com", "member", "beta.example.com").await;
+    let pending = runlight::obj! { "site" => "alpha.example.com", "email" => "cy@example.com", "role" => "viewer" };
+    assert_eq!(app.routes.handle(json(&owner, "POST", "/api/people", &pending)).await.status, 201);
+    let emails = async || {
+        let people = app.routes.handle(req("GET", "/api/people").header("cookie", &owner)).await.json_body().unwrap();
+        let mut found: Vec<String> = ["people", "invites"]
+            .iter()
+            .flat_map(|k| people.at(k).as_array().cloned().unwrap_or_default())
+            .map(|p| js::str_or_empty(p.get("email")))
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(emails().await, ["ada@example.com", "bob@example.com", "cy@example.com", "jon@example.com"]);
+    let gone = app
+        .routes
+        .handle(json(
+            &owner,
+            "DELETE",
+            "/api/sites/alpha.example.com",
+            &runlight::obj! { "password" => "a long password" },
+        ))
+        .await;
+    assert_eq!(gone.status, 200, "{}", gone.json_body().unwrap().to_json());
+    assert_eq!(emails().await, ["bob@example.com", "jon@example.com"]);
+}

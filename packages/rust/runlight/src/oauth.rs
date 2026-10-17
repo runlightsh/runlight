@@ -27,6 +27,7 @@ use crate::hash::{hmac, new_id, random_id, sha256};
 use crate::http::{Headers, Request, Response, SearchParams, Url};
 use crate::js::{self, Object, Value};
 use crate::limit::RateLimit;
+use crate::messages::{accepted_language, translator};
 use crate::re::{js_re, test};
 use crate::runlight::Runlight;
 use crate::sources::encode_uri_component;
@@ -35,15 +36,36 @@ use crate::{BoxFuture, arr, obj};
 
 const SCOPES: [&str; 3] = ["read", "manage", "cms"];
 
-/// The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that replaces it.
+/// The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
+/// replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
+/// database alone cannot report for the site; one kept before as plain text is sealed the next time it is read.
 pub(crate) async fn agents_key(runlight: &Runlight, site: &str, replace: bool) -> Result<String, Error> {
     let name = format!("observe-key:{site}");
+    let secret = runlight.secret();
     if !replace {
-        return Ok(runlight.store().setting_or_add(&name, || format!("rlo_{}", random_id(20))).await?);
+        let made = crate::mail::secret::seal(&format!("rlo_{}", random_id(20)), secret);
+        let stored = runlight.store().setting_or_add(&name, || made.clone()).await?;
+        let key = open_agents_key(runlight, &stored);
+        if let Some(key) = key {
+            if stored.starts_with("rlo_") {
+                runlight.store().set_setting(&name, Some(&crate::mail::secret::seal(&key, secret))).await?;
+            }
+            return Ok(key);
+        }
+        // One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
     }
     let key = format!("rlo_{}", random_id(20));
-    runlight.store().set_setting(&name, Some(&key)).await?;
+    runlight.store().set_setting(&name, Some(&crate::mail::secret::seal(&key, secret))).await?;
     Ok(key)
+}
+
+/// A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. `None` when it cannot be opened.
+pub(crate) fn open_agents_key(runlight: &Runlight, stored: &str) -> Option<String> {
+    if stored.starts_with("rlo_") {
+        Some(stored.to_string())
+    } else {
+        crate::mail::secret::unseal(stored, runlight.secret())
+    }
 }
 
 /// A redirect address's host as a site's domains are kept: lowercase, with no port and no www.
@@ -207,8 +229,10 @@ fn cors() -> Headers {
 }
 
 fn json(body: &Value, status: u16) -> Response {
-    let mut headers =
-        Headers::new().with("content-type", "application/json; charset=utf-8").with("cache-control", "no-store");
+    let mut headers = Headers::new()
+        .with("content-type", "application/json; charset=utf-8")
+        .with("cache-control", "no-store")
+        .with("x-content-type-options", "nosniff");
     for (k, v) in CORS {
         headers.set(k, v);
     }
@@ -348,6 +372,10 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     let runlight = host.runlight();
     let base = host.base();
     runlight.init().await?;
+    let words = translator(&accepted_language(request));
+    let h = |key: &str, vars: &[(&str, &str)]| words.html(key, vars);
+    let lang = words.lang.clone();
+    let page = |title: &str, body: &str, status: u16| page_in(&lang, title, body, status);
     let form = if request.method == "POST" { SearchParams::parse(&request.text()) } else { url.search_params() };
     let get = |k: &str| form.get(k).map(str::to_string);
     let client_id = get("client_id").unwrap_or_default();
@@ -355,7 +383,7 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     let redirect = get("redirect_uri").unwrap_or_default();
     // Without a known client and one of its own addresses there is nowhere safe to send an answer.
     let Some(client) = client.filter(|c| c.redirects().iter().any(|r| r.as_str() == Some(redirect.as_str()))) else {
-        return Ok(page("This app is not registered", "<p>Start connecting again from the app.</p>", 400));
+        return Ok(page(&h("oauth.unregisteredTitle", &[]), &format!("<p>{}</p>", h("oauth.startAgain", &[])), 400));
     };
     let back = |params: &[(&str, &str)]| -> Result<Response, Error> {
         let mut to = Url::parse(&redirect).ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?;
@@ -380,11 +408,13 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
             return back(&params);
         }
         Ok(page(
-            "This app asked in a way Runlight does not support",
+            &h("oauth.unsupportedTitle", &[]),
             &format!(
-                "<p>{} sent {}. Start connecting again from the app.</p>",
-                esc(&client.name_text()),
-                esc(description.unwrap_or(error))
+                "<p>{}</p>",
+                h(
+                    "oauth.unsupported",
+                    &[("app", &esc(&client.name_text())), ("error", &esc(description.unwrap_or(error)))]
+                )
             ),
             400,
         ))
@@ -414,10 +444,8 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
         // Someone signed in who may only read would be sent to sign in again and again.
         if host.is_reader(request).await {
             return Ok(page(
-                "Ask an owner to connect this",
-                &format!(
-                    "<p>You are signed in as a viewer, and only an owner of this Runlight can connect {name}.</p>"
-                ),
+                &h("oauth.viewerTitle", &[]),
+                &format!("<p>{}</p>", h("oauth.viewer", &[("app", &name)])),
                 403,
             ));
         }
@@ -428,13 +456,10 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
             return Ok(see_other(&format!("{sign_in}?next={}", encode_uri_component(&here))));
         }
         let home = if base.is_empty() { "/" } else { base };
+        let link = format!("<a href=\"{}\">{}</a>", esc(home), esc(&format!("{}{home}", url.host())));
         return Ok(page(
-            "Sign in first",
-            &format!(
-                "<p>Open your Runlight dashboard at <a href=\"{}\">{}</a> and sign in, then connect {name} again.</p>",
-                esc(home),
-                esc(&format!("{}{home}", url.host()))
-            ),
+            &h("oauth.signInTitle", &[]),
+            &format!("<p>{}</p>", h("oauth.signIn", &[("link", &link), ("app", &name)])),
             401,
         ));
     }
@@ -459,17 +484,26 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
         // The app names itself, so the page also shows where the answer goes, which it cannot fake.
         let to_host = Url::parse(&redirect).ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?.host();
         let sends_to = format!(
-            "<p class=\"note\">Allowing sends you back to <strong>{}</strong>. Only allow it if you started connecting there.</p>",
-            esc(&to_host)
+            "<p class=\"note\">{}</p>",
+            h("oauth.sendsTo", &[("host", &format!("<strong>{}</strong>", esc(&to_host)))])
         );
+        let (deny, allow) = (h("oauth.deny", &[]), h("oauth.allow", &[]));
+        let buttons = format!(
+            "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">{deny}</button><button type=\"submit\" name=\"decision\" value=\"allow\">{allow}</button></div></form>"
+        );
+        let connect_title = h("oauth.connectTitle", &[("app", &name)]);
+        let site_label = h("app.site", &[]);
         let action = esc(base);
         if cms {
             if counting.is_empty() && !runlight.managed_sites() {
                 return Ok(page(
-                    "Add this site first",
+                    &h("oauth.addSiteTitle", &[]),
                     &format!(
-                        "<p>No site in this Runlight counts <strong>{}</strong>. Add it to a site's domains in your code, then connect again from {name}.</p>",
-                        esc(&host_name)
+                        "<p>{}</p>",
+                        h(
+                            "oauth.addSite",
+                            &[("host", &format!("<strong>{}</strong>", esc(&host_name))), ("app", &name)]
+                        )
                     ),
                     400,
                 ));
@@ -479,19 +513,30 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
                 .map(|s| format!("<option value=\"{}\">{}</option>", esc(&s.id), esc(&s.name)))
                 .collect();
             if runlight.managed_sites() && counting.is_empty() {
-                choices.push_str(&format!("<option value=\"new\">A new site for {}</option>", esc(&host_name)));
+                choices.push_str(&format!(
+                    "<option value=\"new\">{}</option>",
+                    h("oauth.newSite", &[("host", &esc(&host_name))])
+                ));
             }
-            let counts = esc(&host_name);
+            let intro = h(
+                "oauth.cmsIntro",
+                &[
+                    ("app", &format!("<strong>{name}</strong>")),
+                    ("host", &format!("<strong>{}</strong>", esc(&host_name))),
+                ],
+            );
             return Ok(page(
-                &format!("Connect {name}"),
+                &connect_title,
                 &format!(
-                    "<p><strong>{name}</strong> wants to count <strong>{counts}</strong> in this Runlight.</p>
-<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, and a dashboard key, to show the site's read-only dashboard in its admin pages. It cannot change anything here or read other sites.</p>
+                    "<p>{intro}</p>
+<p>{detail}</p>
 {sends_to}
 <form method=\"post\" action=\"{action}/oauth/authorize\">{hidden}
-<label>Site<select name=\"site\">{choices}</select></label>
-<p class=\"note\">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in {name}.</p>
-<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>"
+<label>{site_label}<select name=\"site\">{choices}</select></label>
+<p class=\"note\">{note}</p>
+{buttons}",
+                    detail = h("oauth.cmsDetail", &[]),
+                    note = h("oauth.cmsNote", &[("app", &name)]),
                 ),
                 200,
             ));
@@ -513,34 +558,50 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
                 })
                 .collect();
             return Ok(page(
-                &format!("Connect {name}"),
+                &connect_title,
                 &format!(
-                    "<p><strong>{name}</strong> wants to show this site\u{2019}s stats and change its settings, so you can manage it from there.</p>
-<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>
+                    "<p>{intro}</p>
+<p>{detail}</p>
 {sends_to}
 <form method=\"post\" action=\"{action}/oauth/authorize\">{hidden}
-<label>Site<select name=\"site\">{choices}</select></label>
-<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects {name}.</p>
-<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>"
+<label>{site_label}<select name=\"site\">{choices}</select></label>
+<p class=\"note\">{note}</p>
+{buttons}",
+                    intro = h("oauth.manageIntro", &[("app", &format!("<strong>{name}</strong>"))]),
+                    detail = h("oauth.manageDetail", &[]),
+                    note = h("oauth.manageNote", &[("app", &name)]),
                 ),
                 200,
             ));
         }
         let sites = runlight.sites();
         let options: String = if sites.len() > 1 {
-            sites.iter().map(|s| format!("<option value=\"{}\">{} only</option>", esc(&s.id), esc(&s.name))).collect()
+            sites
+                .iter()
+                .map(|s| {
+                    format!(
+                        "<option value=\"{}\">{}</option>",
+                        esc(&s.id),
+                        h("oauth.siteOnly", &[("site", &esc(&s.name))])
+                    )
+                })
+                .collect()
         } else {
             String::new()
         };
         return Ok(page(
-            &format!("Connect {name}"),
+            &connect_title,
             &format!(
-                "<p><strong>{name}</strong> wants to read your Runlight stats so it can answer questions about them. It will be able to read and never to change anything.</p>
+                "<p>{intro}</p>
 {sends_to}
 <form method=\"post\" action=\"{action}/oauth/authorize\">{hidden}
-<label>Which sites it can read<select name=\"site\"><option value=\"\">Every site</option>{options}</select></label>
-<p class=\"note\">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>
-<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">Deny</button><button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button></div></form>"
+<label>{read_sites}<select name=\"site\"><option value=\"\">{every}</option>{options}</select></label>
+<p class=\"note\">{note}</p>
+{buttons}",
+                intro = h("oauth.readIntro", &[("app", &format!("<strong>{name}</strong>"))]),
+                read_sites = h("oauth.readSites", &[]),
+                every = h("tokens.allSites", &[]),
+                note = h("oauth.readNote", &[]),
             ),
             200,
         ));
@@ -550,7 +611,7 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
         && !origin.is_empty()
         && origin != url.origin()
     {
-        return Ok(page("This request came from another site", "<p>Start connecting again from the app.</p>", 403));
+        return Ok(page(&h("oauth.anotherSiteTitle", &[]), &format!("<p>{}</p>", h("oauth.startAgain", &[])), 403));
     }
     if form.get("decision") != Some("allow") {
         return back(&[("error", "access_denied")]);
@@ -760,10 +821,11 @@ async fn register(runlight: &Runlight, name: &str, redirects: Vec<String>) -> Re
 
 const STYLE: &str = r#"<style>:root{color-scheme:light dark;--page:#f4f4f5;--card:#fff;--ink:#111827;--muted:#4b5563;--line:#e5e7eb}@media (prefers-color-scheme:dark){:root{--page:#09090b;--card:#141417;--ink:#fafafa;--muted:#a1a1aa;--line:#27272a}}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}main{width:min(440px,calc(100% - 32px));padding:28px;background:var(--card);border:1px solid var(--line);border-radius:14px}h1{font-size:20px;margin:0 0 12px}p{margin:0 0 16px;color:var(--muted)}p strong{color:var(--ink)}a{color:inherit}label{display:block;margin:0 0 14px;font-size:13px;font-weight:600}select{display:block;width:100%;height:40px;margin-top:6px;padding:0 36px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238a8a93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") right 12px center/14px no-repeat;color:var(--ink);font:inherit;font-weight:400;appearance:none;cursor:pointer}.note{font-size:13px}.buttons{display:flex;justify-content:flex-end;gap:8px}button{height:40px;padding:0 18px;border:0;border-radius:8px;background:var(--ink);color:var(--card);font:inherit;font-weight:600;cursor:pointer}button.ghost{background:none;color:var(--ink);border:1px solid var(--line)}</style>"#;
 
-fn page(title: &str, body: &str, status: u16) -> Response {
+/// A page in the visitor's language, with a title already written as HTML.
+fn page_in(lang: &str, title: &str, body: &str, status: u16) -> Response {
     Response::new(
         format!(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>{title} | Runlight</title>\n{STYLE}</head><body><main><h1>{title}</h1>{body}</main></body></html>"
+            "<!doctype html><html lang=\"{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>{title} | Runlight</title>\n{STYLE}</head><body><main><h1>{title}</h1>{body}</main></body></html>"
         ),
         status,
         Headers::new()

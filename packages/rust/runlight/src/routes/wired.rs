@@ -167,10 +167,22 @@ pub(crate) async fn send_mail(rl: &Runlight, message: Message) -> Result<(), Err
     rl.send_mail(message).await
 }
 
-pub(crate) async fn send_test_mail(rl: &Runlight, to: &str, lang: &str) -> R {
+pub(crate) async fn send_test_mail(
+    rl: &Runlight,
+    to: &str,
+    lang: &str,
+    sample_sent: &std::sync::Mutex<std::collections::HashMap<String, i64>>,
+) -> R {
     let Some((settings, source)) = rl.mail_settings().await? else {
         return Ok(coded("Set up a mail service first", "mail_unset", 400, None));
     };
+    // One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+    // or use up a service's quota; one just set up can be tried at once.
+    let tested = format!("test:{source}:{}", js::str_or_empty(settings.get("service")));
+    let last = sample_sent.lock().unwrap_or_else(|e| e.into_inner()).get(&tested).copied().unwrap_or(0);
+    if rl.now() - last < 60_000 {
+        return Ok(coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429, None));
+    }
     let (t, _) = translator(lang);
     let id = settings.get("service").and_then(Value::as_str).unwrap_or("");
     let name = if source == "app" {
@@ -187,6 +199,8 @@ pub(crate) async fn send_test_mail(rl: &Runlight, to: &str, lang: &str) -> R {
         ..Message::default()
     })
     .await?;
+    // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+    sample_sent.lock().unwrap_or_else(|e| e.into_inner()).insert(tested, rl.now());
     Ok(json(&obj! { "ok" => true }, 200, &[]))
 }
 

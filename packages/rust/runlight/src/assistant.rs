@@ -239,6 +239,8 @@ pub type Clock<'a> = &'a (dyn Fn() -> i64 + Send + Sync);
 /// Whether the person has left, as the TypeScript's AbortSignal says.
 pub type Cancelled<'a> = Option<&'a (dyn Fn() -> bool + Send + Sync)>;
 
+/// The most text of earlier turns a question carries, about six thousand tokens.
+const MAX_HISTORY_CHARS: usize = 24_000;
 const MAX_ROUNDS: usize = 8;
 /// However many rounds a question takes, the answer comes within this long or the assistant stops.
 pub const DEADLINE_MS: i64 = 120_000;
@@ -555,6 +557,15 @@ pub async fn chat(
                 last.1.push_str(&content);
             }
             _ => history.push((m.role.clone(), content)),
+        }
+    }
+    // The browser sends the history, so its whole length is held too, the oldest turns dropped first: each
+    // tool round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+    let size = |h: &[(String, String)]| h.iter().map(|(_, c)| js::len16(c)).sum::<usize>();
+    while history.len() > 1 && size(&history) > MAX_HISTORY_CHARS {
+        history.remove(0);
+        while history.len() > 1 && history[0].0 != "user" {
+            history.remove(0);
         }
     }
     let history: Vec<Value> =

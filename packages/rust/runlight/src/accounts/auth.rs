@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use super::crypto::{
     CryptoError, HmacHash, base64url, check_password, hash_password, hex, hmac, random_bytes, same_text, seal_text,
-    sha256, unseal_text,
+    sha256, unseal_text, weaker_than_now,
 };
 use crate::goals::CodedError;
 use crate::js::{self, Value};
@@ -221,15 +221,6 @@ pub struct NewInvite {
     pub code: String,
 }
 
-/// The account a code-step ticket names, and whether a right code may sign in with it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending {
-    /// The account.
-    pub user: User,
-    /// False for a decoy ticket, which no code ever passes.
-    pub real: bool,
-}
-
 // Two-factor: TOTP as authenticator apps expect it (RFC 6238): SHA-1, six digits, 30 seconds.
 const STEP_MS: i64 = 30_000;
 const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -383,7 +374,29 @@ impl Drop for Waiter {
 /// queue's length it refuses at once, with an AccountError coded "busy". The slot goes with the check, so a request
 /// given up on still holds it until its hash is done.
 async fn check_slowly(password: &str, stored: &str) -> R<bool> {
-    let permit = match CHECKS.try_acquire() {
+    let permit = take_slot().await?;
+    let (password, stored) = (password.to_string(), stored.to_string());
+    Ok(slow(move || {
+        let _permit = permit;
+        check_password(&password, &stored)
+    })
+    .await)
+}
+
+/// Makes a hash when one of the few slots is free, as checks do.
+async fn hash_in_slot(password: &str) -> R<String> {
+    let permit = take_slot().await?;
+    let password = password.to_string();
+    Ok(slow(move || {
+        let _permit = permit;
+        hash_password(&password)
+    })
+    .await)
+}
+
+/// One of the slots, waiting for it when few are queued.
+async fn take_slot() -> R<tokio::sync::SemaphorePermit<'static>> {
+    Ok(match CHECKS.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
             if WAITERS.fetch_add(1, Ordering::SeqCst) >= WAITING {
@@ -398,13 +411,7 @@ async fn check_slowly(password: &str, stored: &str) -> R<bool> {
             let _waiter = Waiter;
             CHECKS.acquire().await.expect("the semaphore is never closed")
         }
-    };
-    let (password, stored) = (password.to_string(), stored.to_string());
-    Ok(slow(move || {
-        let _permit = permit;
-        check_password(&password, &stored)
     })
-    .await)
 }
 
 /// The accounts on a store, signed with the install's secret.
@@ -695,19 +702,9 @@ impl Accounts {
         self.ticket("pending", user, now + 5 * 60_000)
     }
 
-    /// A ticket that looks and acts like pending_for's, except that no code ever
-    /// passes with it. A wrong password gets one once an account with
-    /// two-factor has had too many, so the answer never tells a right password.
-    pub fn decoy_for(&self, user: &User, now: i64) -> R<String> {
-        self.ticket("decoy", user, now + 5 * 60_000)
-    }
-
-    /// The account a code-step ticket names, and whether a right code may sign in with it.
-    pub async fn from_pending(&self, value: &str, now: i64) -> R<Option<Pending>> {
-        if let Some(user) = self.ticket_user("pending", value, now).await? {
-            return Ok(Some(Pending { user, real: true }));
-        }
-        Ok(self.ticket_user("decoy", value, now).await?.map(|user| Pending { user, real: false }))
+    /// The account a code-step ticket names.
+    pub async fn from_pending(&self, value: &str, now: i64) -> R<Option<User>> {
+        self.ticket_user("pending", value, now).await
     }
 
     /// A ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it.
@@ -843,6 +840,21 @@ impl Accounts {
             }
             self.store.db().run("UPDATE rl_users SET role = 'owner' WHERE id = ?", params![to]).await?;
             self.store.db().run("UPDATE rl_users SET role = 'admin' WHERE id = ?", params![from]).await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+    /// same id, from its domain, and they must not find their way into it.
+    pub async fn forget_site(&self, site: &str) -> R<()> {
+        self.init().await?;
+        self.turn(|| async {
+            for user in self.list().await?.into_iter().filter(|u| u.site.as_deref() == Some(site)) {
+                self.store.db().run("DELETE FROM rl_users WHERE id = ?", params![&user.id]).await?;
+                self.store.set_setting(&format!("login-link-used:{}", user.id), None).await?;
+            }
+            self.store.db().run("DELETE FROM rl_invites WHERE site = ?", params![site]).await?;
             Ok(())
         })
         .await
@@ -1079,7 +1091,19 @@ impl Accounts {
             check_slowly(password, decoy).await?;
             return Ok(None);
         };
-        Ok(if check_slowly(password, &user.hash).await? { Some(user) } else { None })
+        if !check_slowly(password, &user.hash).await? {
+            return Ok(None);
+        }
+        if !weaker_than_now(&user.hash) {
+            return Ok(Some(user));
+        }
+        // A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+        let hash = hash_in_slot(password).await?;
+        self.store
+            .db()
+            .run("UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", params![&hash, &user.id, &user.hash])
+            .await?;
+        Ok(Some(self.by_id(&user.id).await?.unwrap_or(user)))
     }
 
     /// A cookie value naming the user and when it expires, signed with the

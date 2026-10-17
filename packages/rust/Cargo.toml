@@ -20,3 +20,16 @@ runlight = { path = "runlight", version = "=0.1.7" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# A password hash costs 32 MiB and a good while, and the tests sign in often, so what it is made of is built
+# optimized even for tests.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3

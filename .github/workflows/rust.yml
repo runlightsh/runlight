@@ -69,6 +69,11 @@ jobs:
       # The dashboard and tracker the crate serves are the SDK's, copied; this fails when the copy is stale.
       - run: node --import tsx scripts/rust-assets.mts --check
         working-directory: .
+      # The Intl data email reports format with, made from Node's ICU by a script. It is compared only when this
+      # Node's ICU is the one that wrote it, as python.yml's python-intl check is.
+      - name: The Intl data is current
+        run: node --import tsx scripts/rust-intl.mts --check
+        working-directory: .
       # rustup is on the runner, so no third-party action is needed.
       - name: Install Rust ${{ matrix.rust }}
         run: |

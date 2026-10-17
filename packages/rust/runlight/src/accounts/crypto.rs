@@ -134,10 +134,19 @@ fn same_bytes(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// The cost the standalone server has always hashed passwords with: N 16384, r 8, p 1.
-const SCRYPT_LOG_N: u8 = 14;
-const SCRYPT_R: u32 = 8;
-const SCRYPT_P: u32 = 1;
+/// What an scrypt hash costs: N, r, and p.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScryptCost {
+    n: u64,
+    r: u32,
+    p: u32,
+}
+
+/// What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check, so several sign-ins at once stay
+/// within a small server's memory. Each hash records its own cost, so this can rise again.
+const SCRYPT: ScryptCost = ScryptCost { n: 32768, r: 8, p: 3 };
+/// What a hash written as scrypt$salt$key costs: the setting before hashes recorded theirs.
+const SCRYPT_BEFORE: ScryptCost = ScryptCost { n: 16384, r: 8, p: 1 };
 
 /// As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on.
 pub const PBKDF2_ROUNDS: u32 = 100_000;
@@ -157,9 +166,31 @@ pub fn scrypt_derive(password: &[u8], salt: &[u8], n: u64, r: u32, p: u32, lengt
     Some(out)
 }
 
-fn scrypt_key(password: &str, salt: &[u8], length: usize) -> Vec<u8> {
-    scrypt_derive(password.as_bytes(), salt, 1 << SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, length)
-        .expect("the server's own scrypt cost")
+fn scrypt_key(password: &str, salt: &[u8], length: usize, cost: ScryptCost) -> Vec<u8> {
+    scrypt_derive(password.as_bytes(), salt, cost.n, cost.r, cost.p, length).expect("a bounded scrypt cost")
+}
+
+/// A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key). `None`
+/// for one out of bounds.
+fn scrypt_cost(parts: &[&str]) -> Option<ScryptCost> {
+    if parts.len() == 3 {
+        return Some(SCRYPT_BEFORE);
+    }
+    if parts.len() < 4 {
+        return None;
+    }
+    let [n, r, p] = [parts[1], parts[2], parts[3]].map(crate::js::text_number);
+    let whole = |n: f64, max: f64| crate::js::is_integer(n) && (1.0..=max).contains(&n);
+    // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
+    if !whole(n, f64::from(1u32 << 20))
+        || n < 2.0
+        || !(n as u64).is_power_of_two()
+        || !whole(r, 32.0)
+        || !whole(p, 16.0)
+    {
+        return None;
+    }
+    Some(ScryptCost { n: n as u64, r: r as u32, p: p as u32 })
 }
 
 fn pbkdf2_key(password: &str, salt: &[u8], rounds: u32, length: usize) -> Vec<u8> {
@@ -168,23 +199,34 @@ fn pbkdf2_key(password: &str, salt: &[u8], rounds: u32, length: usize) -> Vec<u8
     out
 }
 
-/// A password hash, in the scrypt form the standalone server has always written: `scrypt$salt$key`.
+/// A password hash: `scrypt$N$r$p$salt$key`, the cost recorded in it.
 /// It takes a while on purpose; call it off the async runtime's threads.
 pub fn hash_password(password: &str) -> String {
     let salt = random_bytes(16);
-    format!("scrypt${}${}", base64url(&salt), base64url(&scrypt_key(password, &salt, 32)))
+    format!(
+        "scrypt${}${}${}${}${}",
+        SCRYPT.n,
+        SCRYPT.r,
+        SCRYPT.p,
+        base64url(&salt),
+        base64url(&scrypt_key(password, &salt, 32, SCRYPT))
+    )
 }
 
-/// Whether a password matches a hash, scrypt or PBKDF2. A stored hash whose salt or key is not base64url
-/// matches nothing, rather than failing the sign-in.
+/// Whether a password matches a hash, scrypt (at its recorded cost, or the old one) or PBKDF2. A stored hash
+/// whose salt or key is not base64url matches nothing, rather than failing the sign-in.
 pub fn check_password(password: &str, stored: &str) -> bool {
     let parts: Vec<&str> = stored.split('$').collect();
-    if parts[0] == "scrypt" && parts.len() == 3 {
-        let (Ok(expected), Ok(salt)) = (from_base64url(parts[2]), from_base64url(parts[1])) else { return false };
+    if parts[0] == "scrypt" && (parts.len() == 3 || parts.len() == 6) {
+        let Some(cost) = scrypt_cost(&parts) else { return false };
+        let (Ok(expected), Ok(salt)) = (from_base64url(parts[parts.len() - 1]), from_base64url(parts[parts.len() - 2]))
+        else {
+            return false;
+        };
         if expected.len() < MIN_KEY_BYTES {
             return false;
         }
-        return same_bytes(&scrypt_key(password, &salt, expected.len()), &expected);
+        return same_bytes(&scrypt_key(password, &salt, expected.len(), cost), &expected);
     }
     if parts[0] == "pbkdf2" && parts.len() == 4 {
         let rounds = crate::js::text_number(parts[1]);
@@ -198,6 +240,20 @@ pub fn check_password(password: &str, stored: &str) -> bool {
         return same_bytes(&pbkdf2_key(password, &salt, rounds as u32, expected.len()), &expected);
     }
     false
+}
+
+/// Whether a stored hash costs less than a new one would here, so the password it matched is hashed again: an
+/// scrypt hash with a lower cost, or a PBKDF2 one.
+pub fn weaker_than_now(stored: &str) -> bool {
+    let parts: Vec<&str> = stored.split('$').collect();
+    if parts[0] == "pbkdf2" {
+        return true;
+    }
+    if parts[0] != "scrypt" {
+        return false;
+    }
+    scrypt_cost(&parts)
+        .is_some_and(|c| c.n * u64::from(c.r) * u64::from(c.p) < SCRYPT.n * u64::from(SCRYPT.r) * u64::from(SCRYPT.p))
 }
 
 fn seal_key(secret: &str) -> Vec<u8> {

@@ -201,6 +201,18 @@ pub fn start_of(date: &str, timezone: &str, hour: i64) -> i64 {
         }
         at += 15 * 60_000;
     }
+    // Where clocks fall back across that hour (midnight in Amman in 2019, three hours at Casey station), it
+    // happens twice; the day begins at the first.
+    if offset(at - 3 * 3_600_000, timezone) == offset(at, timezone) {
+        return at;
+    }
+    for step in 0..12 {
+        let back = 3 * 60 - step * 15;
+        let [ly, lm, ld, lh, _, _] = parts(at - back * 60_000, timezone);
+        if date_utc(ly, lm - 1, ld, lh, 0, 0, 0) == guess {
+            return at - back * 60_000;
+        }
+    }
     at
 }
 

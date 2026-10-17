@@ -260,17 +260,7 @@ pub(crate) fn small_page(lang: &str, body: &str, status: u16, script: &str) -> R
     )
 }
 
-/// The first language a browser asks for that the dashboard speaks, else English.
-pub(crate) fn accepted_language(request: &Request) -> String {
-    let languages = glue::languages();
-    for part in request.headers.get("accept-language").unwrap_or_default().split(',') {
-        let code = js::head16(js::trim(part.split(';').next().unwrap_or("")), 2).to_lowercase();
-        if languages.contains(&code) {
-            return code;
-        }
-    }
-    "en".into()
-}
+pub(crate) use crate::messages::accepted_language;
 
 /// A file to save, never shown in the browser or kept in a shared cache.
 pub(crate) fn download(name: &str, body: Vec<u8>, kind: &str) -> Response {

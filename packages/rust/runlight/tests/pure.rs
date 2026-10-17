@@ -607,3 +607,24 @@ fn csv_and_zip_match_the_sdk() {
         assert_eq!(base64::engine::general_purpose::STANDARD.encode(got), s(case, "base64"));
     }
 }
+
+#[test]
+fn a_day_where_clocks_fall_back_across_midnight_begins_at_the_first_midnight() {
+    // Amman in 2019, Gaza and Hebron in 2020, an hour each, and three hours at Casey station in 2019.
+    for (date, zone) in [
+        ("2019-10-25", "Asia/Amman"),
+        ("2020-10-24", "Asia/Gaza"),
+        ("2020-10-24", "Asia/Hebron"),
+        ("2019-03-17", "Antarctica/Casey"),
+    ] {
+        let start = time::start_of(date, zone, 0);
+        assert_eq!(time::local_date(start, zone), date, "{zone}");
+        assert!(time::local_date(start - 1, zone).as_str() < date, "{zone}: the moment before is the day before");
+    }
+}
+
+#[test]
+fn a_csv_value_with_a_semicolon_or_a_tab_is_quoted_so_no_locale_splits_a_formula_out_of_it() {
+    let row = ["x;=1+1", "a\tb", "=1+1", "plain"].map(String::from);
+    assert_eq!(zip::csv_row(&row), "\"x;=1+1\",\"a\tb\",'=1+1,plain");
+}

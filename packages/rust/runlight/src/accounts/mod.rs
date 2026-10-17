@@ -6,8 +6,8 @@ pub mod pages;
 pub mod web;
 
 pub use auth::{
-    AccountError, Accounts, AuthError, INVITE_MS, Invite, MIN_PASSWORD, NewInvite, Pending, Role, SESSION_COOKIE,
-    SESSION_MS, Throttle, User, base32, otpauth_uri, totp,
+    AccountError, Accounts, AuthError, INVITE_MS, Invite, MIN_PASSWORD, NewInvite, Role, SESSION_COOKIE, SESSION_MS,
+    Throttle, User, base32, otpauth_uri, totp,
 };
-pub use crypto::{check_password, hash_password};
+pub use crypto::{check_password, hash_password, weaker_than_now};
 pub use web::{AccountsWeb, AccountsWebOptions, FirstAccount, Home, accounts_web, setup_code};

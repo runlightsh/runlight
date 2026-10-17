@@ -16,6 +16,11 @@ use crate::{obj, params};
 
 type R<T> = Result<T, DbError>;
 
+/// Text cut to at most `max` characters, as a VARCHAR(max) holds it, never through the middle of one.
+fn clip(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
 /// Lets other work run between the pieces of a long job.
 async fn pause() {
     tokio::task::yield_now().await;
@@ -536,6 +541,19 @@ impl SqlStore {
         );
         let (site, day) = (site.to_string(), day.to_string());
         self.transaction(|store| async move {
+            // MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two
+            // processes building one day could each add its rows. There the day is marked first: the second
+            // waits on that mark until the first commits, then fails, and the day counts as built elsewhere.
+            // Elsewhere the rows' own key refuses a second set.
+            if dialect == Dialect::Mysql {
+                store.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", params![&site, &day]).await?;
+                store
+                    .run(
+                        "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)",
+                        params![&site, &day, start, end],
+                    )
+                    .await?;
+            }
             store.run("DELETE FROM rl_rollups WHERE site = ? AND day = ?", params![&site, &day]).await?;
             // The WITH goes after INSERT INTO, the one place every database takes it.
             store.run(&insert, first).await?;
@@ -543,13 +561,15 @@ impl SqlStore {
             // as the raw report counts them.
             store.run(&pages, concat(vec![params![&site, &day], window.clone(), window.clone()])).await?;
             store.run(&events, concat(vec![params![&site, &day], window])).await?;
-            store.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", params![&site, &day]).await?;
-            store
-                .run(
-                    "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)",
-                    params![&site, &day, start, end],
-                )
-                .await?;
+            if dialect != Dialect::Mysql {
+                store.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", params![&site, &day]).await?;
+                store
+                    .run(
+                        "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)",
+                        params![&site, &day, start, end],
+                    )
+                    .await?;
+            }
             Ok(())
         })
         .await
@@ -896,10 +916,31 @@ impl SqlStore {
         Ok(self.first("SELECT salt FROM rl_salts WHERE day = ?", params![day]).await?.map(|r| r.text("salt")))
     }
 
-    /// Deletes every salt older than `day`, so old hashes can never be recomputed.
-    pub async fn drop_salts_before(&self, day: &str) -> R<()> {
-        self.run("DELETE FROM rl_salts WHERE day < ?", params![day]).await?;
+    /// Deletes every salt but those of these days, so the hashes made with them can never be made again.
+    pub async fn drop_salts_except(&self, days: &[String]) -> R<()> {
+        let marks = days.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        self.run(&format!("DELETE FROM rl_salts WHERE day NOT IN ({marks})"), days.iter().map(Param::from).collect())
+            .await?;
         Ok(())
+    }
+
+    /// Whether a visit to one of these sites that started in a stretch of time was still going at `since`.
+    pub async fn visit_open(&self, sites: &[String], from: i64, to: i64, since: i64) -> R<bool> {
+        // As many sites a statement as keep it under D1's 100.
+        let open = in_pieces(sites, MAX_PARAMS - 3, |piece| async move {
+            let mut p: Vec<Param> = piece.iter().map(Param::from).collect();
+            p.extend(params![from, to, since]);
+            self.all(
+                &format!(
+                    "SELECT 1 AS open FROM rl_sessions WHERE site IN ({}) AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1",
+                    piece.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+                ),
+                p,
+            )
+            .await
+        })
+        .await?;
+        Ok(!open.is_empty())
     }
 
     // Ingest
@@ -925,6 +966,38 @@ impl SqlStore {
         Ok(row.map(|r| (r.text("id"), r.text("visitor"))))
     }
 
+    /// After opening a visit: the visitor's earliest visit still going, which is this one unless another
+    /// process opened one for the same visitor at the same moment. Then both settle on the earliest, and the
+    /// one that is not drops its own, before anything is counted into it.
+    pub async fn settle_open_session(
+        &self,
+        site: &str,
+        visitors: &[String],
+        since: i64,
+        opened: (String, String),
+    ) -> R<(String, String)> {
+        let mut p = params![site];
+        p.extend(visitors.iter().map(Param::from));
+        p.push(Param::Int(since));
+        let row = self
+            .first(
+                &format!(
+                    // One already counting a hit first: the other process went on with it.
+                    "SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN ({}) AND last_at >= ?
+       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1",
+                    visitors.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+                ),
+                p,
+            )
+            .await?;
+        let first = row.map_or_else(|| opened.clone(), |r| (r.text("id"), r.text("visitor")));
+        if first.0 != opened.0 {
+            self.run("DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0", params![&opened.0])
+                .await?;
+        }
+        Ok(first)
+    }
+
     /// Records a new visit.
     pub async fn insert_session(&self, row: &SessionRow) -> R<()> {
         self.run(
@@ -938,26 +1011,28 @@ impl SqlStore {
                 &row.visitor,
                 row.started_at,
                 row.started_at,
-                &row.hostname,
-                &row.referrer_host,
-                &row.referrer_path,
-                &row.source,
-                &row.channel,
-                &row.utm_source,
-                &row.utm_medium,
-                &row.utm_campaign,
-                &row.utm_term,
-                &row.utm_content,
-                &row.country,
-                &row.region,
-                &row.city,
-                &row.browser,
-                &row.browser_version,
-                &row.os,
-                &row.os_version,
-                &row.device,
-                &row.screen,
-                &row.language,
+                // Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps
+                // the same, and no header, however long, can make a row Postgres's indexes refuse.
+                clip(&row.hostname, 255),
+                clip(&row.referrer_host, 255),
+                clip(&row.referrer_path, 500),
+                clip(&row.source, 200),
+                clip(&row.channel, 100),
+                clip(&row.utm_source, 200),
+                clip(&row.utm_medium, 200),
+                clip(&row.utm_campaign, 200),
+                clip(&row.utm_term, 200),
+                clip(&row.utm_content, 200),
+                clip(&row.country, 16),
+                clip(&row.region, 100),
+                clip(&row.city, 100),
+                clip(&row.browser, 100),
+                clip(&row.browser_version, 100),
+                clip(&row.os, 100),
+                clip(&row.os_version, 100),
+                clip(&row.device, 50),
+                clip(&row.screen, 50),
+                clip(&row.language, 50),
             ],
         )
         .await?;
@@ -973,7 +1048,7 @@ impl SqlStore {
             self.run(
                 "UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,
            entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?",
-                params![ts, path, path, id],
+                params![ts, clip(path, 1000), clip(path, 1000), id],
             )
             .await?;
         } else if reopen {
@@ -1032,10 +1107,10 @@ impl SqlStore {
                 &row.visitor,
                 &row.session,
                 &row.pageview,
-                &row.path,
-                &row.hostname,
-                &row.title,
-                &row.name,
+                clip(&row.path, 1000),
+                clip(&row.hostname, 255),
+                clip(&row.title, 500),
+                clip(&row.name, 255),
                 row.props.as_ref().map(Object::to_json),
                 row.engaged_ms,
                 row.scroll,
@@ -1468,17 +1543,43 @@ impl SqlStore {
     pub async fn save_goal(&self, g: &GoalRow, before: Option<&GoalRow>) -> R<()> {
         // A click goal is counted by its name, which the tracker sends as the event
         // name. Renaming one renames its past clicks too, so its history stays.
-        if let Some(b) = before
-            && b.kind == "click"
-            && g.kind == "click"
-            && b.name != g.name
-        {
-            self.run(
-                "UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?",
-                params![&g.name, &g.site, &b.name],
-            )
-            .await?;
-        }
+        let renamed = before.filter(|b| b.kind == "click" && g.kind == "click" && b.name != g.name);
+        let Some(b) = renamed else {
+            return self.write_goal(g).await;
+        };
+        let (g, before_name) = (g.clone(), b.name.clone());
+        self.transaction(|store| async move {
+            store
+                .run(
+                    "UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?",
+                    params![&g.name, &g.site, &before_name],
+                )
+                .await?;
+            // The daily rollups count events by name too, and goals read them, so they take the new name as well.
+            // A day that already has events under the new name counts both together now, so it is built again.
+            let both = store
+                .all(
+                    "SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?
+         AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)",
+                    params![&g.site, &before_name, &g.site, &g.name],
+                )
+                .await?;
+            for day in both.iter().map(|r| r.text("day")) {
+                store.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", params![&g.site, &day]).await?;
+                store.run("DELETE FROM rl_rollups WHERE site = ? AND day = ?", params![&g.site, &day]).await?;
+            }
+            store
+                .run(
+                    "UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?",
+                    params![&g.name, &g.site, &before_name],
+                )
+                .await?;
+            store.write_goal(&g).await
+        })
+        .await
+    }
+
+    async fn write_goal(&self, g: &GoalRow) -> R<()> {
         self.run(
             &upsert(
                 self.dialect(),
@@ -2247,6 +2348,45 @@ impl SqlStore {
     }
 
     /// A breakdown of a range by a dimension, a page of rows at a time.
+    /// Seek one matching event per hostname, skipping its remaining events before the next seek.
+    pub async fn hostname_suggestions(&self, query: &Query, limit: i64) -> R<Vec<Value>> {
+        let dialect = self.dialect();
+        let v = visit_rows(&query.filters, &query.site, query.from, query.to, dialect);
+        let within = row_scope(&query.filters, &["page", "hostname"], dialect);
+        let table = if dialect == Dialect::Sqlite {
+            "rl_events e INDEXED BY rl_events_hostname_suggest CROSS JOIN rl_sessions s"
+        } else {
+            v.from
+        };
+        let order = self.text_order();
+        let mut rows = Vec::new();
+        let mut after: Option<String> = None;
+        while (rows.len() as i64) < limit {
+            let seek = if after.is_some() { format!(" AND e.hostname{order} > ?") } else { String::new() };
+            let mut p = v.params.clone();
+            p.extend(within.params.clone());
+            if let Some(a) = &after {
+                p.push(Param::from(a));
+            }
+            let row = self
+                .first(
+                    &format!(
+                        "SELECT e.hostname AS value FROM {table}
+         WHERE {} AND e.kind = 'pageview'{}{seek}
+         ORDER BY e.hostname{order} LIMIT 1",
+                        v.sql, within.sql
+                    ),
+                    p,
+                )
+                .await?;
+            let Some(row) = row else { break };
+            let value = row.text("value");
+            rows.push(obj! { "value" => value.clone() });
+            after = Some(value);
+        }
+        Ok(rows)
+    }
+
     pub async fn breakdown(&self, query: &Query, dimension: &str, limit: i64, offset: i64) -> R<Vec<Value>> {
         let dialect = self.dialect();
         if dimension == "ai_agent" || dimension == "ai_page" {

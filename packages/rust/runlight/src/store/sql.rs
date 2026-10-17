@@ -69,7 +69,7 @@ pub(crate) fn schema(dialect: Dialect) -> Vec<String> {
     let key = str_(100);
     let path = 1000;
     let medium = if my { "MEDIUMTEXT" } else { "TEXT" };
-    vec![
+    let mut statements = vec![
         format!("CREATE TABLE IF NOT EXISTS rl_meta (\"key\" {} PRIMARY KEY, value {medium} NOT NULL){table}", str_(100)),
         format!(
             "CREATE TABLE IF NOT EXISTS rl_sites (
@@ -253,7 +253,12 @@ pub(crate) fn schema(dialect: Dialect) -> Vec<String> {
             text(path),
             if my { "KEY rl_rollups_day (site, dim, day)" } else { "PRIMARY KEY (site, dim, day, value)" }
         ),
-    ]
+    ];
+    if dialect == Dialect::Sqlite {
+        // Hostname suggestions seek one hostname at a time through this.
+        statements.push("CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'".to_string());
+    }
+    statements
 }
 
 /// Orders text by code point, as SQLite and Postgres's "C" collation do (JavaScript's `<` compares
