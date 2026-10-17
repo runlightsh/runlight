@@ -4,7 +4,7 @@
 //
 // The file is what the standalone server keeps in DATA_DIR, so it opens with the server as it is, or with
 // CLICKHOUSE_URL set to move the visits into ClickHouse. The visits end now, so the last two days are
-// copied first, as they are on a real install. About 1.4 GB and 40 seconds a million visits.
+// copied first, as they are on a real install. About 1.8 GB and a minute a million visits.
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { sqlite } from "../packages/sdk/src/stores/sqlite.ts";
@@ -60,15 +60,18 @@ const event = db.prepare(`INSERT INTO rl_events (site, ts, kind, visitor, sessio
 
 const end = Date.now() - 60_000;
 const start = end - 365 * DAY;
-const perDay = VISITS / 365;
+// A year of growth, quieter weekends, and a busier day now and then, scaled so the days add up to VISITS.
+const weights = Array.from({ length: 365 }, (_, day) => {
+  const weekday = new Date(start + day * DAY).getUTCDay();
+  return (0.7 + (0.6 * day) / 365) * (weekday === 0 || weekday === 6 ? 0.75 : 1.08) * (day % 47 === 0 ? 1.8 : 1);
+});
+const perWeight = VISITS / weights.reduce((sum, w) => sum + w, 0);
 let written = 0;
 let events = 0;
 const began = Date.now();
 for (let day = 0; day < 365; day++) {
-  // A year of growth, quieter weekends, and a busier day now and then.
   const dayStart = start + day * DAY;
-  const weekday = new Date(dayStart).getUTCDay();
-  const count = day === 364 ? VISITS - written : Math.round(perDay * (0.7 + (0.6 * day) / 365) * (weekday === 0 || weekday === 6 ? 0.75 : 1.08) * (day % 47 === 0 ? 1.8 : 1) * 0.93);
+  const count = day === 364 ? VISITS - written : Math.round(perWeight * weights[day]!);
   // A visitor id lasts a day, so each day has its own.
   const visitors = Array.from({ length: Math.max(1, Math.round(count * 0.85)) }, () => hex(16));
   db.transaction(() => {
