@@ -4,7 +4,8 @@ import { chat } from "../src/assistant.js";
 import { PrivateAddressError, publicAddress, publicFetch, publicFetchThroughGlobal } from "../src/safefetch.js";
 import { oneConnection } from "../src/store.js";
 import { postgres } from "../src/stores/postgres.js";
-import { STORES, cleanup, setup } from "./helpers.js";
+import { ClickHouseStore } from "../src/stores/clickhouse.js";
+import { STORES, cleanup, setup, visitsDb } from "./helpers.js";
 
 after(cleanup);
 
@@ -123,14 +124,18 @@ for (const kind of STORES) {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     await t.rl.init();
     const old = t.now - 400 * DAY;
-    await t.rl.store.db.run(`INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, pageviews) VALUES ('s1', 'default', 'v1', ?, ?, 1)`, [old, old]);
-    await t.rl.store.db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', 'v1', 's1', 'p1', '/', 'example.com')`, [old]);
+    // ClickHouse keeps a visit as rows of what changed, and each event with its visit's start.
+    const clickhouse = t.rl.store instanceof ClickHouseStore;
+    const db = visitsDb(t.rl.store);
+    await db.run(`INSERT INTO ${clickhouse ? "rl_visits" : "rl_sessions"} (id, site, visitor, started_at, last_at, pageviews) VALUES ('s1', 'default', 'v1', ?, ?, 1)`, [old, old]);
+    const start = clickhouse ? [", started_at", ", ?", [old]] as const : ["", "", []] as const;
+    await db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname${start[0]}) VALUES ('default', ?, 'pageview', 'v1', 's1', 'p1', '/', 'example.com'${start[1]})`, [old, ...start[2]]);
     // An event that joined the visit long after it started, as older versions allowed.
-    await t.rl.store.db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, name, path, hostname) VALUES ('default', ?, 'event', 'v1', 's1', 'Late', '/', 'example.com')`, [t.now - 30 * DAY]);
+    await db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, name, path, hostname${start[0]}) VALUES ('default', ?, 'event', 'v1', 's1', 'Late', '/', 'example.com'${start[1]})`, [t.now - 30 * DAY, ...start[2]]);
     await t.rl.setRetention("default", 6);
     await t.rl.idle();
     await t.rl.check();
-    assert.deepEqual(await t.rl.store.db.all(`SELECT name FROM rl_events WHERE site = 'default'`), []);
+    assert.deepEqual(await db.all(`SELECT name FROM rl_events WHERE site = 'default'`), []);
     assert.equal(await t.rl.store.setting("orphans-swept:default"), "1");
   });
 }

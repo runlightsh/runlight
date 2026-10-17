@@ -72,9 +72,20 @@ jobs:
         ports: ["3306:3306"]
         options: >-
           --health-cmd "${{ matrix.mysql-health }}" --health-interval 5s --health-timeout 5s --health-retries 20
+      # The oldest line the ClickHouse store supports.
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.3
+        env:
+          CLICKHOUSE_PASSWORD: pw
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports: ["8123:8123"]
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --password pw -q 'SELECT 1'" --health-interval 5s --health-timeout 5s --health-retries 20
     env:
       RUNLIGHT_TEST_PG: postgres://postgres:pw@127.0.0.1:5432/runlight
       RUNLIGHT_TEST_MYSQL: mysql://root:pw@127.0.0.1:3306/runlight
+      RUNLIGHT_TEST_CLICKHOUSE: http://default:pw@127.0.0.1:8123
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

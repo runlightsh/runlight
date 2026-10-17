@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { SAFARI_IPHONE, STORES, cleanup, setup } from "./helpers.js";
+import { ROLLUP_STORES, SAFARI_IPHONE, cleanup, setup } from "./helpers.js";
 
 const DAY = 86_400_000;
 
@@ -29,7 +29,7 @@ async function everything(get: (path: string) => Promise<any>) {
   return out;
 }
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: reports read from daily rollups match reports read from every visit`, async () => {
     // Toronto, so local days and UTC days differ, starting ten days back.
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "America/Toronto" } });
@@ -91,7 +91,7 @@ for (const kind of STORES) {
   });
 }
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: a late event and engagement on an old pageview are counted once the day is built again`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     // Evening of October 5th, then rollups built the next morning.
@@ -118,7 +118,7 @@ for (const kind of STORES) {
   });
 }
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: ties come in code point order, the same before and after the days are built`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     const values = ["alpha", "Zeta", "beta", "Gamma", "émile", "Émile", "_x", "a-b", "ab"];
@@ -138,7 +138,7 @@ for (const kind of STORES) {
   });
 }
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: after a timezone change, only days after it are built, so nothing counts twice`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     await t.rl.init();
@@ -221,7 +221,7 @@ test("a timezone changed in the dashboard reaches another process at its next ch
   assert.deepEqual([...(await b.store.rollupDays("default"))].sort(), ["2026-10-07", "2026-10-08"], "then it builds the days after the change");
 });
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: clearing days that stops part way leaves none marked built without its numbers`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     t.advance(-10 * DAY);
@@ -248,7 +248,7 @@ for (const kind of STORES) {
   });
 }
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: renaming a click goal keeps its conversions on built days, even onto a name with events of its own`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     t.advance(-3 * 24 * HOUR);
@@ -283,7 +283,7 @@ for (const kind of STORES) {
   });
 }
 
-for (const kind of STORES) {
+for (const kind of ROLLUP_STORES) {
   test(`${kind}: a header longer than its column is cut to fit, so the day's rollup still builds`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     t.advance(-2 * 24 * HOUR);

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { JOURNEY_VISITS } from "../src/store.js";
-import { STORES, cleanup, setup } from "./helpers.js";
+import { ClickHouseStore } from "../src/stores/clickhouse.js";
+import { BLANK_VISIT, STORES, cleanup, setup, visitsDb } from "./helpers.js";
 
 after(cleanup);
 
@@ -178,6 +179,15 @@ for (const kind of STORES) {
     // Nine pageviews written as the Umami import writes them: no pageview id, never any engaged time.
     const day = Date.UTC(2026, 9, 5, 10);
     for (let i = 0; i < 9; i++) {
+      if (t.rl.store instanceof ClickHouseStore) {
+        // ClickHouse's visits are rows of what changed, which the store's own methods write.
+        const store = t.rl.store;
+        await store.insertSession({ ...BLANK_VISIT, id: `i${i}`, site: "default", visitor: `v${i}`, startedAt: day + i });
+        await store.markImported(`i${i}`, false);
+        await store.touchSession(`i${i}`, day + i, "pageview", "/pricing");
+        await store.insertEvent({ site: "default", ts: day + i, kind: "pageview", visitor: `v${i}`, session: `i${i}`, pageview: "", path: "/pricing", hostname: "example.com", title: "", name: "", props: null, engagedMs: 0, scroll: null, link: "" });
+        continue;
+      }
       await t.rl.store.db.run(`INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, pageviews, entry_path, exit_path, imported) VALUES (?, 'default', ?, ?, ?, 1, '/pricing', '/pricing', 1)`, [`i${i}`, `v${i}`, day + i, day + i]);
       await t.rl.store.db.run(`INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname) VALUES ('default', ?, 'pageview', ?, ?, '', '/pricing', 'example.com')`, [day + i, `v${i}`, `i${i}`]);
     }
@@ -233,6 +243,6 @@ for (const kind of STORES) {
     const one = await t.rl.store.settleOpenSession("default", ["v1"], t.now - 60_000, { id: "bbbb", visitor: "v1" });
     const other = await t.rl.store.settleOpenSession("default", ["v1"], t.now - 60_000, { id: "aaaa", visitor: "v1" });
     assert.deepEqual([one.id, other.id], ["aaaa", "aaaa"]);
-    assert.deepEqual((await t.rl.store.db.all<{ id: string }>(`SELECT id FROM rl_sessions`)).map((r) => r.id), ["aaaa"]);
+    assert.deepEqual((await visitsDb(t.rl.store).all<{ id: string }>(`SELECT id FROM rl_sessions`)).map((r) => r.id), ["aaaa"]);
   });
 }

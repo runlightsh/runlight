@@ -6,6 +6,7 @@
  *   HOST              which address to listen on (0.0.0.0)
  *   DATA_DIR          where the SQLite file and the secret live (./runlight-data)
  *   DATABASE_URL      a postgres://, mysql://, or mariadb:// URL, to use that database instead of SQLite
+ *   CLICKHOUSE_URL    an http:// or https:// URL, to keep the visits and events in ClickHouse
  *   RUNLIGHT_SECRET   signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
  *   RUNLIGHT_TOKEN    also accepted as a bearer token on the API
  *   RUNLIGHT_URL      the dashboard's public address, which can never become a link domain
@@ -36,7 +37,8 @@ Usage:
 
 Settings are environment variables. PORT (3000) and HOST (0.0.0.0) set where it
 listens. DATA_DIR (./runlight-data) holds the SQLite file and the secret, and
-DATABASE_URL switches to Postgres, MySQL, or MariaDB. RUNLIGHT_SECRET signs
+DATABASE_URL switches to Postgres, MySQL, or MariaDB, and CLICKHOUSE_URL keeps
+the visits and events in ClickHouse, with the rest where it was. RUNLIGHT_SECRET signs
 sessions and encrypts saved keys, RUNLIGHT_TOKEN also works as a bearer token
 on the API, and TRUST_PROXY=false ignores forwarded addresses when nothing sits
 in front.
@@ -51,6 +53,15 @@ Docs: https://runlight.sh/docs/server/
 `;
 
 async function openStore(dataDir: string): Promise<SqlStore> {
+  const rows = await openRowStore(dataDir);
+  const url = env("CLICKHOUSE_URL");
+  if (!url) return rows;
+  const { clickhouse } = await import("@runlight/sdk/clickhouse");
+  return clickhouse({ url, store: rows });
+}
+
+/** Where everything but the visits lives, and the visits too without ClickHouse. */
+async function openRowStore(dataDir: string): Promise<SqlStore> {
   const url = env("DATABASE_URL");
   if (url && /^postgres(ql)?:\/\//.test(url)) {
     const { postgres } = await import("@runlight/sdk/postgres");
@@ -177,6 +188,7 @@ async function main(): Promise<void> {
     const database = env("DATABASE_URL") ?? "";
     const where = /^postgres(ql)?:\/\//.test(database) ? "Postgres" : /^mysql:\/\//.test(database) ? "MySQL" : /^mariadb:\/\//.test(database) ? "MariaDB" : path.join(dataDir, "runlight.db");
     console.log(`Data: ${where}`);
+    if (env("CLICKHOUSE_URL")) console.log(`Visits: ClickHouse, ${new URL(env("CLICKHOUSE_URL")!).host}`);
     if ((await server.accounts.count()) === 0) {
       console.log(`\nNo account yet. Open this link to create the first one:\n  http://${shown}:${port}/setup?code=${server.setupCode}\n`);
     }
