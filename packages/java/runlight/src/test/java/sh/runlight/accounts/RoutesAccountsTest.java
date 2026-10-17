@@ -228,6 +228,89 @@ class RoutesAccountsTest {
     assertEquals("/runlight/", elsewhere.headers().get("location"), "never sent off the app");
   }
 
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void anAccountKeptToOneSiteSeesNoMailFieldsCannotMoveItAndGoesWhenTheSiteIsDeleted(String kind) {
+    Runlight rl =
+        new Runlight(
+            new Runlight.Options()
+                .store(Databases.fresh(kind))
+                .secret("k".repeat(64))
+                .managedSites(true));
+    rl.init();
+    String alpha = (String) rl.addSite(Json.object("hostnames", "alpha.example.com")).get("id");
+    Routes routes = rl.routes(new Routes.Options().token("app-token").accounts(true));
+    Accounts accounts = new Accounts(rl.store, "k".repeat(64));
+    long now = rl.now();
+    accounts.setPassword("owner@example.com", "a long password", now);
+    accounts.setPassword("mo@example.com", "another long one", now, "member", alpha);
+    accounts.invite("later@example.com", "viewer", "owner@example.com", now, alpha);
+    String member =
+        cookieOf(
+            routes.handle(
+                form(
+                    "/runlight/login",
+                    "",
+                    "email",
+                    "mo@example.com",
+                    "password",
+                    "another long one",
+                    "next",
+                    "/runlight/")));
+    JsonCall call =
+        (cookie, method, path, body) ->
+            routes.handle(
+                req(
+                    "/runlight" + path,
+                    method,
+                    cookie.isEmpty()
+                        ? Headers.of(
+                            "authorization", "Bearer app-token", "content-type", "application/json")
+                        : Headers.of("cookie", cookie, "content-type", "application/json"),
+                    body == null ? "" : Json.stringify(body)));
+    assertEquals(
+        200,
+        call.call(
+                "",
+                "PUT",
+                "/api/mail",
+                Json.object(
+                    "service", "resend", "apiKey", "re_live_key", "from", "reports@example.com"))
+            .status());
+    Map<String, Object> owners = body(call.call("", "GET", "/api/mail", null));
+    assertEquals(List.of("apiKey"), owners.get("saved"), "the owner sees which keys are saved");
+    // An account kept to one site learns which service sends the reports, and nothing besides.
+    Response mail = call.call(member, "GET", "/api/mail", null);
+    assertEquals(200, mail.status());
+    assertEquals(Map.of(), body(mail).get("fields"));
+    assertEquals(List.of(), body(mail).get("saved"));
+    assertEquals("resend", body(mail).get("service"));
+
+    // It may rename the site, as a hub may, never move it.
+    Response moved =
+        call.call(
+            member, "PATCH", "/api/sites/" + alpha, Json.object("hostnames", List.of("x.example")));
+    assertEquals(403, moved.status());
+    assertEquals("site_domains", body(moved).get("code"));
+    assertEquals(
+        List.of("alpha.example.com"),
+        Js.list(rl.site(alpha).get("hostnames")),
+        "and the site stays where it was");
+
+    // Deleting the site takes its accounts and invitations with it, and no one else's.
+    assertEquals(200, call.call("", "DELETE", "/api/sites/" + alpha, null).status());
+    assertEquals(List.of("owner@example.com"), emails(accounts));
+    assertEquals(List.of(), accounts.invites(now));
+  }
+
+  private static List<Object> emails(Accounts accounts) {
+    List<Object> out = new java.util.ArrayList<>();
+    for (Map<String, Object> user : accounts.list()) {
+      out.add(user.get("email"));
+    }
+    return out;
+  }
+
   @Test
   void invitesGoWithWhoeverSentThem() {
     Runlight rl =

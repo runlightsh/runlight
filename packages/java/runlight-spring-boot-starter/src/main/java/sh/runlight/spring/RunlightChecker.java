@@ -80,7 +80,8 @@ public final class RunlightChecker implements SmartLifecycle {
   void check() {
     try {
       runlight.check();
-    } catch (RuntimeException e) {
+    } catch (Throwable e) {
+      // Anything at all, since an error that escapes ends the interval for good.
       LOGGER.log(System.Logger.Level.ERROR, "Runlight: the scheduled check failed", e);
     }
   }

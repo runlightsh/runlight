@@ -355,7 +355,9 @@ class ReportMailTest {
             .matches("^<https://example\\.com/runlight/unsubscribe/[a-f0-9]{32}>\\z"));
     assertEquals("List-Unsubscribe=One-Click", headers.get("List-Unsubscribe-Post"));
 
-    // A failure comes back as a mail error naming the mailer.
+    // A failure comes back as a mail error naming the mailer. (A test through one mailer goes at
+    // most once a minute.)
+    now.addAndGet(60_000);
     fail.set("SMTP connect() failed");
     Response failed = call.call("POST", "/api/mail/test", test);
     assertEquals(400, failed.status());
@@ -407,6 +409,11 @@ class ReportMailTest {
     assertEquals(200, call.call("DELETE", "/api/mail", null).status());
     assertEquals("app", Make.body(call.call("GET", "/api/mail", null)).get("source"));
     assertEquals(200, call.call("POST", "/api/mail/test", test).status());
+    assertEquals(3, sent.size());
+    // Another test through it straight away waits a minute, so the button cannot flood an inbox.
+    Response again = call.call("POST", "/api/mail/test", test);
+    assertEquals(429, again.status());
+    assertEquals("test_soon", Make.body(again).get("code"));
     assertEquals(3, sent.size());
   }
 

@@ -131,9 +131,10 @@ public final class Connect {
 
   /**
    * MySQL 8.0.20 or MariaDB 11.4 and later from a URL like mysql://user:pass@host:3306/db (or
-   * mariadb://). The session is utf8mb4 with the server's own SQL mode and IGNORE_SPACE added, as
-   * mysql2 asks for it. Runlight's tables carry their own binary collation, so text compares and
-   * sorts by code point. {@code statementTimeout} is set per connection; 0 turns it off.
+   * mariadb://). The session is utf8mb4 with the server's own SQL mode less NO_BACKSLASH_ESCAPES
+   * and with IGNORE_SPACE added, as mysql2 asks for it. Runlight's tables carry their own binary
+   * collation, so text compares and sorts by code point. {@code statementTimeout} is set per
+   * connection; 0 turns it off.
    */
   public static JdbcDb mysql(String url, long statementTimeout) {
     return mysql(url, statementTimeout, JdbcDb.Pool.MAX);
@@ -165,6 +166,11 @@ public final class Connect {
               Connection connection = open(jdbc, props);
               try (Statement statement = connection.createStatement()) {
                 statement.execute("SET NAMES utf8mb4");
+                // NO_BACKSLASH_ESCAPES reads a backslash as text, so a quote in a value could end
+                // it
+                // early. Dropped wherever it sits in the server's own list.
+                statement.execute(
+                    "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))");
                 statement.execute(
                     "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',IGNORE_SPACE')");
               }

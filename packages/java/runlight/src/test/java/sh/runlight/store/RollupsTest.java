@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import sh.runlight.Js;
@@ -509,5 +510,77 @@ class RollupsTest extends StoreTestCase {
         1,
         count(store, "SELECT COUNT(*) AS n FROM rl_events WHERE kind = 'fetch'"),
         "rows of no visit stay");
+  }
+
+  @Test
+  void onMysqlTwoProcessesBuildingOneDayAtOnceAddItsRowsOnce() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        Databases.mysqlUrls().containsKey("mysql"), "RUNLIGHT_TEST_MYSQL is not set");
+    String url = Databases.mysqlDatabase(Databases.mysqlUrls().get("mysql"));
+    SqlStore one = Stores.mysql(url, 120_000, 3);
+    SqlStore other = Stores.mysql(url, 120_000, 3);
+    try {
+      one.migrate();
+      other.migrate();
+      one.upsertSite(
+          Json.object(
+              "id",
+              "default",
+              "name",
+              "Example",
+              "hostnames",
+              List.of("example.com"),
+              "timezone",
+              "UTC"),
+          NOW);
+      long start = NOW - 3 * DAY - 12 * HOUR;
+      for (int i = 0; i < 5; i++) {
+        Seed.visit(
+            one,
+            "s" + i,
+            "v" + i,
+            start + i * MIN,
+            Map.of(),
+            rows(row("pageview", "/p" + i, start + i * MIN, "p" + i)));
+      }
+      String day = Seed.ymd(start);
+      for (int round = 0; round < 5; round++) {
+        List<Throwable> failed = new ArrayList<>();
+        Thread[] threads = new Thread[2];
+        SqlStore[] stores = {one, other};
+        for (int i = 0; i < 2; i++) {
+          SqlStore store = stores[i];
+          threads[i] =
+              Thread.ofVirtual()
+                  .start(
+                      () -> {
+                        try {
+                          store.buildRollupDay("default", day, start, start + DAY);
+                        } catch (RuntimeException error) {
+                          synchronized (failed) {
+                            failed.add(error);
+                          }
+                        }
+                      });
+        }
+        for (Thread thread : threads) {
+          thread.join();
+        }
+        assertTrue(failed.size() < 2, "one of them builds it");
+        Map<String, Object> totals =
+            one.db()
+                .all(
+                    "SELECT COUNT(*) AS n, SUM(visits) AS visits FROM rl_rollups WHERE site = 'default' AND day = ? AND dim = ''",
+                    List.of(day))
+                .get(0);
+        assertEquals(
+            List.of(1L, 5L),
+            List.of(Js.asLong(totals.get("n")), Js.asLong(totals.get("visits"))),
+            "round " + round);
+      }
+    } finally {
+      one.close();
+      other.close();
+    }
   }
 }

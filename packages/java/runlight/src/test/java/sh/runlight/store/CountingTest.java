@@ -990,4 +990,58 @@ class CountingTest extends StoreTestCase {
     Seed.buildDays(store, "default", n(query.get("from")), n(query.get("to")));
     assertEquals(1, sum(store.hourly(query), "visits"), "rolled up");
   }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void twoVisitsOpenedForOneVisitorAtOnceByTwoProcessesSettleOnOne(String kind) {
+    SqlStore store = store(kind);
+    java.util.function.Function<String, Map<String, Object>> row =
+        id -> {
+          Map<String, Object> r = new java.util.LinkedHashMap<>();
+          r.put("id", id);
+          r.put("site", "default");
+          r.put("visitor", "v1");
+          r.put("startedAt", NOW);
+          r.put("hostname", "example.com");
+          r.put("channel", "Direct");
+          for (String key :
+              List.of(
+                  "referrerHost",
+                  "referrerPath",
+                  "source",
+                  "utmSource",
+                  "utmMedium",
+                  "utmCampaign",
+                  "utmTerm",
+                  "utmContent",
+                  "country",
+                  "region",
+                  "city",
+                  "browser",
+                  "browserVersion",
+                  "os",
+                  "osVersion",
+                  "device",
+                  "screen",
+                  "language")) {
+            r.put(key, "");
+          }
+          return r;
+        };
+    store.insertSession(row.apply("bbbb"));
+    store.insertSession(row.apply("aaaa"));
+    // Each process asks after opening its own; both settle on the same one, and the other is gone.
+    Map<String, Object> one =
+        store.settleOpenSession(
+            "default", List.of("v1"), NOW - 60_000, Json.object("id", "bbbb", "visitor", "v1"));
+    Map<String, Object> other =
+        store.settleOpenSession(
+            "default", List.of("v1"), NOW - 60_000, Json.object("id", "aaaa", "visitor", "v1"));
+    assertEquals(List.of("aaaa", "aaaa"), List.of(one.get("id"), other.get("id")));
+    List<Object> ids = new ArrayList<>();
+    for (Map<String, Object> r : store.db().all("SELECT id FROM rl_sessions")) {
+      ids.add(r.get("id"));
+    }
+    assertEquals(List.of("aaaa"), ids);
+  }
 }

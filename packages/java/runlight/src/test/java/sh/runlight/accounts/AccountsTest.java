@@ -219,10 +219,7 @@ class AccountsTest {
     assertNull(accounts.fromSession(id + ".later." + signature, NOW));
 
     String pending = accounts.pendingFor(user, NOW);
-    assertEquals(Json.object("user", user, "real", true), accounts.fromPending(pending, NOW));
-    assertEquals(
-        Json.object("user", user, "real", false),
-        accounts.fromPending(accounts.decoyFor(user, NOW), NOW));
+    assertEquals(user, accounts.fromPending(pending, NOW));
     assertNull(accounts.fromPending(session, NOW), "a session is not a code-step ticket");
     assertNull(accounts.fromPending(pending, NOW + 5 * 60_000));
 
@@ -385,6 +382,83 @@ class AccountsTest {
       roles.add(List.of(u.get("id"), u.get("role")));
     }
     assertEquals(List.of(List.of("a", "owner"), List.of("b", "admin")), roles);
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void signingInHashesAPasswordMadeAtTheOldCostAgainAndAWrongPasswordChangesNothing(String kind) {
+    SqlStore store = store(kind);
+    Accounts accounts = new Accounts(store, SECRET);
+    Map<String, Object> user = accounts.setPassword("owner@example.com", "a long password", NOW);
+    String id = (String) user.get("id");
+    // Node's scrypt("a long password", "0123456789abcdef", 32) at N=16384, r=8, p=1.
+    String old = "scrypt$MDEyMzQ1Njc4OWFiY2RlZg$4e4Ay7yg4Ogm37fyCe7QqI544HrAnZQaPJJBcP8RNmQ";
+    store.db().run("UPDATE rl_users SET hash = ? WHERE id = ?", List.of(old, id));
+    assertNull(accounts.signIn("owner@example.com", "a wrong password"));
+    assertEquals(old, accounts.byId(id).get("hash"));
+    Map<String, Object> signedIn = accounts.signIn("owner@example.com", "a long password");
+    assertNotNull(signedIn);
+    assertTrue(
+        ((String) signedIn.get("hash")).startsWith("scrypt$32768$8$3$"),
+        "made again at the new cost");
+    assertEquals(signedIn.get("hash"), accounts.byId(id).get("hash"));
+    assertNotNull(accounts.signIn("owner@example.com", "a long password"), "and it still signs in");
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void deletingASiteRemovesTheAccountsAndInvitationsKeptToItAndNoOneElse(String kind) {
+    Accounts accounts = new Accounts(store(kind), SECRET);
+    accounts.setPassword("owner@example.com", "a long password", NOW);
+    accounts.setPassword("alpha@example.com", "a long password", NOW, "viewer", "alpha");
+    accounts.setPassword("beta@example.com", "a long password", NOW, "member", "beta");
+    accounts.invite("invited@example.com", "member", "owner@example.com", NOW, "alpha");
+    accounts.invite("other@example.com", "member", "owner@example.com", NOW, "beta");
+    accounts.forgetSite("alpha");
+    List<Object> emails = column(accounts.list(), "email");
+    Collections.sort(emails, (a, b) -> ((String) a).compareTo((String) b));
+    assertEquals(List.of("beta@example.com", "owner@example.com"), emails);
+    assertEquals(List.of("other@example.com"), column(accounts.invites(NOW), "email"));
+  }
+
+  @Test
+  void aCountMadeBeforeMidnightUtcCarriesOnUntilItsWindowEnds() {
+    SqlStore store = store("sqlite");
+    long day = 86_400_000L;
+    // Ten minutes before the next UTC day, in a window of fifteen.
+    long late = NOW + day / 2 - 10 * 60_000L;
+    Throttle throttle = new Throttle(store, "test", 3, 15 * 60_000L);
+    throttle.fail("jon@example.com", late);
+    throttle.fail("jon@example.com", late);
+    throttle.fail("jon@example.com", late);
+    long after = late + 12 * 60_000L;
+    assertTrue(throttle.blocked("jon@example.com", after), "midnight does not lift a block");
+    assertFalse(throttle.take("jon@example.com", after));
+    throttle.forgive("jon@example.com", after);
+    assertFalse(throttle.blocked("jon@example.com", after));
+    assertTrue(throttle.take("jon@example.com", after), "and carries on counting under its own id");
+    assertTrue(throttle.blocked("jon@example.com", after));
+    throttle.clear("jon@example.com", after);
+    assertFalse(throttle.blocked("jon@example.com", after));
+    assertEquals(List.of(), keys(store, "throttle:test:"));
+    assertFalse(throttle.blocked("jon@example.com", late + 20 * 60_000L));
+  }
+
+  @Test
+  void aThrottleLooksOverItsEntriesOnlyWhenTheCeilingMayHaveBeenPassed() {
+    SqlStore store = store("sqlite");
+    Throttle throttle = new Throttle(store, "flood", 3, 60_000L);
+    // Entries made by something else, expired, which a pruning pass would clear.
+    store.migrate();
+    store.setSetting("throttle:flood:stale", Json.stringify(Json.object("count", 1, "until", 1)));
+    throttle.fail("a@example.com", NOW);
+    assertEquals(1, keys(store, "throttle:flood:").size(), "the first new entry counts them");
+    store.setSetting("throttle:flood:stale", Json.stringify(Json.object("count", 1, "until", 1)));
+    throttle.fail("b@example.com", NOW + 1000);
+    assertEquals(
+        3, keys(store, "throttle:flood:").size(), "a new key within the window looks at nothing");
+    throttle.fail("c@example.com", NOW + 61_000L);
+    assertFalse(keys(store, "throttle:flood:").contains("throttle:flood:stale"), "once a window");
   }
 
   @Test

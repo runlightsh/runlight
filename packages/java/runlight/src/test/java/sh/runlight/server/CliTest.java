@@ -300,6 +300,10 @@ class CliTest {
       assertTrue(
           said.startsWith("Runlight " + Version.version() + " is listening on " + base + "\n"),
           said);
+      // The JDK's server is told how long a client may take before it starts.
+      assertEquals("60", System.getProperty("sun.net.httpserver.maxReqTime"));
+      assertEquals("300", System.getProperty("sun.net.httpserver.maxRspTime"));
+      assertEquals("1000", System.getProperty("sun.net.httpserver.maxConnections"));
       assertTrue(said.contains("Data: " + root + "/runlight-data/runlight.db\n"), said);
       Matcher link =
           Pattern.compile("  (" + Pattern.quote(base) + "/setup\\?code=(\\S+))\n").matcher(said);

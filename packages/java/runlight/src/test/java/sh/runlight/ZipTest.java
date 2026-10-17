@@ -46,6 +46,12 @@ class ZipTest {
   }
 
   @Test
+  void aValueWithASemicolonOrATabIsQuotedSoNoLocaleSplitsAFormulaOutOfIt() {
+    assertEquals(
+        "\"x;=1+1\",\"a\tb\",'=1+1,plain", Zip.csvRow(List.of("x;=1+1", "a\tb", "=1+1", "plain")));
+  }
+
+  @Test
   void rows() {
     for (Map<String, Object> c : Fixtures.cases(Fixtures.load("zip"), "rows")) {
       List<Object> values = new ArrayList<>();

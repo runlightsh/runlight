@@ -488,6 +488,11 @@ public final class Runlight
   }
 
   @Override
+  public String secret() {
+    return secret;
+  }
+
+  @Override
   public Fetcher fetcher() {
     return fetcher;
   }
@@ -1749,13 +1754,14 @@ public final class Runlight
     if (months == null) {
       return null;
     }
-    // setUTCMonth: the same day and time that many months back, a day past the month's end
-    // running on.
+    // Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept
+    // within
+    // its month.
     long now = now();
     long dayMs = Math.floorMod(now, 86_400_000L);
     LocalDate date = LocalDate.ofEpochDay(Math.floorDiv(now, 86_400_000L));
     LocalDate first = date.withDayOfMonth(1).minusMonths(months);
-    long day = first.toEpochDay() + date.getDayOfMonth() - 1;
+    long day = first.toEpochDay() + Math.min(date.getDayOfMonth(), first.lengthOfMonth()) - 1;
     return LocalDate.ofEpochDay(day).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
         + dayMs;
   }
@@ -1954,11 +1960,39 @@ public final class Runlight
   }
 
   /**
-   * Deletes salts whose day has ended everywhere. The earliest timezone is a day behind UTC and
-   * still needs its yesterday, so a salt goes two UTC days after its date.
+   * Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in
+   * a site's timezone, and after midnight only while a visit that began that day there is still
+   * going, since it carries on under the visitor it began with. So a salt lasts its day and the
+   * visits that run past it.
    */
   private void dropOldSalts(long now) {
-    store.dropSaltsBefore(Time.isoString(now - 2 * 86_400_000L).substring(0, 10));
+    Map<String, List<String>> zones = new LinkedHashMap<>();
+    for (Map<String, Object> site : sites()) {
+      zones.computeIfAbsent(timezone(site), z -> new ArrayList<>()).add(id(site));
+    }
+    if (zones.isEmpty()) {
+      return;
+    }
+    Set<String> needed = new LinkedHashSet<>();
+    for (Map.Entry<String, List<String>> zone : zones.entrySet()) {
+      String today = Time.localDate(now, zone.getKey());
+      needed.add(today);
+      String yesterday = Time.addDays(today, -1);
+      if (store.visitOpen(
+          zone.getValue(),
+          Time.startOf(yesterday, zone.getKey()),
+          Time.startOf(today, zone.getKey()),
+          now - SESSION_IDLE_MS)) {
+        needed.add(yesterday);
+      } else {
+        // Nor is it kept here: no visit is left for it to find.
+        Salts cached = salts.get(zone.getKey());
+        if (cached != null && cached.day().equals(today) && cached.yesterday() != null) {
+          salts.put(zone.getKey(), new Salts(cached.day(), cached.today(), null));
+        }
+      }
+    }
+    store.dropSaltsExcept(new ArrayList<>(needed));
   }
 
   /**
@@ -2192,7 +2226,10 @@ public final class Runlight
       row.put("screen", screen);
       row.put("language", language);
       store.insertSession(row);
-      return session;
+      // Another process may have opened this visitor's visit at the same moment: both go on with
+      // the
+      // earlier.
+      return store.settleOpenSession(id(site), candidates, now - SESSION_IDLE_MS, session);
     } finally {
       turn.unlock();
     }

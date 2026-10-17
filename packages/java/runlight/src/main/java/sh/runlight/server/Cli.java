@@ -267,6 +267,12 @@ public final class Cli {
     }
   }
 
+  private static void limit(String name, String value) {
+    if (System.getProperty(name) == null) {
+      System.setProperty(name, value);
+    }
+  }
+
   /**
    * Starts the server on PORT (3000) and HOST (0.0.0.0) as the settings say, prints where it
    * listens and, while there is no account, the link that makes the first one, and runs the
@@ -281,6 +287,12 @@ public final class Cli {
     int port = (int) Js.toNumber(portSetting == null ? "3000" : portSetting);
     String host = config.get("HOST");
     host = host == null ? "0.0.0.0" : host;
+    // The JDK's server reads these once, when it first starts, so a client that opens a connection
+    // and says nothing, or reads a response slowly, cannot hold it open (and a thread) for ever.
+    // Left alone where the operator has set them.
+    limit("sun.net.httpserver.maxReqTime", "60");
+    limit("sun.net.httpserver.maxRspTime", "300");
+    limit("sun.net.httpserver.maxConnections", "1000");
     HttpServer http;
     try {
       http = HttpServer.create(new InetSocketAddress(host, port), 0);
@@ -330,13 +342,14 @@ public final class Cli {
                 if (server.accounts.count() > 0) {
                   Files.deleteIfExists(setupFile);
                 }
-              } catch (IOException | RuntimeException error) {
+              } catch (Throwable error) {
+                // Anything at all, since an error that escapes ends the schedule for good.
                 err.println("Runlight: the scheduled check failed " + error);
               }
               if (dbIp != null) {
                 try {
                   dbIp.refresh(now.getAsLong());
-                } catch (RuntimeException error) {
+                } catch (Throwable error) {
                   err.println("Runlight: could not refresh location data " + error);
                 }
               }

@@ -316,4 +316,47 @@ final class AssistantTest {
             + " pairs differ: "
             + String.join(", ", wrong.subList(0, Math.min(20, wrong.size()))));
   }
+
+  @Test
+  void aQuestionCarriesAtMost24000CharactersOfEarlierTurnsHoweverMuchHistoryTheBrowserSends() {
+    RecordingFetcher fetcher =
+        new RecordingFetcher(
+            json(
+                "{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"None.\"}]}"));
+    // Nineteen made-up turns of 8,000 characters each, then the question.
+    List<Map<String, Object>> messages = new ArrayList<>();
+    for (int i = 0; i < 19; i++) {
+      messages.add(
+          Json.object(
+              "role", i % 2 == 1 ? "assistant" : "user", "content", i + " " + "x".repeat(7998)));
+    }
+    messages.add(Json.object("role", "user", "content", "How many visitors?"));
+    Assistant.chat(
+        Json.object(
+            "provider",
+            "anthropic",
+            "model",
+            "",
+            "baseUrl",
+            "https://api.example.com/v1",
+            "key",
+            "sk-ant-secret"),
+        messages,
+        CONTEXT,
+        McpTest.readApi(new ArrayList<>()),
+        fetcher);
+    assertEquals(1, fetcher.inits.size());
+    List<Object> sent =
+        Js.list(Js.map(Json.parse(fetcher.inits.get(0).bodyText())).get("messages"));
+    int text = 0;
+    for (Object m : sent) {
+      if (Js.get(m, "content") instanceof String content) {
+        text += content.length();
+      }
+    }
+    assertTrue(text <= 24_000, text + " characters sent");
+    assertEquals("user", Js.get(sent.get(0), "role"), "still starting with a question");
+    assertTrue(
+        Js.string(Js.get(sent.get(sent.size() - 1), "content")).contains("How many visitors?"));
+  }
 }

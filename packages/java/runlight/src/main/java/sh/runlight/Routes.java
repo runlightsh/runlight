@@ -773,18 +773,6 @@ public final class Routes {
             "no-referrer"));
   }
 
-  /** The first language a browser asks for that the dashboard speaks, else English. */
-  private static String acceptedLanguage(Request request) {
-    String header = request.headers().get("accept-language");
-    for (String part : (header == null ? "" : header).split(",", -1)) {
-      String code = Js.lower(Js.slice(Js.trim(part.split(";", -1)[0]), 0, 2));
-      if (Messages.languages().contains(code)) {
-        return code;
-      }
-    }
-    return "en";
-  }
-
   /**
    * Rows of objects as CSV, with a column for every key the first row has, in the units a
    * spreadsheet reads.
@@ -1090,10 +1078,20 @@ public final class Routes {
   }
 
   /** Math.min(1000, Math.max(1, Number(value) || fallback)). */
-  private static double limit(String value, int fallback) {
+  private static String recorded(String path) {
+    String recorded = Sources.recordedPath(path);
+    return recorded != null ? recorded : path;
+  }
+
+  /**
+   * A whole number from a query, within 1 and {@code max}, or {@code fallback} for anything else: a
+   * fraction, a huge number, or text.
+   */
+  private static int whole(String value, int fallback, int max) {
     double n = Js.toNumber(value);
-    n = Double.isNaN(n) || n == 0 ? fallback : n;
-    return Math.min(1000, Math.max(1, n));
+    return n == Math.rint(n) && n >= 1 && n <= 9_007_199_254_740_991.0
+        ? (int) Math.min(n, max)
+        : fallback;
   }
 
   // The routes.
@@ -2106,9 +2104,12 @@ public final class Routes {
               fields.put(name, value == null ? "" : Js.string(value));
             }
           }
-          // A hub with a manage token learns which service sends the reports and from where,
-          // nothing more.
-          boolean viaManage = managed.containsKey(request);
+          // A hub with a manage token, or an account kept to one site, learns which service sends
+          // the reports and from where, nothing more: a webhook's address is often its own
+          // credential.
+          boolean viaManage =
+              managed.containsKey(request)
+                  || (sessionScope(request) != null && sessionScope(request).get("site") != null);
           Map<String, Object> out = new LinkedHashMap<>();
           out.put("source", settings == null ? null : settings.get("source"));
           out.put("service", viaApp ? "" : orEmpty(settings, "service"));
@@ -2165,6 +2166,17 @@ public final class Routes {
         if (settings == null) {
           return coded("Set up a mail service first", "mail_unset", 400);
         }
+        // One test a minute through each mail service, as samples are held, so the button cannot
+        // flood an inbox or use up a service's quota; one just set up can be tried at once.
+        String tested =
+            "test:"
+                + Js.string(orEmpty(settings, "source"))
+                + ":"
+                + Js.string(orEmpty(settings, "service"));
+        if (rl.now() - sampleSent.getOrDefault(tested, 0L) < 60_000) {
+          return coded(
+              "A test went out a moment ago. Wait a minute and try again.", "test_soon", 429);
+        }
         Messages.Translator t = Messages.translator(text(body, "lang", "en"));
         Map<String, Object> service = service(settings.get("service"));
         String name =
@@ -2184,6 +2196,9 @@ public final class Routes {
                 "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">"
                     + escapeHtml(said)
                     + "</p>"));
+        // Counted once it went out, so a test that failed can be tried again as soon as the
+        // setting is fixed.
+        sampleSent.put(tested, rl.now());
         return json(Json.object("ok", true));
       }
 
@@ -2655,6 +2670,18 @@ public final class Routes {
         }
         if (!(body instanceof Map<?, ?> map) || !site.equals(map.get("site")))
           return coded("Unknown site", "unknown_site", 404);
+      }
+      if (sitePath.matches() && isJson(request)) {
+        // Where a site lives stays with whoever runs the install: an account kept to the site may
+        // rename it, as a hub may, never move it.
+        Object body;
+        try {
+          body = Json.parse(request.text());
+        } catch (RuntimeException error) {
+          body = null;
+        }
+        if (body instanceof Map<?, ?> map && map.containsKey("hostnames"))
+          return coded("Your account cannot change a site's domains", "site_domains", 403);
       }
       url = new Url(url.href());
       var query = url.searchParams();
@@ -3281,6 +3308,10 @@ public final class Routes {
       }
       try {
         rl.deleteSite(id);
+        // Those kept to the site go with it, so a site made later with the same id is not theirs.
+        if (web != null) {
+          web.accounts().forgetSite(id);
+        }
         return json(Json.object("ok", true));
       } catch (RuntimeException error) {
         if (!isRange(error)) {
@@ -3323,7 +3354,8 @@ public final class Routes {
       rl.init();
       for (Map<String, Object> setting : store().settingsStartingWith("observe-key:")) {
         String id = ((String) setting.get("key")).substring("observe-key:".length());
-        String key = (String) setting.get("value");
+        String value = (String) setting.get("value");
+        String key = value == null ? null : OAuth.openAgentsKey(rl, value);
         if (!id.isEmpty() && key != null && constantTimeEqual(given, key) && rl.site(id) != null) {
           keySite = id;
         }
@@ -3961,16 +3993,21 @@ public final class Routes {
       Map<String, Object> journeyOptions = new LinkedHashMap<>();
       String steps = params.get("steps");
       journeyOptions.put("steps", Js.num(Js.toNumber(steps != null ? steps : (Object) 5L)));
+      // Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
       if (Js.truthy(params.get("start"))) {
-        journeyOptions.put("start", params.get("start"));
+        journeyOptions.put("start", recorded(params.get("start")));
       }
       if (Js.truthy(params.get("end"))) {
-        journeyOptions.put("end", params.get("end"));
+        journeyOptions.put("end", recorded(params.get("end")));
       }
       if (hasThrough) {
         journeyOptions.put(
             "through",
-            Json.object("step", Js.num(Js.toNumber(through.group(1))), "value", through.group(2)));
+            Json.object(
+                "step",
+                Js.num(Js.toNumber(through.group(1))),
+                "value",
+                recorded(through.group(2))));
       }
       @SuppressWarnings("unchecked")
       List<Map<String, Object>> rows = (List<Map<String, Object>>) pages.get("rows");
@@ -4024,10 +4061,10 @@ public final class Routes {
           }
         }
       }
-      double limit = limit(params.get("limit"), 100);
+      int limit = whole(params.get("limit"), 100, 1000);
       List<Map<String, Object>> rows =
           key instanceof String k && !k.isEmpty()
-              ? store.eventPropValues(query, event, k, (int) limit)
+              ? store.eventPropValues(query, event, k, limit)
               : new ArrayList<>();
       return json(
           Json.object(
@@ -4044,11 +4081,23 @@ public final class Routes {
             400,
             Json.object("dimension", dimension));
       }
-      double limit = limit(params.get("limit"), 10);
-      double page = Js.toNumber(params.get("page"));
-      page = Math.max(1, Double.isNaN(page) || page == 0 ? 1 : page);
-      List<Map<String, Object>> rows =
-          store.breakdown(query, dimension, (int) limit, (int) ((page - 1) * limit));
+      int limit = whole(params.get("limit"), 10, 1000);
+      int page = whole(params.get("page"), 1, 100_000);
+      if (dimension.equals("hostname")
+          && "1".equals(params.get("suggestions"))
+          && !"csv".equals(params.get("format"))) {
+        return json(
+            Json.object(
+                "site",
+                siteId,
+                "range",
+                out,
+                "dimension",
+                dimension,
+                "rows",
+                store.hostnameSuggestions(query, Math.min(limit, 50))));
+      }
+      List<Map<String, Object>> rows = store.breakdown(query, dimension, limit, (page - 1) * limit);
       if ("csv".equals(params.get("format"))) {
         return download(
             siteId
@@ -4286,7 +4335,7 @@ public final class Routes {
     // server. Its script hands the choice to the dashboard tab on this origin that started the
     // pick, and nothing else.
     if (path.equals("/pick-return") && method.equals("GET")) {
-      Messages.Translator t = Messages.translator(acceptedLanguage(request));
+      Messages.Translator t = Messages.translator(Messages.acceptedLanguage(request));
       return smallPage(
           t.lang(),
           "<div id=\"done\" hidden><h1>"
@@ -4422,7 +4471,7 @@ public final class Routes {
       String ticket = url.searchParams().get("ticket");
       Map<String, Object> found = redeemEmbed(ticket != null ? ticket : "");
       if (found == null) {
-        Messages.Translator t = Messages.translator(acceptedLanguage(request));
+        Messages.Translator t = Messages.translator(Messages.acceptedLanguage(request));
         return smallPage(
             t.lang(),
             "<h1>"
@@ -4457,7 +4506,7 @@ public final class Routes {
       String id = sharePage.group(1);
       Map<String, Object> share = SHARE_ID.matcher(id).find() ? store().shareById(id) : null;
       if (share == null) {
-        Messages.Translator t = Messages.translator(acceptedLanguage(request));
+        Messages.Translator t = Messages.translator(Messages.acceptedLanguage(request));
         return smallPage(
             t.lang(),
             "<h1>"

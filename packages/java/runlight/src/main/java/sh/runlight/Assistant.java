@@ -76,6 +76,17 @@ public final class Assistant {
           provider("lmstudio", "LM Studio", "openai", "http://localhost:1234/v1", "", "no"),
           provider("custom", "Another OpenAI-compatible service", "openai", "", "", "optional"));
 
+  /** The most text of earlier turns a question carries, about six thousand tokens. */
+  private static final int MAX_HISTORY_CHARS = 24_000;
+
+  private static int historySize(List<Object> history) {
+    int size = 0;
+    for (Object turn : history) {
+      size += Js.string(Js.map(turn).get("content")).length();
+    }
+    return size;
+  }
+
   private static final int MAX_ROUNDS = 8;
 
   /**
@@ -413,6 +424,15 @@ public final class Assistant {
         previous.put("content", previous.get("content") + "\n\n" + content);
       } else {
         history.add(Json.object("role", m.get("role"), "content", content));
+      }
+    }
+    // The browser sends the history, so its whole length is held too, the oldest turns dropped
+    // first: each tool round sends it again, and the limits on questions are there to keep the
+    // owner's AI credit safe.
+    while (history.size() > 1 && historySize(history) > MAX_HISTORY_CHARS) {
+      history.remove(0);
+      while (history.size() > 1 && !"user".equals(Js.map(history.get(0)).get("role"))) {
+        history.remove(0);
       }
     }
 

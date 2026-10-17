@@ -31,6 +31,25 @@ class TimeTest {
   }
 
   @Test
+  void aDayWhereClocksFallBackAcrossMidnightBeginsAtTheFirstMidnight() {
+    // Amman in 2019, Gaza and Hebron in 2020, an hour each, and three hours at Casey station in
+    // 2019.
+    String[][] cases = {
+      {"2019-10-25", "Asia/Amman"},
+      {"2020-10-24", "Asia/Gaza"},
+      {"2020-10-24", "Asia/Hebron"},
+      {"2019-03-17", "Antarctica/Casey"}
+    };
+    for (String[] c : cases) {
+      long start = Time.startOf(c[0], c[1]);
+      assertEquals(c[0], Time.localDate(start, c[1]), c[1]);
+      assertTrue(
+          Time.localDate(start - 1, c[1]).compareTo(c[0]) < 0,
+          c[1] + ": the moment before is the day before");
+    }
+  }
+
+  @Test
   void theSpringDstChangeMakesA23HourDay() {
     Map<String, Object> range =
         Time.resolveRange(

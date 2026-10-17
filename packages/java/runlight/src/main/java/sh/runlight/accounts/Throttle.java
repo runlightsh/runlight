@@ -49,6 +49,12 @@ public final class Throttle {
   private final long limit;
   private final long windowMs;
   private volatile boolean migrated;
+  // How many entries this throttle can hold, as of the last prune and the new ones counted since,
+  // so
+  // a flood of new keys prunes only when the ceiling may have been passed, not on every one. Other
+  // processes add entries too, so it is counted again each window.
+  private long estimate;
+  private long countedAt = -1;
 
   /** Ten tries in fifteen minutes. */
   public Throttle(SqlStore store, String name) {
@@ -131,8 +137,40 @@ public final class Throttle {
     }
   }
 
+  private static String idWith(String salt, String key) {
+    return Crypto.base64url(Crypto.hmac("SHA-256", salt, key)).substring(0, 22);
+  }
+
   private String id(String key, long now) {
-    return Crypto.base64url(Crypto.hmac("SHA-256", salt(now), key)).substring(0, 22);
+    return idWith(salt(now), key);
+  }
+
+  /** The hashing key of the day before, while it is kept; null otherwise. */
+  private String yesterdaysSalt(long now) {
+    String saved = store.setting(DAY_KEY + day(now - 86_400_000L));
+    return saved == null || saved.isEmpty() ? null : saved;
+  }
+
+  /**
+   * The id to count under: today's, unless a count made under yesterday's key is still running,
+   * which then carries on under its own id until its window ends, so midnight does not lift a
+   * block.
+   */
+  private String idFor(String key, long now) {
+    String today = id(key, now);
+    long[] entry = entry(today);
+    if (entry != null && entry[1] > now) {
+      return today;
+    }
+    String before = yesterdaysSalt(now);
+    if (before != null) {
+      String earlier = idWith(before, key);
+      long[] kept = entry(earlier);
+      if (kept != null && kept[1] > now) {
+        return earlier;
+      }
+    }
+    return today;
   }
 
   private String prefix() {
@@ -197,7 +235,7 @@ public final class Throttle {
   }
 
   public boolean blocked(String key, long now) {
-    return isBlocked(id(key, now), now);
+    return isBlocked(idFor(key, now), now);
   }
 
   private boolean isBlocked(String id, long now) {
@@ -221,7 +259,7 @@ public final class Throttle {
   public boolean take(String key, long now) {
     long[] made =
         update(
-            id(key, now),
+            idFor(key, now),
             entry ->
                 entry != null && entry[1] > now && entry[0] >= limit ? null : counted(entry, now));
     if (made == null) {
@@ -236,12 +274,12 @@ public final class Throttle {
   /** Takes back one counted try, for one that turned out right. */
   public void forgive(String key, long now) {
     update(
-        id(key, now),
+        idFor(key, now),
         entry -> entry != null && entry[0] > 0 ? new long[] {entry[0] - 1, entry[1]} : null);
   }
 
   public void fail(String key, long now) {
-    long[] made = update(id(key, now), entry -> counted(entry, now));
+    long[] made = update(idFor(key, now), entry -> counted(entry, now));
     if (made[0] == 1) {
       prune(now);
     }
@@ -255,6 +293,21 @@ public final class Throttle {
    * a new entry is made, since only then can there be more.
    */
   private void prune(long now) {
+    synchronized (this) {
+      estimate++;
+      if (estimate <= Accounts.MAX_THROTTLED && countedAt >= 0 && now - countedAt < windowMs) {
+        return;
+      }
+    }
+    long size = prunedTo(now);
+    synchronized (this) {
+      estimate = size;
+      countedAt = now;
+    }
+  }
+
+  /** Prunes, and gives back how many entries are left. */
+  private int prunedTo(long now) {
     List<Kept> entries = new ArrayList<>();
     for (Map<String, Object> setting : store.settingsStartingWith(prefix())) {
       String key = (String) setting.get("key");
@@ -268,14 +321,14 @@ public final class Throttle {
     }
     int size = entries.size();
     if (size <= Accounts.MAX_THROTTLED) {
-      return;
+      return size;
     }
     // Oldest first: each entry's window started windowMs before its end.
     entries.sort(Comparator.comparingLong(Kept::until));
     for (boolean blocked : new boolean[] {false, true}) {
       for (Kept entry : entries) {
         if (size <= Accounts.MAX_THROTTLED) {
-          return;
+          return size;
         }
         if (entry.blocked() == blocked) {
           store.setSetting(entry.key(), null);
@@ -283,9 +336,14 @@ public final class Throttle {
         }
       }
     }
+    return size;
   }
 
   public void clear(String key, long now) {
     store.setSetting(prefix() + id(key, now), null);
+    String before = yesterdaysSalt(now);
+    if (before != null) {
+      store.setSetting(prefix() + idWith(before, key), null);
+    }
   }
 }

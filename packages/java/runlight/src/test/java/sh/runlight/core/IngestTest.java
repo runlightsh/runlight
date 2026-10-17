@@ -268,9 +268,17 @@ class IngestTest {
     assertEquals(2L, stats.get("pageviews"));
   }
 
+  private static List<String> saltDays(Harness t) {
+    List<String> days = new ArrayList<>();
+    for (Map<String, Object> r : t.store().db().all("SELECT day FROM rl_salts ORDER BY day")) {
+      days.add(Js.string(r.get("day")));
+    }
+    return days;
+  }
+
   @ParameterizedTest
   @MethodSource("kinds")
-  void aSaltIsDeletedOnceItsDayHasEndedEverywhere(String kind) {
+  void aSaltLastsItsDayAndPastMidnightOnlyWhileAVisitThatBeganThatDayGoesOn(String kind) {
     Harness t = new Harness(kind);
     t.send(pageview("https://example.com/", "s1"));
     for (int i = 0; i < 3; i++) {
@@ -278,12 +286,62 @@ class IngestTest {
       t.send(pageview("https://example.com/", "s" + (i + 2)));
     }
     t.rl.check();
-    // October 9th at noon UTC: the earliest timezone is on the 8th and still needs the 7th.
-    List<String> days = new ArrayList<>();
-    for (Map<String, Object> r : t.store().db().all("SELECT day FROM rl_salts ORDER BY day")) {
-      days.add(Js.string(r.get("day")));
+    // October 9th at noon UTC: no visit from the 8th is still going, so only today's salt is left.
+    assertEquals(List.of("2026-10-09"), saltDays(t));
+
+    // A visit that runs past midnight keeps its day's salt until it ends, and stays one visit.
+    t.advance(11 * 60 * MIN + 50 * MIN); // 23:50 on the 9th
+    t.send(pageview("https://example.com/late", "m1"));
+    t.advance(20 * MIN); // 00:10 on the 10th
+    t.send(pageview("https://example.com/later", "m2"));
+    t.rl.check();
+    assertEquals(List.of("2026-10-09", "2026-10-10"), saltDays(t), "the visit is still going");
+    t.advance(31 * MIN); // idle for half an hour: the visit has ended
+    t.rl.check();
+    assertEquals(List.of("2026-10-10"), saltDays(t));
+    // Noon on the 9th, and the one across midnight, which belongs to the 9th where it began.
+    Map<String, Object> stats = t.stats(t.query("2026-10-09", "2026-10-10"));
+    assertEquals(2L, stats.get("visits"), "the visit across midnight is one visit");
+    assertEquals(3L, stats.get("pageviews"));
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void eachSitesTimezoneKeepsTheSaltsItsOwnVisitsNeed(String kind) {
+    // Toronto is still on the 9th when UTC reaches the 10th.
+    Harness t =
+        new Harness(
+            kind,
+            new Runlight.Options()
+                .sites(
+                    List.of(
+                        Json.object(
+                            "id",
+                            "utc",
+                            "name",
+                            "UTC",
+                            "hostnames",
+                            List.of("example.com"),
+                            "timezone",
+                            "UTC"),
+                        Json.object(
+                            "id",
+                            "to",
+                            "name",
+                            "Toronto",
+                            "hostnames",
+                            List.of("example.org"),
+                            "timezone",
+                            "America/Toronto"))));
+    t.advance(-12 * 60 * MIN + 2 * 60 * MIN); // 02:00 UTC on the 6th, 22:00 on the 5th in Toronto
+    t.rl.check();
+    for (String day : saltDays(t)) {
+      assertTrue(day.equals("2026-10-05") || day.equals("2026-10-06"), day);
     }
-    assertEquals(List.of("2026-10-07", "2026-10-08", "2026-10-09"), days);
+    t.send(pageview("https://example.org/", "to1"));
+    t.send(pageview("https://example.com/", "utc1"));
+    t.rl.check();
+    assertEquals(List.of("2026-10-05", "2026-10-06"), saltDays(t), "today in each timezone");
   }
 
   @ParameterizedTest

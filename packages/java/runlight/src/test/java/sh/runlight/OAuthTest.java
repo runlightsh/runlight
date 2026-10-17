@@ -51,6 +51,11 @@ final class OAuthTest {
     }
 
     @Override
+    public String secret() {
+      return "oauth-test-secret";
+    }
+
+    @Override
     public String clientIp(Request request, Map<String, Object> context) {
       return context.get("ip") instanceof String ip ? ip : "";
     }
@@ -123,6 +128,7 @@ final class OAuthTest {
         "{\"resource\":\"https://x.com/runlight/mcp\",\"authorization_servers\":[\"https://x.com/runlight\"],\"scopes_supported\":[\"read\",\"manage\",\"cms\"],\"bearer_methods_supported\":[\"header\"]}",
         resource.text());
     assertEquals("*", resource.headers().get("access-control-allow-origin"));
+    assertEquals("nosniff", resource.headers().get("x-content-type-options"));
     Response options =
         handle(ctx, "https://x.com/runlight/oauth/token", "OPTIONS", new Headers(), "", null);
     assertEquals(204, options.status());
@@ -449,7 +455,8 @@ final class OAuthTest {
       }
       assertEquals(1, kept.size());
       String agent = kept.iterator().next();
-      assertEquals(agent, install.store().setting("observe-key:default"));
+      assertEquals(
+          agent, OAuth.openAgentsKey(install, install.store().setting("observe-key:default")));
       assertNotEquals(
           agent, OAuth.agentsKey(install, "default", true), "replacing still makes a new one");
     } finally {

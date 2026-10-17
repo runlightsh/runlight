@@ -602,6 +602,16 @@ public final class SqlStore implements AutoCloseable {
     transaction(
         store -> {
           Db d = store.db;
+          // MySQL keys a day's rows by no unique key, since a path is longer than its keys allow,
+          // so
+          // two processes building one day could each add its rows. There the day is marked first:
+          // the
+          // second waits on that mark until the first commits, then fails, and the day counts as
+          // built
+          // elsewhere. Elsewhere the rows' own key refuses a second set.
+          if (dialect.equals("mysql")) {
+            markRollupDay(d, site, day, start, end);
+          }
           d.run("DELETE FROM rl_rollups WHERE site = ? AND day = ?", List.of(site, day));
           // The WITH goes after INSERT INTO, the one place every database takes it.
           List<Object> params = list(site, start, end);
@@ -637,12 +647,18 @@ public final class SqlStore implements AutoCloseable {
                   + ofDay.apply("event")
                   + " GROUP BY e.name",
               concat(List.of(site, day), window));
-          d.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", List.of(site, day));
-          d.run(
-              "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)",
-              list(site, day, start, end));
+          if (!dialect.equals("mysql")) {
+            markRollupDay(d, site, day, start, end);
+          }
           return null;
         });
+  }
+
+  private static void markRollupDay(Db d, String site, String day, long start, long end) {
+    d.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", List.of(site, day));
+    d.run(
+        "INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)",
+        list(site, day, start, end));
   }
 
   /** The days of a site already built. */
@@ -1074,9 +1090,35 @@ public final class SqlStore implements AutoCloseable {
     return row != null && row.get("salt") != null ? text(row.get("salt")) : null;
   }
 
-  /** Deletes every salt older than {@code day}, so old hashes can never be recomputed. */
-  public void dropSaltsBefore(String day) {
-    db.run("DELETE FROM rl_salts WHERE day < ?", List.of(day));
+  /**
+   * Deletes every salt but those of these days, so the hashes made with them can never be made
+   * again.
+   */
+  public void dropSaltsExcept(List<String> days) {
+    db.run(
+        "DELETE FROM rl_salts WHERE day NOT IN ("
+            + String.join(", ", Collections.nCopies(days.size(), "?"))
+            + ")",
+        new ArrayList<Object>(days));
+  }
+
+  /**
+   * Whether a visit to one of these sites that started in a stretch of time was still going at
+   * {@code since}.
+   */
+  public boolean visitOpen(List<String> sites, long from, long to, long since) {
+    // As many sites a statement as keep it under D1's 100.
+    List<Map<String, Object>> open =
+        Sql.inPieces(
+            sites,
+            Sql.MAX_PARAMS - 3,
+            piece ->
+                db.all(
+                    "SELECT 1 AS open FROM rl_sessions WHERE site IN ("
+                        + String.join(", ", Collections.nCopies(piece.size(), "?"))
+                        + ") AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1",
+                    concat(piece, List.of(from, to, since))));
+    return !open.isEmpty();
   }
 
   // Ingest
@@ -1103,6 +1145,46 @@ public final class SqlStore implements AutoCloseable {
         : Json.object("id", text(row.get("id")), "visitor", text(row.get("visitor")));
   }
 
+  /**
+   * After opening a visit: the visitor's earliest visit still going, which is this one unless
+   * another process opened one for the same visitor at the same moment. Then both settle on the
+   * earliest, and the one that is not drops its own, before anything is counted into it.
+   */
+  public Map<String, Object> settleOpenSession(
+      String site, List<String> visitors, long since, Map<String, Object> opened) {
+    List<Object> params = list(site);
+    params.addAll(visitors);
+    params.add(since);
+    Map<String, Object> row =
+        first(
+            db.all(
+                // One already counting a hit first: the other process went on with it.
+                "SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN ("
+                    + String.join(", ", Collections.nCopies(visitors.size(), "?"))
+                    + ") AND last_at >= ?\n       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1",
+                params));
+    if (row == null) {
+      return opened;
+    }
+    if (!text(row.get("id")).equals(opened.get("id"))) {
+      db.run(
+          "DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0",
+          List.of(opened.get("id")));
+    }
+    return Json.object("id", text(row.get("id")), "visitor", text(row.get("visitor")));
+  }
+
+  /** Text cut to at most {@code max} characters, as a VARCHAR(max) holds it, never through one. */
+  private static Object clip(Object value, int max) {
+    if (!(value instanceof String text) || text.length() <= max) {
+      return value;
+    }
+    if (text.codePointCount(0, text.length()) <= max) {
+      return text;
+    }
+    return text.substring(0, text.offsetByCodePoints(0, max));
+  }
+
   /** Opens a session from a SessionRow. */
   public void insertSession(Map<String, Object> row) {
     db.run(
@@ -1110,32 +1192,34 @@ public final class SqlStore implements AutoCloseable {
             + "        source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, country, region, city,\n"
             + "        browser, browser_version, os, os_version, device, screen, language)\n"
             + "       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        // Each text cut to its column's width, as MySQL's columns would hold it, so every database
+        // keeps the same, and no header, however long, can make a row Postgres's indexes refuse.
         list(
             row.get("id"),
             row.get("site"),
             row.get("visitor"),
             row.get("startedAt"),
             row.get("startedAt"),
-            row.get("hostname"),
-            row.get("referrerHost"),
-            row.get("referrerPath"),
-            row.get("source"),
-            row.get("channel"),
-            row.get("utmSource"),
-            row.get("utmMedium"),
-            row.get("utmCampaign"),
-            row.get("utmTerm"),
-            row.get("utmContent"),
-            row.get("country"),
-            row.get("region"),
-            row.get("city"),
-            row.get("browser"),
-            row.get("browserVersion"),
-            row.get("os"),
-            row.get("osVersion"),
-            row.get("device"),
-            row.get("screen"),
-            row.get("language")));
+            clip(row.get("hostname"), 255),
+            clip(row.get("referrerHost"), 255),
+            clip(row.get("referrerPath"), 500),
+            clip(row.get("source"), 200),
+            clip(row.get("channel"), 100),
+            clip(row.get("utmSource"), 200),
+            clip(row.get("utmMedium"), 200),
+            clip(row.get("utmCampaign"), 200),
+            clip(row.get("utmTerm"), 200),
+            clip(row.get("utmContent"), 200),
+            clip(row.get("country"), 16),
+            clip(row.get("region"), 100),
+            clip(row.get("city"), 100),
+            clip(row.get("browser"), 100),
+            clip(row.get("browserVersion"), 100),
+            clip(row.get("os"), 100),
+            clip(row.get("osVersion"), 100),
+            clip(row.get("device"), 50),
+            clip(row.get("screen"), 50),
+            clip(row.get("language"), 50)));
   }
 
   public void touchSession(String id, long ts, String kind, String path) {
@@ -1153,7 +1237,7 @@ public final class SqlStore implements AutoCloseable {
       db.run(
           "UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,\n"
               + "           entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?",
-          list(ts, path, path, id));
+          list(ts, clip(path, 1000), clip(path, 1000), id));
     } else if (reopen) {
       db.run("UPDATE rl_sessions SET events = events + 1, last_at = ? WHERE id = ?", list(ts, id));
     } else {
@@ -1213,10 +1297,10 @@ public final class SqlStore implements AutoCloseable {
             row.get("visitor"),
             row.get("session"),
             row.get("pageview"),
-            row.get("path"),
-            row.get("hostname"),
-            row.get("title"),
-            row.get("name"),
+            clip(row.get("path"), 1000),
+            clip(row.get("hostname"), 255),
+            clip(row.get("title"), 500),
+            clip(row.get("name"), 255),
             props == null || props == Json.UNDEFINED ? null : Json.stringify(props),
             row.get("engagedMs"),
             row.get("scroll") == Json.UNDEFINED ? null : row.get("scroll"),
@@ -1719,17 +1803,46 @@ public final class SqlStore implements AutoCloseable {
   public void saveGoal(Map<String, Object> g, Map<String, Object> before) {
     // A click goal is counted by its name, which the tracker sends as the event name. Renaming one
     // renames its past clicks too, so its history stays.
-    if (before != null
+    if (!(before != null
         && "click".equals(before.get("kind"))
         && "click".equals(g.get("kind"))
-        && !Js.same(before.get("name"), g.get("name"))) {
-      db.run(
-          "UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?",
-          list(g.get("name"), g.get("site"), before.get("name")));
+        && !Js.same(before.get("name"), g.get("name")))) {
+      writeGoal(db, g);
+      return;
     }
-    db.run(
+    transaction(
+        store -> {
+          Db d = store.db;
+          d.run(
+              "UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?",
+              list(g.get("name"), g.get("site"), before.get("name")));
+          // The daily rollups count events by name too, and goals read them, so they take the new
+          // name as well. A day that already has events under the new name counts both together
+          // now, so it is built again.
+          List<Map<String, Object>> both =
+              d.all(
+                  "SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?\n"
+                      + "         AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)",
+                  list(g.get("site"), before.get("name"), g.get("site"), g.get("name")));
+          for (Map<String, Object> r : both) {
+            String day = text(r.get("day"));
+            d.run(
+                "DELETE FROM rl_rollup_days WHERE site = ? AND day = ?",
+                List.of(g.get("site"), day));
+            d.run("DELETE FROM rl_rollups WHERE site = ? AND day = ?", List.of(g.get("site"), day));
+          }
+          d.run(
+              "UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?",
+              list(g.get("name"), g.get("site"), before.get("name")));
+          writeGoal(d, g);
+          return null;
+        });
+  }
+
+  private static void writeGoal(Db d, Map<String, Object> g) {
+    d.run(
         Sql.upsert(
-            db.dialect(),
+            d.dialect(),
             "rl_goals",
             List.of(
                 "id",
@@ -2400,6 +2513,49 @@ public final class SqlStore implements AutoCloseable {
   // Reports
 
   /**
+   * Seek one matching pageview per hostname, skipping its remaining rows before the next seek, each
+   * hostname after the last in the order they sort in.
+   */
+  public List<Map<String, Object>> hostnameSuggestions(Map<String, Object> query, int limit) {
+    Sql.VisitRows v =
+        Sql.visitRows(filters(query), site(query), from(query), to(query), db.dialect());
+    Sql.Piece within = Sql.rowScope(filters(query), List.of("page", "hostname"), db.dialect());
+    String table =
+        db.dialect().equals("sqlite")
+            ? "rl_events e INDEXED BY rl_events_hostname_suggest"
+            : "rl_events e";
+    List<Map<String, Object>> rows = new ArrayList<>();
+    String after = null;
+    while (rows.size() < limit) {
+      List<Object> params = new ArrayList<>(v.params());
+      params.addAll(within.params());
+      if (after != null) {
+        params.add(after);
+      }
+      Map<String, Object> row =
+          first(
+              db.all(
+                  "SELECT e.hostname AS value FROM "
+                      + table
+                      + " CROSS JOIN rl_sessions s\n         WHERE "
+                      + v.sql()
+                      + " AND e.kind = 'pageview'"
+                      + within.sql()
+                      + (after == null ? "" : " AND e.hostname" + textOrder() + " > ?")
+                      + "\n         ORDER BY e.hostname"
+                      + textOrder()
+                      + " LIMIT 1",
+                  params));
+      if (row == null) {
+        break;
+      }
+      after = text(row.get("value"));
+      rows.add(Json.object("value", after));
+    }
+    return rows;
+  }
+
+  /**
    * Ties are broken by the value in code point order, the order the rolled-up path sorts in, so a
    * report reads the same before and after its days are built.
    */
@@ -2443,7 +2599,11 @@ public final class SqlStore implements AutoCloseable {
     Map<String, Object> row =
         first(
             db.all(
-                "SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND "
+                "SELECT COUNT(DISTINCT s.visitor) AS visitors FROM "
+                    + (db.dialect().equals("sqlite") && filters(query).isEmpty()
+                        ? "rl_sessions s INDEXED BY rl_sessions_visit_visitors"
+                        : "rl_sessions s")
+                    + " WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND "
                     + Sql.IS_VISIT
                     + scope.sql(),
                 concat(list(site(query), from(query), to(query)), scope.params())));

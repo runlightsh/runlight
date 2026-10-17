@@ -2,6 +2,8 @@ package sh.runlight.accounts;
 
 import java.util.Map;
 import sh.runlight.Js;
+import sh.runlight.Json;
+import sh.runlight.Messages;
 import sh.runlight.Version;
 
 /**
@@ -69,7 +71,7 @@ public final class Pages {
    * Applies the saved theme before the page paints, then runs the switch and Cmd+Shift+D
    * (Ctrl+Shift+D).
    */
-  public static final String AUTH_JS =
+  private static final String AUTH_JS_ENGLISH =
       """
       (() => {
         const COMMON = ["password", "passw0rd", "123456", "qwerty", "azerty", "letmein", "welcome", "admin", "runlight", "iloveyou", "abc123", "monkey", "dragon", "football", "baseball", "sunshine", "princess", "shadow", "master"];
@@ -172,8 +174,53 @@ public final class Pages {
         });
       })();""";
 
-  private static final String THEME_BUTTON =
-      "<button type=\"button\" class=\"theme\" aria-label=\"Switch theme\"><svg data-choice=\"light\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"3\"/><path d=\"M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1\"/></svg><svg data-choice=\"dark\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z\"/></svg><svg data-choice=\"system\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"12\" height=\"8.5\" rx=\"1.5\"/><path d=\"M5.5 14h5M8 11.5V14\"/></svg></button>";
+  /** The script's English, which is served as auth.js. */
+  public static final String AUTH_JS = AUTH_JS_ENGLISH;
+
+  /**
+   * The script with its words in a language the dashboard speaks. English is served as auth.js, the
+   * others as auth.js?lang=fr and so on.
+   */
+  public static String authJs(String lang) {
+    Messages.Translator tr = Messages.translator(lang);
+    if (tr.lang().equals("en")) {
+      return AUTH_JS_ENGLISH;
+    }
+    String theme = "c === \"dark\" ? " + q(tr, "auth.themeDark") + " : " + q(tr, "auth.themeLight");
+    StringBuilder strength = new StringBuilder("[");
+    for (int n = 0; n < 5; n++) {
+      strength.append(n > 0 ? ", " : "").append(q(tr, "account.strength" + n));
+    }
+    strength.append("]");
+    return AUTH_JS_ENGLISH
+        .replace(
+            "button.title = c === \"system\" ? \"Theme: device setting\" : \"Theme: \" + c;",
+            "button.title = c === \"system\" ? " + q(tr, "auth.themeSystem") + " : " + theme + ";")
+        .replace(
+            "eye.setAttribute(\"aria-label\", shown ? \"Hide password\" : \"Show password\");",
+            "eye.setAttribute(\"aria-label\", shown ? "
+                + q(tr, "auth.hidePassword")
+                + " : "
+                + q(tr, "auth.showPassword")
+                + ");")
+        .replace(
+            "eye.title = shown ? \"Hide password\" : \"Show password\";",
+            "eye.title = shown ? "
+                + q(tr, "auth.hidePassword")
+                + " : "
+                + q(tr, "auth.showPassword")
+                + ";")
+        .replace(
+            "[\"Too short\", \"Weak\", \"Fair\", \"Good\", \"Strong\"][score]",
+            strength + "[score]");
+  }
+
+  private static String q(Messages.Translator tr, String key) {
+    return Json.stringify(tr.t(key));
+  }
+
+  private static final String THEME_ICONS =
+      "<svg data-choice=\"light\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"3\"/><path d=\"M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1\"/></svg><svg data-choice=\"dark\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z\"/></svg><svg data-choice=\"system\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"12\" height=\"8.5\" rx=\"1.5\"/><path d=\"M5.5 14h5M8 11.5V14\"/></svg>";
 
   private static String esc(String value) {
     StringBuilder out = new StringBuilder(value.length());
@@ -197,10 +244,14 @@ public final class Pages {
     return value == null ? fallback : Js.string(value);
   }
 
-  private static String page(String base, String title, String body) {
+  private static String page(String base, String lang, String title, String body) {
+    Messages.Translator t = Messages.translator(lang);
+    String code = t.lang();
     String b = esc(base);
     return "<!doctype html>\n"
-        + "<html lang=\"en\">\n"
+        + "<html lang=\""
+        + code
+        + "\">\n"
         + "<head>\n"
         + "<meta charset=\"utf-8\">\n"
         + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
@@ -216,7 +267,9 @@ public final class Pages {
         + "/auth.css\">\n"
         + "<script src=\""
         + b
-        + "/auth.js\"></script>\n"
+        + "/auth.js"
+        + (code.equals("en") ? "" : "?lang=" + code)
+        + "\"></script>\n"
         + "</head>\n"
         + "<body>\n"
         + "<main>\n"
@@ -225,7 +278,11 @@ public final class Pages {
         + "Runlight</p>\n"
         + body
         + "\n</main>\n"
-        + THEME_BUTTON
+        + "<button type=\"button\" class=\"theme\" aria-label=\""
+        + esc(t.t("auth.switchTheme"))
+        + "\">"
+        + THEME_ICONS
+        + "</button>"
         + "\n</body>\n"
         + "</html>\n";
   }
@@ -235,14 +292,30 @@ public final class Pages {
     return error.isEmpty() ? "" : "<p class=\"error\" role=\"alert\">" + esc(error) + "</p>";
   }
 
-  /** The sign-in page; opts are error, email, next, and forgot. */
   public static String loginPage(String base, Map<String, Object> opts) {
+    return loginPage(base, opts, "en");
+  }
+
+  /** The sign-in page; opts are error, email, next, and forgot. */
+  public static String loginPage(String base, Map<String, Object> opts, String lang) {
+    Messages.Translator t = Messages.translator(lang);
     String b = esc(base);
+    String link =
+        "<a href=\""
+            + esc(opt(opts, "forgot", ""))
+            + "\" target=\"_blank\" rel=\"noopener\">"
+            + t.html("auth.forgotLink")
+            + "</a>";
     return page(
         base,
-        "Sign in",
-        "<h1>Sign in</h1>\n"
-            + "<p>Sign in to see your sites.</p>\n"
+        lang,
+        t.t("auth.signIn"),
+        "<h1>"
+            + t.html("auth.signIn")
+            + "</h1>\n"
+            + "<p>"
+            + t.html("auth.signInIntro")
+            + "</p>\n"
             + error(opts)
             + "\n<form method=\"post\" action=\""
             + b
@@ -250,28 +323,44 @@ public final class Pages {
             + "<input type=\"hidden\" name=\"next\" value=\""
             + esc(opt(opts, "next", base + "/"))
             + "\">\n"
-            + "<label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\""
+            + "<label>"
+            + t.html("auth.email")
+            + "<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\""
             + esc(opt(opts, "email", ""))
             + "\"></label>\n"
-            + "<label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required></label>\n"
-            + "<button type=\"submit\">Sign in</button>\n"
+            + "<label>"
+            + t.html("auth.password")
+            + "<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required></label>\n"
+            + "<button type=\"submit\">"
+            + t.html("auth.signIn")
+            + "</button>\n"
             + "</form>\n"
-            + "<p class=\"hint\">If you have forgotten your password, <a href=\""
-            + esc(opt(opts, "forgot", ""))
-            + "\" target=\"_blank\" rel=\"noopener\">the docs say how to set a new one</a>.</p>");
+            + "<p class=\"hint\">"
+            + t.html("auth.forgot", Map.of("link", link))
+            + "</p>");
+  }
+
+  public static String codePage(String base, Map<String, Object> opts) {
+    return codePage(base, opts, "en");
   }
 
   /**
    * The second step of signing in, for an account with two-factor on; opts are pending, next, and
    * error.
    */
-  public static String codePage(String base, Map<String, Object> opts) {
+  public static String codePage(String base, Map<String, Object> opts, String lang) {
+    Messages.Translator t = Messages.translator(lang);
     String b = esc(base);
     return page(
         base,
-        "Enter your code",
-        "<h1>Enter your code</h1>\n"
-            + "<p>Open your authenticator app and enter the six-digit code for Runlight.</p>\n"
+        lang,
+        t.t("auth.codeTitle"),
+        "<h1>"
+            + t.html("auth.codeTitle")
+            + "</h1>\n"
+            + "<p>"
+            + t.html("auth.codeIntro")
+            + "</p>\n"
             + error(opts)
             + "\n<form method=\"post\" action=\""
             + b
@@ -282,42 +371,66 @@ public final class Pages {
             + "<input type=\"hidden\" name=\"next\" value=\""
             + esc(opt(opts, "next", ""))
             + "\">\n"
-            + "<label>Code<input type=\"text\" name=\"code\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"12\" required autofocus></label>\n"
-            + "<button type=\"submit\">Sign in</button>\n"
+            + "<label>"
+            + t.html("auth.code")
+            + "<input type=\"text\" name=\"code\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"12\" required autofocus></label>\n"
+            + "<button type=\"submit\">"
+            + t.html("auth.signIn")
+            + "</button>\n"
             + "</form>\n"
-            + "<p class=\"hint\">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>");
+            + "<p class=\"hint\">"
+            + t.html("auth.codeHint")
+            + "</p>");
   }
 
   /** What someone invited with a role can do, after "as". */
   public static String roleText(String role, String... sites) {
-    if (sites.length > 0 && sites[0] != null)
-      return role.equals("viewer")
-          ? "a viewer, who can read the stats for " + sites[0] + " only"
-          : "a member, who can change the settings of " + sites[0] + " only";
+    return roleText(role, sites.length > 0 ? sites[0] : null, "en");
+  }
+
+  public static String roleText(String role, String site, String lang) {
+    Messages.Translator t = Messages.translator(lang);
+    if (site != null) {
+      return t.t(
+          role.equals("viewer") ? "auth.roleViewerSite" : "auth.roleMemberSite",
+          Map.of("site", site));
+    }
     if (role.equals("viewer")) {
-      return "a viewer, who can read every site's stats";
+      return t.t("auth.roleViewer");
     }
     if (role.equals("member")) {
-      return "a member, who can change the settings of every site";
+      return t.t("auth.roleMember");
     }
-    return "an admin, who can change everything and manage people";
+    return t.t("auth.roleAdmin");
+  }
+
+  public static String invitePage(String base, Map<String, Object> opts) {
+    return invitePage(base, opts, "en");
   }
 
   /**
    * Where an invited person chooses a password and joins; opts are code, email, role, host, and
    * error.
    */
-  public static String invitePage(String base, Map<String, Object> opts) {
+  public static String invitePage(String base, Map<String, Object> opts, String lang) {
+    Messages.Translator t = Messages.translator(lang);
     String b = esc(base);
     return page(
         base,
-        "Join Runlight",
-        "<h1>Join Runlight</h1>\n"
-            + "<p>You were invited to "
-            + esc(opt(opts, "host", ""))
-            + " as "
-            + esc(roleText(opt(opts, "role", ""), (String) opts.get("site")))
-            + ". Choose a password to finish.</p>\n"
+        lang,
+        t.t("auth.joinTitle"),
+        "<h1>"
+            + t.html("auth.joinTitle")
+            + "</h1>\n"
+            + "<p>"
+            + t.html(
+                "auth.joinIntro",
+                Map.of(
+                    "host",
+                    esc(opt(opts, "host", "")),
+                    "role",
+                    esc(roleText(opt(opts, "role", ""), (String) opts.get("site"), lang))))
+            + "</p>\n"
             + error(opts)
             + "\n<form method=\"post\" action=\""
             + b
@@ -325,82 +438,138 @@ public final class Pages {
             + "<input type=\"hidden\" name=\"code\" value=\""
             + esc(opt(opts, "code", ""))
             + "\">\n"
-            + "<label>Email<input type=\"email\" value=\""
+            + "<label>"
+            + t.html("auth.email")
+            + "<input type=\"email\" value=\""
             + esc(opt(opts, "email", ""))
             + "\" disabled></label>\n"
-            + "<label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required autofocus></label>\n"
-            + "<label>Password again<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n"
-            + "<button type=\"submit\">Join</button>\n"
+            + "<label>"
+            + t.html("auth.password")
+            + "<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required autofocus></label>\n"
+            + "<label>"
+            + t.html("auth.passwordAgain")
+            + "<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n"
+            + "<button type=\"submit\">"
+            + t.html("auth.join")
+            + "</button>\n"
             + "</form>\n"
-            + "<p class=\"hint\">Use at least ten characters.</p>");
+            + "<p class=\"hint\">"
+            + t.html("auth.passwordHint")
+            + "</p>");
   }
 
   public static String inviteGonePage(String base) {
+    return inviteGonePage(base, "en");
+  }
+
+  public static String inviteGonePage(String base, String lang) {
+    Messages.Translator t = Messages.translator(lang);
     return page(
         base,
-        "This invite no longer works",
-        "<h1>This invite no longer works</h1>\n"
-            + "<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>");
+        lang,
+        t.t("auth.inviteGoneTitle"),
+        "<h1>"
+            + t.html("auth.inviteGoneTitle")
+            + "</h1>\n<p>"
+            + t.html("auth.inviteGone")
+            + "</p>");
+  }
+
+  public static String setupPage(String base, Map<String, Object> opts) {
+    return setupPage(base, opts, "en");
   }
 
   /** The first account's form; opts are code, error, email, and askCode. */
-  public static String setupPage(String base, Map<String, Object> opts) {
+  public static String setupPage(String base, Map<String, Object> opts, String lang) {
+    Messages.Translator t = Messages.translator(lang);
     String b = esc(base);
     String code = esc(opt(opts, "code", ""));
     String field =
         Js.truthy(opts.get("askCode"))
-            ? "<label>Your RUNLIGHT_TOKEN<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\""
+            ? "<label>"
+                + t.html("auth.setupToken")
+                + "<input type=\"password\" name=\"code\" autocomplete=\"off\" required value=\""
                 + code
                 + "\"></label>"
             : "<input type=\"hidden\" name=\"code\" value=\"" + code + "\">";
     return page(
         base,
-        "Create your account",
-        "<h1>Create your account</h1>\n"
-            + "<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>\n"
+        lang,
+        t.t("auth.setupTitle"),
+        "<h1>"
+            + t.html("auth.setupTitle")
+            + "</h1>\n"
+            + "<p>"
+            + t.html("auth.setupIntro")
+            + "</p>\n"
             + error(opts)
             + "\n<form method=\"post\" action=\""
             + b
             + "/setup\">\n"
             + field
-            + "\n<label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\""
+            + "\n<label>"
+            + t.html("auth.email")
+            + "<input type=\"email\" name=\"email\" autocomplete=\"username\" required autofocus value=\""
             + esc(opt(opts, "email", ""))
             + "\"></label>\n"
-            + "<label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n"
-            + "<label>Password again<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n"
-            + "<button type=\"submit\">Create account</button>\n"
+            + "<label>"
+            + t.html("auth.password")
+            + "<input type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n"
+            + "<label>"
+            + t.html("auth.passwordAgain")
+            + "<input type=\"password\" name=\"again\" autocomplete=\"new-password\" minlength=\"10\" required></label>\n"
+            + "<button type=\"submit\">"
+            + t.html("auth.createAccount")
+            + "</button>\n"
             + "</form>\n"
-            + "<p class=\"hint\">Use at least ten characters.</p>");
+            + "<p class=\"hint\">"
+            + t.html("auth.passwordHint")
+            + "</p>");
   }
 
   /**
    * For a server with no account yet, which prints a setup link with a one-time code in its log.
    */
   public static String setupLockedPage(String base) {
-    return setupLockedPage(base, null);
+    return setupLockedPage(base, false, "en");
+  }
+
+  public static String setupLockedPage(String base, String lang) {
+    return setupLockedPage(base, false, lang);
   }
 
   /**
-   * As {@link #setupLockedPage(String)}, saying where the setup link is when it is not in a log
-   * (HTML).
+   * As {@link #setupLockedPage(String, String)}, for a server that keeps the setup link in the file
+   * setup.txt rather than printing it in its log.
    */
-  public static String setupLockedPage(String base, String where) {
-    String at = where == null ? "printed in the server's log when it started" : where;
+  public static String setupLockedPage(String base, boolean inFile, String lang) {
+    Messages.Translator t = Messages.translator(lang);
+    String text =
+        inFile
+            ? t.html("auth.setupLockedFile", Map.of("command", "<code>runlight setup</code>"))
+            : t.html("auth.setupLocked");
     return page(
         base,
-        "Finish setting up",
-        "<h1>Finish setting up</h1>\n"
-            + "<p>Runlight has no account yet. Open the setup link "
-            + at
-            + ", which carries a one-time code, to create the first account.</p>");
+        lang,
+        t.t("auth.finishTitle"),
+        "<h1>" + t.html("auth.finishTitle") + "</h1>\n<p>" + text + "</p>");
+  }
+
+  public static String setupNeedsTokenPage(String base) {
+    return setupNeedsTokenPage(base, "en");
   }
 
   /** For an app with accounts on but nothing to prove the first account with. */
-  public static String setupNeedsTokenPage(String base) {
+  public static String setupNeedsTokenPage(String base, String lang) {
+    Messages.Translator t = Messages.translator(lang);
     return page(
         base,
-        "Finish setting up",
-        "<h1>Finish setting up</h1>\n"
-            + "<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>");
+        lang,
+        t.t("auth.finishTitle"),
+        "<h1>"
+            + t.html("auth.finishTitle")
+            + "</h1>\n<p>"
+            + t.html("auth.setupNeedsToken")
+            + "</p>");
   }
 }

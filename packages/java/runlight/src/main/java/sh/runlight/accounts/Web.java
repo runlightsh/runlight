@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
 import sh.runlight.CodedError;
 import sh.runlight.Js;
 import sh.runlight.Json;
+import sh.runlight.Messages;
 import sh.runlight.http.Headers;
 import sh.runlight.http.Request;
 import sh.runlight.http.Response;
@@ -114,9 +115,6 @@ public final class Web {
   // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the
   // first one. Password re-checks in Account: ten.
   private final Throttle codeTries;
-  // A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up
-  // the owner's five.
-  private final Throttle decoyTries;
   private final Throttle confirmTries;
   private final Throttle rechecks;
 
@@ -124,8 +122,8 @@ public final class Web {
    * Accounts on the web, from options with the TypeScript's keys: runlight (a {@link Host}),
    * secret, base, now (a {@link LongSupplier} of milliseconds), firstAccount ("open", "locked", or
    * a map with code or token), home (an optional {@link Supplier} of the install's own origin),
-   * forgot, and setupWhere (optional: where to find the setup link with the one-time code when it
-   * is not in a log, as HTML).
+   * forgot, and setupWhere (optional: when set, the setup page says the link is in the file
+   * setup.txt rather than in the log; the text itself is only tested for being there).
    */
   public Web(Map<String, Object> options) {
     this.rl = (Host) options.get("runlight");
@@ -147,7 +145,6 @@ public final class Web {
     this.perAccount = new Throttle(store, "account", 50);
     this.perIp = new Throttle(store, "ip", 30);
     this.codeTries = new Throttle(store, "code", 5);
-    this.decoyTries = new Throttle(store, "decoy", 5);
     this.confirmTries = new Throttle(store, "confirm", 5);
     this.rechecks = new Throttle(store, "recheck", 10);
   }
@@ -425,9 +422,11 @@ public final class Web {
   }
 
   /** Why there is no setup form. */
-  private Response setupLocked() {
+  private Response setupLocked(String lang) {
     return html(
-        isLocked() ? Pages.setupNeedsTokenPage(base) : Pages.setupLockedPage(base, setupWhere),
+        isLocked()
+            ? Pages.setupNeedsTokenPage(base, lang)
+            : Pages.setupLockedPage(base, setupWhere != null, lang),
         403);
   }
 
@@ -540,6 +539,8 @@ public final class Web {
     Url url = new Url(request.url());
     SearchParams query = url.searchParams();
     String method = request.method();
+    String lang = Messages.acceptedLanguage(request);
+    Messages.Translator t = Messages.translator(lang);
     if (path.equals("/auth.css")) {
       return new Response(
           Pages.AUTH_CSS,
@@ -549,7 +550,7 @@ public final class Web {
     }
     if (path.equals("/auth.js")) {
       return new Response(
-          Pages.AUTH_JS,
+          Pages.authJs(query.get("lang") == null ? "en" : query.get("lang")),
           200,
           Headers.of(
               "content-type",
@@ -565,15 +566,16 @@ public final class Web {
       if (method.equals("GET")) {
         String code = query.get("code") == null ? "" : query.get("code");
         if (isLocked()) {
-          return setupLocked();
+          return setupLocked(lang);
         }
         // The app's token is typed in; the server's code comes in the link it printed.
         if (asksForToken || isOpen()) {
-          return html(Pages.setupPage(base, Json.object("code", "", "askCode", asksForToken)));
+          return html(
+              Pages.setupPage(base, Json.object("code", "", "askCode", asksForToken), lang));
         }
         return setupOk(code)
-            ? html(Pages.setupPage(base, Json.object("code", code)))
-            : setupLocked();
+            ? html(Pages.setupPage(base, Json.object("code", code), lang))
+            : setupLocked(lang);
       }
       if (method.equals("POST")) {
         SearchParams form = new SearchParams(request.text());
@@ -589,19 +591,19 @@ public final class Web {
                         "askCode",
                         true,
                         "error",
-                        "That is not this app's RUNLIGHT_TOKEN.",
+                        t.t("auth.tokenWrong"),
                         "email",
-                        formValue(form, "email"))),
+                        formValue(form, "email")),
+                    lang),
                 403);
           }
-          return setupLocked();
+          return setupLocked(lang);
         }
         // Asked twice, since a typo here would lock the first owner out.
         if (!formValue(form, "password").equals(formValue(form, "again"))) {
           return html(
               Pages.setupPage(
-                  base,
-                  setupOpts(code, "The two passwords are not the same.", formValue(form, "email"))),
+                  base, setupOpts(code, t.t("auth.mismatch"), formValue(form, "email")), lang),
               400);
         }
         try {
@@ -611,7 +613,8 @@ public final class Web {
           return redirect(homePath, "set-cookie", freshSession(request, user, now()));
         } catch (AccountError error) {
           return html(
-              Pages.setupPage(base, setupOpts(code, error.getMessage(), formValue(form, "email"))),
+              Pages.setupPage(
+                  base, setupOpts(code, reason(error, lang), formValue(form, "email")), lang),
               400);
         }
       }
@@ -620,14 +623,14 @@ public final class Web {
     if (path.equals("/login")) {
       if (!hasAccount()) {
         if (isLocked()) {
-          return setupLocked();
+          return setupLocked(lang);
         }
-        return isOpen() || asksForToken ? redirect(base + "/setup") : setupLocked();
+        return isOpen() || asksForToken ? redirect(base + "/setup") : setupLocked(lang);
       }
       if (method.equals("GET")) {
         return html(
             Pages.loginPage(
-                base, Json.object("next", safeNext(query.get("next")), "forgot", forgot)));
+                base, Json.object("next", safeNext(query.get("next")), "forgot", forgot), lang));
       }
       if (method.equals("POST")) {
         return login(request, context);
@@ -644,19 +647,16 @@ public final class Web {
         return html(
             Pages.loginPage(
                 base,
-                Json.object(
-                    "error",
-                    "That sign-in link has run out. Sign in again.",
-                    "next",
-                    next,
-                    "forgot",
-                    forgot)),
+                Json.object("error", t.t("auth.linkExpired"), "next", next, "forgot", forgot),
+                lang),
             410);
       }
       if (Boolean.TRUE.equals(user.get("twoFactor"))) {
         return html(
             Pages.codePage(
-                base, Json.object("pending", accounts.pendingFor(user, now()), "next", next)));
+                base,
+                Json.object("pending", accounts.pendingFor(user, now()), "next", next),
+                lang));
       }
       return signedInTo(request, user, next);
     }
@@ -664,15 +664,13 @@ public final class Web {
     if (path.equals("/login/code") && method.equals("POST")) {
       SearchParams form = new SearchParams(request.text());
       String next = safeNext(form.get("next"));
-      Map<String, Object> pending = accounts.fromPending(formValue(form, "pending"), now());
-      if (pending == null) {
+      Map<String, Object> user = accounts.fromPending(formValue(form, "pending"), now());
+      if (user == null) {
         return redirect(base + "/login?next=" + Js.encodeURIComponent(next));
       }
-      Map<String, Object> user = Js.map(pending.get("user"));
       String id = (String) user.get("id");
-      boolean real = Boolean.TRUE.equals(pending.get("real"));
       // Counted before the check, so a burst cannot get past five.
-      if (!(real ? codeTries : decoyTries).take(id, now())) {
+      if (!codeTries.take(id, now())) {
         return html(
             Pages.codePage(
                 base,
@@ -682,10 +680,11 @@ public final class Web {
                     "next",
                     next,
                     "error",
-                    "Too many tries. Wait fifteen minutes and try again.")),
+                    t.t("error.too_many_tries")),
+                lang),
             429);
       }
-      if (!real || !accounts.checkSecondFactor(id, formValue(form, "code"), now())) {
+      if (!accounts.checkSecondFactor(id, formValue(form, "code"), now())) {
         return html(
             Pages.codePage(
                 base,
@@ -695,7 +694,8 @@ public final class Web {
                     "next",
                     next,
                     "error",
-                    "That code is not right. Check the time on your phone, or use a recovery code.")),
+                    t.t("auth.codeWrong")),
+                lang),
             401);
       }
       codeTries.clear(id, now());
@@ -724,18 +724,19 @@ public final class Web {
                         "site",
                         invite.get("site"),
                         "host",
-                        url.host())))
-            : html(Pages.inviteGonePage(base), 410);
+                        url.host()),
+                    lang))
+            : html(Pages.inviteGonePage(base, lang), 410);
       }
       if (method.equals("POST")) {
         SearchParams form = new SearchParams(request.text());
         String code = formValue(form, "code");
         Map<String, Object> invite = accounts.inviteByCode(code, now());
         if (invite == null) {
-          return html(Pages.inviteGonePage(base), 410);
+          return html(Pages.inviteGonePage(base, lang), 410);
         }
         if (!formValue(form, "password").equals(formValue(form, "again"))) {
-          return inviteAgain(invite, code, url, "The two passwords are not the same.");
+          return inviteAgain(invite, code, url, t.t("auth.mismatch"), lang);
         }
         try {
           Map<String, Object> user =
@@ -744,16 +745,17 @@ public final class Web {
           return redirect(homePath, "set-cookie", freshSession(request, user, now()));
         } catch (AccountError error) {
           if (error.code().equals("invite_gone")) {
-            return html(Pages.inviteGonePage(base), 410);
+            return html(Pages.inviteGonePage(base, lang), 410);
           }
-          return inviteAgain(invite, code, url, error.getMessage());
+          return inviteAgain(invite, code, url, reason(error, lang), lang);
         }
       }
     }
     return null;
   }
 
-  private Response inviteAgain(Map<String, Object> invite, String code, Url url, String error) {
+  private Response inviteAgain(
+      Map<String, Object> invite, String code, Url url, String error, String lang) {
     return html(
         Pages.invitePage(
             base,
@@ -769,7 +771,8 @@ public final class Web {
                 "host",
                 url.host(),
                 "error",
-                error)),
+                error),
+            lang),
         400);
   }
 
@@ -780,13 +783,15 @@ public final class Web {
     String next = safeNext(form.get("next"));
     String account = Js.lower(Js.trim(email));
     String ip = rl.clientIp(request, context);
+    String lang = Messages.acceptedLanguage(request);
+    Messages.Translator t = Messages.translator(lang);
     boolean knownIp = ip != null && !ip.isEmpty();
     String pair = account + "\n" + (knownIp ? ip : "unknown");
     if (knownIp && !perIp.take(ip, now())) {
-      return loginAgain("Too many tries. Wait fifteen minutes and try again.", email, next, 429);
+      return loginAgain(t.t("error.too_many_tries"), email, next, 429, lang);
     }
     if (!perAddress.take(pair, now())) {
-      return loginAgain("Too many tries. Wait fifteen minutes and try again.", email, next, 429);
+      return loginAgain(t.t("error.too_many_tries"), email, next, 429, lang);
     }
     try {
       return checkLogin(request, email, password, next, account, pair, knownIp ? ip : null);
@@ -794,7 +799,7 @@ public final class Web {
       // Too many password checks already waiting, so this one was never run: try again in a
       // moment.
       if (error.code().equals("busy")) {
-        Response busy = loginAgain(error.getMessage(), email, next, 503);
+        Response busy = loginAgain(reason(error, lang), email, next, 503, lang);
         busy.headers().set("retry-after", "5");
         return busy;
       }
@@ -810,19 +815,21 @@ public final class Web {
       String account,
       String pair,
       String ip) {
+    String lang = Messages.acceptedLanguage(request);
+    Messages.Translator t = Messages.translator(lang);
     // A browser that signed in to the account before is never held up by others' failures.
     Map<String, Object> known = accounts.byEmail(account);
     boolean trusted =
         known != null && accounts.trustsDevice(readCookie(request, DEVICE_COOKIE), known);
     boolean over = !trusted && !perAccount.take(account, now());
-    // Past the account's limit, a right password and a wrong one get the same answer, so guessing
-    // from many addresses learns nothing, and the owner still gets in. With two-factor on, both
-    // reach the code step, where a wrong password's ticket never passes. Without it, a right
-    // password emails a sign-in link.
-    if (over && !(known != null && Boolean.TRUE.equals(known.get("twoFactor")))) {
+    // Past the account's limit, a right password and a wrong one get the same answer, and so does
+    // every account, with two-factor on or not, and an email with no account, so guessing from many
+    // addresses learns nothing about either. The owner still gets in: a right password emails a
+    // sign-in link, which leads to the code step when two-factor is on.
+    if (over) {
       String origin = homeOrigin();
       if (rl.mailSettings() == null || origin == null || origin.isEmpty()) {
-        return loginAgain("Too many tries. Wait fifteen minutes and try again.", email, next, 429);
+        return loginAgain(t.t("error.too_many_tries"), email, next, 429, lang);
       }
       Map<String, Object> user = accounts.signIn(email, password);
       if (user != null) {
@@ -838,42 +845,48 @@ public final class Web {
               }
             });
       }
-      return loginAgain(
-          "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.",
-          email,
-          next,
-          429);
+      return loginAgain(t.t("auth.tooManyLink"), email, next, 429, lang);
     }
     Map<String, Object> user = accounts.signIn(email, password);
     if (user == null) {
-      if (over && known != null) {
-        return html(
-            Pages.codePage(
-                base, Json.object("pending", accounts.decoyFor(known, now()), "next", next)));
-      }
-      return loginAgain("That email and password do not match an account.", email, next, 401);
+      return loginAgain(t.t("auth.wrongPassword"), email, next, 401, lang);
     }
     perAddress.clear(pair, now());
     if (ip != null) {
       perIp.forgive(ip, now());
     }
-    if (!over && !trusted) {
+    if (!trusted) {
       perAccount.forgive(account, now());
     }
     // With two-factor on, the password only earns the second step.
     if (Boolean.TRUE.equals(user.get("twoFactor"))) {
       return html(
           Pages.codePage(
-              base, Json.object("pending", accounts.pendingFor(user, now()), "next", next)));
+              base, Json.object("pending", accounts.pendingFor(user, now()), "next", next), lang));
     }
     return signedInTo(request, user, next);
   }
 
-  private Response loginAgain(String error, String email, String next, int status) {
+  private Response loginAgain(String error, String email, String next, int status, String lang) {
     return html(
         Pages.loginPage(
-            base, Json.object("error", error, "email", email, "next", next, "forgot", forgot)),
+            base,
+            Json.object("error", error, "email", email, "next", next, "forgot", forgot),
+            lang),
         status);
+  }
+
+  /**
+   * An account's problem in the visitor's language, where the dashboard has words for it; English
+   * as it was thrown.
+   */
+  private static String reason(AccountError error, String lang) {
+    Messages.Translator t = Messages.translator(lang);
+    String key = "error." + error.code();
+    if (lang.equals("en") || t.t(key).equals(key)) {
+      return error.getMessage();
+    }
+    return t.t(key, error.params() == null ? Map.of() : error.params());
   }
 
   /**
@@ -1272,7 +1285,9 @@ public final class Web {
         && request.method().equals("GET")
         && signedIn(request) == null) {
       if (!hasAccount()) {
-        return isOpen() || asksForToken ? redirect(base + "/setup") : setupLocked();
+        return isOpen() || asksForToken
+            ? redirect(base + "/setup")
+            : setupLocked(Messages.acceptedLanguage(request));
       }
       String search = new Url(request.url()).search;
       return redirect(
