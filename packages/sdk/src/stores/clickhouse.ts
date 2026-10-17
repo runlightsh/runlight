@@ -971,34 +971,39 @@ export class ClickHouseStore extends SqlStore {
     const copied = { visits: 0, events: 0 };
     const sites = (await this.clickhouse.all<{ site: string }>(`SELECT DISTINCT site FROM rl_visits UNION DISTINCT SELECT DISTINCT site FROM rl_events`)).map((s) => s.site);
     const visitColumns = ["id", "site", "visitor", "started_at", "last_at", "entry_path", "exit_path", "pageviews", "events", "engaged_ms", "imported", ...VISIT_TEXT];
+    // A day at a time, so each query reads and sorts one day's rows rather than the whole table.
     for (const site of sites) {
-      let after: { at: number; id: string } | null = null;
-      for (;;) {
-        const rows: Array<Record<string, unknown>> = await this.clickhouse.all(
-          `SELECT ${visitColumns.join(", ")} FROM rl_sessions WHERE site = ?${after ? " AND (started_at > ? OR (started_at = ? AND id > ?))" : ""} ORDER BY started_at, id LIMIT ${COPY_BATCH}`,
-          after ? [site, after.at, after.at, after.id] : [site],
-        );
-        if (!rows.length) break;
-        await this.insertRows("rl_sessions", visitColumns, rows);
-        copied.visits += rows.length;
-        onProgress?.(copied);
-        if (rows.length < COPY_BATCH) break;
-        const last = rows[rows.length - 1]!;
-        after = { at: Number(last.started_at), id: String(last.id) };
+      for (let day = await this.firstFrom("rl_visits", "started_at", site, 0); day !== null; day = await this.firstFrom("rl_visits", "started_at", site, day + 86_400_000)) {
+        let after: { at: number; id: string } | null = null;
+        for (;;) {
+          const rows: Array<Record<string, unknown>> = await this.clickhouse.all(
+            `SELECT ${visitColumns.join(", ")} FROM rl_sessions WHERE site = ? AND started_at >= ? AND started_at < ?${after ? " AND (started_at > ? OR (started_at = ? AND id > ?))" : ""} ORDER BY started_at, id LIMIT ${COPY_BATCH}`,
+            [site, day, day + 86_400_000, ...(after ? [after.at, after.at, after.id] : [])],
+          );
+          if (!rows.length) break;
+          await this.insertRows("rl_sessions", visitColumns, rows);
+          copied.visits += rows.length;
+          onProgress?.(copied);
+          if (rows.length < COPY_BATCH) break;
+          const last = rows[rows.length - 1]!;
+          after = { at: Number(last.started_at), id: String(last.id) };
+        }
       }
-      let next: { ts: number; id: string } | null = null;
-      for (;;) {
-        const rows: Array<Record<string, unknown>> = await this.clickhouse.all(
-          `SELECT ${EVENT_COLUMNS.join(", ")}, toString(id) AS row_id FROM rl_events WHERE site = ?${next ? " AND (ts > ? OR (ts = ? AND toString(id) > ?))" : ""} ORDER BY ts, row_id LIMIT ${COPY_BATCH}`,
-          next ? [site, next.ts, next.ts, next.id] : [site],
-        );
-        if (!rows.length) break;
-        await this.insertRows("rl_events", [...EVENT_COLUMNS], rows);
-        copied.events += rows.length;
-        onProgress?.(copied);
-        if (rows.length < COPY_BATCH) break;
-        const last = rows[rows.length - 1]!;
-        next = { ts: Number(last.ts), id: String(last.row_id) };
+      for (let day = await this.firstFrom("rl_events", "ts", site, 0); day !== null; day = await this.firstFrom("rl_events", "ts", site, day + 86_400_000)) {
+        let next: { ts: number; id: string } | null = null;
+        for (;;) {
+          const rows: Array<Record<string, unknown>> = await this.clickhouse.all(
+            `SELECT ${EVENT_COLUMNS.join(", ")}, toString(id) AS row_id FROM rl_events WHERE site = ? AND ts >= ? AND ts < ?${next ? " AND (ts > ? OR (ts = ? AND toString(id) > ?))" : ""} ORDER BY ts, row_id LIMIT ${COPY_BATCH}`,
+            [site, day, day + 86_400_000, ...(next ? [next.ts, next.ts, next.id] : [])],
+          );
+          if (!rows.length) break;
+          await this.insertRows("rl_events", [...EVENT_COLUMNS], rows);
+          copied.events += rows.length;
+          onProgress?.(copied);
+          if (rows.length < COPY_BATCH) break;
+          const last = rows[rows.length - 1]!;
+          next = { ts: Number(last.ts), id: String(last.row_id) };
+        }
       }
     }
     await this.clickhouse.run(`TRUNCATE TABLE rl_visits`);
@@ -1006,6 +1011,12 @@ export class ClickHouseStore extends SqlStore {
     this.keys.clear();
     // Switched on again later, ClickHouse copies everything afresh.
     await this.setMeta("move", "");
+  }
+
+  /** The earliest `col` in a ClickHouse table for `site` at `from` or later, or null when there is none. */
+  private async firstFrom(table: string, col: string, site: string, from: number): Promise<number | null> {
+    const [row] = await this.clickhouse.all<{ t: unknown }>(`SELECT min(${col}) AS t FROM ${table} WHERE site = ? AND ${col} >= ?`, [site, from]);
+    return row?.t === null || row?.t === undefined ? null : Number(row.t);
   }
 
   /** Rows into the other store, a few hundred to a statement, each statement its own transaction. */
