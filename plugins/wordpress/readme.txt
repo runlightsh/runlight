@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.7
+Stable tag: 0.1.8
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -121,7 +121,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.1.8 =
 * Fixed share links and embedded dashboards when the plugin runs Runlight itself. Since 0.1.7 everyone but a signed-in admin was refused.
 * Wrote database values to suit a MySQL server set to NO_BACKSLASH_ESCAPES, reading the mode from WordPress's own connection.
 * Honoured the X-Forwarded-Proto header behind a proxy.
