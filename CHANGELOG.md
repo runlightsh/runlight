@@ -29,8 +29,24 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - New password hashes cost more (scrypt at N=32768, r=8, p=3, one of OWASP's settings) and record their cost, so it can rise again. A password hashed before is checked as before, and hashed again at the new cost the next time it signs in, which signs out that account's other browsers once.
 - Go on MySQL or MariaDB: every session drops `NO_BACKSLASH_ESCAPES`, an app's own pool's as well as the standalone server's, as the other languages already did, and a quote in a value is doubled rather than escaped with a backslash. On a server set to that mode, a quote in a tracker hit could end a value early and run SQL of its own. The standalone server's two-minute statement timeout now applies to every session too, where before it reached only the one that created the tables.
 
+- Ruby, PHP, and Elixir honour the first `X-Forwarded-Proto` of http or https behind a proxy, as TypeScript does.
+- Java and PHP on MySQL or MariaDB drop `NO_BACKSLASH_ESCAPES` on every session, as the other languages do. The WordPress plugin, which shares WordPress's own connection, reads the mode once and writes values to suit it.
+- Ruby's HTTP fetcher refuses a redirect from https to http, and drops the authorization, cookie, and API key headers when a redirect goes to another origin.
+- Rust, Java, and .NET cap what they pass through from a connected install at 100 MiB, as Go does, answering 502 past it.
+- Python's standalone server keeps answering while idle connections are held open, rather than letting a few of them take every worker.
 ### Fixed
 
+- The sign-in, setup, invitation, two-factor, and OAuth pages speak the browser's language where the dashboard does, in every language, rather than always English. The page shown before the first account is made says where to find its setup link in that language too.
+- Goals come back in their own order, however each was counted, rather than with the ones counted from rollups first.
+- Hostnames with capitals, full-width dots, or characters that map to others are read the way browsers read them in Go and Elixir, and the IPv4 reader in Python, Ruby, PHP, and Elixir refuses a part such as `08` or more than four parts, as `new URL()` does.
+- Sites are listed in the same order in every language, using the assistant's collation in Go, Rust, Python, and Ruby rather than a rough copy.
+- The dashboard's faint text, such as every panel's column headings, reaches WCAG AA contrast in both themes. Light mode's secondary text is a step darker to keep the two greys apart.
+- The date and comparison pickers hand keyboard focus back to their button when they close, and close when focus tabs past them, rather than dropping focus to the top of the page or staying open.
+- When a new range or filter fails to load, the cards, chart, and panels show the error alone, rather than the range before's numbers under the new range's name.
+- A request that never reaches the server, or a proxy's own error page, shows a message in the dashboard's language with the status, rather than the browser's English, or nothing at all over HTTP/2.
+- Code samples in the dashboard take keyboard focus, so a long line can be scrolled without a mouse.
+- A single page app's pageview carries the title its new page sets, where the title of the page before was sent, since a router changes the address before the page sets its title.
+- A local `docker build` leaves the other languages' build output out of its context, which sent tens of gigabytes after a Rust build.
 - A visitor's first two hits reaching two app servers at the same moment open one visit, not two each counted as a bounce: after opening a visit, a server checks for one the other opened just then, and both go on with the earlier. A small window remains, about one race in sixty in a test of two servers on one Postgres.
 - An install with one site can invite an admin again, who is then an admin for the whole install, so ownership can be handed over. Since the invitation form hid its all-sites choice there, everyone invited was kept to the site.
 - The dashboard reads its numbers again once a site's first visit arrives, rather than showing the zeros it read moments before for up to ten seconds.
