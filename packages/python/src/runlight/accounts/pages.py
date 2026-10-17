@@ -7,7 +7,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .. import _js
 from ..brand import RUNLIGHT_ICON
+from ..messages import translator
 
 _ESCAPES = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}
 _SPECIAL = re.compile("[&<>\"']")
@@ -169,12 +171,41 @@ AUTH_JS = """(() => {
   });
 })();"""
 
-THEME_BUTTON = '<button type="button" class="theme" aria-label="Switch theme"><svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg></button>'
+def auth_js(lang: str = "en") -> str:
+    """AUTH_JS with its words in a language the dashboard speaks. English is served as auth.js, the others as
+    auth.js?lang=fr and so on."""
+    t, code = translator(lang).t, translator(lang).lang
+    if code == "en":
+        return AUTH_JS
+
+    def q(key: str) -> str:
+        return _js.dumps(t(key))
+
+    def swap(script: str, old: str, new: str) -> str:
+        assert old in script, old
+        return script.replace(old, new, 1)
+
+    out = swap(
+        AUTH_JS,
+        'button.title = c === "system" ? "Theme: device setting" : "Theme: " + c;',
+        f'button.title = c === "system" ? {q("auth.themeSystem")} : c === "dark" ? {q("auth.themeDark")} : {q("auth.themeLight")};',
+    )
+    out = swap(
+        out,
+        'eye.setAttribute("aria-label", shown ? "Hide password" : "Show password");\n        eye.title = shown ? "Hide password" : "Show password";',
+        f'eye.setAttribute("aria-label", shown ? {q("auth.hidePassword")} : {q("auth.showPassword")});\n        eye.title = shown ? {q("auth.hidePassword")} : {q("auth.showPassword")};',
+    )
+    return swap(out, '["Too short", "Weak", "Fair", "Good", "Strong"][score]', f"[{', '.join(q(f'account.strength{n}') for n in range(5))}][score]")
 
 
-def _page(base: str, title: str, body: str) -> str:
+THEME_ICONS = '<svg data-choice="light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg><svg data-choice="dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg><svg data-choice="system" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg>'
+
+
+def _page(base: str, lang: str, title: str, body: str) -> str:
+    t, code = translator(lang).t, translator(lang).lang
+    script = "" if code == "en" else f"?lang={code}"
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{code}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -182,14 +213,14 @@ def _page(base: str, title: str, body: str) -> str:
 <title>{_esc(title)} | Runlight</title>
 <link rel="icon" href="{RUNLIGHT_ICON}">
 <link rel="stylesheet" href="{_esc(base)}/auth.css">
-<script src="{_esc(base)}/auth.js"></script>
+<script src="{_esc(base)}/auth.js{script}"></script>
 </head>
 <body>
 <main>
 <p class="brand">{MARK}Runlight</p>
 {body}
 </main>
-{THEME_BUTTON}
+<button type="button" class="theme" aria-label="{_esc(t("auth.switchTheme"))}">{THEME_ICONS}</button>
 </body>
 </html>
 """
@@ -199,92 +230,109 @@ def _error(error: Any) -> str:
     return f'<p class="error" role="alert">{_esc(error)}</p>' if error else ""
 
 
-def login_page(base: str, opts: dict[str, Any]) -> str:
+def login_page(base: str, opts: dict[str, Any], lang: str = "en") -> str:
     """opts: error, email, and next (all optional), and forgot."""
+    tr = translator(lang)
+    t, html = tr.t, tr.html
     given = opts.get("next")
     nxt = f"{base}/" if given is None else given
     error = _error(opts.get("error"))
     email = _esc(opts.get("email") or "")
+    forgot = html("auth.forgot", {"link": f'<a href="{_esc(opts["forgot"])}" target="_blank" rel="noopener">{html("auth.forgotLink")}</a>'})
     return _page(
         base,
-        "Sign in",
-        f"""<h1>Sign in</h1>
-<p>Sign in to see your sites.</p>
+        lang,
+        t("auth.signIn"),
+        f"""<h1>{html("auth.signIn")}</h1>
+<p>{html("auth.signInIntro")}</p>
 {error}
 <form method="post" action="{_esc(base)}/login">
 <input type="hidden" name="next" value="{_esc(nxt)}">
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
-<label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
+<label>{html("auth.email")}<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
+<label>{html("auth.password")}<input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">{html("auth.signIn")}</button>
 </form>
-<p class="hint">If you have forgotten your password, <a href="{_esc(opts['forgot'])}" target="_blank" rel="noopener">the docs say how to set a new one</a>.</p>""",
+<p class="hint">{forgot}</p>""",
     )
 
 
-def code_page(base: str, opts: dict[str, Any]) -> str:
+def code_page(base: str, opts: dict[str, Any], lang: str = "en") -> str:
     """The second step of signing in, for an account with two-factor on. opts: pending, next, and error."""
+    tr = translator(lang)
+    t, html = tr.t, tr.html
     error = _error(opts.get("error"))
     return _page(
         base,
-        "Enter your code",
-        f"""<h1>Enter your code</h1>
-<p>Open your authenticator app and enter the six-digit code for Runlight.</p>
+        lang,
+        t("auth.codeTitle"),
+        f"""<h1>{html("auth.codeTitle")}</h1>
+<p>{html("auth.codeIntro")}</p>
 {error}
 <form method="post" action="{_esc(base)}/login/code">
 <input type="hidden" name="pending" value="{_esc(opts['pending'])}">
 <input type="hidden" name="next" value="{_esc(opts['next'])}">
-<label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
-<button type="submit">Sign in</button>
+<label>{html("auth.code")}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required autofocus></label>
+<button type="submit">{html("auth.signIn")}</button>
 </form>
-<p class="hint">Lost your phone? Enter one of your recovery codes instead. Each works once.</p>""",
+<p class="hint">{html("auth.codeHint")}</p>""",
     )
 
 
-def role_text(role: str, site: str | None = None) -> str:
-    if site is not None:
-        return f"a viewer, who can read the stats for {site} only" if role == "viewer" else f"a member, who can change the settings of {site} only"
+def role_text(role: str, site: str | None = None, lang: str = "en") -> str:
     """What someone invited with a role can do, after "as"."""
+    t = translator(lang).t
+    if site is not None:
+        return t("auth.roleViewerSite", {"site": site}) if role == "viewer" else t("auth.roleMemberSite", {"site": site})
     if role == "viewer":
-        return "a viewer, who can read every site's stats"
+        return t("auth.roleViewer")
     if role == "member":
-        return "a member, who can change the settings of every site"
-    return "an admin, who can change everything and manage people"
+        return t("auth.roleMember")
+    return t("auth.roleAdmin")
 
 
-def invite_page(base: str, opts: dict[str, Any]) -> str:
+def invite_page(base: str, opts: dict[str, Any], lang: str = "en") -> str:
     """Where an invited person chooses a password and joins. opts: code, email, role, host, and error."""
+    tr = translator(lang)
+    t, html = tr.t, tr.html
     error = _error(opts.get("error"))
+    intro = html("auth.joinIntro", {"host": _esc(opts["host"]), "role": _esc(role_text(opts["role"], opts.get("site"), lang))})
     return _page(
         base,
-        "Join Runlight",
-        f"""<h1>Join Runlight</h1>
-<p>You were invited to {_esc(opts['host'])} as {_esc(role_text(opts['role'], opts.get('site')))}. Choose a password to finish.</p>
+        lang,
+        t("auth.joinTitle"),
+        f"""<h1>{html("auth.joinTitle")}</h1>
+<p>{intro}</p>
 {error}
 <form method="post" action="{_esc(base)}/invite">
 <input type="hidden" name="code" value="{_esc(opts['code'])}">
-<label>Email<input type="email" value="{_esc(opts['email'])}" disabled></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Join</button>
+<label>{html("auth.email")}<input type="email" value="{_esc(opts['email'])}" disabled></label>
+<label>{html("auth.password")}<input type="password" name="password" autocomplete="new-password" minlength="10" required autofocus></label>
+<label>{html("auth.passwordAgain")}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">{html("auth.join")}</button>
 </form>
-<p class="hint">Use at least ten characters.</p>""",
+<p class="hint">{html("auth.passwordHint")}</p>""",
     )
 
 
-def invite_gone_page(base: str) -> str:
+def invite_gone_page(base: str, lang: str = "en") -> str:
+    tr = translator(lang)
+    t, html = tr.t, tr.html
     return _page(
         base,
-        "This invite no longer works",
-        """<h1>This invite no longer works</h1>
-<p>It has expired or was already used. Ask whoever invited you to send a new one.</p>""",
+        lang,
+        t("auth.inviteGoneTitle"),
+        f"""<h1>{html("auth.inviteGoneTitle")}</h1>
+<p>{html("auth.inviteGone")}</p>""",
     )
 
 
-def setup_page(base: str, opts: dict[str, Any]) -> str:
+def setup_page(base: str, opts: dict[str, Any], lang: str = "en") -> str:
     """opts: code, and optionally error, email, and askCode."""
+    tr = translator(lang)
+    t, html = tr.t, tr.html
     code = _esc(opts["code"])
     field = (
-        f'<label>Your RUNLIGHT_TOKEN<input type="password" name="code" autocomplete="off" required value="{code}"></label>'
+        f'<label>{html("auth.setupToken")}<input type="password" name="code" autocomplete="off" required value="{code}"></label>'
         if opts.get("askCode")
         else f'<input type="hidden" name="code" value="{code}">'
     )
@@ -292,38 +340,45 @@ def setup_page(base: str, opts: dict[str, Any]) -> str:
     email = _esc(opts.get("email") or "")
     return _page(
         base,
-        "Create your account",
-        f"""<h1>Create your account</h1>
-<p>This account owns the dashboard. You can invite more people later in Settings, Team Members.</p>
+        lang,
+        t("auth.setupTitle"),
+        f"""<h1>{html("auth.setupTitle")}</h1>
+<p>{html("auth.setupIntro")}</p>
 {error}
 <form method="post" action="{_esc(base)}/setup">
 {field}
-<label>Email<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
-<label>Password<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
-<label>Password again<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
-<button type="submit">Create account</button>
+<label>{html("auth.email")}<input type="email" name="email" autocomplete="username" required autofocus value="{email}"></label>
+<label>{html("auth.password")}<input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+<label>{html("auth.passwordAgain")}<input type="password" name="again" autocomplete="new-password" minlength="10" required></label>
+<button type="submit">{html("auth.createAccount")}</button>
 </form>
-<p class="hint">Use at least ten characters.</p>""",
+<p class="hint">{html("auth.passwordHint")}</p>""",
     )
 
 
-def setup_locked_page(base: str, where: str | None = None) -> str:
-    """For a server with no account yet, which prints a setup link with a one-time code in its log. `where` says
-    where else to find the link, when it is not in a log (HTML), as the PHP port's drop-in needs."""
-    where = "printed in the server's log when it started" if where is None else where
+def setup_locked_page(base: str, file: bool = False, lang: str = "en") -> str:
+    """For a server with no account yet, which prints a setup link with a one-time code in its log, or, with `file`,
+    keeps it in the file setup.txt in its data folder."""
+    tr = translator(lang)
+    t, html = tr.t, tr.html
+    text = html("auth.setupLockedFile", {"command": "<code>runlight setup</code>"}) if file else html("auth.setupLocked")
     return _page(
         base,
-        "Finish setting up",
-        f"""<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Open the setup link {where}, which carries a one-time code, to create the first account.</p>""",
+        lang,
+        t("auth.finishTitle"),
+        f"""<h1>{html("auth.finishTitle")}</h1>
+<p>{text}</p>""",
     )
 
 
-def setup_needs_token_page(base: str) -> str:
+def setup_needs_token_page(base: str, lang: str = "en") -> str:
     """For an app with accounts on but nothing to prove the first account with."""
+    tr = translator(lang)
+    t, html = tr.t, tr.html
     return _page(
         base,
-        "Finish setting up",
-        """<h1>Finish setting up</h1>
-<p>Runlight has no account yet. Set RUNLIGHT_TOKEN, or pass token to routes(), and open this page again. Creating the first account asks for it, so only whoever runs the app can.</p>""",
+        lang,
+        t("auth.finishTitle"),
+        f"""<h1>{html("auth.finishTitle")}</h1>
+<p>{html("auth.setupNeedsToken")}</p>""",
     )

@@ -199,7 +199,7 @@ def test_a_setup_link_can_say_where_it_is():
         "runlight": StandIn(store), "secret": "k" * 64, "base": "", "now": lambda: NOW, "firstAccount": {"code": "abc"},
         "forgot": FORGOT, "setupWhere": where,
     })  # fmt: skip
-    assert web.handle(Request("https://example.com/setup"), "/setup").text() == setup_locked_page("", where)
+    assert web.handle(Request("https://example.com/setup"), "/setup").text() == setup_locked_page("", True)
 
 
 def test_signing_in_and_out_never_leaves_the_app(h):

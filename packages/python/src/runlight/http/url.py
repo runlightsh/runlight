@@ -296,16 +296,22 @@ def _ipv4(host: str) -> str | None:
     parts = host.split(".")
     if parts and parts[-1] == "":
         parts.pop()
-    if not parts or len(parts) > 4:
+    if not parts:
         return None
     if not re.fullmatch(r"0x[0-9a-f]*|[0-9]+", parts[-1]):
         return None
+    # A host ending in a number is an address, so too many parts, or a digit past 7 in a part that starts with a 0
+    # (octal), is no host at all, as new URL() finds.
+    if len(parts) > 4:
+        raise InvalidUrl("Invalid URL")
     numbers: list[int] = []
     for part in parts:
         if re.fullmatch(r"0x[0-9a-f]*", part):
             numbers.append(int(part[2:] or "0", 16))
         elif re.fullmatch(r"0[0-7]+", part):
             numbers.append(int(part, 8))
+        elif re.fullmatch(r"0[0-9]+", part):
+            raise InvalidUrl("Invalid URL")
         elif re.fullmatch(r"[0-9]+", part):
             numbers.append(int(part))
         else:

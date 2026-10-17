@@ -16,8 +16,10 @@ cli.ts). Settings come from the environment:
 
 from __future__ import annotations
 
+import collections
 import io
 import re
+import selectors
 import signal
 import socket
 import sys
@@ -222,16 +224,113 @@ def _password(settings: Settings, email: str | None, out: IO[str]) -> int:
 
 class _ThreadingServer(WSGIServer):
     """Answers each request on one of a fixed number of threads, so a flood of connections waits its turn rather
-    than starting a thread, and holding memory, for every one."""
+    than starting a thread, and holding memory, for every one. A connection takes a thread only once the head of its
+    request has arrived, so ones held open and idle cannot use up the threads and keep everyone else waiting."""
 
     threads = 64
+    # How long a connection has to send the head of its request before it is closed, without having had a thread.
+    head_seconds = 10.0
+    # The most connections kept waiting for a head; past that the one waiting longest is closed.
+    waiting_most = 1024
+    # The head is looked at as far as this many bytes; past that the request is the handler's to refuse.
+    head_peek = 16 * 1024
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pool = ThreadPoolExecutor(self.threads, thread_name_prefix="runlight-http")
+        self._arrived: collections.deque[tuple[Any, Any]] = collections.deque()
+        self._arrived_lock = threading.Lock()
+        self._wake_read, self._wake_write = socket.socketpair()
+        self._wake_read.setblocking(False)
+        self._closing = False
+        self._watcher = threading.Thread(target=self._watch, name="runlight-heads", daemon=True)
+        self._watcher.start()
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        self._pool.submit(self._answer, request, client_address)
+        with self._arrived_lock:
+            self._arrived.append((request, client_address))
+        try:
+            self._wake_write.send(b"x")
+        except OSError:
+            pass
+
+    def _watch(self) -> None:
+        """Holds each new connection until the head of its request is there to read, then hands it to a thread. One
+        thread watches every waiting connection."""
+        selector = selectors.DefaultSelector()
+        selector.register(self._wake_read, selectors.EVENT_READ, None)
+        waiting: dict[Any, tuple[Any, float]] = {}
+        # Ones that have begun to send a head but not finished it. Looked at again every so often rather than when
+        # readable, since the bytes already there keep them readable.
+        begun: set[Any] = set()
+
+        def drop(connection: Any) -> None:
+            waiting.pop(connection, None)
+            begun.discard(connection)
+            try:
+                selector.unregister(connection)
+            except (KeyError, ValueError, OSError):
+                pass
+
+        def close(connection: Any) -> None:
+            drop(connection)
+            self.shutdown_request(connection)
+
+        def look(connection: Any) -> None:
+            """Hands the connection to a thread when its head is whole, closes it if it hung up, else keeps it."""
+            try:
+                head = connection.recv(self.head_peek, socket.MSG_PEEK)
+            except OSError:
+                close(connection)
+                return
+            if not head:
+                # Hung up without a word: nothing to answer.
+                close(connection)
+            elif b"\r\n\r\n" in head or b"\n\n" in head or len(head) >= self.head_peek:
+                client = waiting[connection][0]
+                drop(connection)
+                self._pool.submit(self._answer, connection, client)
+            elif connection not in begun:
+                begun.add(connection)
+                try:
+                    selector.unregister(connection)
+                except (KeyError, ValueError, OSError):
+                    pass
+
+        try:
+            while not self._closing:
+                for key, _ in selector.select(0.05 if begun else 1.0):
+                    if key.fileobj is self._wake_read:
+                        try:
+                            while self._wake_read.recv(4096):
+                                pass
+                        except OSError:
+                            pass
+                    elif key.fileobj in waiting:
+                        look(key.fileobj)
+                for connection in list(begun):
+                    if connection in waiting:
+                        look(connection)
+                now = time.monotonic()
+                for connection, (_, since) in list(waiting.items()):
+                    if now - since > self.head_seconds:
+                        close(connection)
+                with self._arrived_lock:
+                    arrived = list(self._arrived)
+                    self._arrived.clear()
+                for connection, client in arrived:
+                    # Past the most, the connection waiting longest goes, so new ones are not shut out by idle ones.
+                    while len(waiting) >= self.waiting_most:
+                        close(next(iter(waiting)))
+                    try:
+                        selector.register(connection, selectors.EVENT_READ, None)
+                        waiting[connection] = (client, time.monotonic())
+                    except (OSError, ValueError):
+                        self.shutdown_request(connection)
+        finally:
+            for connection in list(waiting):
+                close(connection)
+            selector.close()
 
     def _answer(self, request: Any, client_address: Any) -> None:
         try:
@@ -243,6 +342,14 @@ class _ThreadingServer(WSGIServer):
 
     def server_close(self) -> None:
         super().server_close()
+        self._closing = True
+        try:
+            self._wake_write.send(b"x")
+        except OSError:
+            pass
+        self._watcher.join(timeout=5)
+        self._wake_read.close()
+        self._wake_write.close()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 

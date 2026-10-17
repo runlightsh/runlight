@@ -2,11 +2,12 @@
  * Writes the pieces of Node's ICU the Python port's email reports need, which Python's standard library lacks
  * (packages/python/src/runlight/data/intl.json): region names and currency symbols in the dashboard's
  * languages, and each currency's default fraction digits. Then writes a fixture of Intl's output over many
- * inputs (packages/python/tests/fixtures/intl.json) for tests/test_intl.py to replay.
+ * inputs (packages/python/tests/fixtures/intl.json) for tests/test_intl.py to replay. With --check it writes
+ * nothing and only says whether both files are current, when this Node's ICU is the one that wrote them.
  *
- * Run from the repo root: node --import tsx scripts/python-intl.mts
+ * Run from the repo root: node --import tsx scripts/python-intl.mts [--check]
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const LANGS = ["en", "de", "es", "fr", "pt"];
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -57,7 +58,7 @@ for (const code of currencyCodes) {
 }
 
 const root = new URL("../packages/python/", import.meta.url);
-writeFileSync(new URL("src/runlight/data/intl.json", root), JSON.stringify({ regions, currencies, unknown, digits }) + "\n");
+const files: Array<[URL, string]> = [[new URL("src/runlight/data/intl.json", root), JSON.stringify({ icu: process.versions.icu, regions, currencies, unknown, digits }) + "\n"]];
 
 // The fixture: what reports.ts formats, over many inputs.
 const numbers = [0, 1, -1, 7, 12, 999, 1000, 1234, 12345, 123456, 1234567, -1234567, 0.5, 1.5, 2.5, -2.5, 0.05, 2.05, 1.005, 0.135, 0.1 + 0.2, 1e21, 1e-7, 123.456789, 9999.95, 99999.95, 0.0001, 3.14159, -0.4, NaN, Infinity, -Infinity, 1 / 3, 2 / 3, 0.995, 1.45, 1.55, 12.345];
@@ -99,8 +100,37 @@ for (const lang of LANGS) {
     cases.push({ lang, kind: "region", code, out });
   }
 }
-mkdirSync(new URL("tests/fixtures/", root), { recursive: true });
-writeFileSync(
+files.push([
   new URL("tests/fixtures/intl.json", root),
-  JSON.stringify({ description: "Intl.NumberFormat, DateTimeFormat, and DisplayNames as reports.ts uses them, from Node's ICU.", node: process.version, cases }, null, 1) + "\n",
-);
+  JSON.stringify({ description: "Intl.NumberFormat, DateTimeFormat, and DisplayNames as reports.ts uses them, from Node's ICU.", icu: process.versions.icu, cases }, null, 1) + "\n",
+]);
+
+const read = (file: URL): string | null => {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+};
+if (process.argv.includes("--check")) {
+  // Another ICU (CI's Node, say) writes other data, so only the ICU that wrote the files compares them, as
+  // scripts/elixir-intl.mts does.
+  let icu: unknown;
+  try {
+    icu = JSON.parse(read(files[0]![0]) ?? "").icu;
+  } catch {}
+  if (typeof icu === "string" && icu !== process.versions.icu) {
+    console.log(`python-intl: the data was written from ICU ${icu}, this Node has ${process.versions.icu}`);
+    process.exit(0);
+  }
+  const stale = files.filter(([file, text]) => read(file) !== text).map(([file]) => file.pathname);
+  if (stale.length) {
+    console.error(`python-intl: ${stale.join(", ")} stale. Run node --import tsx scripts/python-intl.mts (Node ${process.versions.node}, ICU ${process.versions.icu})`);
+    process.exit(1);
+  }
+  console.log("python-intl: up to date");
+} else {
+  mkdirSync(new URL("tests/fixtures/", root), { recursive: true });
+  for (const [file, text] of files) writeFileSync(file, text);
+  console.log("python-intl: written");
+}

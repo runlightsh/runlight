@@ -35,19 +35,35 @@ from typing import Any
 from . import _js
 from .hash import hmac, random_id, sha256
 from .http import Request, Response, SearchParams, Url
+from .messages import accepted_language, translator
+from .mail.secret import seal, unseal
 
 SCOPES = ["read", "manage", "cms"]
 
 
 def agents_key(runlight: Any, site: str, replace: bool = False) -> str:
     """The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
-    replaces it."""
+    replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied database
+    alone cannot report for the site; one kept before as plain text is sealed the next time it is read."""
     name = f"observe-key:{site}"
     if not replace:
-        return runlight.store.setting_or_add(name, lambda: f"rlo_{random_id(20)}")
+        made = seal(f"rlo_{random_id(20)}", runlight.secret)
+        stored = runlight.store.setting_or_add(name, lambda: made)
+        key = open_agents_key(runlight, stored)
+        if key and stored.startswith("rlo_"):
+            runlight.store.set_setting(name, seal(key, runlight.secret))
+        # One sealed under a secret the server no longer has cannot be shown or checked, so it is replaced.
+        if key:
+            return key
     key = f"rlo_{random_id(20)}"
-    runlight.store.set_setting(name, key)
+    runlight.store.set_setting(name, seal(key, runlight.secret))
     return key
+
+
+def open_agents_key(runlight: Any, stored: str) -> str | None:
+    """A site's agents key as kept in its setting: sealed, or plain text from before keys were sealed. None when it
+    cannot be opened."""
+    return stored if stored.startswith("rlo_") else unseal(stored, runlight.secret)
 
 
 def _site_host(redirect: str) -> str:
@@ -124,7 +140,7 @@ def _esc(value: str) -> str:
 
 
 def _json(body: Any, status: int = 200) -> Response:
-    return Response(_js.dumps(body), status, {"content-type": "application/json; charset=utf-8", "cache-control": "no-store", **CORS})
+    return Response(_js.dumps(body), status, {"content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", **CORS})
 
 
 def _oauth_error(error: str, description: str, status: int = 400) -> Response:
@@ -226,6 +242,12 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
 
     if path == "/oauth/authorize" and request.method in ("GET", "POST"):
         runlight.init()
+        tr = translator(accepted_language(request))
+        html, lang = tr.html, tr.lang
+
+        def page(title: str, body: str, status: int = 200) -> Response:
+            return _page_in(lang, title, body, status)
+
         form = SearchParams(request.text()) if request.method == "POST" else url.search_params
         client_id = form.get("client_id") or ""
         found = _client_for(runlight, client_id)
@@ -233,7 +255,7 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         redirect = form.get("redirect_uri") or ""
         # Without a known client and one of its own addresses there is nowhere safe to send an answer.
         if client is None or redirect not in client["redirects"]:
-            return _page("This app is not registered", "<p>Start connecting again from the app.</p>", 400)
+            return page(html("oauth.unregisteredTitle"), f"<p>{html('oauth.startAgain')}</p>", 400)
 
         def back(params: Mapping[str, str]) -> Response:
             to = Url(redirect)
@@ -254,11 +276,7 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
             if _js.truthy(client.get("usedAt")):
                 return back(params)
             said = params.get("error_description") or params["error"]
-            return _page(
-                "This app asked in a way Runlight does not support",
-                f"<p>{_esc(name)} sent {_esc(said)}. Start connecting again from the app.</p>",
-                400,
-            )
+            return page(html("oauth.unsupportedTitle"), f"<p>{html('oauth.unsupported', {'app': _esc(name), 'error': _esc(said)})}</p>", 400)
 
         if form.get("response_type") != "code":
             return refuse({"error": "unsupported_response_type"})
@@ -277,22 +295,15 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         if not ctx["isOwner"](request):
             # Someone signed in who may only read would be sent to sign in again and again.
             if ctx.get("isReader") and ctx["isReader"](request):
-                return _page(
-                    "Ask an owner to connect this",
-                    f"<p>You are signed in as a viewer, and only an owner of this Runlight can connect {_esc(name)}.</p>",
-                    403,
-                )
+                return page(html("oauth.viewerTitle"), f"<p>{html('oauth.viewer', {'app': _esc(name)})}</p>", 403)
             # The site stays, since on the way in it only says which one to offer first.
             kept = SearchParams([(k, v) for k, v in form.items() if k != "decision"])
             here = f"{url.pathname}?{kept.to_string()}"
             if ctx.get("signIn"):
                 return Response("", 303, {"location": f"{ctx['signIn']}?next={_js.encode_uri_component(here)}", "cache-control": "no-store"})
             home = base or "/"
-            return _page(
-                "Sign in first",
-                f'<p>Open your Runlight dashboard at <a href="{_esc(home)}">{_esc(url.host + home)}</a> and sign in, then connect {_esc(name)} again.</p>',
-                401,
-            )
+            link = f'<a href="{_esc(home)}">{_esc(url.host + home)}</a>'
+            return page(html("oauth.signInTitle"), f"<p>{html('oauth.signIn', {'link': link, 'app': _esc(name)})}</p>", 401)
 
         if request.method == "GET":
             hidden = "".join(
@@ -300,33 +311,26 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
                 for k in ("response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "scope", "resource")
             )
             # The app names itself, so the page also shows where the answer goes, which it cannot fake.
-            sends_to = (
-                f'<p class="note">Allowing sends you back to <strong>{_esc(Url(redirect).host)}</strong>. '
-                "Only allow it if you started connecting there.</p>"
+            sends_to = f'<p class="note">{html("oauth.sendsTo", {"host": f"<strong>{_esc(Url(redirect).host)}</strong>"})}</p>'
+            buttons = (
+                f'<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">{html("oauth.deny")}</button>'
+                f'<button type="submit" name="decision" value="allow">{html("oauth.allow")}</button></div></form>'
             )
             if cms:
                 if not counting and not runlight.managed_sites:
-                    return _page(
-                        "Add this site first",
-                        f"<p>No site in this Runlight counts <strong>{_esc(host)}</strong>. "
-                        f"Add it to a site's domains in your code, then connect again from {_esc(name)}.</p>",
-                        400,
-                    )
+                    return page(html("oauth.addSiteTitle"), f"<p>{html('oauth.addSite', {'host': f'<strong>{_esc(host)}</strong>', 'app': _esc(name)})}</p>", 400)
                 choices = "".join(f'<option value="{_esc(s["id"])}">{_esc(s["name"])}</option>' for s in counting) + (
-                    f'<option value="new">A new site for {_esc(host)}</option>' if runlight.managed_sites and not counting else ""
+                    f'<option value="new">{html("oauth.newSite", {"host": _esc(host)})}</option>' if runlight.managed_sites and not counting else ""
                 )
-                return _page(
-                    f"Connect {_esc(name)}",
-                    f"<p><strong>{_esc(name)}</strong> wants to count <strong>{_esc(host)}</strong> in this Runlight.</p>\n"
-                    "<p>It will get the site's agents key, to report AI agents such as ChatGPT and Claude reading its pages, "
-                    "and a dashboard key, to show the site's read-only dashboard in its admin pages. "
-                    "It cannot change anything here or read other sites.</p>\n"
+                return page(
+                    html("oauth.connectTitle", {"app": _esc(name)}),
+                    f"<p>{html('oauth.cmsIntro', {'app': f'<strong>{_esc(name)}</strong>', 'host': f'<strong>{_esc(host)}</strong>'})}</p>\n"
+                    f"<p>{html('oauth.cmsDetail')}</p>\n"
                     f"{sends_to}\n"
                     f'<form method="post" action="{_esc(base)}/oauth/authorize">{hidden}\n'
-                    f'<label>Site<select name="site">{choices}</select></label>\n'
-                    f'<p class="note">Its dashboard key appears in Settings, API and AI, where deleting it stops the dashboard in {_esc(name)}.</p>\n'
-                    '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button>'
-                    '<button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                    f'<label>{html("app.site")}<select name="site">{choices}</select></label>\n'
+                    f'<p class="note">{html("oauth.cmsNote", {"app": _esc(name)})}</p>\n'
+                    f"{buttons}",
                 )
             sites = runlight.sites
             if manage:
@@ -337,34 +341,30 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
                     for s in sites
                     if not runlight.remote(s["id"])
                 )
-                return _page(
-                    f"Connect {_esc(name)}",
-                    f"<p><strong>{_esc(name)}</strong> wants to show this site’s stats and change its settings, so you can manage it from there.</p>\n"
-                    "<p>It will be able to change goals, funnels, short links, link domains, email reports, and share links for the site you pick, "
-                    "along with its name, timezone, and retention. It cannot read other sites, add people, make tokens, or change how email is sent.</p>\n"
+                return page(
+                    html("oauth.connectTitle", {"app": _esc(name)}),
+                    f"<p>{html('oauth.manageIntro', {'app': f'<strong>{_esc(name)}</strong>'})}</p>\n"
+                    f"<p>{html('oauth.manageDetail')}</p>\n"
                     f"{sends_to}\n"
                     f'<form method="post" action="{_esc(base)}/oauth/authorize">{hidden}\n'
-                    f'<label>Site<select name="site">{choices}</select></label>\n'
-                    f'<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects {_esc(name)}.</p>\n'
-                    '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button>'
-                    '<button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                    f'<label>{html("app.site")}<select name="site">{choices}</select></label>\n'
+                    f'<p class="note">{html("oauth.manageNote", {"app": _esc(name)})}</p>\n'
+                    f"{buttons}",
                 )
-            options = "".join(f'<option value="{_esc(s["id"])}">{_esc(s["name"])} only</option>' for s in sites)
-            return _page(
-                f"Connect {_esc(name)}",
-                f"<p><strong>{_esc(name)}</strong> wants to read your Runlight stats so it can answer questions about them. "
-                "It will be able to read and never to change anything.</p>\n"
+            options = "".join(f'<option value="{_esc(s["id"])}">{html("oauth.siteOnly", {"site": _esc(s["name"])})}</option>' for s in sites)
+            return page(
+                html("oauth.connectTitle", {"app": _esc(name)}),
+                f"<p>{html('oauth.readIntro', {'app': f'<strong>{_esc(name)}</strong>'})}</p>\n"
                 f"{sends_to}\n"
                 f'<form method="post" action="{_esc(base)}/oauth/authorize">{hidden}\n'
-                f'<label>Which sites it can read<select name="site"><option value="">Every site</option>{options if len(sites) > 1 else ""}</select></label>\n'
-                '<p class="note">Its token appears in Settings, API and AI, where deleting it disconnects the app.</p>\n'
-                '<div class="buttons"><button type="submit" name="decision" value="deny" class="ghost">Deny</button>'
-                '<button type="submit" name="decision" value="allow">Allow</button></div></form>',
+                f'<label>{html("oauth.readSites")}<select name="site"><option value="">{html("tokens.allSites")}</option>{options if len(sites) > 1 else ""}</select></label>\n'
+                f'<p class="note">{html("oauth.readNote")}</p>\n'
+                f"{buttons}",
             )
         # The consent form posts here from this page only; a form from another site is refused.
         origin = request.headers.get("origin")
         if origin and origin != url.origin:
-            return _page("This request came from another site", "<p>Start connecting again from the app.</p>", 403)
+            return page(html("oauth.anotherSiteTitle"), f"<p>{html('oauth.startAgain')}</p>", 403)
         if form.get("decision") != "allow":
             return back({"error": "access_denied"})
         site = form.get("site") or ""
@@ -511,9 +511,10 @@ _STYLE = (
 )
 
 
-def _page(title: str, body: str, status: int = 200) -> Response:
+def _page_in(lang: str, title: str, body: str, status: int = 200) -> Response:
+    """A page in the visitor's language, with a title already written as HTML."""
     return Response(
-        '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<meta name="robots" content="noindex"><title>{title} | Runlight</title>\n'
         f"{_STYLE}</head><body><main><h1>{title}</h1>{body}</main></body></html>",
         status,

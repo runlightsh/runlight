@@ -28,6 +28,7 @@ from .crypto import (
     seal_text,
     sha256,
     unseal_text,
+    weaker_than_now,
 )
 
 if TYPE_CHECKING:
@@ -384,19 +385,9 @@ class Accounts:
         which still owes a code. Signed like a session, so it cannot be made up."""
         return self._ticket("pending", user, now + 5 * 60_000)
 
-    def decoy_for(self, user: dict[str, Any], now: int) -> str:
-        """A ticket that looks and acts like pending_for's, except that no code ever
-        passes with it. A wrong password gets one once an account with
-        two-factor has had too many, so the answer never tells a right password."""
-        return self._ticket("decoy", user, now + 5 * 60_000)
-
     def from_pending(self, value: str, now: int) -> dict[str, Any] | None:
-        """The account a code-step ticket names, and whether a right code may sign in with it: {user, real}."""
-        user = self._from_ticket("pending", value, now)
-        if user is not None:
-            return {"user": user, "real": True}
-        decoy = self._from_ticket("decoy", value, now)
-        return {"user": decoy, "real": False} if decoy is not None else None
+        """The account a code-step ticket names."""
+        return self._from_ticket("pending", value, now)
 
     def link_for(self, user: dict[str, Any], now: int) -> str:
         """A ticket for a sign-in link sent by email, for fifteen minutes. A new password withdraws it."""
@@ -496,6 +487,19 @@ class Accounts:
                 raise AccountError("Make them an admin first", "owner_needs_admin")
             self.store.db.run("UPDATE rl_users SET role = 'owner' WHERE id = ?", [to])
             self.store.db.run("UPDATE rl_users SET role = 'admin' WHERE id = ?", [from_])
+
+        self._turn(change)
+
+    def forget_site(self, site: str) -> None:
+        """Removes the accounts and invitations kept to a site that was deleted. A site made later is often given the
+        same id, from its domain, and they must not find their way into it."""
+        self._init()
+
+        def change() -> None:
+            for user in [u for u in self.list() if u.get("site") == site]:
+                self.store.db.run("DELETE FROM rl_users WHERE id = ?", [user["id"]])
+                self.store.set_setting(f"login-link-used:{user['id']}", None)
+            self.store.db.run("DELETE FROM rl_invites WHERE site = ?", [site])
 
         self._turn(change)
 
@@ -642,7 +646,14 @@ class Accounts:
             decoy = Accounts._decoy
             _slot(lambda: check_password(password, decoy))
             return None
-        return user if _slot(lambda: check_password(password, user["hash"])) else None
+        if not _slot(lambda: check_password(password, user["hash"])):
+            return None
+        if not weaker_than_now(user["hash"]):
+            return user
+        # A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+        hash_ = _slot(lambda: hash_password(password))
+        self.store.db.run("UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", [hash_, user["id"], user["hash"]])
+        return self.by_id(user["id"]) or user
 
     def session_for(self, user: dict[str, Any], now: int) -> str:
         """A cookie value naming the user and when it expires, signed with the

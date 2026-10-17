@@ -79,6 +79,11 @@ def _string(value: Any) -> str:
     return _js.string(value)
 
 
+def _clip(text: str, most: int) -> str:
+    """Text cut to at most `most` characters, as a VARCHAR(most) holds it, never through the middle of one."""
+    return text if len(text) <= most else text[:most]
+
+
 def _or(value: Any, fallback: Any) -> Any:
     """value ?? fallback."""
     return fallback if value is None else value
@@ -390,6 +395,13 @@ class SqlStore:
 
         def build(store: SqlStore) -> None:
             db = store.db
+            # MySQL keys a day's rows by no unique key, since a path is longer than its keys allow, so two processes
+            # building one day could each add its rows. There the day is marked first: the second waits on that
+            # mark until the first commits, then fails, and the day counts as built elsewhere. Elsewhere the rows'
+            # own key refuses a second set, and a database without transactions (D1) must not mark a day first.
+            if dialect == "mysql":
+                db.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [site, day])
+                db.run("INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", [site, day, start, end])
             db.run("DELETE FROM rl_rollups WHERE site = ? AND day = ?", [site, day])
             # The WITH goes after INSERT INTO, the one place every database takes it.
             params: list[Any] = [site, start, end]
@@ -418,8 +430,9 @@ class SqlStore:
          SELECT ?, ?, 'event', e.name, COUNT(DISTINCT e.visitor), COUNT(*) {of_day("event")} GROUP BY e.name""",
                 [site, day, *window],
             )
-            db.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [site, day])
-            db.run("INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", [site, day, start, end])
+            if dialect != "mysql":
+                db.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [site, day])
+                db.run("INSERT INTO rl_rollup_days (site, day, start_at, end_at) VALUES (?, ?, ?, ?)", [site, day, start, end])
 
         self.transaction(build)
 
@@ -660,9 +673,22 @@ class SqlStore:
         rows = self.db.all("SELECT salt FROM rl_salts WHERE day = ?", [day])
         return rows[0]["salt"] if rows else None
 
-    def drop_salts_before(self, day: str) -> None:
-        """Deletes every salt older than `day`, so old hashes can never be recomputed."""
-        self.db.run("DELETE FROM rl_salts WHERE day < ?", [day])
+    def drop_salts_except(self, days: list[str]) -> None:
+        """Deletes every salt but those of these days, so the hashes made with them can never be made again."""
+        self.db.run(f"DELETE FROM rl_salts WHERE day NOT IN ({', '.join('?' for _ in days)})", days)
+
+    def visit_open(self, sites: list[str], from_: int, to: int, since: int) -> bool:
+        """Whether a visit to one of these sites that started in a stretch of time was still going at `since`."""
+        # As many sites a statement as keep it under D1's 100.
+        open_ = in_pieces(
+            sites,
+            MAX_PARAMS - 3,
+            lambda piece: self.db.all(
+                f"SELECT 1 AS open FROM rl_sessions WHERE site IN ({', '.join('?' for _ in piece)}) AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1",
+                [*piece, from_, to, since],
+            ),
+        )
+        return len(open_) > 0
 
     # Ingest
 
@@ -677,17 +703,35 @@ class SqlStore:
         )
         return {"id": rows[0]["id"], "visitor": rows[0]["visitor"]} if rows else None
 
+    def settle_open_session(self, site: str, visitors: list[str], since: int, opened: dict[str, str]) -> dict[str, str]:
+        """After opening a visit: the visitor's earliest visit still going, which is this one unless another process
+        opened one for the same visitor at the same moment. Then both settle on the earliest, and the one that is not
+        drops its own, before anything is counted into it."""
+        rows = self.db.all(
+            # One already counting a hit first: the other process went on with it.
+            f"""SELECT id, visitor FROM rl_sessions WHERE site = ? AND visitor IN ({', '.join('?' for _ in visitors)}) AND last_at >= ?
+       ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1""",
+            [site, *visitors, since],
+        )
+        first = rows[0] if rows else opened
+        if first["id"] != opened["id"]:
+            self.db.run("DELETE FROM rl_sessions WHERE id = ? AND pageviews = 0 AND events = 0", [opened["id"]])
+        return {"id": _string(first["id"]), "visitor": _string(first["visitor"])}
+
     def insert_session(self, row: dict[str, Any]) -> None:
+        c = _clip
         self.db.run(
             """INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, engaged_ms, hostname, referrer_host, referrer_path,
         source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, country, region, city,
         browser, browser_version, os, os_version, device, screen, language)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
-                row["id"], row["site"], row["visitor"], row["startedAt"], row["startedAt"], row["hostname"], row["referrerHost"], row["referrerPath"],
-                row["source"], row["channel"], row["utmSource"], row["utmMedium"], row["utmCampaign"], row["utmTerm"], row["utmContent"],
-                row["country"], row["region"], row["city"], row["browser"], row["browserVersion"], row["os"], row["osVersion"], row["device"],
-                row["screen"], row["language"],
+                # Each text cut to its column's width, as MySQL's columns would hold it, so every database keeps the
+                # same, and no header, however long, can make a row Postgres's indexes refuse.
+                row["id"], row["site"], row["visitor"], row["startedAt"], row["startedAt"], c(row["hostname"], 255), c(row["referrerHost"], 255), c(row["referrerPath"], 500),
+                c(row["source"], 200), c(row["channel"], 100), c(row["utmSource"], 200), c(row["utmMedium"], 200), c(row["utmCampaign"], 200), c(row["utmTerm"], 200), c(row["utmContent"], 200),
+                c(row["country"], 16), c(row["region"], 100), c(row["city"], 100), c(row["browser"], 100), c(row["browserVersion"], 100), c(row["os"], 100), c(row["osVersion"], 100), c(row["device"], 50),
+                c(row["screen"], 50), c(row["language"], 50),
             ],
         )
 
@@ -700,7 +744,7 @@ class SqlStore:
             self.db.run(
                 """UPDATE rl_sessions SET pageviews = pageviews + 1, last_at = ?, exit_path = ?,
            entry_path = CASE WHEN entry_path = '' THEN ? ELSE entry_path END WHERE id = ?""",
-                [ts, path, path, id],
+                [ts, _clip(path, 1000), _clip(path, 1000), id],
             )
         elif reopen:
             self.db.run("UPDATE rl_sessions SET events = events + 1, last_at = ? WHERE id = ?", [ts, id])
@@ -741,8 +785,8 @@ class SqlStore:
             """INSERT INTO rl_events (site, ts, kind, visitor, session, pageview, path, hostname, title, name, props, engaged_ms, scroll, link)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
-                row["site"], row["ts"], row["kind"], row["visitor"], row["session"], row["pageview"], row["path"], row["hostname"], row["title"],
-                row["name"], _js.dumps(row["props"]) if row.get("props") else None, row["engagedMs"], row.get("scroll"), row["link"],
+                row["site"], row["ts"], row["kind"], row["visitor"], row["session"], row["pageview"], _clip(row["path"], 1000), _clip(row["hostname"], 255), _clip(row["title"], 500),
+                _clip(row["name"], 255), _js.dumps(row["props"]) if row.get("props") else None, row["engagedMs"], row.get("scroll"), row["link"],
             ],
         )
 
@@ -1045,20 +1089,44 @@ class SqlStore:
         return goal_row(rows[0]) if rows else None
 
     def save_goal(self, g: dict[str, Any], before: dict[str, Any] | None = None) -> None:
+        def write(db: Any) -> None:
+            db.run(
+                upsert(
+                    db.dialect(),
+                    "rl_goals",
+                    ["id", "site", "name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency", "created_at"],
+                    ["id"],
+                    ["name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency"],
+                ),
+                [g["id"], g["site"], g["name"], g["kind"], g["match"], g["clickBy"], g["valueMode"], g["value"], g["valueProp"], g["currency"], g["createdAt"]],
+            )
+
         # A click goal is counted by its name, which the tracker sends as the event name. Renaming one renames its
         # past clicks too, so its history stays.
-        if before is not None and before["kind"] == "click" and g["kind"] == "click" and before["name"] != g["name"]:
-            self.db.run("UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", [g["name"], g["site"], before["name"]])
-        self.db.run(
-            upsert(
-                self.db.dialect(),
-                "rl_goals",
-                ["id", "site", "name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency", "created_at"],
-                ["id"],
-                ["name", "kind", '"match"', "click_by", "value_mode", "value", "value_prop", "currency"],
-            ),
-            [g["id"], g["site"], g["name"], g["kind"], g["match"], g["clickBy"], g["valueMode"], g["value"], g["valueProp"], g["currency"], g["createdAt"]],
-        )
+        if not (before is not None and before["kind"] == "click" and g["kind"] == "click" and before["name"] != g["name"]):
+            write(self.db)
+            return
+
+        def rename(store: SqlStore) -> None:
+            db = store.db
+            db.run("UPDATE rl_events SET name = ? WHERE site = ? AND kind = 'event' AND name = ?", [g["name"], g["site"], before["name"]])
+            # The daily rollups count events by name too, and goals read them, so they take the new name as well.
+            # A day that already has events under the new name counts both together now, so it is built again.
+            both = [
+                _string(r["day"])
+                for r in db.all(
+                    """SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?
+         AND day IN (SELECT day FROM rl_rollups WHERE site = ? AND dim = 'event' AND value = ?)""",
+                    [g["site"], before["name"], g["site"], g["name"]],
+                )
+            ]
+            for day in both:
+                db.run("DELETE FROM rl_rollup_days WHERE site = ? AND day = ?", [g["site"], day])
+                db.run("DELETE FROM rl_rollups WHERE site = ? AND day = ?", [g["site"], day])
+            db.run("UPDATE rl_rollups SET value = ? WHERE site = ? AND dim = 'event' AND value = ?", [g["name"], g["site"], before["name"]])
+            write(db)
+
+        self.transaction(rename)
 
     def delete_goal(self, id: str) -> None:
         self.db.run("DELETE FROM rl_goals WHERE id = ?", [id])
@@ -1407,8 +1475,9 @@ class SqlStore:
         if rolled:
             return rolled["visitors"]
         scope = visit_scope(query["filters"], query["site"], query["from"], query["to"], self.db.dialect())
+        table = "rl_sessions s INDEXED BY rl_sessions_visit_visitors" if self.db.dialect() == "sqlite" and not query["filters"] else "rl_sessions s"
         rows = self.db.all(
-            f"SELECT COUNT(DISTINCT s.visitor) AS visitors FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND {IS_VISIT}{scope['sql']}",
+            f"SELECT COUNT(DISTINCT s.visitor) AS visitors FROM {table} WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND {IS_VISIT}{scope['sql']}",
             [query["site"], query["from"], query["to"], *scope["params"]],
         )
         return num(rows[0].get("visitors") if rows else None)
@@ -1528,6 +1597,27 @@ class SqlStore:
                 }
             )
         return out
+
+    def hostname_suggestions(self, query: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+        """Seek one matching event per hostname, skipping its remaining events before the next seek."""
+        dialect = self.db.dialect()
+        v = visit_rows(query["filters"], query["site"], query["from"], query["to"], dialect)
+        within = row_scope(query["filters"], ["page", "hostname"], dialect)
+        table = "rl_events e INDEXED BY rl_events_hostname_suggest" if dialect == "sqlite" else "rl_events e"
+        rows: list[dict[str, Any]] = []
+        after: str | None = None
+        while len(rows) < limit:
+            found = self.db.all(
+                f"""SELECT e.hostname AS value FROM {table} CROSS JOIN rl_sessions s
+         WHERE {v["sql"]} AND e.kind = 'pageview'{within["sql"]}{"" if after is None else f" AND e.hostname{self._text_order} > ?"}
+         ORDER BY e.hostname{self._text_order} LIMIT 1""",
+                [*v["params"], *within["params"], *([] if after is None else [after])],
+            )
+            if not found:
+                break
+            after = _string(found[0]["value"])
+            rows.append({"value": after})
+        return rows
 
     def breakdown(self, query: dict[str, Any], dimension: str, limit: int, offset: int) -> list[dict[str, Any]]:
         page = [limit, offset]

@@ -203,7 +203,12 @@ class SqliteDb(_BaseDb):
                 )
                 if made:
                     _owner_and_group(path, 0o660)
-                conn.execute("PRAGMA journal_mode = WAL")
+                try:
+                    conn.execute("PRAGMA journal_mode = WAL")
+                except sqlite3.OperationalError as error:
+                    # A file opened read-only in another journal mode stays in it.
+                    if "readonly" not in str(error):
+                        raise
                 conn.execute("PRAGMA synchronous = NORMAL")
                 conn.execute("PRAGMA busy_timeout = 5000")
                 # Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra

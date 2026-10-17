@@ -45,6 +45,12 @@ class Translator:
             own = _table("en").get(key)
         return self._fill(own if own is not None else key, vars or {})
 
+    def html(self, key: str, vars: dict[str, str] | None = None) -> str:
+        """A message for a page: its own text escaped, then each {name} filled with HTML the caller made safe."""
+        own = self.t(key).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        given = vars or {}
+        return _PLACEHOLDER.sub(lambda m: given[m.group(1)] if m.group(1) in given else m.group(0), own)
+
     def tn(self, key: str, n: int | float, vars: dict[str, Any] | None = None) -> str:
         form = plural(self.lang, n)
         table = _table(self.lang)
@@ -56,6 +62,15 @@ class Translator:
 
 def translator(lang: str) -> Translator:
     return Translator(lang)
+
+
+def accepted_language(request: Any) -> str:
+    """The first language a browser asks for that the dashboard speaks, else English."""
+    for part in (request.headers.get("accept-language") or "").split(","):
+        code = _js.slice16(_js.trim(part.split(";")[0]), 0, 2).lower()
+        if code in languages():
+            return code
+    return "en"
 
 
 def plural(lang: str, n: int | float) -> str:

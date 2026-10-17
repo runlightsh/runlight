@@ -149,7 +149,10 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
         start_response("200 OK", [("content-type", "text/plain")])
         return [body]
 
-    httpd = make_server("127.0.0.1", 0, echo, server_class=cli._ThreadingServer, handler_class=Handler)
+    class Server(cli._ThreadingServer):
+        head_seconds = 0.3
+
+    httpd = make_server("127.0.0.1", 0, echo, server_class=Server, handler_class=Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     port = httpd.server_address[1]
     try:
@@ -177,5 +180,59 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
             quick.sendall(b"POST / HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi")
             assert quick.makefile("rb").read().endswith(b"\r\n\r\nhi")
     finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_idle_connections_do_not_keep_the_server_from_answering() -> None:
+    import socket
+    import threading
+    import time
+    from wsgiref.simple_server import make_server
+
+    def echo(environ: Any, start_response: Any) -> list[bytes]:
+        body = environ["wsgi.input"].read(int(environ.get("CONTENT_LENGTH") or 0))
+        start_response("200 OK", [("content-type", "text/plain")])
+        return [body]
+
+    class Server(cli._ThreadingServer):
+        threads = 2
+        head_seconds = 1.0
+        waiting_most = 6
+
+    httpd = make_server("127.0.0.1", 0, echo, server_class=Server, handler_class=cli._QuietHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    held: list[socket.socket] = []
+    try:
+        # More connections than threads, some sending nothing and some half a head.
+        for i in range(5):
+            connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+            if i % 2:
+                connection.sendall(b"POST / HTTP/1.0\r\nContent-Le")
+            held.append(connection)
+        time.sleep(0.2)
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as quick:
+            quick.sendall(b"POST / HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi")
+            assert quick.makefile("rb").read().endswith(b"\r\n\r\nhi")
+        assert time.monotonic() - started < 0.9
+        # Each held one is closed once its head is overdue, never having taken a thread.
+        for connection in held:
+            connection.settimeout(5)
+            try:
+                assert connection.recv(1024) == b""
+            except ConnectionResetError:
+                # Closed with half a head unread, which hangs up with a reset: hung up all the same.
+                pass
+        # Past the most waiting, the oldest is shed and the newest are answered.
+        held = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(10)]
+        time.sleep(0.3)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as quick:
+            quick.sendall(b"POST / HTTP/1.0\r\nContent-Length: 2\r\n\r\nok")
+            assert quick.makefile("rb").read().endswith(b"\r\n\r\nok")
+    finally:
+        for connection in held:
+            connection.close()
         httpd.shutdown()
         httpd.server_close()

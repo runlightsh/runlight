@@ -47,7 +47,9 @@ from .hash import hmac, random_id, sha256
 from .http import FetchError, Headers, Request, Response, Url
 from .body import read_text_capped
 from .db import TablesBusyError
+from .messages import accepted_language
 from .safefetch import install_fetch
+from .sources import recorded_path
 
 COOKIE = "runlight_token"
 IMPLEMENTATION = {"library": "runlight", "language": "python"}
@@ -200,12 +202,11 @@ def _decode_part(part: str) -> str | None:
     return _js.decode_uri_component(part)
 
 
-def _limit(value: str | None, fallback: int) -> Any:
-    """Math.min(1000, Math.max(1, Number(value) || fallback))."""
+def _whole(value: str | None, fallback: int, most: int) -> int:
+    """A whole number from a query, within 1 and `most`, or `fallback` for anything else: a fraction, a huge number, or
+    text."""
     n = _js.number(value)
-    if not _js.truthy(n):
-        n = fallback
-    return min(1000, max(1, n))
+    return min(int(n), most) if _js.is_safe_integer(n) and n >= 1 else fallback
 
 
 def _translator(lang: str) -> tuple[Callable[..., str], str]:
@@ -320,15 +321,6 @@ def _small_page(lang: str, body: str, status: int = 200, script: str = "") -> Re
             "referrer-policy": "no-referrer",
         },
     )
-
-
-def _accepted_language(request: Request) -> str:
-    """The first language a browser asks for that the dashboard speaks, else English."""
-    for part in (request.headers.get("accept-language") or "").split(","):
-        code = _js.slice16(_js.trim(part.split(";")[0]), 0, 2).lower()
-        if code in _languages():
-            return code
-    return "en"
 
 
 _PATH_DIMENSIONS = {"page", "entry", "exit", "ai_page"}
@@ -1180,8 +1172,10 @@ class Routes:
                         else:
                             value = settings.get(f["name"]) if settings else None
                             fields[f["name"]] = "" if value is None else _js.string(value)
-                    # A hub with a manage token learns which service sends the reports and from where, nothing more.
-                    via_manage = request in self.managed
+                    # A hub with a manage token, or an account kept to one site, learns which service sends the reports and
+                    # from where, nothing more: a webhook's address is often its own credential.
+                    scope = self._session_scope(request)
+                    via_manage = request in self.managed or (scope is not None and scope.get("site") is not None)
                     # The app's own mailer, named only when there is one, so the answer without it stays as it was.
                     app = rl.app_mailer
                     return json(
@@ -1222,6 +1216,11 @@ class Routes:
                 settings = rl.mail_settings()
                 if not settings:
                     return coded("Set up a mail service first", "mail_unset", 400)
+                # One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
+                # or use up a service's quota; one just set up can be tried at once.
+                tested = f"test:{settings.get('source') or ''}:{settings.get('service') or ''}"
+                if rl.now() - self.sample_sent.get(tested, 0) < 60_000:
+                    return coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429)
                 t, _ = _translator(_text(body, "lang", "en"))
                 if settings["source"] == "app":
                     name = settings["via"]
@@ -1235,6 +1234,8 @@ class Routes:
                         "html": f'<img src="https://runlight.sh/icon-192.png" width="48" height="48" alt="Runlight" style="display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px"><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
                     }
                 )
+                # Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
+                self.sample_sent[tested] = rl.now()
                 return json({"ok": True})
 
             site = self._query_site(url)
@@ -1532,6 +1533,12 @@ class Routes:
                 ok, body = _js.try_loads(request.body())
                 if not ok or not isinstance(body, dict) or body.get("site") != site:
                     return coded("Unknown site", "unknown_site", 404)
+            if site_path and is_json(request):
+                # Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
+                # a hub may, never move it.
+                ok, body = _js.try_loads(request.body())
+                if ok and isinstance(body, dict) and "hostnames" in body:
+                    return coded("Your account cannot change a site's domains", "site_domains", 403)
             url = url.copy()
             query = url.search_params
             query.set("site", site)
@@ -1970,6 +1977,9 @@ class Routes:
                     return refused
             try:
                 rl.delete_site(id_)
+                # Those kept to the site go with it, so a site made later with the same id is not theirs.
+                if self.web is not None:
+                    self.web.accounts.forget_site(id_)
                 return json({"ok": True})
             except _js.RangeError as error:
                 return coded(_message(error), "unknown_site", 404) if _message(error) == "Unknown site" else _refused(error, "site_invalid")
@@ -1992,10 +2002,13 @@ class Routes:
         if not any_site:
             if not given.startswith("rlo_"):
                 return coded("Unauthorized", "unauthorized", 401)
+            from .oauth import open_agents_key
+
             rl.init()
             for setting in rl.store.settings_starting_with("observe-key:"):
                 site_id = setting["key"][len("observe-key:"):]
-                if site_id and setting["value"] and _constant_time_equal(given, setting["value"]) and rl.site(site_id):
+                opened = open_agents_key(rl, setting["value"]) if setting["value"] else None
+                if site_id and opened and _constant_time_equal(given, opened) and rl.site(site_id):
                     key_site = site_id
             if not key_site:
                 return coded("Unauthorized", "unauthorized", 401)
@@ -2383,12 +2396,13 @@ class Routes:
             read_pages = store.journey_pages(query, PAGES_PER_VISIT)
             steps = params.get("steps")
             options: dict[str, Any] = {"steps": _js.number(steps if steps is not None else 5)}
+            # Pages as they are recorded, percent-encoded, as filters take them: /café is /caf%C3%A9.
             if params.get("start"):
-                options["start"] = params.get("start")
+                options["start"] = recorded_path(params.get("start")) or params.get("start")
             if params.get("end"):
-                options["end"] = params.get("end")
+                options["end"] = recorded_path(params.get("end")) or params.get("end")
             if through:
-                options["through"] = {"step": _js.number(through.group(1)), "value": through.group(2)}
+                options["through"] = {"step": _js.number(through.group(1)), "value": recorded_path(through.group(2)) or through.group(2)}
             answer = {"site": site["id"], "range": range_out, **journeys(read_pages["rows"], options)}
             if read_pages["sampled"]:
                 answer["sampled"] = JOURNEY_VISITS
@@ -2418,7 +2432,7 @@ class Routes:
             if asked is not None and not safe(asked):
                 return coded("Bad property name", "property_bad", 400)
             key = asked if asked is not None else next((k["key"] for k in keys if safe(k["key"])), None)
-            limit = _limit(params.get("limit"), 100)
+            limit = _whole(params.get("limit"), 100, 1000)
             rows = store.event_prop_values(query, event, key, limit) if key else []
             return json({"site": site["id"], "range": range_out, "event": event, "keys": keys, "key": key, "rows": rows})
 
@@ -2428,9 +2442,10 @@ class Routes:
             dimension = params.get("dimension") or ""
             if not is_dimension(dimension):
                 return coded(f'Unknown dimension "{dimension}"', "unknown_dimension", 400, {"dimension": dimension})
-            limit = _limit(params.get("limit"), 10)
-            page = _js.number(params.get("page"))
-            page = max(1, page if _js.truthy(page) else 1)
+            limit = _whole(params.get("limit"), 10, 1000)
+            page = _whole(params.get("page"), 1, 100_000)
+            if dimension == "hostname" and params.get("suggestions") == "1" and params.get("format") != "csv":
+                return json({"site": site["id"], "range": range_out, "dimension": dimension, "rows": store.hostname_suggestions(query, min(limit, 50))})
             rows = store.breakdown(query, dimension, limit, _js.whole((page - 1) * limit))
             if params.get("format") == "csv":
                 return _download(
@@ -2554,7 +2569,7 @@ class Routes:
         # The relay page the picker opens with its choice in the fragment, which never reaches a server. Its script
         # hands the choice to the dashboard tab on this origin that started the pick, and nothing else.
         if path == "/pick-return" and method == "GET":
-            t, lang = _translator(_accepted_language(request))
+            t, lang = _translator(accepted_language(request))
             return _small_page(
                 lang,
                 f'<div id="done" hidden><h1>{escape_html(t("pick.doneTitle"))}</h1><p>{escape_html(t("pick.done"))}</p></div>'
@@ -2637,7 +2652,7 @@ class Routes:
             rl.init()
             found = self._redeem_embed(url.search_params.get("ticket") or "")
             if not found:
-                t, lang = _translator(_accepted_language(request))
+                t, lang = _translator(accepted_language(request))
                 return _small_page(lang, f"<h1>{escape_html(t('embed.goneTitle'))}</h1><p>{escape_html(t('embed.gone'))}</p>", 404)
             session = self._embed_session(found["token"]["id"]) if found["token"] else ""
             return Response(
@@ -2658,7 +2673,7 @@ class Routes:
             id_ = share_page.group(1)
             share = rl.store.share_by_id(id_) if _SHARE_ID.match(id_) else None
             if not share:
-                t, lang = _translator(_accepted_language(request))
+                t, lang = _translator(accepted_language(request))
                 return _small_page(lang, f"<h1>{escape_html(t('share.goneTitle'))}</h1><p>{escape_html(t('share.gone'))}</p>", 404)
             return Response(
                 dashboard(base, share["id"], "", _js.truthy(self.options.get("geoCredit"))),

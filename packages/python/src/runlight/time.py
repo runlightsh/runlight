@@ -121,6 +121,14 @@ def start_of(date: str, timezone: str, hour: int = 0) -> int:
         if _utc(ly, lm - 1, ld, lh) >= guess:
             break
         at += 15 * 60_000
+    # Where clocks fall back across that hour (midnight in Amman in 2019, three hours at Casey station), it
+    # happens twice; the day begins at the first.
+    if _offset(at - 3 * 3_600_000, timezone) == _offset(at, timezone):
+        return at
+    for back in range(3 * 60, 0, -15):
+        ly, lm, ld, lh, _mi, _s = _parts(at - back * 60_000, timezone)
+        if _utc(ly, lm - 1, ld, lh) == guess:
+            return at - back * 60_000
     return at
 
 
