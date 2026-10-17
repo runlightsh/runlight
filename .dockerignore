@@ -14,3 +14,18 @@ plugins
 **/*.db
 **/*.db-*
 **/*.mmdb
+# The other languages' build output: the image builds only the TypeScript packages, though npm run build
+# writes every language's copy of the dashboard, so their sources stay.
+**/target
+packages/dotnet/**/bin
+packages/dotnet/**/obj
+**/_build
+**/deps
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.bundle
+**/.elixir_ls
+erl_crash.dump
