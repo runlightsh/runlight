@@ -121,6 +121,12 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Fixed share links and embedded dashboards when the plugin runs Runlight itself. Since 0.1.7 everyone but a signed-in admin was refused.
+* Wrote database values to suit a MySQL server set to NO_BACKSLASH_ESCAPES, reading the mode from WordPress's own connection.
+* Honoured the X-Forwarded-Proto header behind a proxy.
+* Updated the bundled Runlight library to 0.1.8, with shorter-lived daily salts, stronger password hashing, faster reports on big sites, and dashboard accessibility fixes.
+
 = 0.1.7 =
 * Sanitized and validated request fields before passing them to Runlight.
 * Loaded dashboard and settings scripts from files with WordPress-encoded settings.

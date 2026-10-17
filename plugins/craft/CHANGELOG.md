@@ -1,5 +1,13 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Updated the Runlight library to 0.1.8, with shorter-lived daily salts, stronger password hashing, faster reports on big sites, and dashboard accessibility fixes.
+
+### Fixed
+- Each MySQL connection drops `NO_BACKSLASH_ESCAPES`, so values are written correctly on a server set to that mode.
+
 ## 0.1.7 - 2026-10-15
 
 ### Changed
