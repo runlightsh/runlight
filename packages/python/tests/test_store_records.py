@@ -158,7 +158,7 @@ def test_salts_sessions_and_the_live_view(databases: Any, kind: str) -> None:
     assert s.salt("2026-10-06", "first") == "first"
     assert s.salt("2026-10-06", "second") == "first", "two racing callers agree on one"
     s.salt("2026-10-05", "old")
-    s.drop_salts_before("2026-10-06")
+    s.drop_salts_except(["2026-10-06"])
     assert s.salt_if_exists("2026-10-05") is None
     assert s.salt_if_exists("2026-10-06") == "first"
 

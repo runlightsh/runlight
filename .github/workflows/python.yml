@@ -62,6 +62,10 @@ jobs:
       - run: node scripts/check-dashes.mjs
       - name: The assets match the TypeScript SDK's
         run: node --import tsx scripts/python-assets.mts --check
+      # The Intl data email reports format with, made from Node's ICU by a script. It is compared only when this
+      # Node's ICU is the one that wrote it, as elixir.yml's elixir-intl check is.
+      - name: The Intl data is current
+        run: node --import tsx scripts/python-intl.mts --check
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: ${{ matrix.python }}

@@ -140,3 +140,17 @@ def test_models_are_listed_within_twenty_seconds() -> None:
     assert list_models({"provider": "ollama", "baseUrl": "", "key": ""}, fetcher) == [{"id": "a", "name": "a"}, {"id": "b", "name": "b"}]
     assert fetcher.requests[0]["timeoutMs"] == 20_000
     assert fetcher.requests[0]["url"] == "http://localhost:11434/v1/models"
+
+
+def test_a_question_carries_at_most_24000_characters_of_earlier_turns_however_much_history_the_browser_sends() -> None:
+    import json
+
+    fetcher = RecordingFetcher([Response(_js.dumps({"stop_reason": "end_turn", "content": [{"type": "text", "text": "Two."}]}))])
+    # Nineteen made-up turns of 8,000 characters each, then the question.
+    history = [{"role": "assistant" if i % 2 else "user", "content": f"{i} {'x' * 7998}"} for i in range(19)]
+    chat({"provider": "anthropic", "model": "m", "baseUrl": "", "key": "k"}, [*history, {"role": "user", "content": "How many visitors?"}], CONTEXT, read_api([]), fetcher=fetcher)
+    sent = json.loads(fetcher.requests[0]["body"])["messages"]
+    texts = [m["content"] for m in sent if isinstance(m["content"], str)]
+    assert sum(len(c) for c in texts) <= 24_000
+    assert sent[0]["role"] == "user", "still starting with a question"
+    assert "How many visitors?" in texts[-1]

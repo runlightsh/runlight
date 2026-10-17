@@ -44,6 +44,7 @@ which an adapter calls once the answer is sent, and everything else in check().
 
 from __future__ import annotations
 
+import calendar
 import datetime
 import math
 import re
@@ -120,10 +121,6 @@ def _wall_clock() -> int:
     return time.time_ns() // 1_000_000
 
 
-def _utc_day(ts: int) -> str:
-    return _js_iso(ts)[:10]
-
-
 def _js_iso(ts: int) -> str:
     at = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC) + datetime.timedelta(milliseconds=ts)
     return at.strftime("%Y-%m-%dT%H:%M:%S.") + f"{at.microsecond // 1000:03d}Z"
@@ -157,7 +154,9 @@ def _site_row(options: Mapping[str, Any], index: int) -> dict[str, Any]:
 
 def _by_name(sites: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sites in name order, as TS sorts them with localeCompare."""
-    return sorted(sites, key=lambda site: _js.locale_key(site["name"]))
+    from .assistant import locale_key
+
+    return sorted(sites, key=lambda site: locale_key(site["name"]))
 
 
 def _busy(error: BaseException) -> bool:
@@ -986,14 +985,13 @@ class Runlight:
         months = self.retention(site)
         if months is None:
             return None
-        # setUTCMonth: the same day and time that many months back, a day past the month's end running on.
+        # Six months before August 31st is February 28th (or 29th), not March 2nd: the day is kept within its month.
         now = self.now()
         ms = now % 1000
         at = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC) + datetime.timedelta(seconds=(now - ms) // 1000)
-        month_index = at.year * 12 + (at.month - 1) - months
-        year, month0 = divmod(month_index, 12)
-        start = datetime.datetime(year, month0 + 1, 1, tzinfo=datetime.UTC)
-        back = start + datetime.timedelta(days=at.day - 1, hours=at.hour, minutes=at.minute, seconds=at.second)
+        year, month0 = divmod(at.year * 12 + (at.month - 1) - months, 12)
+        day = min(at.day, calendar.monthrange(year, month0 + 1)[1])
+        back = datetime.datetime(year, month0 + 1, day, at.hour, at.minute, at.second, tzinfo=datetime.UTC)
         return int(back.timestamp()) * 1000 + ms
 
     def _apply_retention(self, only: str | None = None) -> None:
@@ -1103,9 +1101,29 @@ class Runlight:
         return salts
 
     def _drop_old_salts(self, now: int) -> None:
-        """Deletes salts whose day has ended everywhere. The earliest timezone is a day behind UTC and still needs
-        its yesterday, so a salt goes two UTC days after its date."""
-        self.store.drop_salts_before(_utc_day(now - 2 * 86_400_000))
+        """Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a site's
+        timezone, and after midnight only while a visit that began that day there is still going, since it carries
+        on under the visitor it began with. So a salt lasts its day and the visits that run past it."""
+        from .time import add_days, local_date, start_of
+
+        zones: dict[str, list[str]] = {}
+        for site in self.sites:
+            zones.setdefault(site["timezone"], []).append(site["id"])
+        if not zones:
+            return
+        needed: set[str] = set()
+        for timezone, sites in zones.items():
+            today = local_date(now, timezone)
+            needed.add(today)
+            yesterday = add_days(today, -1)
+            if self.store.visit_open(sites, start_of(yesterday, timezone), start_of(today, timezone), now - SESSION_IDLE_MS):
+                needed.add(yesterday)
+            else:
+                # Nor is it kept here: no visit is left for it to find.
+                cached = self._salts.get(timezone)
+                if cached is not None and cached["day"] == today:
+                    cached["yesterday"] = None
+        self.store.drop_salts_except(sorted(needed))
 
     def _forwarded_host(self, request: Request) -> str | None:
         """The host a proxy says the request was for, read only when proxy headers are trusted, as the client's
@@ -1275,7 +1293,8 @@ class Runlight:
                     "language": client["language"],
                 }
             )
-            return session
+            # Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
+            return self.store.settle_open_session(site["id"], candidates, now - SESSION_IDLE_MS, session)
 
         return self._one_at_a_time(f"{site['id']}:{today}", open_or_start)
 

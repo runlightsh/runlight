@@ -14,12 +14,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .. import _js
+from ..messages import accepted_language, translator
 from ..http import Headers, Request, Response, SearchParams, Url
 from .auth import SESSION_COOKIE, SESSION_MS, AccountError, Accounts, Throttle, otpauth_uri
 from .crypto import base64url, random_bytes, same_text
 from .pages import (
     AUTH_CSS,
-    AUTH_JS,
+    auth_js,
     code_page,
     invite_gone_page,
     invite_page,
@@ -159,8 +160,6 @@ class AccountsWeb:
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
         self.code_tries = Throttle(self.store, "code", 5)
-        # A decoy ticket's tries count apart, the same way, so someone guessing passwords cannot use up the owner's five.
-        self.decoy_tries = Throttle(self.store, "decoy", 5)
         self.confirm_tries = Throttle(self.store, "confirm", 5)
         self.rechecks = Throttle(self.store, "recheck", 10)
 
@@ -230,9 +229,9 @@ class AccountsWeb:
             return False
         return same_text(given, str(self.first["code"] if "code" in self.first else self.first["token"]))
 
-    def _setup_locked(self) -> Response:
+    def _setup_locked(self, lang: str = "en") -> Response:
         """Why there is no setup form."""
-        return _html(setup_needs_token_page(self.base) if self.first == "locked" else setup_locked_page(self.base, self.setup_where), 403)
+        return _html(setup_needs_token_page(self.base, lang) if self.first == "locked" else setup_locked_page(self.base, bool(self.setup_where), lang), 403)
 
     def _send_invite(self, request: Request, invite: dict[str, Any], code: str) -> dict[str, Any]:
         """Emails an invite through the mail service when there is one. The link
@@ -303,10 +302,16 @@ class AccountsWeb:
         query = url.search_params
         method = request.method
         base = self.base
+        lang = accepted_language(request)
+        t = translator(lang).t
+
+        def reason(error: BaseException) -> str:
+            return _reason(lang, error)
+
         if path == "/auth.css":
             return Response(AUTH_CSS, 200, {"content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600"})
         if path == "/auth.js":
-            return Response(AUTH_JS, 200, {"content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600"})
+            return Response(auth_js(query.get("lang") or "en"), 200, {"content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600"})
 
         if path == "/setup":
             if self.has_account():
@@ -314,39 +319,39 @@ class AccountsWeb:
             if method == "GET":
                 code = query.get("code") or ""
                 if self.first == "locked":
-                    return self._setup_locked()
+                    return self._setup_locked(lang)
                 # The app's token is typed in; the server's code comes in the link it printed.
                 if self.asks_for_token or self.first == "open":
-                    return _html(setup_page(base, {"code": "", "askCode": self.asks_for_token}))
-                return _html(setup_page(base, {"code": code})) if self._setup_ok(code) else self._setup_locked()
+                    return _html(setup_page(base, {"code": "", "askCode": self.asks_for_token}, lang))
+                return _html(setup_page(base, {"code": code}, lang)) if self._setup_ok(code) else self._setup_locked(lang)
             if method == "POST":
                 form = SearchParams(request.text())
                 code = form.get("code") or ""
                 if not self._setup_ok(code):
                     if self.asks_for_token:
-                        return _html(setup_page(base, {"code": "", "askCode": True, "error": "That is not this app's RUNLIGHT_TOKEN.", "email": form.get("email") or ""}), 403)
-                    return self._setup_locked()
+                        return _html(setup_page(base, {"code": "", "askCode": True, "error": t("auth.tokenWrong"), "email": form.get("email") or ""}, lang), 403)
+                    return self._setup_locked(lang)
 
                 def again(error: str) -> dict[str, Any]:
                     return {"code": "" if self.asks_for_token else code, "askCode": self.asks_for_token, "error": error, "email": form.get("email") or ""}
 
                 # Asked twice, since a typo here would lock the first owner out.
                 if (form.get("password") or "") != (form.get("again") or ""):
-                    return _html(setup_page(base, again("The two passwords are not the same.")), 400)
+                    return _html(setup_page(base, again(t("auth.mismatch")), lang), 400)
                 try:
                     user = self.accounts.set_password(form.get("email") or "", form.get("password") or "", self.now())
                     self._existing = True
                     return _redirect(self.home_path, self._fresh(request, user))
                 except _js.RangeError as error:
-                    return _html(setup_page(base, again(str(error))), 400)
+                    return _html(setup_page(base, again(reason(error)), lang), 400)
 
         if path == "/login":
             if not self.has_account():
                 if self.first == "locked":
-                    return self._setup_locked()
-                return _redirect(f"{base}/setup") if self.first == "open" or self.asks_for_token else self._setup_locked()
+                    return self._setup_locked(lang)
+                return _redirect(f"{base}/setup") if self.first == "open" or self.asks_for_token else self._setup_locked(lang)
             if method == "GET":
-                return _html(login_page(base, {"next": self.safe_next(query.get("next")), "forgot": self.forgot}))
+                return _html(login_page(base, {"next": self.safe_next(query.get("next")), "forgot": self.forgot}, lang))
             if method == "POST":
                 return self._login(request, context)
 
@@ -355,24 +360,23 @@ class AccountsWeb:
             next_ = self.safe_next(query.get("next"))
             user = self.accounts.from_link(query.get("ticket") or "", self.now())
             if user is None:
-                return _html(login_page(base, {"error": "That sign-in link has run out. Sign in again.", "next": next_, "forgot": self.forgot}), 410)
+                return _html(login_page(base, {"error": t("auth.linkExpired"), "next": next_, "forgot": self.forgot}, lang), 410)
             if user["twoFactor"]:
-                return _html(code_page(base, {"pending": self.accounts.pending_for(user, self.now()), "next": next_}))
+                return _html(code_page(base, {"pending": self.accounts.pending_for(user, self.now()), "next": next_}, lang))
             return self._signed_in_to(request, user, next_)
 
         if path == "/login/code" and method == "POST":
             form = SearchParams(request.text())
             next_ = self.safe_next(form.get("next"))
-            pending = self.accounts.from_pending(form.get("pending") or "", self.now())
-            if pending is None:
+            user = self.accounts.from_pending(form.get("pending") or "", self.now())
+            if user is None:
                 return _redirect(f"{base}/login?next={_js.encode_uri_component(next_)}")
-            user, real = pending["user"], pending["real"]
             # Counted before the check, so a burst cannot get past five.
-            if not (self.code_tries if real else self.decoy_tries).take(user["id"], self.now()):
-                return _html(code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": "Too many tries. Wait fifteen minutes and try again."}), 429)
-            if not real or not self.accounts.check_second_factor(user["id"], form.get("code") or "", self.now()):
+            if not self.code_tries.take(user["id"], self.now()):
+                return _html(code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": t("error.too_many_tries")}, lang), 429)
+            if not self.accounts.check_second_factor(user["id"], form.get("code") or "", self.now()):
                 return _html(
-                    code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": "That code is not right. Check the time on your phone, or use a recovery code."}),
+                    code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": t("auth.codeWrong")}, lang),
                     401,
                 )
             self.code_tries.clear(user["id"])
@@ -386,32 +390,34 @@ class AccountsWeb:
                 code = query.get("code") or ""
                 invite = self.accounts.invite_by_code(code, self.now())
                 if invite is None:
-                    return _html(invite_gone_page(base), 410)
-                return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host}))
+                    return _html(invite_gone_page(base, lang), 410)
+                return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host}, lang))
             if method == "POST":
                 form = SearchParams(request.text())
                 code = form.get("code") or ""
                 invite = self.accounts.invite_by_code(code, self.now())
                 if invite is None:
-                    return _html(invite_gone_page(base), 410)
+                    return _html(invite_gone_page(base, lang), 410)
 
                 def again_page(error: str) -> Response:
-                    return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host, "error": error}), 400)
+                    return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host, "error": error}, lang), 400)
 
                 if (form.get("password") or "") != (form.get("again") or ""):
-                    return again_page("The two passwords are not the same.")
+                    return again_page(t("auth.mismatch"))
                 try:
                     user = self.accounts.accept_invite(code, form.get("password") or "", self.now())
                     self._existing = True
                     return _redirect(self.home_path, self._fresh(request, user))
                 except _js.RangeError as error:
                     if isinstance(error, AccountError) and error.code == "invite_gone":
-                        return _html(invite_gone_page(base), 410)
-                    return again_page(str(error))
+                        return _html(invite_gone_page(base, lang), 410)
+                    return again_page(reason(error))
         return None
 
     def _login(self, request: Request, context: Mapping[str, Any]) -> Response:
         base = self.base
+        lang = accepted_language(request)
+        t = translator(lang).t
         form = SearchParams(request.text())
         email = form.get("email") or ""
         password = form.get("password") or ""
@@ -421,10 +427,10 @@ class AccountsWeb:
         pair = f"{account}\n{ip or 'unknown'}"
 
         def login(opts: dict[str, Any]) -> str:
-            return login_page(base, {**opts, "next": next_, "forgot": self.forgot})
+            return login_page(base, {**opts, "next": next_, "forgot": self.forgot}, lang)
 
         def too_many() -> Response:
-            return _html(login({"error": "Too many tries. Wait fifteen minutes and try again.", "email": email}), 429)
+            return _html(login({"error": t("error.too_many_tries"), "email": email}), 429)
 
         if ip and not self.per_ip.take(ip, self.now()):
             return too_many()
@@ -435,34 +441,33 @@ class AccountsWeb:
             known = self.accounts.by_email(account)
             trusted = known is not None and self.accounts.trusts_device(_read_cookie(request, DEVICE_COOKIE), known)
             over = not trusted and not self.per_account.take(account, self.now())
-            # Past the account's limit, a right password and a wrong one get the same answer, so guessing from many
-            # addresses learns nothing, and the owner still gets in. With two-factor on, both reach the code step,
-            # where a wrong password's ticket never passes. Without it, a right password emails a sign-in link.
-            if over and not (known is not None and known["twoFactor"]):
+            # Past the account's limit, a right password and a wrong one get the same answer, and so does every
+            # account, with two-factor on or not, and an email with no account, so guessing from many addresses
+            # learns nothing about either. The owner still gets in: a right password emails a sign-in link, which
+            # leads to the code step when two-factor is on.
+            if over:
                 if not self.rl.mail_settings() or not self._home_origin():
                     return too_many()
                 user = self.accounts.sign_in(email, password)
                 if user is not None:
                     self._send_link_later(user, next_)
-                return _html(login({"error": "Too many tries for this account. If the password was right, a link to sign in is on its way to its email address.", "email": email}), 429)
+                return _html(login({"error": t("auth.tooManyLink"), "email": email}), 429)
             user = self.accounts.sign_in(email, password)
             if user is None:
-                if over and known is not None:
-                    return _html(code_page(base, {"pending": self.accounts.decoy_for(known, self.now()), "next": next_}))
-                return _html(login({"error": "That email and password do not match an account.", "email": email}), 401)
+                return _html(login({"error": t("auth.wrongPassword"), "email": email}), 401)
             self.per_address.clear(pair)
             if ip:
                 self.per_ip.forgive(ip)
-            if not over and not trusted:
+            if not trusted:
                 self.per_account.forgive(account)
             # With two-factor on, the password only earns the second step.
             if user["twoFactor"]:
-                return _html(code_page(base, {"pending": self.accounts.pending_for(user, self.now()), "next": next_}))
+                return _html(code_page(base, {"pending": self.accounts.pending_for(user, self.now()), "next": next_}, lang))
             return self._signed_in_to(request, user, next_)
         except AccountError as error:
             # Too many password checks already waiting, so this one was never run: try again in a moment.
             if error.code == "busy":
-                return _html(login({"error": error.message, "email": email}), 503, {"retry-after": "5"})
+                return _html(login({"error": _reason(lang, error), "email": email}), 503, {"retry-after": "5"})
             raise
 
     def _recheck(self, user: Mapping[str, Any], input: Mapping[str, Any], field: str, wrong: tuple[str, str]) -> Response | None:  # noqa: A002
@@ -680,17 +685,27 @@ class AccountsWeb:
         # The dashboard itself: straight to sign-in, or to setting up the first account.
         if path in ("/", "") and request.method == "GET" and self.signed_in(request) is None:
             if not self.has_account():
-                return _redirect(f"{self.base}/setup") if self.first == "open" or self.asks_for_token else self._setup_locked()
+                return _redirect(f"{self.base}/setup") if self.first == "open" or self.asks_for_token else self._setup_locked(accepted_language(request))
             search = Url(request.url).search
             return _redirect(f"{self.base}/login" + (f"?next={_js.encode_uri_component(f'{self.home_path}{search}')}" if search else ""))
         return None
+
+
+def _reason(lang: str, error: BaseException) -> str:
+    """An account's problem in the visitor's language, where the dashboard has words for it; English as it was thrown."""
+    t = translator(lang).t
+    code = error.code if isinstance(error, AccountError) else ""
+    key = f"error.{code}"
+    if lang == "en" or t(key) == key:
+        return str(error)
+    return t(key, error.params if isinstance(error, AccountError) else {})
 
 
 def accounts_web(options: Mapping[str, Any]) -> AccountsWeb:
     """Accounts on the web. options: runlight, secret (signs sessions and seals two-factor secrets; keep it stable
     across restarts), base ("" on the standalone server, "/runlight" in an app), now, firstAccount, home (a function
     giving the address emails link to, the install's public one when known; without it, a locked account gets no
-    link), forgot (where the sign-in page sends someone who forgot their password), and setupWhere."""
+    link), forgot (where the sign-in page sends someone who forgot their password), and setupWhere (any non-empty value: the setup link is in the file setup.txt in the data folder, not in the log)."""
     return AccountsWeb(options)
 
 

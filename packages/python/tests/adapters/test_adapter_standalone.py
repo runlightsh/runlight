@@ -53,7 +53,7 @@ def test_a_new_server_is_locked_until_the_setup_code_makes_the_first_account() -
     server = make(setupWhere="in setup.txt")
     # The dashboard waits for setup.
     assert server.handle(req("/")).status == 403
-    assert "Open the setup link in setup.txt" in server.handle(req("/")).text()
+    assert "Open the setup link in the file setup.txt" in server.handle(req("/")).text()
     assert server.handle(req("/setup?code=wrong")).status == 403
     assert server.handle(form("/setup", {"code": "wrong", "email": "a@b.co", "password": "long enough pw"})).status == 403
     assert server.handle(req(f"/setup?code={CODE}")).status == 200

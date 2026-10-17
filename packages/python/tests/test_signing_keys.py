@@ -15,7 +15,7 @@ import pytest
 from support.databases import store_kinds
 
 from runlight import Runlight
-from runlight.oauth import agents_key
+from runlight.oauth import agents_key, open_agents_key
 from runlight.server.secret import secret_in
 from runlight.store import Stores
 
@@ -45,7 +45,7 @@ def test_a_key_made_on_first_use_is_the_same_for_every_request_that_asks_at_once
     with ThreadPoolExecutor(5) as pool:
         agents = list(pool.map(lambda _: agents_key(rl, "default"), range(5)))
     assert len(set(agents)) == 1
-    assert store.setting("observe-key:default") == agents[0]
+    assert open_agents_key(rl, store.setting("observe-key:default")) == agents[0]
     assert agents_key(rl, "default", True) != agents[0], "replacing it still makes a new one"
 
 

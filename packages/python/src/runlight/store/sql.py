@@ -124,6 +124,12 @@ def schema(dialect: str) -> list[str]:
         # MySQL takes an index that leads with the site as a way to read all of a site's rows, even where a
         # range of time would read far fewer, so there an index for looking a value up leads with that value.
         f"CREATE INDEX IF NOT EXISTS rl_sessions_visitor ON rl_sessions ({'visitor, site' if my else 'site, visitor'}, last_at)",
+        # Keep exact visitor counts in index order without loading every session row.
+        *(
+            ["CREATE INDEX IF NOT EXISTS rl_sessions_visit_visitors ON rl_sessions (site, visitor, started_at) WHERE pageviews > 0 OR events > 0"]
+            if dialect == "sqlite"
+            else []
+        ),
         f"""CREATE TABLE IF NOT EXISTS rl_events (
       id {id_}, site {site} NOT NULL, ts BIGINT NOT NULL, kind {str_(20)} NOT NULL,
       visitor {text(100)}, session {text(100)}, pageview {text(100)},
@@ -136,6 +142,11 @@ def schema(dialect: str) -> list[str]:
         # Page and event filters find the visits they pick through these, rather than reading every row in the
         # range. MySQL indexes the first 255 characters of a path, which is enough to find it.
         f"CREATE INDEX IF NOT EXISTS rl_events_site_path ON rl_events ({'path(255), site' if my else 'site, path'}, ts)",
+        *(
+            ["CREATE INDEX IF NOT EXISTS rl_events_hostname_suggest ON rl_events (site, hostname, ts, session) WHERE kind = 'pageview'"]
+            if dialect == "sqlite"
+            else []
+        ),
         # MySQL has no partial index, so its index of event names holds the kind too.
         "CREATE INDEX IF NOT EXISTS rl_events_site_name ON rl_events (name, site, kind, ts)"
         if my

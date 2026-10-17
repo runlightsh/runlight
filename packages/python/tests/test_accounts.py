@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,7 @@ import pytest
 from support.databases import store_kinds
 
 from runlight import _js
+from runlight.accounts import crypto
 from runlight.accounts.auth import INVITE_MS, SESSION_MS, AccountError, Accounts, Throttle, signature, totp
 from runlight.store import SqlStore, Stores
 
@@ -130,8 +132,7 @@ def test_sessions_tickets_and_devices_are_signed_and_end_with_their_password(dat
     assert accounts.from_session(f"{id_}.later.{signed}", NOW) is None
 
     pending = accounts.pending_for(user, NOW)
-    assert accounts.from_pending(pending, NOW) == {"user": user, "real": True}
-    assert accounts.from_pending(accounts.decoy_for(user, NOW), NOW) == {"user": user, "real": False}
+    assert accounts.from_pending(pending, NOW) == user
     assert accounts.from_pending(session, NOW) is None, "a session is not a code-step ticket"
     assert accounts.from_pending(pending, NOW + 5 * 60_000) is None
 
@@ -344,3 +345,33 @@ def test_the_throttle_counts_before_the_check_and_forgives_a_right_try(databases
     # A new entry clears expired ones.
     throttle.fail("zed@example.com", NOW + 2000)
     assert len(store.settings_starting_with("throttle:test:")) == 1
+
+
+@pytest.mark.parametrize("kind", store_kinds())
+def test_signing_in_hashes_a_password_made_at_the_old_cost_again_and_a_wrong_password_changes_nothing(databases, kind):
+    s = fresh(databases, kind)
+    accounts = Accounts(s, SECRET)
+    user = accounts.set_password("owner@example.com", "a long password", NOW)
+    salt = b"0123456789abcdef"
+    key = hashlib.scrypt(b"a long password", salt=salt, n=16384, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)
+    old = f"scrypt${crypto.base64url(salt)}${crypto.base64url(key)}"
+    s.db.run("UPDATE rl_users SET hash = ? WHERE id = ?", [old, user["id"]])
+    assert accounts.sign_in("owner@example.com", "a wrong password") is None
+    assert accounts.by_id(user["id"])["hash"] == old
+    signed_in = accounts.sign_in("owner@example.com", "a long password")
+    assert signed_in["hash"].startswith("scrypt$32768$8$3$"), "made again at the new cost"
+    assert accounts.by_id(user["id"])["hash"] == signed_in["hash"]
+    assert accounts.sign_in("owner@example.com", "a long password") is not None, "and it still signs in"
+
+
+@pytest.mark.parametrize("kind", store_kinds())
+def test_deleting_a_site_removes_the_accounts_and_invitations_kept_to_it_and_no_one_else(databases, kind):
+    accounts = Accounts(fresh(databases, kind), SECRET)
+    accounts.set_password("owner@example.com", "a long password", NOW)
+    accounts.set_password("alpha@example.com", "a long password", NOW, "viewer", "alpha")
+    accounts.set_password("beta@example.com", "a long password", NOW, "member", "beta")
+    accounts.invite("invited@example.com", "member", "owner@example.com", NOW, "alpha")
+    accounts.invite("other@example.com", "member", "owner@example.com", NOW, "beta")
+    accounts.forget_site("alpha")
+    assert sorted(u["email"] for u in accounts.list()) == ["beta@example.com", "owner@example.com"]
+    assert [i["email"] for i in accounts.invites(NOW)] == ["other@example.com"]

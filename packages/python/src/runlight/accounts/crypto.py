@@ -16,12 +16,16 @@ from typing import Literal
 
 from .. import _aesgcm, _js
 
-SCRYPT = {"N": 16384, "r": 8, "p": 1, "maxmem": 64 * 1024 * 1024}
+# What a new hash costs: one of OWASP's scrypt settings, 32 MiB a check, so several sign-ins at once stay within a
+# small server's memory. Each hash records its own cost, so this can rise again.
+SCRYPT = {"N": 32768, "r": 8, "p": 3}
+# What a hash written as scrypt$salt$key costs: the setting before hashes recorded theirs.
+SCRYPT_BEFORE = {"N": 16384, "r": 8, "p": 1}
 
 # As many PBKDF2 rounds as Cloudflare Workers allow, the strictest runtime Runlight runs on.
 PBKDF2_ROUNDS = 100_000
 
-# Password hashes worked out at once, at most. Each scrypt holds 16 MB while it runs, so a burst of sign-ins on as
+# Password hashes worked out at once, at most. Each scrypt holds 32 MB while it runs, so a burst of sign-ins on as
 # many threads cannot take memory without bound. Node runs them on its thread pool of four.
 PASSWORD_SLOTS = 4
 _slots = threading.BoundedSemaphore(PASSWORD_SLOTS)
@@ -82,11 +86,28 @@ def scrypt(password: str, salt: bytes, n: int, r: int, p: int, length: int) -> b
     if length == 0:
         return b""
     with _slots:
-        return hashlib.scrypt(_js.encode(password), salt=salt, n=n, r=r, p=p, maxmem=SCRYPT["maxmem"], dklen=length)
+        # Memory is 128 * N * r bytes; room for twice that, and at least what small costs always had.
+        return hashlib.scrypt(_js.encode(password), salt=salt, n=n, r=r, p=p, maxmem=max(64 * 1024 * 1024, 256 * n * r), dklen=length)
 
 
-def _run_scrypt(password: str, salt: bytes, length: int) -> bytes:
-    return scrypt(password, salt, SCRYPT["N"], SCRYPT["r"], SCRYPT["p"], length)
+def _run_scrypt(password: str, salt: bytes, length: int, cost: dict[str, int]) -> bytes:
+    return scrypt(password, salt, cost["N"], cost["r"], cost["p"], length)
+
+
+def _scrypt_cost(parts: list[str]) -> dict[str, int] | None:
+    """A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key). None for
+    one out of bounds."""
+    if len(parts) == 3:
+        return SCRYPT_BEFORE
+    n, r, p = (_js.number(part) for part in parts[1:4])
+
+    def whole(value: float, top: int) -> bool:
+        return _js.is_integer(value) and 1 <= value <= top
+
+    # N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
+    if not whole(n, 1 << 20) or n < 2 or (int(n) & (int(n) - 1)) != 0 or not whole(r, 32) or not whole(p, 16):
+        return None
+    return {"N": int(n), "r": int(r), "p": int(p)}
 
 
 def _pbkdf2(password: str, salt: bytes, rounds: int, length: int) -> bytes:
@@ -97,9 +118,10 @@ def _pbkdf2(password: str, salt: bytes, rounds: int, length: int) -> bytes:
 
 
 def hash_password(password: str) -> str:
-    """A password hash, in the scrypt form the standalone server has always written."""
+    """A password hash in scrypt, recording its cost: scrypt$N$r$p$salt$key."""
     salt = random_bytes(16)
-    return f"scrypt${base64url(salt)}${base64url(_run_scrypt(password, salt, 32))}"
+    cost = SCRYPT
+    return f"scrypt${cost['N']}${cost['r']}${cost['p']}${base64url(salt)}${base64url(_run_scrypt(password, salt, 32, cost))}"
 
 
 def check_password(password: str, stored: str) -> bool:
@@ -113,12 +135,15 @@ def check_password(password: str, stored: str) -> bool:
         except ValueError:
             return None
 
-    if parts[0] == "scrypt" and len(parts) == 3:
-        expected = decode(parts[2])
-        salt = decode(parts[1])
+    if parts[0] == "scrypt" and len(parts) in (3, 6):
+        cost = _scrypt_cost(parts)
+        if cost is None:
+            return False
+        expected = decode(parts[-1])
+        salt = decode(parts[-2])
         if expected is None or salt is None or len(expected) < MIN_KEY_BYTES:
             return False
-        return _same_bytes(_run_scrypt(password, salt, len(expected)), expected)
+        return _same_bytes(_run_scrypt(password, salt, len(expected), cost), expected)
     if parts[0] == "pbkdf2" and len(parts) == 4:
         rounds = _js.number(parts[1])
         if not _js.is_integer(rounds) or rounds < 1 or rounds > 10_000_000:
@@ -129,6 +154,18 @@ def check_password(password: str, stored: str) -> bool:
             return False
         return _same_bytes(_pbkdf2(password, salt, int(rounds), len(expected)), expected)
     return False
+
+
+def weaker_than_now(stored: str) -> bool:
+    """Whether a stored hash costs less than a new one would here, so the password it matched is hashed again: an
+    scrypt hash with a lower cost, or a PBKDF2 one."""
+    parts = stored.split("$")
+    if parts[0] == "pbkdf2":
+        return True
+    if parts[0] != "scrypt":
+        return False
+    cost = _scrypt_cost(parts)
+    return cost is not None and cost["N"] * cost["r"] * cost["p"] < SCRYPT["N"] * SCRYPT["r"] * SCRYPT["p"]
 
 
 def _same_bytes(a: bytes, b: bytes) -> bool:

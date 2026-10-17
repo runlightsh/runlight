@@ -53,6 +53,8 @@ class AssistantError(Exception):
         self.params = params or {}
 
 
+# The most text of earlier turns a question carries, about six thousand tokens.
+MAX_HISTORY_CHARS = 24_000
 MAX_ROUNDS = 8
 # However many rounds a question takes, the answer comes within this long or the assistant stops.
 DEADLINE_MS = 120_000
@@ -298,6 +300,12 @@ def chat(
             history[-1]["content"] += f"\n\n{content}"
         else:
             history.append({"role": m.get("role"), "content": content})
+    # The browser sends the history, so its whole length is held too, the oldest turns dropped first: each tool
+    # round sends it again, and the limits on questions are there to keep the owner's AI credit safe.
+    while len(history) > 1 and sum(_js.length(h["content"]) for h in history) > MAX_HISTORY_CHARS:
+        history.pop(0)
+        while len(history) > 1 and history[0]["role"] != "user":
+            history.pop(0)
 
     if provider["protocol"] == "anthropic":
         tools = [{"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in [*TOOLS, json.loads((Path(__file__).parent / "assets" / "assistant-action.json").read_text())]]
@@ -399,7 +407,7 @@ _ICU_ASCII = [
 _ICU_RANK = {c: i for i, group in enumerate(_ICU_ASCII) for c in group}
 
 
-def _locale_key(text: str) -> Any:
+def locale_key(text: str) -> Any:
     """A sort key for `a.localeCompare(b)` as Node's ICU orders model ids: printable ASCII by ICU's root order,
     accented letters with their base letter and then by accent, and lower case before upper. Other characters
     follow, by code point."""
@@ -480,4 +488,4 @@ def list_models(settings: dict[str, Any], fetcher: Fetcher | None = None) -> lis
     # Anthropic lists newest first already; others come in no useful order.
     if provider["protocol"] == "anthropic":
         return models
-    return sorted(models, key=lambda m: _locale_key(m["id"]))
+    return sorted(models, key=lambda m: locale_key(m["id"]))

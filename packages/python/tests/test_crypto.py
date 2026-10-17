@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
@@ -70,9 +71,34 @@ def test_no_more_than_four_password_hashes_run_at_once(monkeypatch):
 
 def test_new_hashes_use_scrypt_and_check():
     hashed = crypto.hash_password("a long password")
-    assert re.fullmatch(r"scrypt\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}", hashed)
+    assert re.fullmatch(r"scrypt\$32768\$8\$3\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}", hashed)
     assert crypto.check_password("a long password", hashed)
+    assert not crypto.check_password("a long passwore", hashed)
     assert hashed != crypto.hash_password("a long password"), "a new salt each time"
+
+
+def test_a_hash_records_its_cost_and_a_cost_out_of_bounds_is_refused_not_run():
+    hashed = crypto.hash_password("a long password")
+    _, _, _, _, salt, key = hashed.split("$")
+    # The same bytes any language's scrypt gives for that cost, so every port can check them.
+    again = hashlib.scrypt(b"a long password", salt=crypto.from_base64url(salt), n=32768, r=8, p=3, maxmem=256 * 32768 * 8, dklen=32)
+    assert crypto.base64url(again) == key
+    for cost in ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "16384$8$1.5"]:
+        assert crypto.check_password("a long password", f"scrypt${cost}${salt}${key}") is False, cost
+
+
+def test_a_hash_from_before_costs_were_recorded_still_checks_at_the_old_cost():
+    salt = b"0123456789abcdef"
+    key = hashlib.scrypt(b"a long password", salt=salt, n=16384, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)
+    old = f"scrypt${crypto.base64url(salt)}${crypto.base64url(key)}"
+    assert crypto.check_password("a long password", old)
+    assert not crypto.check_password("another long one", old)
+    assert crypto.weaker_than_now(old) is True
+    assert crypto.weaker_than_now(crypto.hash_password("a long password")) is False
+    assert crypto.weaker_than_now("pbkdf2$100000$AAAA$AAAA") is True
+    assert crypto.weaker_than_now("nothing") is False
+    assert crypto.weaker_than_now("scrypt$16384$8$1$AAAA$AAAA") is True
+    assert crypto.weaker_than_now("scrypt$2097152$8$1$AAAA$AAAA") is False, "one out of bounds is not made again"
 
 
 def test_check_password_answers_as_typescript_does():

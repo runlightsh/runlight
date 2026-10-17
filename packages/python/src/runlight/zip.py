@@ -56,7 +56,9 @@ def zip(files: list[dict[str, str]], now: int | None = None) -> bytes:
 
 _FORMULA = re.compile("[=+\\-@\\t\\r]")
 _NUMBER = re.compile(r"-?[0-9]+(\.[0-9]+)?\Z")
-_QUOTE = re.compile('[",\\n\\r]')
+# Quoted with a semicolon or tab in it too: Excel in a locale that separates lists with ";" splits an unquoted cell
+# there, and what follows could start with = and run as a formula.
+_QUOTE = re.compile('[",;\\t\\n\\r]')
 
 
 def csv_row(values: list[Any]) -> str:
