@@ -1153,12 +1153,15 @@ export class ClickHouseStore extends SqlStore {
     if (this.lost) throw new Error("Runlight: another process took over copying visits into ClickHouse");
   }
 
-  /** Waits up to `ms`, or until the store closes. */
-  private async pause(ms: number): Promise<void> {
+  /**
+   * Waits up to `ms`, or until the store closes. Only the copy in the background lets the process exit
+   * meanwhile; one a caller waits for, such as the server's clickhouse copy command, keeps it running.
+   */
+  private async pause(ms: number, background = false): Promise<void> {
     if (this.closed) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, ms);
-      timer.unref?.();
+      if (background) timer.unref?.();
       this.wake = () => {
         clearTimeout(timer);
         resolve();
@@ -1191,7 +1194,7 @@ export class ClickHouseStore extends SqlStore {
       await this.pause(1_000);
     }
     if (this.background) {
-      this.copying ??= this.copy().then(
+      this.copying ??= this.copyAll(undefined, undefined, true).then(
         () => {},
         (error) => console.error("Runlight: copying visits into ClickHouse stopped, and carries on at the next start", error),
       );
@@ -1218,6 +1221,10 @@ export class ClickHouseStore extends SqlStore {
    * and calls `onWait` once to say so.
    */
   async copy(onProgress?: (state: MoveState) => void, onWait?: () => void): Promise<MoveState | null> {
+    return this.copyAll(onProgress, onWait, false);
+  }
+
+  private async copyAll(onProgress: ((state: MoveState) => void) | undefined, onWait: (() => void) | undefined, background: boolean): Promise<MoveState | null> {
     let first = true;
     let failed = 0;
     let waited = false;
@@ -1232,7 +1239,7 @@ export class ClickHouseStore extends SqlStore {
         if (!waited) onWait?.();
         waited = true;
         first = true;
-        await this.pause(5_000);
+        await this.pause(5_000, background);
         continue;
       }
       let next: MoveState;
@@ -1246,7 +1253,7 @@ export class ClickHouseStore extends SqlStore {
         const reason = error instanceof Error ? [error.message, (error.cause as Error | undefined)?.message].filter(Boolean).join(": ") : String(error);
         console.error(`Runlight: copying visits into ClickHouse failed (${reason}), and tries again in ${Math.round(wait / 1000)} s`);
         first = true;
-        await this.pause(wait);
+        await this.pause(wait, background);
         continue;
       }
       first = false;
