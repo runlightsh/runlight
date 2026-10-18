@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -406,7 +407,14 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
   option("runlight_settings", `["mode" => "local"]`);
   option("permalink_structure", `"/%postname%/"`);
 
-  const port = 47000 + (process.pid % 2000);
+  // A port the system says is free, so PHP never finds it taken by something else on a shared runner.
+  const port = await new Promise<number>((resolve, reject) => {
+    const probe = createServer().once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port: free } = probe.address() as { port: number };
+      probe.close(() => resolve(free));
+    });
+  });
   const home = `http://127.0.0.1:${port}`;
   // PHP's own log of the server, shown in CI, where a failure here cannot be watched as it happens.
   const log = openSync(path.join(dir, "server.log"), "w");
