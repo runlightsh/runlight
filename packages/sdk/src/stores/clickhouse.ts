@@ -9,8 +9,9 @@ export interface ClickHouseOptions {
   /** Where everything but the visits lives: sites, goals, links, settings, and the rest. */
   store: SqlStore;
   /**
-   * The most queries sent to ClickHouse at once; the rest wait their turn. Default 4. A dashboard asks for
-   * a dozen reports at once, and each can take a few hundred megabytes over a long range.
+   * The most queries sent to ClickHouse at once; the rest wait their turn. Default 2. A dashboard asks for
+   * a dozen reports at once, and over a year of 10 million visits the biggest take 3 GB each, so two at a
+   * time fit in 8 GB, and open the dashboard sooner than four that fight over the memory.
    */
   maxQueries?: number;
   /** The longest one query may run, in milliseconds. Default 120000. 0 means no limit. */
@@ -213,6 +214,8 @@ function limiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
 export interface ClickHouseDb extends Db {
   /** Inserts rows. `wait` waits until they can be read, which ingest needs; a copy sends big batches instead. */
   insert(table: string, rows: Array<Record<string, unknown>>, options?: { batched?: boolean }): Promise<void>;
+  /** As `all`, without waiting behind reports for a turn: for the small reads a hit makes, so it is counted at once. */
+  lookup<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   /** Makes the database named in the URL, if it is not there. */
   createDatabase(): Promise<void>;
   /** Drops the database named in the URL, and everything in it. */
@@ -232,6 +235,9 @@ const SETTINGS: Record<string, string> = {
   // A delete or a rename is done before the statement returns, as everywhere else.
   lightweight_deletes_sync: "2",
   mutations_sync: "2",
+  // Visitors and visits are counted exactly up to about 4,000, and to within about 1% beyond, in a
+  // fraction of the memory: an exact count of a year's visitors per page needs gigabytes at 10 million visits.
+  count_distinct_implementation: "uniqCombined64",
 };
 
 export function clickhouseDb(options: { url: string; maxQueries?: number; queryTimeout?: number }): ClickHouseDb {
@@ -243,7 +249,7 @@ export function clickhouseDb(options: { url: string; maxQueries?: number; queryT
   const password = decodeURIComponent(url.password);
   const endpoint = `${url.protocol}//${url.host}/`;
   const timeout = options.queryTimeout ?? 120_000;
-  const turn = limiter(Math.max(1, options.maxQueries ?? 4));
+  const turn = limiter(Math.max(1, options.maxQueries ?? 2));
 
   async function send(body: string, params: Record<string, string>, inDatabase = true): Promise<string> {
     const search = new URLSearchParams({ ...SETTINGS, ...params });
@@ -260,21 +266,26 @@ export function clickhouseDb(options: { url: string; maxQueries?: number; queryT
     return text;
   }
 
-  const query = (sql: string, params: unknown[], extra: Record<string, string> = {}) => {
+  const query = (sql: string, params: unknown[], extra: Record<string, string> = {}, queued = true) => {
     const bound = bindPlaceholders(sql, params);
     const values = Object.fromEntries(Object.entries(bound.values).map(([k, v]) => [`param_${k}`, v]));
-    return turn(() => send(bound.sql, { ...values, ...extra }));
+    const go = () => send(bound.sql, { ...values, ...extra });
+    return queued ? turn(go) : go();
   };
+  const parsed = <T,>(text: string): T[] =>
+    text
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as T);
 
   return {
     dialect: "clickhouse",
     database,
     async all<T>(sql: string, params: unknown[] = []): Promise<T[]> {
-      const text = await query(sql, params, { default_format: "JSONEachRow" });
-      return text
-        .split("\n")
-        .filter((line) => line.trim())
-        .map((line) => JSON.parse(line) as T);
+      return parsed<T>(await query(sql, params, { default_format: "JSONEachRow" }));
+    },
+    async lookup<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+      return parsed<T>(await query(sql, params, { default_format: "JSONEachRow" }, false));
     },
     async run(sql: string, params: unknown[] = []): Promise<void> {
       await query(sql, params);
@@ -392,8 +403,13 @@ export class ClickHouseStore extends SqlStore {
 
   // Reports: the shared SQL, run on ClickHouse.
 
-  override visitOpen(...a: Parameters<SqlStore["visitOpen"]>) {
-    return this.visits.visitOpen(...a);
+  override async visitOpen(sites: string[], from: number, to: number, since: number): Promise<boolean> {
+    // A hit asks this as the day turns, so it goes ahead of any reports waiting their turn.
+    const open = await this.clickhouse.lookup(
+      `SELECT 1 AS open FROM rl_sessions WHERE site IN (${sites.map(() => "?").join(", ")}) AND started_at >= ? AND started_at < ? AND last_at >= ? LIMIT 1`,
+      [...sites, from, to, since],
+    );
+    return open.length > 0;
   }
   override lastSeen(...a: Parameters<SqlStore["lastSeen"]>) {
     return this.visits.lastSeen(...a);
@@ -482,7 +498,7 @@ export class ClickHouseStore extends SqlStore {
   private async key(id: string): Promise<VisitKey | null> {
     const known = this.keys.get(id);
     if (known) return known;
-    const [row] = await this.clickhouse.all<{ site: string; started_at: unknown; visitor: string }>(
+    const [row] = await this.clickhouse.lookup<{ site: string; started_at: unknown; visitor: string }>(
       `SELECT site, started_at, visitor FROM rl_visits WHERE id = ? LIMIT 1`,
       [id],
     );
@@ -510,7 +526,7 @@ export class ClickHouseStore extends SqlStore {
   override async openSession(site: string, visitors: string[], since: number): Promise<{ id: string; visitor: string } | null> {
     if (visitors.length === 0) return null;
     // A visit still going started within EVENT_TAIL_MS, which keeps the read to the newest days.
-    const rows = await this.clickhouse.all<{ id: string; visitor: string; started_at: unknown }>(
+    const rows = await this.clickhouse.lookup<{ id: string; visitor: string; started_at: unknown }>(
       `SELECT id, visitor, started_at FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
        ORDER BY last_at DESC, id LIMIT 1`,
       [site, since - EVENT_TAIL_MS, ...visitors, since],
@@ -522,7 +538,7 @@ export class ClickHouseStore extends SqlStore {
   }
 
   override async settleOpenSession(site: string, visitors: string[], since: number, opened: { id: string; visitor: string }): Promise<{ id: string; visitor: string }> {
-    const rows = await this.clickhouse.all<{ id: string; visitor: string; started_at: unknown }>(
+    const rows = await this.clickhouse.lookup<{ id: string; visitor: string; started_at: unknown }>(
       `SELECT id, visitor, started_at FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
        ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1`,
       [site, since - EVENT_TAIL_MS, ...visitors, since],
@@ -531,7 +547,7 @@ export class ClickHouseStore extends SqlStore {
     if (!first || first.id === opened.id) return opened;
     this.remember(first.id, { site, startedAt: Number(first.started_at), visitor: first.visitor });
     // The one opened here goes, unless something was counted into it meanwhile.
-    const [mine] = await this.clickhouse.all<{ n: unknown }>(`SELECT pageviews + events AS n FROM rl_sessions WHERE site = ? AND started_at >= ? AND id = ?`, [site, since - EVENT_TAIL_MS, opened.id]);
+    const [mine] = await this.clickhouse.lookup<{ n: unknown }>(`SELECT pageviews + events AS n FROM rl_sessions WHERE site = ? AND started_at >= ? AND id = ?`, [site, since - EVENT_TAIL_MS, opened.id]);
     if (mine && Number(mine.n) === 0) await this.deleteSession(opened.id);
     return { id: first.id, visitor: first.visitor };
   }
@@ -569,13 +585,13 @@ export class ClickHouseStore extends SqlStore {
 
   override async pageview(site: string, pageview: string): ReturnType<SqlStore["pageview"]> {
     // The pageview first, then its visit by the start it carries, which ClickHouse finds by its sort order.
-    const [row] = await this.clickhouse.all<Record<string, unknown>>(
+    const [row] = await this.clickhouse.lookup<Record<string, unknown>>(
       `SELECT session, visitor, path, hostname, ts, started_at FROM rl_events WHERE site = ? AND kind = 'pageview' AND pageview = ? LIMIT 1`,
       [site, pageview],
     );
     if (!row) return null;
     const startedAt = Number(row.started_at);
-    const [visit] = await this.clickhouse.all<{ last_at: unknown; visitor: string }>(
+    const [visit] = await this.clickhouse.lookup<{ last_at: unknown; visitor: string }>(
       `SELECT last_at, visitor FROM rl_sessions WHERE site = ? AND started_at = ? AND id = ?`,
       [site, startedAt, String(row.session)],
     );
