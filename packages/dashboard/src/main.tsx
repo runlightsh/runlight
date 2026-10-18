@@ -82,11 +82,11 @@ function writeUrl(view: View, charted: MetricKey[]) {
   history.replaceState(null, "", search ? `?${search}` : location.pathname);
 }
 
-function todayIn(timezone: string): string {
+function todayIn(timezone: string, at = new Date()): string {
   try {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(at);
   } catch {
-    return new Date().toISOString().slice(0, 10);
+    return at.toISOString().slice(0, 10);
   }
 }
 
@@ -499,7 +499,8 @@ function App() {
       ) : null}
       {moving !== null ? (
         <p class="failure notice" role="status">
-          {t("app.moving", { day: day(new Date(moving).toISOString().slice(0, 10)) })}
+          {/* The first whole day in the site's own time: the day the copy has reached is in part. */}
+          {t("app.moving", { day: day(todayIn(site?.timezone ?? "UTC", new Date(moving + 86_400_000 - 1))) })}
         </p>
       ) : null}
       {failure ? <p class="failure">{failure}</p> : null}
