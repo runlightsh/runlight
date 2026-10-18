@@ -7,6 +7,6 @@
   "require": {
     "php": ">=8.2",
     "drupal/core": "^10.3 || ^11",
-    "runlight/runlight": "^0.1.8"
+    "runlight/runlight": "^0.2.0"
   }
 }

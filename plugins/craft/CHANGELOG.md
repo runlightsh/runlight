@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.2.0 - 2026-10-18
 
 ### Changed
 - Released with Runlight 0.2.0, whose new ClickHouse support is for the standalone server. Nothing in the plugin changed.
