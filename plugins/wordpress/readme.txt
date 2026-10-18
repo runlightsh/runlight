@@ -121,6 +121,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Released with Runlight 0.2.0, whose new ClickHouse support is for the standalone server. Nothing in the plugin changed.
+
 = 0.1.8 =
 * Fixed share links and embedded dashboards when the plugin runs Runlight itself. Since 0.1.7 everyone but a signed-in admin was refused.
 * Wrote database values to suit a MySQL server set to NO_BACKSLASH_ESCAPES, reading the mode from WordPress's own connection.
