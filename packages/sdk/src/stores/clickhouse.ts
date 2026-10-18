@@ -1,4 +1,5 @@
-import { EVENT_TAIL_MS, SqlStore, clip, type Db, type EventRow, type GoalRow, type LinkRow, type SessionRow } from "../store.js";
+import { publicAddress } from "../safefetch.js";
+import { CARRIED_COLUMNS, EVENT_TAIL_MS, SqlStore, clip, type Db, type EventRow, type GoalRow, type LinkRow, type SessionRow } from "../store.js";
 
 export interface ClickHouseOptions {
   /**
@@ -69,6 +70,9 @@ const RENEW_MS = 20_000;
 /** The setting in the other store that says which process is copying. */
 const LEASE_KEY = "clickhouse-copy";
 
+/** The setting that says which process is sending the hits that waited for ClickHouse. */
+const WAITING_KEY = "clickhouse-waiting";
+
 /**
  * An event copied from the other store has its row id there with the top bit set, where ClickHouse's own
  * ids (Snowflake ids) never have it. So a piece of the copy tried again clears what the copy wrote, and
@@ -85,6 +89,10 @@ const VISIT_TEXT = [
   "hostname", "referrer_host", "referrer_path", "source", "channel", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
   "country", "region", "city", "browser", "browser_version", "os", "os_version", "device", "screen", "language",
 ] as const;
+
+/** A ClickHouse event's copy of its visit's column (see CARRIED_COLUMNS), and its type: few values each, but for two of the campaign tags. */
+const carried = (col: string) => `visit_${col}`;
+const CARRIED_TYPES = CARRIED_COLUMNS.map((col) => `${carried(col)} ${col === "utm_term" || col === "utm_content" ? "String" : "LowCardinality(String)"}`);
 
 /** The columns of an event, alike in both stores. */
 const EVENT_COLUMNS = ["site", "ts", "kind", "visitor", "session", "pageview", "path", "hostname", "title", "name", "props", "engaged_ms", "scroll", "link"] as const;
@@ -119,6 +127,7 @@ function eventFrom(r: Record<string, unknown>): Record<string, unknown> {
     pageview: text(r.pageview), path: text(r.path), hostname: text(r.hostname), title: text(r.title), name: text(r.name),
     props: r.props === null || r.props === undefined ? null : String(r.props), engaged_ms: int(r.engaged_ms),
     scroll: r.scroll === null || r.scroll === undefined ? null : int(r.scroll), link: text(r.link),
+    ...Object.fromEntries(CARRIED_COLUMNS.map((col) => [carried(col), text(r[carried(col)])])),
   };
 }
 
@@ -126,8 +135,9 @@ function eventFrom(r: Record<string, unknown>): Record<string, unknown> {
  * Runlight's visits and events in ClickHouse. Each hit adds a row of what changed (one more pageview,
  * when, on which page) and ClickHouse adds them up, so nothing is read before it is written, no count can
  * be lost, and any number of processes can share it. `rl_sessions` is a view over those rows, added up,
- * so reports read it as any other database's table. Events carry the start of their visit, so "the rows
- * of the visits that started in a range" is a range of the events themselves.
+ * so reports read it as any other database's table. Events carry the start of their visit and the columns
+ * that never change after it began, so "the rows of the Organic Search visits that started in a range" is
+ * a range of the events themselves, with no list of millions of visits to hold.
  */
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS rl_meta ("key" String, value String, at Int64) ENGINE = ReplacingMergeTree(at) ORDER BY "key"`,
@@ -166,6 +176,7 @@ const SCHEMA = [
     id UInt64 DEFAULT generateSnowflakeID(), site LowCardinality(String), ts Int64, kind LowCardinality(String),
     visitor String, session String, started_at Int64, pageview String, path String, hostname String, title String,
     name String, props Nullable(String), engaged_ms Int64, scroll Nullable(Int32), link String,
+    ${CARRIED_TYPES.join(", ")},
     INDEX session_index session TYPE bloom_filter GRANULARITY 4,
     INDEX pageview_index pageview TYPE bloom_filter GRANULARITY 4,
     INDEX path_index path TYPE bloom_filter GRANULARITY 4,
@@ -174,8 +185,8 @@ const SCHEMA = [
   ) ENGINE = MergeTree PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(ts)) ORDER BY (site, kind, ts)`,
 ];
 
-/** The version of the tables above, kept in ClickHouse's own rl_meta. */
-const SCHEMA_VERSION = 1;
+/** The version of the tables above, kept in ClickHouse's own rl_meta. 2 added the visits' columns to the events. */
+const SCHEMA_VERSION = 2;
 
 /** A ClickHouse type for a value bound to a placeholder, and the value as ClickHouse reads a parameter. */
 function typed(value: unknown): { type: string; text: string } {
@@ -222,7 +233,7 @@ const BUSY = "Runlight: ClickHouse is busy";
  * Lets at most `max` calls run at once; the rest wait in order, at most `queue` of them and for at most
  * `wait` ms (0 for no limit), so a ClickHouse that has slowed down cannot pile up work without end.
  */
-function limiter(max: number, queue: number, wait: number): <T>(fn: () => Promise<T>) => Promise<T> {
+export function limiter(max: number, queue: number, wait: number): <T>(fn: () => Promise<T>) => Promise<T> {
   let running = 0;
   const waiting: Array<() => void> = [];
   return async (fn) => {
@@ -313,9 +324,24 @@ const SETTINGS: Record<string, string> = {
   count_distinct_implementation: "uniqCombined64",
 };
 
+/**
+ * True for an http:// URL to a host that may be across the internet, where the password would go unencrypted:
+ * a public address, or a name with a dot in it that is not a private network's. Not for localhost, a private
+ * address, or a one-word name such as a Docker Compose service's.
+ */
+export function plainAcross(url: URL): boolean {
+  if (url.protocol !== "http:") return false;
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (/^[\d.]+$/.test(host) || host.includes(":")) return publicAddress(host);
+  return host.includes(".") && !/(^|\.)(localhost|local|internal|lan|home\.arpa|localdomain)$/.test(host);
+}
+
 export function clickhouseDb(options: { url: string; maxQueries?: number; queryTimeout?: number }): ClickHouseDb {
   const url = new URL(options.url);
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Runlight: CLICKHOUSE_URL should start http:// or https://");
+  if (plainAcross(url)) {
+    console.warn(`Runlight: ClickHouse is reached over http://, so its password goes unencrypted to ${url.hostname} with every request. Use https:// unless it is on a private network.`);
+  }
   const database = decodeURIComponent(url.pathname.replace(/^\/+|\/+$/g, "")) || "default";
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(database)) throw new Error("Runlight: the ClickHouse database name should be letters, digits, and underscores");
   const user = decodeURIComponent(url.username) || "default";
@@ -496,6 +522,13 @@ interface VisitKey {
   site: string;
   startedAt: number;
   visitor: string;
+  /** The visit's columns its events carry, as `visit_<column>`. */
+  carried: Record<string, string>;
+}
+
+/** The carried columns of a visit's row, or of a SessionRow's names for them, as its events take them. */
+function carriedOf(row: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(CARRIED_COLUMNS.map((col) => [carried(col), text(row[col])]));
 }
 
 /**
@@ -504,11 +537,12 @@ interface VisitKey {
  */
 export class ClickHouseStore extends SqlStore {
   override readonly keepsRollups = false;
+  override readonly keepsWaiting = true;
   /** Reads the visits and events, with the SQL every store shares. */
   readonly visits: SqlStore;
   readonly clickhouse: ClickHouseDb;
   private readonly rows: SqlStore;
-  private readonly keys: Map<string, VisitKey>;
+  protected readonly keys: Map<string, VisitKey>;
   private schema: Promise<void> | null = null;
   private readonly background: boolean;
   /** The copy running in the background, if one is. */
@@ -519,6 +553,8 @@ export class ClickHouseStore extends SqlStore {
   /** Who this process is, in the claim on the copy, and the claim as last written. */
   private readonly owner = crypto.randomUUID();
   private claimed: string | null = null;
+  /** This process's claim on sending the waiting hits, as last written. */
+  private sending: string | null = null;
   /** The claim being written, so the next waits for it. */
   private claims: Promise<boolean> = Promise.resolve(true);
   /** Set when this process finds another has taken the copy over, so it stops before writing more. */
@@ -544,10 +580,18 @@ export class ClickHouseStore extends SqlStore {
    */
   override async migrate(): Promise<void> {
     await super.migrate();
+    await this.makeWaiting();
     this.schema ??= (async () => {
       await this.clickhouse.createDatabase();
       for (const statement of SCHEMA) await this.clickhouse.run(statement);
-      if ((await this.meta("schema")) !== String(SCHEMA_VERSION)) await this.setMeta("schema", String(SCHEMA_VERSION));
+      const version = await this.meta("schema");
+      if (version === "1") {
+        // Events written before carry no visit columns, so reports read them through their visits as before.
+        for (const type of CARRIED_TYPES) await this.clickhouse.run(`ALTER TABLE rl_events ADD COLUMN IF NOT EXISTS ${type}`);
+        await this.setMeta("carried-from", String(Date.now()));
+      }
+      if (version !== String(SCHEMA_VERSION)) await this.setMeta("schema", String(SCHEMA_VERSION));
+      this.visits.carriedFrom = Number((await this.meta("carried-from")) ?? 0);
       if ((await this.moveState())?.back) throw new Error("Runlight: the visits are being copied back out of ClickHouse. Run clickhouse copy --back to finish, then remove CLICKHOUSE_URL.");
       await this.sayLive();
       this.live ??= setInterval(() => void this.sayLive().catch(() => {}), LIVE_EVERY_MS);
@@ -563,6 +607,59 @@ export class ClickHouseStore extends SqlStore {
   /** The other store's tables only, leaving ClickHouse and the copy be, for the server's clickhouse commands. */
   async migrateOther(): Promise<void> {
     await super.migrate();
+    await this.makeWaiting();
+  }
+
+  override tables(): string[] {
+    return [...super.tables(), `${this.prefix}waiting_hits`];
+  }
+
+  // Hits that wait in the other store while ClickHouse cannot take them (see Waiting).
+
+  private async makeWaiting(): Promise<void> {
+    const dialect = this.db.dialect;
+    const id = dialect === "postgres" ? "BIGSERIAL PRIMARY KEY" : dialect === "mysql" ? "BIGINT AUTO_INCREMENT PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
+    await this.db.run(`CREATE TABLE IF NOT EXISTS rl_waiting_hits (id ${id}, at BIGINT NOT NULL, hit ${dialect === "mysql" ? "MEDIUMTEXT" : "TEXT"} NOT NULL)${dialect === "mysql" ? " DEFAULT CHARSET=utf8mb4" : ""}`);
+  }
+
+  /** ClickHouse could not be reached, was too busy, ran out of time or memory, or had too many parts to merge. */
+  override waitable(error: unknown): boolean {
+    if (transient(error) || (error as Error)?.name === "TimeoutError") return true;
+    if (error instanceof ClickHouseError) return /^Code: (159|241|252)\b/.test(error.reply);
+    return /ClickHouse is busy|could not reach ClickHouse/.test(String((error as Error)?.message ?? error));
+  }
+
+  override async wait(at: number, hit: string): Promise<void> {
+    await this.db.run(`INSERT INTO rl_waiting_hits (at, hit) VALUES (?, ?)`, [at, hit]);
+  }
+
+  override async waiting(limit: number, since: number): Promise<{ hits: Array<{ id: string; hit: string }>; left: number } | null> {
+    if (!(await this.db.all(`SELECT 1 AS x FROM rl_waiting_hits LIMIT 1`)).length) {
+      // None left: another process may send the next ones at once.
+      if (this.sending) await this.swapSetting(WAITING_KEY, this.sending, JSON.stringify({ by: "", until: 0 }));
+      this.sending = null;
+      return { hits: [], left: 0 };
+    }
+    const mine = JSON.stringify({ by: this.owner, until: Date.now() + LEASE_MS });
+    const held = await this.settingOrAdd(WAITING_KEY, () => mine);
+    if (held !== mine) {
+      const { by, until } = JSON.parse(held) as { by: string; until: number };
+      if (by !== this.owner && until > Date.now()) return null;
+      if (!(await this.swapSetting(WAITING_KEY, held, mine))) return null;
+    }
+    this.sending = mine;
+    await this.db.run(`DELETE FROM rl_waiting_hits WHERE at < ?`, [since]);
+    const hits = await this.db.all<{ id: unknown; hit: unknown }>(`SELECT id, hit FROM rl_waiting_hits ORDER BY id LIMIT ${Math.trunc(limit)}`);
+    const [left] = await this.db.all<{ n: unknown }>(`SELECT COUNT(*) AS n FROM rl_waiting_hits`);
+    return { hits: hits.map((h) => ({ id: String(h.id), hit: String(h.hit) })), left: Number(left?.n ?? 0) };
+  }
+
+  override async doneWaiting(ids: string[]): Promise<void> {
+    // Ninety at a time, within Cloudflare D1's 100 values a statement.
+    for (let i = 0; i < ids.length; i += 90) {
+      const piece = ids.slice(i, i + 90);
+      await this.db.run(`DELETE FROM rl_waiting_hits WHERE id IN (${piece.map(() => "?").join(", ")})`, piece.map(Number));
+    }
   }
 
   override async close(): Promise<void> {
@@ -570,6 +667,7 @@ export class ClickHouseStore extends SqlStore {
     this.wake?.();
     await this.copying;
     await this.release().catch(() => {});
+    if (this.sending) await this.swapSetting(WAITING_KEY, this.sending, JSON.stringify({ by: "", until: 0 })).catch(() => {});
     if (this.live) {
       clearInterval(this.live);
       this.live = null;
@@ -731,12 +829,13 @@ export class ClickHouseStore extends SqlStore {
   protected async key(id: string): Promise<VisitKey | null> {
     const known = this.keys.get(id);
     if (known) return known;
-    const [row] = await this.clickhouse.lookup<{ site: string; started_at: unknown; visitor: string }>(
-      `SELECT site, started_at, visitor FROM rl_visits WHERE id = ? LIMIT 1`,
+    // Its columns are in the row that began it, and empty in the rest, so the largest of each is the one.
+    const [row] = await this.clickhouse.lookup<Record<string, unknown>>(
+      `SELECT site, started_at, visitor, ${CARRIED_COLUMNS.map((col) => `max(${col}) AS ${col}`).join(", ")} FROM rl_visits WHERE id = ? GROUP BY site, started_at, visitor LIMIT 1`,
       [id],
     );
     if (!row) return null;
-    return this.remember(id, { site: row.site, startedAt: Number(row.started_at), visitor: row.visitor });
+    return this.remember(id, { site: String(row.site), startedAt: Number(row.started_at), visitor: String(row.visitor), carried: carriedOf(row) });
   }
 
   protected remember(id: string, key: VisitKey): VisitKey {
@@ -762,26 +861,26 @@ export class ClickHouseStore extends SqlStore {
   override async openSession(site: string, visitors: string[], since: number): Promise<{ id: string; visitor: string } | null> {
     if (visitors.length === 0) return null;
     // A visit still going started within EVENT_TAIL_MS, which keeps the read to the newest days.
-    const rows = await this.clickhouse.lookup<{ id: string; visitor: string; started_at: unknown }>(
-      `SELECT id, visitor, started_at FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
+    const rows = await this.clickhouse.lookup<Record<string, unknown> & { id: string; visitor: string }>(
+      `SELECT id, visitor, started_at, ${CARRIED_COLUMNS.join(", ")} FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
        ORDER BY last_at DESC, id LIMIT 1`,
       [site, since - EVENT_TAIL_MS, ...visitors, since],
     );
     const row = rows[0];
     if (!row) return null;
-    this.remember(row.id, { site, startedAt: Number(row.started_at), visitor: row.visitor });
+    this.remember(row.id, { site, startedAt: Number(row.started_at), visitor: row.visitor, carried: carriedOf(row) });
     return { id: row.id, visitor: row.visitor };
   }
 
   override async settleOpenSession(site: string, visitors: string[], since: number, opened: { id: string; visitor: string }): Promise<{ id: string; visitor: string }> {
-    const rows = await this.clickhouse.lookup<{ id: string; visitor: string; started_at: unknown }>(
-      `SELECT id, visitor, started_at FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
+    const rows = await this.clickhouse.lookup<Record<string, unknown> & { id: string; visitor: string }>(
+      `SELECT id, visitor, started_at, ${CARRIED_COLUMNS.join(", ")} FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")}) AND last_at >= ?
        ORDER BY CASE WHEN pageviews > 0 OR events > 0 THEN 0 ELSE 1 END, started_at, id LIMIT 1`,
       [site, since - EVENT_TAIL_MS, ...visitors, since],
     );
     const first = rows[0];
     if (!first || first.id === opened.id) return opened;
-    this.remember(first.id, { site, startedAt: Number(first.started_at), visitor: first.visitor });
+    this.remember(first.id, { site, startedAt: Number(first.started_at), visitor: first.visitor, carried: carriedOf(first) });
     // The one opened here is left, rather than deleted: another process may be counting a hit into it this
     // moment, and a visit with no pageview or event is no visit to any report.
     return { id: first.id, visitor: first.visitor };
@@ -789,17 +888,20 @@ export class ClickHouseStore extends SqlStore {
 
   override async insertSession(row: SessionRow): Promise<void> {
     const c = clip;
-    this.remember(row.id, { site: row.site, startedAt: row.startedAt, visitor: row.visitor });
     // Each text cut as the other databases cut it, so every database keeps the same.
-    await this.write("rl_visits", {
-      site: row.site, started_at: row.startedAt, id: row.id, visitor: row.visitor, last_at: row.startedAt,
-      pageviews: 0, events: 0, engaged_ms: 0, engaged_unknown: 0, imported: 0, entry: [NO_ENTRY, ""], exit: [0, ""],
+    const columns = {
       hostname: c(row.hostname, 255), referrer_host: c(row.referrerHost, 255), referrer_path: c(row.referrerPath, 500),
       source: c(row.source, 200), channel: c(row.channel, 100), utm_source: c(row.utmSource, 200), utm_medium: c(row.utmMedium, 200),
       utm_campaign: c(row.utmCampaign, 200), utm_term: c(row.utmTerm, 200), utm_content: c(row.utmContent, 200),
       country: c(row.country, 16), region: c(row.region, 100), city: c(row.city, 100), browser: c(row.browser, 100),
       browser_version: c(row.browserVersion, 100), os: c(row.os, 100), os_version: c(row.osVersion, 100), device: c(row.device, 50),
       screen: c(row.screen, 50), language: c(row.language, 50),
+    };
+    this.remember(row.id, { site: row.site, startedAt: row.startedAt, visitor: row.visitor, carried: carriedOf(columns) });
+    await this.write("rl_visits", {
+      site: row.site, started_at: row.startedAt, id: row.id, visitor: row.visitor, last_at: row.startedAt,
+      pageviews: 0, events: 0, engaged_ms: 0, engaged_unknown: 0, imported: 0, entry: [NO_ENTRY, ""], exit: [0, ""],
+      ...columns,
     });
   }
 
@@ -830,12 +932,12 @@ export class ClickHouseStore extends SqlStore {
     );
     if (!row) return null;
     const startedAt = Number(row.started_at);
-    const [visit] = await this.clickhouse.lookup<{ last_at: unknown; visitor: string }>(
-      `SELECT last_at, visitor FROM rl_sessions WHERE site = ? AND started_at = ? AND id = ?`,
+    const [visit] = await this.clickhouse.lookup<Record<string, unknown> & { visitor: string }>(
+      `SELECT last_at, visitor, ${CARRIED_COLUMNS.join(", ")} FROM rl_sessions WHERE site = ? AND started_at = ? AND id = ?`,
       [site, startedAt, String(row.session)],
     );
     if (!visit) return null;
-    this.remember(String(row.session), { site, startedAt, visitor: visit.visitor });
+    this.remember(String(row.session), { site, startedAt, visitor: visit.visitor, carried: carriedOf(visit) });
     return {
       session: String(row.session),
       visitor: String(row.visitor),
@@ -853,6 +955,7 @@ export class ClickHouseStore extends SqlStore {
       site: row.site, ts: row.ts, kind: row.kind, visitor: row.visitor, session: row.session, started_at: key?.startedAt ?? 0,
       pageview: row.pageview, path: clip(row.path, 1000), hostname: clip(row.hostname, 255), title: clip(row.title, 500),
       name: clip(row.name, 255), props: row.props ? JSON.stringify(row.props) : null, engaged_ms: row.engagedMs, scroll: row.scroll, link: row.link,
+      ...key?.carried,
     });
   }
 
@@ -1191,7 +1294,7 @@ export class ClickHouseStore extends SqlStore {
     return next;
   }
 
-  /** One site's visits that started in [from, to), and its events in [from, to), each with its visit's start. */
+  /** One site's visits that started in [from, to), and its events in [from, to), each with its visit's start and columns. */
   private async copyPiece(site: string, from: number, to: number): Promise<void> {
     let after: { at: number; id: string } | null = null;
     for (;;) {
@@ -1211,7 +1314,7 @@ export class ClickHouseStore extends SqlStore {
     let next: { ts: number; id: number } | null = null;
     for (;;) {
       const rows: Array<Record<string, unknown>> = await this.db.all(
-        `SELECT ${EVENT_COLUMNS.map((c) => `e.${c}`).join(", ")}, e.id AS row_id, s.started_at AS visit_started
+        `SELECT ${EVENT_COLUMNS.map((c) => `e.${c}`).join(", ")}, e.id AS row_id, s.started_at AS visit_started, ${CARRIED_COLUMNS.map((c) => `s.${c} AS ${carried(c)}`).join(", ")}
          FROM rl_events e LEFT JOIN rl_sessions s ON s.id = e.session
          WHERE e.site = ? AND e.ts >= ? AND e.ts < ?${next ? " AND (e.ts > ? OR (e.ts = ? AND e.id > ?))" : ""}
          ORDER BY e.ts, e.id LIMIT ${COPY_BATCH}`,
@@ -1291,6 +1394,10 @@ export class ClickHouseStore extends SqlStore {
         `Runlight: a server is still taking hits into ClickHouse (it last said so ${Math.round(ago / 1000)} s ago). Stop every server first; one that stopped without shutting down counts as gone ${LIVE_FOR_MS / 1000} s after it last said so.`,
       );
     }
+    // Without ClickHouse they would never be sent.
+    const [waiting] = await this.db.all<{ n: unknown }>(`SELECT COUNT(*) AS n FROM rl_waiting_hits`);
+    const left = Number(waiting?.n ?? 0);
+    if (left) throw new Error(`Runlight: ${left === 1 ? "a hit is" : `${left.toLocaleString("en")} hits are`} still waiting to go into ClickHouse. Start a server until they are in, then stop it and copy back.`);
     if (state.back !== "copied") {
       const held = await this.clickhouse.all(`SELECT 1 AS x FROM (SELECT 1 FROM rl_visits LIMIT 1 UNION ALL SELECT 1 FROM rl_events LIMIT 1)`);
       if (!held.length && state.back !== "copying") {
@@ -1425,7 +1532,7 @@ class ImportStep extends ClickHouseStore {
 
   override async insertSession(row: SessionRow): Promise<void> {
     await super.insertSession(row);
-    const key = { site: row.site, startedAt: row.startedAt, visitor: row.visitor };
+    const key = this.keys.get(row.id)!;
     this.madeKeys.set(row.id, key);
     this.made.set(row.visitor, [...(this.made.get(row.visitor) ?? []), { id: row.id, ...key }]);
   }
@@ -1443,15 +1550,15 @@ class ImportStep extends ClickHouseStore {
   /** The visit to join, from ClickHouse and from what this step has gathered, by the same rule as ClickHouse's. */
   override async openSession(site: string, visitors: string[], since: number): Promise<{ id: string; visitor: string } | null> {
     if (visitors.length === 0) return null;
-    const found = new Map<string, { id: string; visitor: string; startedAt: number; lastAt: number }>();
-    const rows = await this.clickhouse.lookup<{ id: string; visitor: string; started_at: unknown; last_at: unknown }>(
-      `SELECT id, visitor, started_at, last_at FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")})`,
+    const found = new Map<string, { id: string; visitor: string; startedAt: number; lastAt: number; carried: Record<string, string> }>();
+    const rows = await this.clickhouse.lookup<Record<string, unknown> & { id: string; visitor: string }>(
+      `SELECT id, visitor, started_at, last_at, ${CARRIED_COLUMNS.join(", ")} FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")})`,
       [site, since - EVENT_TAIL_MS, ...visitors],
     );
-    for (const r of rows) found.set(r.id, { id: r.id, visitor: r.visitor, startedAt: Number(r.started_at), lastAt: Number(r.last_at) });
+    for (const r of rows) found.set(r.id, { id: r.id, visitor: r.visitor, startedAt: Number(r.started_at), lastAt: Number(r.last_at), carried: carriedOf(r) });
     for (const visitor of visitors) {
       for (const v of this.made.get(visitor) ?? []) {
-        if (v.site === site && v.startedAt >= since - EVENT_TAIL_MS) found.set(v.id, { id: v.id, visitor, startedAt: v.startedAt, lastAt: v.startedAt });
+        if (v.site === site && v.startedAt >= since - EVENT_TAIL_MS) found.set(v.id, { id: v.id, visitor, startedAt: v.startedAt, lastAt: v.startedAt, carried: v.carried });
       }
     }
     const open = [...found.values()]
@@ -1460,7 +1567,7 @@ class ImportStep extends ClickHouseStore {
       .sort((a, b) => b.lastAt - a.lastAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const row = open[0];
     if (!row) return null;
-    this.remember(row.id, { site, startedAt: row.startedAt, visitor: row.visitor });
+    this.remember(row.id, { site, startedAt: row.startedAt, visitor: row.visitor, carried: row.carried });
     return { id: row.id, visitor: row.visitor };
   }
 }

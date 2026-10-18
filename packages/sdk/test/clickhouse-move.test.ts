@@ -242,7 +242,7 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     assert.deepEqual(await reports(server(rows, clock)), expected);
   });
 
-  test(`${kind}: copy back waits until no server is taking hits, and refuses an empty ClickHouse`, async () => {
+  test(`${kind}: copy back waits until no server is taking hits and no hit is waiting, and refuses an empty ClickHouse`, async () => {
     const clock = { now: Date.now() };
     const rows = freshStore(kind);
     await history(server(rows, clock), clock);
@@ -254,6 +254,10 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     await say(String(Date.now() + 90_000));
     await assert.rejects(store.copyBack(), /still taking hits/);
     await say("0");
+    // Hits still waiting for ClickHouse would never be sent once it is gone.
+    await store.wait(Date.now(), "{}");
+    await assert.rejects(store.copyBack(), /a hit is still waiting/);
+    await store.doneWaiting((await store.waiting(10, 0))!.hits.map((h) => h.id));
     // ClickHouse emptied by hand would leave nothing to copy back but the other store to lose.
     await store.clickhouse.run("TRUNCATE TABLE rl_visits");
     await store.clickhouse.run("TRUNCATE TABLE rl_events");
@@ -351,6 +355,51 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     assert.deepEqual(await reports(server(store, clock)), expected);
   });
 }
+
+test("a copy gives up after ten failures in a row, and a piece that goes in starts the count again", { skip: !process.env.RUNLIGHT_TEST_CLICKHOUSE }, async () => {
+  const clock = { now: Date.now() };
+  const rows = freshStore("sqlite");
+  const before = server(rows, clock);
+  await history(before, clock);
+  const expected = await reports(before);
+
+  const store = switched(rows, false);
+  await store.migrate();
+  // No pauses between tries, which would otherwise double from a second up to five minutes.
+  const inner = store as unknown as { pause(ms: number): Promise<void>; copyStep(...a: unknown[]): Promise<unknown> };
+  const waits: number[] = [];
+  inner.pause = async (ms) => void waits.push(ms);
+  const step = inner.copyStep.bind(store);
+  const plan = [...Array(9).fill("fail"), "copy", ...Array(9).fill("fail")];
+  let tries = 0;
+  inner.copyStep = async (...a) => {
+    tries++;
+    const next = plan.shift() ?? "copy";
+    if (next === "fail") throw new TypeError("fetch failed", { cause: new Error("other side closed") });
+    return step(...a);
+  };
+  // Nine failures, a piece, nine more: never ten in a row, so the copy finishes.
+  assert.equal((await store.copy())?.done, true);
+  assert.deepEqual(waits.slice(0, 10), [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 1_000]);
+  assert.deepEqual(await reports(server(store, clock)), expected);
+
+  // Ten in a row stops it with the last reason.
+  const otherRows = freshStore("sqlite");
+  await history(server(otherRows, clock), clock);
+  const other = switched(otherRows, false);
+  await other.migrate();
+  const otherInner = other as unknown as typeof inner;
+  otherInner.pause = async () => {};
+  tries = 0;
+  otherInner.copyStep = async () => {
+    tries++;
+    throw new TypeError("fetch failed", { cause: new Error("other side closed") });
+  };
+  await assert.rejects(other.copy(), /fetch failed/);
+  assert.equal(tries, 10);
+  await other.close();
+  await store.close();
+});
 
 test("the old database's text columns map onto ClickHouse's", async () => {
   // The visit columns copied one way and back must be the visit columns both stores have.
