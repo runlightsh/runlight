@@ -649,9 +649,8 @@ function anyCase(value: string): string {
   return `${out}*`;
 }
 
-/** One filter as a condition on its own column, with "is not" flipped to "is" when `positive` asks. */
-function condition(filter: Filter, dialect: Db["dialect"], positive = false): { sql: string; params: unknown[] } {
-  const col = column(filter.dimension);
+/** One filter as a condition on its own column (or `col`), with "is not" flipped to "is" when `positive` asks. */
+function condition(filter: Filter, dialect: Db["dialect"], positive = false, col = column(filter.dimension)): { sql: string; params: unknown[] } {
   const op = positive && filter.op === "not" ? "is" : filter.op;
   // Paths are recorded percent-encoded, as the browser's URL parser writes them, so "/café" is matched as
   // "/caf%C3%A9", just as a goal for it is.
@@ -726,6 +725,29 @@ function rowScope(filters: Filter[], dimensions: string[], dialect: Db["dialect"
   return { sql, params };
 }
 
+/** The visit's columns a ClickHouse event carries, as `visit_<column>`: all but the entry and exit pages, which change as it goes on. */
+export const CARRIED_COLUMNS = Object.values(SESSION_DIMENSIONS).filter((col) => col !== "entry_path" && col !== "exit_path");
+
+/**
+ * On ClickHouse, the rows of the visits the filters pick, as conditions on the rows themselves, with no list
+ * of the visits to hold: each event carries its visit's start and columns. A filter on one of `dimensions`,
+ * the kind of row read, is met by any row that `rowScope` keeps, when it is the only filter on it. Null when
+ * a filter needs the visits themselves: on the entry or exit page, or another kind of row.
+ */
+function carriedScope(filters: Filter[], dimensions: string[], from: number, to: number, dialect: Db["dialect"]): { sql: string; params: unknown[] } | null {
+  let sql = " AND e.started_at >= ? AND e.started_at < ?";
+  const params: unknown[] = [from, to];
+  for (const filter of filters) {
+    if (isSessionDimension(filter.dimension)) {
+      if (filter.dimension === "entry" || filter.dimension === "exit") return null;
+      const c = condition(filter, dialect, false, `e.visit_${SESSION_DIMENSIONS[filter.dimension]}`);
+      sql += ` AND ${c.sql}`;
+      params.push(...c.params);
+    } else if (!dimensions.includes(filter.dimension) || filter.op === "not" || filters.filter((f) => f.dimension === filter.dimension).length > 1) return null;
+  }
+  return { sql, params };
+}
+
 /**
  * Pageviews for each visit a filter picks, as a table to LEFT JOIN on `pv.session = s.id`, when a page or
  * hostname filter narrows what counts as a pageview. Null when every pageview of a visit counts.
@@ -737,6 +759,29 @@ function pageviewsOf(filters: Filter[], site: string, from: number, to: number, 
     sql: `(SELECT e.session AS session, COUNT(*) AS n FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'pageview'${rows.sql} GROUP BY e.session)`,
     params: [site, from, to + EVENT_TAIL_MS, ...rows.params],
   };
+}
+
+/**
+ * The visits the filters pick (see visitScope), and their pageviews as `pv` to join to them, when a filter
+ * narrows what counts as one (see pageviewsOf). On ClickHouse a lone filter on the page or the hostname is
+ * read once for both: the visits it picks are the ones with a matching pageview or event, which the join
+ * keeps, by their ids' hashes as visitScope matches them.
+ */
+function visitsAndPageviews(filters: Filter[], site: string, from: number, to: number, dialect: Db["dialect"]): { scope: { sql: string; params: unknown[] }; pv: { join: string; params: unknown[] } | null } {
+  const rows = filters.filter((f) => !isSessionDimension(f.dimension));
+  const lone = dialect === "clickhouse" && rows.length === 1 && rows[0]!.op !== "not" && rows[0]!.dimension !== "event" ? rows[0]! : null;
+  if (lone) {
+    const c = condition(lone, dialect);
+    return {
+      scope: visitScope(filters.filter((f) => f !== lone), site, from, to, dialect),
+      pv: {
+        join: `INNER JOIN (SELECT cityHash64(e.session) AS h, countIf(e.kind = 'pageview') AS n FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND ${VISIT_KINDS} AND ${c.sql} GROUP BY h) pv ON pv.h = cityHash64(s.id)`,
+        params: [site, from, to + EVENT_TAIL_MS, ...c.params],
+      },
+    };
+  }
+  const pv = pageviewsOf(filters, site, from, to, dialect);
+  return { scope: visitScope(filters, site, from, to, dialect), pv: pv && { join: `LEFT JOIN ${pv.sql} pv ON pv.session = s.id`, params: pv.params } };
 }
 
 // SQLite can prefer the path index to avoid a sort, reading the site's entire history.
@@ -770,6 +815,11 @@ export class SqlStore {
   readonly keepsRollups: boolean = true;
   /** On ClickHouse, how many engagement rows the pages report adds up in one query; smaller in tests, to try the slices. */
   engagedPerSlice = ENGAGED_PER_SLICE;
+  /**
+   * On ClickHouse, the earliest visit start from which every event carries its visit's columns (see
+   * CARRIED_COLUMNS), so reports over those visits can filter the events by them. Null elsewhere.
+   */
+  carriedFrom: number | null = null;
 
   /**
    * `prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
@@ -790,6 +840,33 @@ export class SqlStore {
   tables(): string[] {
     return TABLES.map((table) => `${this.prefix}${table}`);
   }
+
+  /**
+   * Whether hits the store could not take can wait in it, to be sent again: only a ClickHouseStore keeps them,
+   * in its other store, for while ClickHouse is down or too busy. Every other store takes a hit or loses it.
+   */
+  readonly keepsWaiting: boolean = false;
+
+  /** True for an error after which a hit is worth keeping to send again, rather than dropping. */
+  waitable(_error: unknown): boolean {
+    return false;
+  }
+
+  /** Keeps a hit, as text, that arrived at `at`, to send again. */
+  async wait(_at: number, _hit: string): Promise<void> {
+    throw new Error("Runlight: this store keeps no waiting hits");
+  }
+
+  /**
+   * The oldest waiting hits, in the order they came, after dropping any that arrived before `since`, and how
+   * many are left in all. Null while another process is sending them.
+   */
+  async waiting(_limit: number, _since: number): Promise<{ hits: Array<{ id: string; hit: string }>; left: number } | null> {
+    return { hits: [], left: 0 };
+  }
+
+  /** Lets go of waiting hits once sent. */
+  async doneWaiting(_ids: string[]): Promise<void> {}
 
   /** A name as the database has it, under the store's prefix, as Runlight's SQL writes it, under rl_. */
   private unnamed(name: string): string {
@@ -2294,12 +2371,11 @@ export class SqlStore {
     const rolled = await this.rolledStats(query);
     if (rolled) return rolled;
     // Filtered or not, the numbers describe visits that started in the range (see visitScope).
-    const scope = visitScope(query.filters, query.site, query.from, query.to, this.db.dialect);
-    const pv = pageviewsOf(query.filters, query.site, query.from, query.to, this.db.dialect);
+    const { scope, pv } = visitsAndPageviews(query.filters, query.site, query.from, query.to, this.db.dialect);
     const [row] = await this.db.all(
       `SELECT COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(${pv ? "COALESCE(pv.n, 0)" : "s.pageviews"}) AS pageviews,
          SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(${DURATION}) AS duration
-       FROM rl_sessions s ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+       FROM rl_sessions s ${pv?.join ?? ""}
        WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql}`,
       [...(pv?.params ?? []), query.site, query.from, query.to, ...scope.params],
     );
@@ -2320,8 +2396,7 @@ export class SqlStore {
     if (buckets.length > BUCKETS_PER_QUERY) return inPieces(buckets, BUCKETS_PER_QUERY, (piece) => this.series(query, piece));
     const params: unknown[] = buckets.flatMap((b, i) => [i, b.start, b.end]);
     // Filtered or not, each bucket counts the visits that started in it (see visitScope).
-    const scope = visitScope(query.filters, query.site, buckets[0]!.start, buckets[buckets.length - 1]!.end, this.db.dialect);
-    const pv = pageviewsOf(query.filters, query.site, buckets[0]!.start, buckets[buckets.length - 1]!.end, this.db.dialect);
+    const { scope, pv } = visitsAndPageviews(query.filters, query.site, buckets[0]!.start, buckets[buckets.length - 1]!.end, this.db.dialect);
     // Built days that fit inside one bucket come from rollups; the rest from the visits.
     const plan = await this.rollupPlan(query, buckets[0]!.start, buckets[buckets.length - 1]!.end);
     const inBucket = (d: { start: number; end: number }) => buckets.findIndex((b) => b.start <= d.start && d.end <= b.end);
@@ -2368,7 +2443,7 @@ export class SqlStore {
             `SELECT i, ${totals} FROM (
                SELECT s.*, arrayFirstIndex((a, z) -> s.started_at >= a AND s.started_at < z, [${buckets.map((b) => Math.trunc(b.start)).join(", ")}], [${buckets.map((b) => Math.trunc(b.end)).join(", ")}]) - 1 AS i
                FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ?) s
-             ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+             ${pv?.join ?? ""}
              WHERE i >= 0 AND ${IS_VISIT}${scope.sql} AND ${w.sql}
              GROUP BY i`,
             [query.site, buckets[0]!.start, buckets[buckets.length - 1]!.end, ...(pv?.params ?? []), ...scope.params, ...w.params],
@@ -2377,7 +2452,7 @@ export class SqlStore {
             `WITH ${bucketTable(this.db.dialect, buckets)}
              SELECT b.i AS i, ${totals}
              FROM b JOIN rl_sessions s ON s.site = ? AND s.started_at >= b.bs AND s.started_at < b.be
-             ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+             ${pv?.join ?? ""}
              WHERE ${IS_VISIT}${scope.sql} AND ${w.sql}
              GROUP BY b.i`,
             [...params, query.site, ...(pv?.params ?? []), ...scope.params, ...w.params],
@@ -2438,13 +2513,13 @@ export class SqlStore {
     // Filtered or not, the visits are those that started in the range (see visitScope).
     const scope = visitScope(query.filters, query.site, query.from, query.to, this.db.dialect);
     if (isSessionDimension(dimension)) {
-      const pv = pageviewsOf(query.filters, query.site, query.from, query.to, this.db.dialect);
+      const { scope, pv } = visitsAndPageviews(query.filters, query.site, query.from, query.to, this.db.dialect);
       const col = `s.${SESSION_DIMENSIONS[dimension]}`;
       const entryExit = dimension === "entry" || dimension === "exit";
       const rows = await this.db.all(
         `SELECT ${col} AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(${pv ? "COALESCE(pv.n, 0)" : "s.pageviews"}) AS pageviews,
            SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(${DURATION}) AS duration
-         FROM rl_sessions s ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+         FROM rl_sessions s ${pv?.join ?? ""}
          WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql} AND ${col} <> ''
          GROUP BY ${col} ORDER BY ${entryExit ? "visits DESC" : "visitors DESC, visits DESC"}, ${col}${this.textOrder} LIMIT ? OFFSET ?`,
         [...(pv?.params ?? []), query.site, query.from, query.to, ...scope.params, ...page],
@@ -2469,6 +2544,8 @@ export class SqlStore {
     // the same kind of row ("page is /pricing" on pages), as the rollups count them.
     const within = (dimensions: string[]) => {
       const rows = rowScope(query.filters, dimensions, this.db.dialect);
+      const carried = this.carriedFrom !== null && query.from >= this.carriedFrom ? carriedScope(query.filters, dimensions, query.from, query.to, this.db.dialect) : null;
+      if (carried) return { sql: `${carried.sql}${rows.sql}`, params: [...carried.params, ...rows.params], to: query.to + EVENT_TAIL_MS };
       return {
         // On ClickHouse, by the ids' hashes, which the set holds in under half the memory.
         sql:
@@ -2563,13 +2640,12 @@ export class SqlStore {
       for (const row of raw) bump(Math.floor(num(row.quarter)), row);
       return [...sums.values()];
     }
-    const matching = visitScope(query.filters, query.site, query.from, query.to, this.db.dialect);
     // A page filter counts that page's views as pageviews here too, as the cards do.
-    const pv = pageviewsOf(query.filters, query.site, query.from, query.to, this.db.dialect);
+    const { scope: matching, pv } = visitsAndPageviews(query.filters, query.site, query.from, query.to, this.db.dialect);
     const rows = await this.db.all(
       `SELECT ${div(this.db.dialect, "s.started_at", 900000)} AS quarter, COUNT(*) AS visits, COUNT(DISTINCT s.visitor) AS visitors,
          SUM(${pv ? "COALESCE(pv.n, 0)" : "s.pageviews"}) AS pageviews, SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced
-       FROM rl_sessions s ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+       FROM rl_sessions s ${pv?.join ?? ""}
        WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${matching.sql}
        GROUP BY 1`,
       [...(pv?.params ?? []), query.site, query.from, query.to, ...matching.params],

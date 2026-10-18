@@ -12,9 +12,10 @@ import { RateLimit } from "./limit.js";
 import { decodePart } from "./path.js";
 import { createRoutes, type Routes, type RoutesOptions } from "./routes.js";
 import { attribute, parsePage, stripWww, type Page } from "./sources.js";
-import { EVENT_TAIL_MS, type ReportRow, type SiteOverrides, type SiteRow, type SqlStore } from "./store.js";
+import { EVENT_TAIL_MS, type ReportRow, type SessionRow, type SiteOverrides, type SiteRow, type SqlStore } from "./store.js";
 import { addDays, isTimezone, localDate, startOf } from "./time.js";
 import { aiAgent, isBot, parseClient } from "./ua.js";
+import { Waiting } from "./waiting.js";
 
 export interface SiteOptions {
   /** Stable id, stored with every row. Default "default". */
@@ -187,6 +188,47 @@ export class SettingsError extends RangeError {
 /** What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets. */
 export const EMAIL = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
 
+/** A tracker hit as it is recorded: no address and no user agent, so one can wait in the store for later. */
+interface Hit {
+  site: string;
+  at: number;
+  kind: Payload["kind"];
+  pageviewId: string;
+  path: string;
+  hostname: string;
+  title: string;
+  name: string;
+  props: Record<string, string> | null;
+  engagedMs: number;
+  scroll: number | null;
+}
+
+/** What a new visit is attributed to: where it came from, and its place and device. */
+type VisitColumns = Omit<SessionRow, "id" | "site" | "visitor" | "startedAt">;
+
+/** Who sent a hit, worked out only when a hit needs it: the visitor's hashes (today's first), and a new visit's columns. */
+interface Sender {
+  visitors(): Promise<string[]>;
+  visit(): Promise<VisitColumns>;
+}
+
+/** A hit waiting for the store, with its sender worked out when it came. */
+interface WaitingHit {
+  hit: Hit;
+  visitors: string[];
+  visit: VisitColumns | null;
+}
+
+/** Runs `fn` when first asked and gives every caller its answer, or runs it again after it failed. */
+function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let result: Promise<T> | null = null;
+  return () =>
+    (result ??= fn().catch((error) => {
+      result = null;
+      throw error;
+    }));
+}
+
 export class Runlight {
   readonly store: SqlStore;
   /** The sites as configured in code, or as kept in the database when they are managed. */
@@ -223,6 +265,8 @@ export class Runlight {
   private linkDomainCache: { at: number; domains: Set<string> } | null = null;
   /** Work queued per key by oneAtATime, such as one visitor's session. */
   private readonly turns = new Map<string, Promise<void>>();
+  /** Hits waiting in the store while ClickHouse cannot take them, when the store keeps them (see Waiting). */
+  private readonly waiting: Waiting<WaitingHit> | null;
   /** Each timezone's salts for its current day, so a lookup is a map read until midnight there. */
   private readonly salts = new Map<string, { day: string; today: string; yesterday: string | null }>();
   private readonly mailInCode: MailSettings | undefined;
@@ -238,6 +282,9 @@ export class Runlight {
   constructor(options: RunlightOptions) {
     if (!options?.store) throw new Error("Runlight: pass a store, such as sqlite({ path: \"./data/runlight.db\" })");
     this.store = options.store;
+    this.waiting = this.store.keepsWaiting
+      ? new Waiting<WaitingHit>(this.store, (w) => this.recordWaiting(w), (w) => w.visitors[0] ?? "", () => this.now())
+      : null;
     this.managedSites = options.managedSites ?? false;
     const configured = this.managedSites ? [] : options.sites?.length ? options.sites : [options.site ?? {}];
     this.configured = configured.map(siteRow);
@@ -878,8 +925,15 @@ export class Runlight {
     if (cached?.day === day) return cached;
     const today = await this.store.salt(day, randomSalt());
     const yesterday = await this.store.saltIfExists(addDays(day, -1));
-    await this.dropOldSalts(now);
     const salts = { day, today, yesterday };
+    try {
+      await this.dropOldSalts(now);
+    } catch (error) {
+      // ClickHouse cannot say yet whether yesterday's visits are over, so a hit can still wait for it; the
+      // next hit asks again, and old salts go once it answers.
+      if (!this.store.waitable(error)) throw error;
+      return salts;
+    }
     this.salts.set(timezone, salts);
     return salts;
   }
@@ -934,29 +988,86 @@ export class Runlight {
     // A database too busy to take the hit right now (every pooled connection held by long reports, or
     // another process writing the SQLite file) gets it a little later, at the time it arrived.
     const now = this.now();
+    let ready: { site: SiteRow; hit: Hit; sender: Sender } | null = null;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.record(payload, request, context, now);
+        ready ??= await this.prepare(payload, request, context, now);
+        if (!ready) return;
+        this.waiting?.start();
+        // Behind hits already waiting for ClickHouse, so a visitor's hits stay in order.
+        if (this.waiting?.active) return await this.keep(ready.hit, ready.sender);
+        return await this.record(ready.site, ready.hit, ready.sender);
       } catch (error) {
+        // A ClickHouse still down or busy after that: the hit waits in the other store until it is back.
+        if (ready && this.waiting && this.store.waitable(error) && (attempt >= 3 || !busy(error))) return this.keep(ready.hit, ready.sender, error);
         if (attempt >= 3 || !busy(error)) throw error;
         await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
       }
     }
   }
 
-  private async record(payload: Payload, request: Request, context: RequestContext, now: number): Promise<void> {
+  /** A hit's site, the hit as it is recorded, and its sender, or null for a site that is not counted here. */
+  private async prepare(payload: Payload, request: Request, context: RequestContext, now: number): Promise<{ site: SiteRow; hit: Hit; sender: Sender } | null> {
     // Managed sites load from the database in init(), so it must come first.
     await this.init();
     const site = this.siteFor(payload.url.hostname, payload.site) ?? (await this.setupSite(payload.url.hostname, payload.site));
-    if (!site) return;
-
-    if (payload.kind === "engagement") return this.engagement(site, payload, now);
-
+    if (!site) return null;
     const page = parsePage(payload.url);
+    const hit: Hit = {
+      site: site.id,
+      at: now,
+      kind: payload.kind,
+      pageviewId: payload.pageviewId,
+      path: page.path,
+      hostname: page.hostname,
+      title: payload.kind === "pageview" ? payload.title : "",
+      name: payload.kind === "event" ? payload.name : "",
+      props: payload.props,
+      engagedMs: payload.engagedMs,
+      scroll: payload.scroll ?? null,
+    };
+    const sender = this.sender(site, request, context, page, payload.referrer, now, {
+      screenWidth: payload.screenWidth,
+      screen: payload.screenWidth && payload.screenHeight ? `${payload.screenWidth}x${payload.screenHeight}` : "",
+      language: payload.language,
+    });
+    return { site, hit, sender };
+  }
+
+  /** Keeps a hit to send once ClickHouse can take it, or throws `error` when too many wait already. */
+  private async keep(hit: Hit, sender: Sender, error?: unknown): Promise<void> {
+    const kept = await this.waiting!.add(hit.at, { hit, visitors: await sender.visitors(), visit: hit.kind === "engagement" ? null : await sender.visit() });
+    if (!kept) throw error ?? new Error("Runlight: too many hits are waiting for ClickHouse, so this one was dropped");
+  }
+
+  /**
+   * Sends the hits waiting for ClickHouse now, rather than within the next few seconds, as a server does on
+   * its own once ClickHouse answers again. For tests, and for a script about to stop.
+   */
+  async flushWaiting(): Promise<void> {
+    await this.waiting?.flush();
+  }
+
+  /** Records a hit that waited, as it would have been when it came. One for a site removed since is let go. */
+  private async recordWaiting(w: WaitingHit): Promise<void> {
+    const site = this.site(w.hit.site);
+    if (!site) return;
+    await this.record(site, w.hit, {
+      visitors: async () => w.visitors,
+      visit: async () => {
+        if (!w.visit) throw new Error("Runlight: a waiting hit has no visit to start");
+        return w.visit;
+      },
+    });
+  }
+
+  private async record(site: SiteRow, hit: Hit, sender: Sender): Promise<void> {
+    if (hit.kind === "engagement") return this.engagement(site, hit);
+    const now = hit.at;
     let session: { id: string; visitor: string } | null = null;
     let reopen = true;
-    if (payload.kind === "event" && payload.pageviewId) {
-      const pageview = await this.store.pageview(site.id, payload.pageviewId, now - EVENT_TAIL_MS);
+    if (hit.kind === "event" && hit.pageviewId) {
+      const pageview = await this.store.pageview(site.id, hit.pageviewId, now - EVENT_TAIL_MS);
       // An event joins its page's visit unless that visit began longer ago than reports look for its rows
       // (a tab left open for days); it then starts a visit of its own, as any later activity would.
       if (pageview && now - pageview.startedAt < EVENT_TAIL_MS) {
@@ -966,36 +1077,29 @@ export class Runlight {
         if (now - pageview.startedAt > 3_600_000) await this.store.touchedOldVisit(site.id, pageview.startedAt, now - ROLLUP_DELAY_MS + 3_600_000);
       }
     }
-    session ??= await this.sessionFor(site, request, context, page, payload.referrer, now, {
-      screenWidth: payload.screenWidth,
-      screen: payload.screenWidth && payload.screenHeight ? `${payload.screenWidth}x${payload.screenHeight}` : "",
-      language: payload.language,
-    });
+    session ??= await this.sessionFor(site, sender, now);
 
-    await this.store.touchSession(session.id, now, payload.kind, page.path, reopen);
+    await this.store.touchSession(session.id, now, hit.kind, hit.path, reopen);
     await this.store.insertEvent({
       site: site.id,
       ts: now,
-      kind: payload.kind,
+      kind: hit.kind,
       visitor: session.visitor,
       session: session.id,
-      pageview: payload.pageviewId,
-      path: page.path,
-      hostname: page.hostname,
-      title: payload.kind === "pageview" ? payload.title : "",
-      name: payload.kind === "event" ? payload.name : "",
-      props: payload.props,
+      pageview: hit.pageviewId,
+      path: hit.path,
+      hostname: hit.hostname,
+      title: hit.title,
+      name: hit.name,
+      props: hit.props,
       engagedMs: 0,
       scroll: null,
       link: "",
     });
   }
 
-  /**
-   * The visitor's open session on a site, or a new one attributed to this
-   * request. Shared by tracker hits and short link clicks.
-   */
-  private async sessionFor(
+  /** Who sent a request: its visitor's hashes, and what a visit it starts is attributed to, each worked out once. */
+  private sender(
     site: SiteRow,
     request: Request,
     context: RequestContext,
@@ -1003,13 +1107,51 @@ export class Runlight {
     referrer: string,
     now: number,
     client: { screenWidth?: number; screen: string; language: string },
-  ): Promise<{ id: string; visitor: string }> {
+  ): Sender {
     const ua = request.headers.get("user-agent") ?? "";
-    const ip = this.clientIp(request, context);
-    const salts = await this.currentSalts(now, site.timezone);
-    const today = await visitorHash(salts.today, site.id, ip, ua);
-    const candidates = [today];
-    if (salts.yesterday) candidates.push(await visitorHash(salts.yesterday, site.id, ip, ua));
+    const ip = once(async () => this.clientIp(request, context));
+    return {
+      visitors: once(async () => {
+        const salts = await this.currentSalts(now, site.timezone);
+        const candidates = [await visitorHash(salts.today, site.id, await ip(), ua)];
+        if (salts.yesterday) candidates.push(await visitorHash(salts.yesterday, site.id, await ip(), ua));
+        return candidates;
+      }),
+      visit: once(async () => {
+        const parsed = parseClient(
+          ua,
+          {
+            brands: request.headers.get("sec-ch-ua"),
+            mobile: request.headers.get("sec-ch-ua-mobile"),
+            platform: request.headers.get("sec-ch-ua-platform"),
+          },
+          client.screenWidth,
+        );
+        const location = await locate(request.headers, await ip(), this.geo, Boolean(this.trustProxy));
+        return {
+          hostname: page.hostname,
+          ...attribute(page, referrer, site.hostnames),
+          utmSource: page.utm.source,
+          utmMedium: page.utm.medium,
+          utmCampaign: page.utm.campaign,
+          utmTerm: page.utm.term,
+          utmContent: page.utm.content,
+          ...location,
+          ...parsed,
+          screen: client.screen,
+          language: client.language,
+        };
+      }),
+    };
+  }
+
+  /**
+   * The visitor's open session on a site, or a new one attributed to this
+   * request. Shared by tracker hits and short link clicks.
+   */
+  private async sessionFor(site: SiteRow, sender: Sender, now: number): Promise<{ id: string; visitor: string }> {
+    const candidates = await sender.visitors();
+    const today = candidates[0]!;
     // One visitor's requests often arrive together (a pageview and the event
     // right after it). Taking turns per visitor means only the first opens a
     // session and the rest find it, instead of each opening its own.
@@ -1018,34 +1160,7 @@ export class Runlight {
       if (open) return open;
 
       const session = { id: randomId(), visitor: today };
-      const attribution = attribute(page, referrer, site.hostnames);
-      const parsed = parseClient(
-        ua,
-        {
-          brands: request.headers.get("sec-ch-ua"),
-          mobile: request.headers.get("sec-ch-ua-mobile"),
-          platform: request.headers.get("sec-ch-ua-platform"),
-        },
-        client.screenWidth,
-      );
-      const location = await locate(request.headers, ip, this.geo, Boolean(this.trustProxy));
-      await this.store.insertSession({
-        id: session.id,
-        site: site.id,
-        visitor: session.visitor,
-        startedAt: now,
-        hostname: page.hostname,
-        ...attribution,
-        utmSource: page.utm.source,
-        utmMedium: page.utm.medium,
-        utmCampaign: page.utm.campaign,
-        utmTerm: page.utm.term,
-        utmContent: page.utm.content,
-        ...location,
-        ...parsed,
-        screen: client.screen,
-        language: client.language,
-      });
+      await this.store.insertSession({ id: session.id, site: site.id, visitor: session.visitor, startedAt: now, ...(await sender.visit()) });
       // Another process may have opened this visitor's visit at the same moment: both go on with the earlier.
       return this.store.settleOpenSession(site.id, candidates, now - SESSION_IDLE_MS, session);
     });
@@ -1149,7 +1264,7 @@ export class Runlight {
       try {
         const now = this.now();
         const language = (request.headers.get("accept-language") ?? "").split(",")[0]?.split(";")[0]?.trim().slice(0, 35) ?? "";
-        const session = await this.sessionFor(site, request, context, parsePage(url), request.headers.get("referer") ?? "", now, { screen: "", language });
+        const session = await this.sessionFor(site, this.sender(site, request, context, parsePage(url), request.headers.get("referer") ?? "", now, { screen: "", language }), now);
         await this.store.touchSession(session.id, now, "click", url.pathname);
         await this.store.insertEvent({
           site: site.id,
@@ -1175,12 +1290,13 @@ export class Runlight {
     return new Response(null, { status: 302, headers: { location: link.url, "cache-control": "no-store", "referrer-policy": "no-referrer-when-downgrade" } });
   }
 
-  private async engagement(site: SiteRow, payload: Payload, now: number): Promise<void> {
-    if (payload.engagedMs <= 0) return;
-    const pageview = await this.store.pageview(site.id, payload.pageviewId, now - EVENT_TAIL_MS);
+  private async engagement(site: SiteRow, hit: Hit): Promise<void> {
+    if (hit.engagedMs <= 0) return;
+    const now = hit.at;
+    const pageview = await this.store.pageview(site.id, hit.pageviewId, now - EVENT_TAIL_MS);
     // Reports look for a visit's rows only so long after it began, so later time on it is let go.
     if (!pageview || now - pageview.startedAt >= EVENT_TAIL_MS) return;
-    await this.store.addEngagement(pageview.session, payload.engagedMs);
+    await this.store.addEngagement(pageview.session, hit.engagedMs);
     // Only a visit that began more than an hour ago can belong to a day that is already added up.
     if (now - pageview.startedAt > 3_600_000) await this.store.touchedOldVisit(site.id, pageview.startedAt, now - ROLLUP_DELAY_MS + 3_600_000);
     await this.store.insertEvent({
@@ -1189,14 +1305,14 @@ export class Runlight {
       kind: "engagement",
       visitor: pageview.visitor,
       session: pageview.session,
-      pageview: payload.pageviewId,
+      pageview: hit.pageviewId,
       path: pageview.path,
       hostname: pageview.hostname,
       title: "",
       name: "",
       props: null,
-      engagedMs: payload.engagedMs,
-      scroll: payload.scroll ?? null,
+      engagedMs: hit.engagedMs,
+      scroll: hit.scroll,
       link: "",
     });
   }
