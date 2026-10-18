@@ -32,6 +32,11 @@ export interface MoveState {
   /** Every visit that started from here until `at` is in ClickHouse. */
   through: number;
   done: boolean;
+  /**
+   * Set while `copyBack()` runs: "copying" until the other store holds everything, then "copied" until
+   * ClickHouse is emptied, so a copy back stopped part way can be run again without losing a visit.
+   */
+  back?: "copying" | "copied";
 }
 
 /** The fetch there was when Runlight loaded, so an app or a test that wraps the global one later cannot reach ClickHouse's requests. */
@@ -58,8 +63,22 @@ const COPY_TRIES = 10;
 /** How long one process's claim on the copy lasts, unless it renews it. */
 const LEASE_MS = 120_000;
 
+/** How often the copying process renews its claim, well inside LEASE_MS, whatever its queries are doing. */
+const RENEW_MS = 20_000;
+
 /** The setting in the other store that says which process is copying. */
 const LEASE_KEY = "clickhouse-copy";
+
+/**
+ * An event copied from the other store has its row id there with the top bit set, where ClickHouse's own
+ * ids (Snowflake ids) never have it. So a piece of the copy tried again clears what the copy wrote, and
+ * leaves alone an event a hit wrote into the same days meanwhile, such as an AI fetch read from a log.
+ */
+const COPIED_ID = 1n << 63n;
+
+/** How often a store taking hits says so in ClickHouse, and how long after its last word it counts as gone. */
+const LIVE_EVERY_MS = 30_000;
+const LIVE_FOR_MS = 90_000;
 
 /** The text columns of a visit, alike in both stores. */
 const VISIT_TEXT = [
@@ -93,6 +112,8 @@ function visitFrom(r: Record<string, unknown>): Record<string, unknown> {
 /** An event from the other store, with the start of its visit, or 0 when it has none, as ingest writes it. */
 function eventFrom(r: Record<string, unknown>): Record<string, unknown> {
   return {
+    // As text: the id is past what a JavaScript number holds exactly.
+    id: String(COPIED_ID + BigInt(int(r.row_id))),
     site: text(r.site), ts: int(r.ts), kind: text(r.kind), visitor: text(r.visitor), session: text(r.session),
     started_at: r.visit_started === null || r.visit_started === undefined ? 0 : int(r.visit_started),
     pageview: text(r.pageview), path: text(r.path), hostname: text(r.hostname), title: text(r.title), name: text(r.name),
@@ -194,12 +215,34 @@ export function bindPlaceholders(sql: string, params: unknown[]): { sql: string;
   return { sql: out, values };
 }
 
-/** Lets at most `max` calls run at once; the rest wait in order. */
-function limiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+/** What a lane of queries turns away, as a busy database does, so a hit is tried again a moment later. */
+const BUSY = "Runlight: ClickHouse is busy";
+
+/**
+ * Lets at most `max` calls run at once; the rest wait in order, at most `queue` of them and for at most
+ * `wait` ms (0 for no limit), so a ClickHouse that has slowed down cannot pile up work without end.
+ */
+function limiter(max: number, queue: number, wait: number): <T>(fn: () => Promise<T>) => Promise<T> {
   let running = 0;
   const waiting: Array<() => void> = [];
   return async (fn) => {
-    if (running >= max) await new Promise<void>((resolve) => waiting.push(resolve));
+    if (running >= max) {
+      if (waiting.length >= queue) throw new Error(`${BUSY}: ${queue} queries are waiting`);
+      await new Promise<void>((resolve, reject) => {
+        const go = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer =
+          wait > 0
+            ? setTimeout(() => {
+                waiting.splice(waiting.indexOf(go), 1);
+                reject(new Error(`${BUSY}: a query waited ${Math.round(wait / 1000)} s for its turn`));
+              }, wait)
+            : undefined;
+        waiting.push(go);
+      });
+    }
     running++;
     try {
       return await fn();
@@ -210,12 +253,40 @@ function limiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
   };
 }
 
+/** The longest a hit's own read may run, in milliseconds: one taking longer is better given up and tried again. */
+const LOOKUP_TIMEOUT_MS = 10_000;
+
+/** The ClickHouse error codes worth sending again: too many queries at once, and the server going away. */
+const AGAIN_CODES = /^Code: (202|209|210)\b/;
+
+/** True when a request never reached ClickHouse, or ClickHouse turned it away before running it. */
+function transient(error: unknown): boolean {
+  const code = ((error as { cause?: { code?: string } })?.cause?.code ?? "") as string;
+  if (/^(ECONNREFUSED|ECONNRESET|EPIPE|UND_ERR_SOCKET|UND_ERR_CLOSED)$/.test(code)) return true;
+  return error instanceof ClickHouseError && AGAIN_CODES.test(error.reply);
+}
+
+/** An answer from ClickHouse that was an error, with the first line of what it said. */
+class ClickHouseError extends Error {
+  constructor(readonly reply: string) {
+    super(`Runlight: ClickHouse said ${reply}`);
+  }
+}
+
 /** ClickHouse over HTTP, with what a ClickHouseStore needs beyond a Db: inserting rows, and its own settings. */
 export interface ClickHouseDb extends Db {
-  /** Inserts rows. `wait` waits until they can be read, which ingest needs; a copy sends big batches instead. */
+  /**
+   * Inserts rows. A hit's rows are gathered with others for a moment and sent together, and answer once
+   * they can be read, which ingest needs; `batched` sends a copy's big batches at once instead.
+   */
   insert(table: string, rows: Array<Record<string, unknown>>, options?: { batched?: boolean }): Promise<void>;
   /** As `all`, without waiting behind reports for a turn: for the small reads a hit makes, so it is counted at once. At most 64 run at a time. */
   lookup<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  /**
+   * A DELETE or ALTER ... UPDATE over a big table: ClickHouse runs it in the background and this waits for it
+   * to finish, however long it takes, where `run` would give up after the query timeout.
+   */
+  mutate(table: string, sql: string, params?: unknown[]): Promise<void>;
   /** Makes the database named in the URL, if it is not there. */
   createDatabase(): Promise<void>;
   /** Drops the database named in the URL, and everything in it. */
@@ -251,65 +322,173 @@ export function clickhouseDb(options: { url: string; maxQueries?: number; queryT
   const password = decodeURIComponent(url.password);
   const endpoint = `${url.protocol}//${url.host}/`;
   const timeout = options.queryTimeout ?? 120_000;
-  const turn = limiter(Math.max(1, options.maxQueries ?? 2));
+  const turn = limiter(Math.max(1, options.maxQueries ?? 2), 1_000, timeout);
   // A hit's reads skip the reports' line but have one of their own, so a flood of hits waits here rather than
   // passing ClickHouse's limit of queries at once, where it would turn them away.
-  const quick = limiter(64);
+  // The wait is what bounds it, at the hits of so many seconds; the count only stops a burst far past that.
+  const quick = limiter(64, 20_000, LOOKUP_TIMEOUT_MS);
+  // Inserts have a line of their own too, so a slow ClickHouse cannot be sent a request per hit without end.
+  const writes = limiter(32, 20_000, 30_000);
 
-  async function send(body: string, params: Record<string, string>, inDatabase = true): Promise<string> {
+  /** One request. `limit` is the query's own timeout, in ms; 0 for none. */
+  async function sendOnce(body: string, params: Record<string, string>, inDatabase: boolean, limit: number): Promise<string> {
     const search = new URLSearchParams({ ...SETTINGS, ...params });
     if (inDatabase) search.set("database", database);
-    if (timeout > 0) search.set("max_execution_time", String(Math.ceil(timeout / 1000)));
-    const response = await ownFetch(`${endpoint}?${search}`, {
-      method: "POST",
-      headers: { "X-ClickHouse-User": user, "X-ClickHouse-Key": password, "Content-Type": "text/plain; charset=utf-8" },
-      body,
-      signal: timeout > 0 ? AbortSignal.timeout(timeout + 5_000) : undefined,
-    });
+    if (limit > 0) search.set("max_execution_time", String(Math.ceil(limit / 1000)));
+    let response: Response;
+    try {
+      response = await ownFetch(`${endpoint}?${search}`, {
+        method: "POST",
+        headers: { "X-ClickHouse-User": user, "X-ClickHouse-Key": password, "Content-Type": "text/plain; charset=utf-8" },
+        body,
+        signal: limit > 0 ? AbortSignal.timeout(limit + 5_000) : undefined,
+      });
+    } catch (error) {
+      if ((error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError") throw error;
+      // "fetch failed" says nothing; the reason is in its cause, such as ECONNREFUSED.
+      const cause = (error as { cause?: { code?: string; message?: string } })?.cause;
+      throw new Error(`Runlight: could not reach ClickHouse at ${url.host} (${cause?.code ?? cause?.message ?? String(error)})`, { cause });
+    }
     const text = await response.text();
-    if (!response.ok) throw new Error(`Runlight: ClickHouse said ${text.trim().split("\n")[0]}`);
+    if (!response.ok) throw new ClickHouseError(text.trim().split("\n")[0] ?? "");
     return text;
   }
 
-  const query = (sql: string, params: unknown[], extra: Record<string, string> = {}, queued = true) => {
+  /** A request, sent again after a pause when it never reached ClickHouse or ClickHouse turned it away unrun. */
+  async function send(body: string, params: Record<string, string>, inDatabase = true, limit = timeout): Promise<string> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await sendOnce(body, params, inDatabase, limit);
+      } catch (error) {
+        if (attempt >= 3 || !transient(error)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250 * 3 ** (attempt - 1)));
+      }
+    }
+  }
+
+  const bind = (sql: string, params: unknown[]) => {
     const bound = bindPlaceholders(sql, params);
-    const values = Object.fromEntries(Object.entries(bound.values).map(([k, v]) => [`param_${k}`, v]));
-    const go = () => send(bound.sql, { ...values, ...extra });
-    return queued ? turn(go) : quick(go);
+    return { sql: bound.sql, values: Object.fromEntries(Object.entries(bound.values).map(([k, v]) => [`param_${k}`, v])) };
   };
+  // A read stops in ClickHouse as well when its request is given up, rather than running on unseen.
+  const READ = { default_format: "JSONEachRow", cancel_http_readonly_queries_on_client_close: "1" };
   const parsed = <T,>(text: string): T[] =>
     text
       .split("\n")
       .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as T);
+      .map((line) => {
+        const row = JSON.parse(line) as T & { exception?: string };
+        // An error after the first rows went out comes at the end of a 200 answer, as a row of its own.
+        if (row && typeof row === "object" && typeof row.exception === "string" && Object.keys(row).length === 1) throw new ClickHouseError(row.exception);
+        return row;
+      });
+
+  /** Whether this user can see system.mutations, to wait for a change to finish there. Asked once. */
+  let watchable: Promise<boolean> | null = null;
+
+  // A hit's rows, gathered per table for a moment and sent as one insert, so ClickHouse gets a request for
+  // many hits rather than one for each, and each hit's row can still be read once its insert answers. A
+  // batch waiting for its turn in the inserts' line takes more rows meanwhile, so it grows as ClickHouse slows.
+  type Batch = { rows: string[]; done: Array<{ resolve: () => void; reject: (error: unknown) => void }>; queued: boolean };
+  const gathering = new Map<string, Batch>();
+  const sendGathered = (table: string, batch: Batch) => {
+    if (batch.queued) return;
+    batch.queued = true;
+    writes(() => {
+      // From here on the batch is closed: rows that come now start the next one.
+      if (gathering.get(table) === batch) gathering.delete(table);
+      // Each batch is its own, so one sent again after a dropped connection is not counted twice where
+      // ClickHouse deduplicates (replicated tables, and ClickHouse Cloud).
+      const settings = { async_insert: "1", wait_for_async_insert: "1", async_insert_deduplicate: "1", insert_deduplication_token: crypto.randomUUID() };
+      return send(`INSERT INTO ${table} FORMAT JSONEachRow\n${batch.rows.join("\n")}`, settings);
+    }).then(
+      () => {
+        for (const d of batch.done) d.resolve();
+      },
+      (error) => {
+        if (gathering.get(table) === batch) gathering.delete(table);
+        for (const d of batch.done) d.reject(error);
+      },
+    );
+  };
 
   return {
     dialect: "clickhouse",
     database,
     async all<T>(sql: string, params: unknown[] = []): Promise<T[]> {
-      return parsed<T>(await query(sql, params, { default_format: "JSONEachRow" }));
+      const q = bind(sql, params);
+      return parsed<T>(await turn(() => send(q.sql, { ...q.values, ...READ })));
     },
     async lookup<T>(sql: string, params: unknown[] = []): Promise<T[]> {
-      return parsed<T>(await query(sql, params, { default_format: "JSONEachRow" }, false));
+      const q = bind(sql, params);
+      return parsed<T>(await quick(() => send(q.sql, { ...q.values, ...READ }, true, LOOKUP_TIMEOUT_MS)));
     },
     async run(sql: string, params: unknown[] = []): Promise<void> {
-      await query(sql, params);
+      const q = bind(sql, params);
+      await turn(() => send(q.sql, q.values));
+    },
+    async mutate(table: string, sql: string, params: unknown[] = []): Promise<void> {
+      const q = bind(sql, params);
+      // A user granted only its own database cannot see system.mutations, so waits in the request instead,
+      // as far as the request's own limits allow.
+      watchable ??= send(`SELECT 1 FROM system.mutations LIMIT 0`, READ, true, LOOKUP_TIMEOUT_MS).then(
+        () => true,
+        () => false,
+      );
+      if (!(await watchable)) return void (await turn(() => send(q.sql, q.values, true, 0)));
+      await turn(() => send(q.sql, { ...q.values, lightweight_deletes_sync: "0", mutations_sync: "0" }));
+      // Done once no change to the table is left to run. A change that keeps failing says why.
+      for (let wait = 100; ; wait = Math.min(wait * 2, 2_000)) {
+        const [left] = parsed<{ n: unknown; reason: string }>(
+          await quick(() =>
+            send(`SELECT count() AS n, any(latest_fail_reason) AS reason FROM system.mutations WHERE database = {d:String} AND table = {t:String} AND NOT is_done`, { param_d: database, param_t: table, ...READ }, true, LOOKUP_TIMEOUT_MS),
+          ),
+        );
+        if (!Number(left?.n)) return;
+        if (left?.reason) throw new Error(`Runlight: ClickHouse could not change ${table}: ${left.reason.split("\n")[0]}`);
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
     },
     async insert(table, rows, opts = {}) {
       if (!rows.length) return;
-      const body = `INSERT INTO ${table} FORMAT JSONEachRow\n${rows.map((row) => JSON.stringify(row)).join("\n")}`;
-      // A hit at a time would make a part of the table for every row, which ClickHouse merges at great cost;
-      // it batches them itself, and answers once the row can be read.
-      const settings: Record<string, string> = opts.batched ? {} : { async_insert: "1", wait_for_async_insert: "1" };
-      await send(body, settings);
+      const lines = rows.map((row) => JSON.stringify(row));
+      if (opts.batched) {
+        // Sent again after a dropped connection, the same rows must go in; ClickHouse Cloud would otherwise
+        // drop a block it saw before, such as a piece of the copy tried a second time.
+        await writes(() => send(`INSERT INTO ${table} FORMAT JSONEachRow\n${lines.join("\n")}`, { insert_deduplicate: "0" }));
+        return;
+      }
+      await new Promise<void>((resolve, reject) => {
+        let batch = gathering.get(table);
+        if (!batch || batch.rows.length >= 5_000) {
+          const fresh: Batch = { rows: [], done: [], queued: false };
+          batch = fresh;
+          gathering.set(table, fresh);
+          setTimeout(() => sendGathered(table, fresh), 5);
+        }
+        batch.rows.push(...lines);
+        batch.done.push({ resolve, reject });
+      });
     },
     async createDatabase() {
-      await send(`CREATE DATABASE IF NOT EXISTS ${database}`, {}, false);
+      // A user given only its own database cannot create one, so it is only made when it is not there.
+      const [found] = parsed(await send(`SELECT 1 AS x FROM system.databases WHERE name = {d:String}`, { param_d: database, ...READ }, false));
+      if (!found) await send(`CREATE DATABASE IF NOT EXISTS ${database}`, {}, false);
     },
     async dropDatabase() {
       await send(`DROP DATABASE IF EXISTS ${database}`, {}, false);
     },
   };
+}
+
+/**
+ * Past about 4,000, visitors are an estimate and visits an exact count, so a range of one-visit visitors could
+ * show a few more visitors than visits. A visitor has at least one visit, pageview, event, or conversion, so
+ * the estimate is held to that count.
+ */
+function capped<T extends { visitors: number; visits?: number; pageviews?: number; events?: number; conversions?: number }>(row: T): T {
+  const most = row.visits ?? row.conversions ?? row.pageviews ?? row.events;
+  return most !== undefined && row.visitors > most ? { ...row, visitors: most } : row;
 }
 
 /** The columns of a visit's row that never change, which every row added to it carries. */
@@ -340,7 +519,15 @@ export class ClickHouseStore extends SqlStore {
   /** Who this process is, in the claim on the copy, and the claim as last written. */
   private readonly owner = crypto.randomUUID();
   private claimed: string | null = null;
+  /** The claim being written, so the next waits for it. */
+  private claims: Promise<boolean> = Promise.resolve(true);
+  /** Set when this process finds another has taken the copy over, so it stops before writing more. */
+  private lost = false;
   private metaAt = 0;
+  /** Says now and then that this store is taking hits, so copy --back can tell a server is still running. */
+  private live: ReturnType<typeof setInterval> | null = null;
+  /** Once the copy is done it stays done, so the dashboard need not ask ClickHouse on every load. */
+  private moved = false;
 
   constructor(rows: SqlStore, clickhouse: ClickHouseDb, keys: Map<string, VisitKey> = new Map(), copyInBackground = false) {
     super(rows.db, rows.prefix);
@@ -361,6 +548,10 @@ export class ClickHouseStore extends SqlStore {
       await this.clickhouse.createDatabase();
       for (const statement of SCHEMA) await this.clickhouse.run(statement);
       if ((await this.meta("schema")) !== String(SCHEMA_VERSION)) await this.setMeta("schema", String(SCHEMA_VERSION));
+      if ((await this.moveState())?.back) throw new Error("Runlight: the visits are being copied back out of ClickHouse. Run clickhouse copy --back to finish, then remove CLICKHOUSE_URL.");
+      await this.sayLive();
+      this.live ??= setInterval(() => void this.sayLive().catch(() => {}), LIVE_EVERY_MS);
+      this.live.unref?.();
       await this.prepareMove();
     })().catch((error) => {
       this.schema = null;
@@ -379,12 +570,41 @@ export class ClickHouseStore extends SqlStore {
     this.wake?.();
     await this.copying;
     await this.release().catch(() => {});
+    if (this.live) {
+      clearInterval(this.live);
+      this.live = null;
+      await this.setMeta(`live:${this.owner}`, "0").catch(() => {});
+    }
     await super.close();
+  }
+
+  /** Writes that this store is taking hits, until LIVE_FOR_MS from now. */
+  private async sayLive(): Promise<void> {
+    await this.setMeta(`live:${this.owner}`, String(Date.now() + LIVE_FOR_MS));
+  }
+
+  /** How long ago a store that is still taking hits last said so, or null when none is. */
+  private async liveAgo(): Promise<number | null> {
+    const rows = await this.clickhouse.all<{ v: string }>(`SELECT argMax(value, at) AS v FROM rl_meta WHERE startsWith("key", 'live:') AND "key" <> ? GROUP BY "key"`, [`live:${this.owner}`]);
+    const until = Math.max(0, ...rows.map((r) => Number(r.v) || 0));
+    return until > Date.now() ? Date.now() - (until - LIVE_FOR_MS) : null;
   }
 
   override async transaction<T>(fn: (store: SqlStore) => Promise<T>): Promise<T> {
     // The other store's statements are in a transaction; ClickHouse has none, and each write stands alone.
     return this.rows.transaction((rows) => fn(rows === this.rows ? this : new ClickHouseStore(rows, this.clickhouse, this.keys)));
+  }
+
+  /**
+   * An import's step, without holding the other store's transaction: it writes nothing there but its progress,
+   * and on SQLite a transaction would hold the whole server while the step's rows go to ClickHouse. The rows
+   * are gathered and sent a few big inserts at a time, and the step reads its own visits back from memory.
+   */
+  override async importStep<T>(fn: (store: SqlStore) => Promise<T>): Promise<T> {
+    const step = new ImportStep(this.rows, this.clickhouse, this.keys);
+    const result = await fn(step.store);
+    await step.flush();
+    return result;
   }
 
   /**
@@ -399,8 +619,14 @@ export class ClickHouseStore extends SqlStore {
       for (const back of [1, 0]) {
         const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
         const partition = month.getUTCFullYear() * 100 + month.getUTCMonth() + 1;
-        await this.clickhouse.run(`OPTIMIZE TABLE rl_visits PARTITION ${partition} FINAL`);
+        // A month already merged into one part is left alone rather than written again.
+        await this.clickhouse.run(`OPTIMIZE TABLE rl_visits PARTITION ${partition} FINAL SETTINGS optimize_skip_merged_partitions = 1`);
       }
+      // A delete only hides rows until their part is written again, which an old month may never be. The
+      // parts with deleted rows are written again in the background (the rest are left as they are), so
+      // deleted visits leave the disk too.
+      for (const table of ["rl_visits", "rl_events"]) await this.clickhouse.run(`ALTER TABLE ${table} APPLY DELETED MASK SETTINGS mutations_sync = 0`);
+      await this.clickhouse.run(`DELETE FROM rl_meta WHERE startsWith("key", 'live:') AND at < ?`, [Date.now() - 86_400_000]);
     } catch (error) {
       console.error("Runlight: could not merge the visits in ClickHouse", error);
     }
@@ -428,14 +654,14 @@ export class ClickHouseStore extends SqlStore {
   override visitors(...a: Parameters<SqlStore["visitors"]>) {
     return this.visits.visitors(...a);
   }
-  override stats(...a: Parameters<SqlStore["stats"]>) {
-    return this.visits.stats(...a);
+  override async stats(...a: Parameters<SqlStore["stats"]>) {
+    return capped(await this.visits.stats(...a));
   }
-  override series(...a: Parameters<SqlStore["series"]>) {
-    return this.visits.series(...a);
+  override async series(...a: Parameters<SqlStore["series"]>) {
+    return (await this.visits.series(...a)).map(capped);
   }
-  override breakdown(...a: Parameters<SqlStore["breakdown"]>) {
-    return this.visits.breakdown(...a);
+  override async breakdown(...a: Parameters<SqlStore["breakdown"]>) {
+    return (await this.visits.breakdown(...a)).map(capped);
   }
   override hourly(...a: Parameters<SqlStore["hourly"]>) {
     return this.visits.hourly(...a);
@@ -452,14 +678,16 @@ export class ClickHouseStore extends SqlStore {
   override journeyPages(...a: Parameters<SqlStore["journeyPages"]>) {
     return this.visits.journeyPages(...a);
   }
-  override goalTotalsAll(...a: Parameters<SqlStore["goalTotalsAll"]>) {
-    return this.visits.goalTotalsAll(...a);
+  override async goalTotalsAll(...a: Parameters<SqlStore["goalTotalsAll"]>) {
+    const all = await this.visits.goalTotalsAll(...a);
+    for (const [id, totals] of all) all.set(id, capped(totals));
+    return all;
   }
-  override goalTotals(...a: Parameters<SqlStore["goalTotals"]>) {
-    return this.visits.goalTotals(...a);
+  override async goalTotals(...a: Parameters<SqlStore["goalTotals"]>) {
+    return capped(await this.visits.goalTotals(...a));
   }
-  override goalBreakdown(...a: Parameters<SqlStore["goalBreakdown"]>) {
-    return this.visits.goalBreakdown(...a);
+  override async goalBreakdown(...a: Parameters<SqlStore["goalBreakdown"]>) {
+    return (await this.visits.goalBreakdown(...a)).map(capped);
   }
   override goalSeries(...a: Parameters<SqlStore["goalSeries"]>) {
     return this.visits.goalSeries(...a);
@@ -500,7 +728,7 @@ export class ClickHouseStore extends SqlStore {
   // Ingest
 
   /** Where a visit's rows go: its site, start, and visitor, remembered or looked up by its id. */
-  private async key(id: string): Promise<VisitKey | null> {
+  protected async key(id: string): Promise<VisitKey | null> {
     const known = this.keys.get(id);
     if (known) return known;
     const [row] = await this.clickhouse.lookup<{ site: string; started_at: unknown; visitor: string }>(
@@ -511,7 +739,7 @@ export class ClickHouseStore extends SqlStore {
     return this.remember(id, { site: row.site, startedAt: Number(row.started_at), visitor: row.visitor });
   }
 
-  private remember(id: string, key: VisitKey): VisitKey {
+  protected remember(id: string, key: VisitKey): VisitKey {
     this.keys.delete(id);
     this.keys.set(id, key);
     // The oldest goes first, so the visits still going stay.
@@ -519,13 +747,16 @@ export class ClickHouseStore extends SqlStore {
     return key;
   }
 
+  /** Writes a hit's row into a table. An import's step gathers them instead. */
+  protected async write(table: "rl_visits" | "rl_events", row: Record<string, unknown>): Promise<void> {
+    await this.clickhouse.insert(table, [row]);
+  }
+
   /** Adds a row to a visit: what changed, over a row of nothing. */
   private async add(id: string, change: Record<string, unknown>): Promise<void> {
     const key = await this.key(id);
     if (!key) return;
-    await this.clickhouse.insert("rl_visits", [
-      { site: key.site, started_at: key.startedAt, id, visitor: key.visitor, last_at: key.startedAt, entry: [NO_ENTRY, ""], exit: [0, ""], ...change },
-    ]);
+    await this.write("rl_visits", { site: key.site, started_at: key.startedAt, id, visitor: key.visitor, last_at: key.startedAt, entry: [NO_ENTRY, ""], exit: [0, ""], ...change });
   }
 
   override async openSession(site: string, visitors: string[], since: number): Promise<{ id: string; visitor: string } | null> {
@@ -551,9 +782,8 @@ export class ClickHouseStore extends SqlStore {
     const first = rows[0];
     if (!first || first.id === opened.id) return opened;
     this.remember(first.id, { site, startedAt: Number(first.started_at), visitor: first.visitor });
-    // The one opened here goes, unless something was counted into it meanwhile.
-    const [mine] = await this.clickhouse.lookup<{ n: unknown }>(`SELECT pageviews + events AS n FROM rl_sessions WHERE site = ? AND started_at >= ? AND id = ?`, [site, since - EVENT_TAIL_MS, opened.id]);
-    if (mine && Number(mine.n) === 0) await this.deleteSession(opened.id);
+    // The one opened here is left, rather than deleted: another process may be counting a hit into it this
+    // moment, and a visit with no pageview or event is no visit to any report.
     return { id: first.id, visitor: first.visitor };
   }
 
@@ -561,18 +791,16 @@ export class ClickHouseStore extends SqlStore {
     const c = clip;
     this.remember(row.id, { site: row.site, startedAt: row.startedAt, visitor: row.visitor });
     // Each text cut as the other databases cut it, so every database keeps the same.
-    await this.clickhouse.insert("rl_visits", [
-      {
-        site: row.site, started_at: row.startedAt, id: row.id, visitor: row.visitor, last_at: row.startedAt,
-        pageviews: 0, events: 0, engaged_ms: 0, engaged_unknown: 0, imported: 0, entry: [NO_ENTRY, ""], exit: [0, ""],
-        hostname: c(row.hostname, 255), referrer_host: c(row.referrerHost, 255), referrer_path: c(row.referrerPath, 500),
-        source: c(row.source, 200), channel: c(row.channel, 100), utm_source: c(row.utmSource, 200), utm_medium: c(row.utmMedium, 200),
-        utm_campaign: c(row.utmCampaign, 200), utm_term: c(row.utmTerm, 200), utm_content: c(row.utmContent, 200),
-        country: c(row.country, 16), region: c(row.region, 100), city: c(row.city, 100), browser: c(row.browser, 100),
-        browser_version: c(row.browserVersion, 100), os: c(row.os, 100), os_version: c(row.osVersion, 100), device: c(row.device, 50),
-        screen: c(row.screen, 50), language: c(row.language, 50),
-      },
-    ]);
+    await this.write("rl_visits", {
+      site: row.site, started_at: row.startedAt, id: row.id, visitor: row.visitor, last_at: row.startedAt,
+      pageviews: 0, events: 0, engaged_ms: 0, engaged_unknown: 0, imported: 0, entry: [NO_ENTRY, ""], exit: [0, ""],
+      hostname: c(row.hostname, 255), referrer_host: c(row.referrerHost, 255), referrer_path: c(row.referrerPath, 500),
+      source: c(row.source, 200), channel: c(row.channel, 100), utm_source: c(row.utmSource, 200), utm_medium: c(row.utmMedium, 200),
+      utm_campaign: c(row.utmCampaign, 200), utm_term: c(row.utmTerm, 200), utm_content: c(row.utmContent, 200),
+      country: c(row.country, 16), region: c(row.region, 100), city: c(row.city, 100), browser: c(row.browser, 100),
+      browser_version: c(row.browserVersion, 100), os: c(row.os, 100), os_version: c(row.osVersion, 100), device: c(row.device, 50),
+      screen: c(row.screen, 50), language: c(row.language, 50),
+    });
   }
 
   override async touchSession(id: string, ts: number, kind: "pageview" | "event" | "click", path: string, reopen = true): Promise<void> {
@@ -587,6 +815,12 @@ export class ClickHouseStore extends SqlStore {
   override async addEngagement(id: string, ms: number): Promise<void> {
     await this.add(id, { engaged_ms: ms });
   }
+
+  /**
+   * Nothing to do: there are no rollups to build again. Doing it anyway would write to the other store after
+   * the engaged time went in, and a busy SQLite there would have the hit tried again and its time counted twice.
+   */
+  override async touchedOldVisit(): Promise<void> {}
 
   override async pageview(site: string, pageview: string, since = 0): ReturnType<SqlStore["pageview"]> {
     // The pageview first, among the recent ones by the events' sort order, then its visit by the start it carries.
@@ -615,20 +849,21 @@ export class ClickHouseStore extends SqlStore {
 
   override async insertEvent(row: EventRow): Promise<void> {
     const key = row.session ? await this.key(row.session) : null;
-    await this.clickhouse.insert("rl_events", [
-      {
-        site: row.site, ts: row.ts, kind: row.kind, visitor: row.visitor, session: row.session, started_at: key?.startedAt ?? 0,
-        pageview: row.pageview, path: clip(row.path, 1000), hostname: clip(row.hostname, 255), title: clip(row.title, 500),
-        name: clip(row.name, 255), props: row.props ? JSON.stringify(row.props) : null, engaged_ms: row.engagedMs, scroll: row.scroll, link: row.link,
-      },
-    ]);
+    await this.write("rl_events", {
+      site: row.site, ts: row.ts, kind: row.kind, visitor: row.visitor, session: row.session, started_at: key?.startedAt ?? 0,
+      pageview: row.pageview, path: clip(row.path, 1000), hostname: clip(row.hostname, 255), title: clip(row.title, 500),
+      name: clip(row.name, 255), props: row.props ? JSON.stringify(row.props) : null, engaged_ms: row.engagedMs, scroll: row.scroll, link: row.link,
+    });
   }
 
   // Imports
 
   override async deleteSession(id: string): Promise<void> {
+    // By its key, so the delete reads one visit's rows rather than the whole table, and not at all for a
+    // visit that is not there, as for each new visit an import makes.
+    const key = await this.key(id);
     this.keys.delete(id);
-    await this.clickhouse.run(`DELETE FROM rl_visits WHERE id = ?`, [id]);
+    if (key) await this.clickhouse.run(`DELETE FROM rl_visits WHERE site = ? AND started_at = ? AND id = ?`, [key.site, key.startedAt, id]);
   }
 
   override async markImported(id: string, unknownEngagement: boolean): Promise<void> {
@@ -636,15 +871,16 @@ export class ClickHouseStore extends SqlStore {
   }
 
   override async deleteLinkHistory(link: string): Promise<void> {
-    await this.clickhouse.run(`DELETE FROM rl_visits WHERE id IN (SELECT DISTINCT session FROM rl_events WHERE link = ? AND session <> '')`, [link]);
-    await this.clickhouse.run(`DELETE FROM rl_events WHERE link = ?`, [link]);
+    await this.clickhouse.mutate("rl_visits", `DELETE FROM rl_visits WHERE id IN (SELECT DISTINCT session FROM rl_events WHERE link = ? AND session <> '')`, [link]);
+    await this.clickhouse.mutate("rl_events", `DELETE FROM rl_events WHERE link = ?`, [link]);
     this.keys.clear();
   }
 
   override async clearImportedVisits(site: string, from: number, to: number): Promise<void> {
     const imported = `SELECT id FROM rl_sessions WHERE site = ? AND imported = 1`;
-    await this.clickhouse.run(`DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${imported})`, [site, from, to, site]);
-    await this.clickhouse.run(
+    await this.clickhouse.mutate("rl_events", `DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${imported})`, [site, from, to, site]);
+    await this.clickhouse.mutate(
+      "rl_visits",
       `DELETE FROM rl_visits WHERE site = ? AND started_at >= ? AND started_at < ? AND id IN (${imported})
          AND id NOT IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
       [site, from - EVENT_TAIL_MS, to, site, site, from - EVENT_TAIL_MS, to + EVENT_TAIL_MS],
@@ -653,73 +889,66 @@ export class ClickHouseStore extends SqlStore {
   }
 
   override async recountCarriedVisits(site: string, from: number, to: number): Promise<void> {
-    const carried = await this.clickhouse.all<Record<string, unknown>>(
-      `SELECT * FROM rl_sessions s WHERE s.site = ? AND s.imported = 1 AND s.started_at < ? AND s.started_at >= ?
+    const carried = await this.clickhouse.all<{ id: string; started_at: unknown; visitor: string; pageviews: unknown; events: unknown }>(
+      `SELECT id, started_at, visitor, pageviews, events FROM rl_sessions s WHERE s.site = ? AND s.imported = 1 AND s.started_at < ? AND s.started_at >= ?
          AND s.id IN (SELECT e.session FROM rl_events e WHERE e.site = ? AND e.ts >= ? AND e.ts < ?)`,
       [site, from, from - EVENT_TAIL_MS, site, from, to],
     );
     if (!carried.length) return;
-    const ids = carried.map((c) => String(c.id));
-    const rows = await this.clickhouse.all<{ session: string; kind: string; ts: unknown; path: string }>(
-      `SELECT session, kind, ts, path FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${ids.map(() => "?").join(", ")})`,
-      [site, Math.min(...carried.map((c) => Number(c.started_at))), to, ...ids],
-    );
-    const totals = new Map<string, { pageviews: number; events: number; last: number; exit: [number, string] }>();
-    for (const r of rows) {
-      const t = totals.get(r.session) ?? { pageviews: 0, events: 0, last: 0, exit: [0, ""] };
-      if (r.kind === "pageview") {
-        t.pageviews++;
-        if (Number(r.ts) >= t.exit[0]) t.exit = [Number(r.ts), r.path];
-      } else t.events++;
-      t.last = Math.max(t.last, Number(r.ts));
-      totals.set(r.session, t);
+    const totals = new Map<string, { pageviews: number; events: number }>();
+    // A few hundred visits to a query, so their ids fit in the request's address.
+    for (let i = 0; i < carried.length; i += 500) {
+      const piece = carried.slice(i, i + 500);
+      const rows = await this.clickhouse.all<{ session: string; pageviews: unknown; events: unknown }>(
+        `SELECT session, countIf(kind = 'pageview') AS pageviews, countIf(kind = 'event') AS events FROM rl_events
+         WHERE site = ? AND ts >= ? AND ts < ? AND kind IN ('pageview', 'event') AND session IN (${piece.map(() => "?").join(", ")}) GROUP BY session`,
+        [site, Math.min(...piece.map((c) => Number(c.started_at))), to, ...piece.map((c) => c.id)],
+      );
+      for (const r of rows) totals.set(r.session, { pageviews: Number(r.pageviews), events: Number(r.events) });
     }
-    // Each visit is written again whole, as one row, in place of the rows it had.
-    for (const visit of carried) {
-      const id = String(visit.id);
-      const t = totals.get(id);
-      if (!t) continue;
-      const [entry] = await this.clickhouse.all<{ ts: unknown; path: string }>(`SELECT entry.1 AS ts, entry.2 AS path FROM rl_visits FINAL WHERE site = ? AND started_at = ? AND id = ?`, [
-        site,
-        Number(visit.started_at),
-        id,
-      ]);
-      await this.clickhouse.run(`DELETE FROM rl_visits WHERE site = ? AND started_at = ? AND id = ?`, [site, Number(visit.started_at), id]);
-      const { entry_path: _entry, exit_path: _exit, engaged_ms, ...rest } = visit;
-      await this.clickhouse.insert("rl_visits", [
-        {
-          ...rest,
-          pageviews: t.pageviews,
-          events: t.events,
-          last_at: t.last,
-          engaged_ms: Number(engaged_ms ?? 0),
-          engaged_unknown: engaged_ms === null ? 1 : 0,
-          entry: entry ? [String(entry.ts), entry.path] : [NO_ENTRY, ""],
-          exit: t.pageviews ? t.exit : [0, String(_exit ?? "")],
-        },
-      ]);
-    }
+    // Each visit gets a row of the difference between what it counts and what its rows say, which ClickHouse
+    // adds to the rest. Its first and last page and its last moment already come from its rows, as maxima.
+    const fixes = carried.flatMap((v) => {
+      const t = totals.get(v.id) ?? { pageviews: 0, events: 0 };
+      const pageviews = t.pageviews - Number(v.pageviews);
+      const events = t.events - Number(v.events);
+      if (!pageviews && !events) return [];
+      const startedAt = Number(v.started_at);
+      return [{ site, started_at: startedAt, id: v.id, visitor: v.visitor, last_at: startedAt, pageviews, events, entry: [NO_ENTRY, ""], exit: [0, ""] }];
+    });
+    await this.clickhouse.insert("rl_visits", fixes, { batched: true });
   }
 
   // Deletes
 
   /** A site's visits and events go from ClickHouse, then everything else from the other store. */
   override async deleteSite(id: string): Promise<void> {
-    await this.clickhouse.run(`DELETE FROM rl_events WHERE site = ?`, [id]);
-    await this.clickhouse.run(`DELETE FROM rl_visits WHERE site = ?`, [id]);
+    await this.clickhouse.mutate("rl_events", `DELETE FROM rl_events WHERE site = ?`, [id]);
+    await this.clickhouse.mutate("rl_visits", `DELETE FROM rl_visits WHERE site = ?`, [id]);
     this.keys.clear();
     await super.deleteSite(id);
   }
 
-  /** A visit's events go with it, even ones after the cutoff, so nothing is left without its visit. */
+  /**
+   * A visit's events go with it, even ones after the cutoff, so nothing is left without its visit. Retention
+   * asks every few minutes, so it first looks whether anything is that old, which costs next to nothing.
+   */
   override async dropBefore(site: string, ts: number): Promise<void> {
-    await this.clickhouse.run(`DELETE FROM rl_events WHERE site = ? AND (ts < ? OR (session <> '' AND started_at < ?))`, [site, ts, ts]);
-    await this.clickhouse.run(`DELETE FROM rl_visits WHERE site = ? AND started_at < ?`, [site, ts]);
+    // Only the months before the cutoff are read, which once retention has run hold nothing.
+    const any = await this.clickhouse.all(
+      `SELECT 1 AS x FROM (SELECT 1 FROM rl_visits WHERE site = ? AND started_at < ? LIMIT 1 UNION ALL SELECT 1 FROM rl_events WHERE site = ? AND ts < ? LIMIT 1)`,
+      [site, ts, site, ts],
+    );
+    if (!any.length) return;
+    // A visit's events come within EVENT_TAIL_MS of its start, which bounds the months read.
+    await this.clickhouse.mutate("rl_events", `DELETE FROM rl_events WHERE site = ? AND ts < ? AND (ts < ? OR (started_at > 0 AND started_at < ?))`, [site, ts + EVENT_TAIL_MS, ts, ts]);
+    await this.clickhouse.mutate("rl_visits", `DELETE FROM rl_visits WHERE site = ? AND started_at < ?`, [site, ts]);
     this.keys.clear();
   }
 
   override async dropOrphans(site: string, from: number, until: number): Promise<void> {
-    await this.clickhouse.run(
+    await this.clickhouse.mutate(
+      "rl_events",
       `DELETE FROM rl_events WHERE site = ? AND ts >= ? AND ts < ? AND session <> '' AND session NOT IN (SELECT id FROM rl_visits WHERE site = ?)`,
       [site, from, until, site],
     );
@@ -729,7 +958,7 @@ export class ClickHouseStore extends SqlStore {
   override async saveGoal(g: GoalRow, before?: GoalRow): Promise<void> {
     await super.saveGoal(g, before);
     if (before?.kind === "click" && g.kind === "click" && before.name !== g.name) {
-      await this.clickhouse.run(`ALTER TABLE rl_events UPDATE name = ? WHERE site = ? AND kind = 'event' AND name = ?`, [g.name, g.site, before.name]);
+      await this.clickhouse.mutate("rl_events", `ALTER TABLE rl_events UPDATE name = ? WHERE site = ? AND kind = 'event' AND name = ?`, [g.name, g.site, before.name]);
     }
   }
 
@@ -737,8 +966,9 @@ export class ClickHouseStore extends SqlStore {
   // One process copies at a time, by a claim in the other store's settings, and records how far it got
   // in ClickHouse, so a restart carries on from there.
 
-  private async meta(key: string): Promise<string | null> {
-    const [row] = await this.clickhouse.all<{ value: string | null }>(`SELECT argMax(value, at) AS value FROM rl_meta WHERE "key" = ?`, [key]);
+  private async meta(key: string, quick = false): Promise<string | null> {
+    const sql = `SELECT argMax(value, at) AS value FROM rl_meta WHERE "key" = ?`;
+    const [row] = quick ? await this.clickhouse.lookup<{ value: string | null }>(sql, [key]) : await this.clickhouse.all<{ value: string | null }>(sql, [key]);
     return row?.value ?? null;
   }
 
@@ -749,19 +979,31 @@ export class ClickHouseStore extends SqlStore {
   }
 
   /** How far the copy has got, or null when there has been none, or it was undone by `copyBack()`. */
-  async moveState(): Promise<MoveState | null> {
-    const value = await this.meta("move");
+  async moveState(quick = false): Promise<MoveState | null> {
+    const value = await this.meta("move", quick);
     return value ? (JSON.parse(value) as MoveState) : null;
   }
 
   /** The start of the oldest visit copied so far, while the copy is still going, for the dashboard to say. */
   override async moving(): Promise<{ through: number } | null> {
-    const state = await this.moveState();
+    if (this.moved) return null;
+    // Asked on every dashboard load, so it goes ahead of the reports waiting their turn.
+    const state = await this.moveState(true);
+    if (state?.done && !state.back) this.moved = true;
     return state && !state.done ? { through: state.through } : null;
   }
 
-  /** Claims the copy for this process, or renews its claim. False while another process holds it. */
-  private async claim(): Promise<boolean> {
+  /**
+   * Claims the copy for this process, or renews its claim. False while another process holds it. One at a
+   * time, so the renewal on a timer and a piece's own claim never swap the setting from under each other.
+   */
+  private claim(): Promise<boolean> {
+    const next = this.claims.then(() => this.claimOnce());
+    this.claims = next.catch(() => false);
+    return next;
+  }
+
+  private async claimOnce(): Promise<boolean> {
     const mine = JSON.stringify({ by: this.owner, until: Date.now() + LEASE_MS });
     const held = await this.settingOrAdd(LEASE_KEY, () => mine);
     if (held !== mine) {
@@ -777,6 +1019,35 @@ export class ClickHouseStore extends SqlStore {
     if (!this.claimed) return;
     await this.swapSetting(LEASE_KEY, this.claimed, JSON.stringify({ by: "", until: 0 }));
     this.claimed = null;
+  }
+
+  /**
+   * Runs `fn` while renewing this process's claim on a timer, however long its queries take, so another
+   * process never takes over a piece this one is still writing. Losing the claim anyway (this process stalled
+   * past LEASE_MS) stops it at its next write, through `still()`.
+   */
+  private async holding<T>(fn: () => Promise<T>): Promise<T> {
+    this.lost = false;
+    const timer = setInterval(() => {
+      this.claim().then(
+        (held) => {
+          if (!held) this.lost = true;
+        },
+        () => {},
+      );
+    }, RENEW_MS);
+    timer.unref?.();
+    try {
+      return await fn();
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  /** Stops a piece of the copy before its next write, once the store closes or another process takes over. */
+  private still(): void {
+    if (this.closed) throw new Error("Runlight: the store closed while copying visits into ClickHouse");
+    if (this.lost) throw new Error("Runlight: another process took over copying visits into ClickHouse");
   }
 
   /** Waits up to `ms`, or until the store closes. */
@@ -806,7 +1077,10 @@ export class ClickHouseStore extends SqlStore {
       if (state && state.through < state.at) break;
       if (await this.claim()) {
         state ??= await this.planMove();
-        if (!state.done) await this.copyStep(state, true);
+        if (!state.done) {
+          const first = state;
+          await this.holding(() => this.copyStep(first, true));
+        }
         break;
       }
       // Another process is copying the newest visits; this one starts once they are in.
@@ -837,29 +1111,34 @@ export class ClickHouseStore extends SqlStore {
   /**
    * Copies every visit and event from the other store that ClickHouse does not have yet, newest first, and
    * returns once all are in. Runs in the background unless `copyInBackground` is false; the server's
-   * `clickhouse copy` command runs it in the foreground. While another process holds the copy, it waits.
+   * `clickhouse copy` command runs it in the foreground. While another process holds the copy, it waits,
+   * and calls `onWait` once to say so.
    */
-  async copy(onProgress?: (state: MoveState) => void): Promise<MoveState | null> {
+  async copy(onProgress?: (state: MoveState) => void, onWait?: () => void): Promise<MoveState | null> {
     let first = true;
     let failed = 0;
+    let waited = false;
     for (;;) {
-      if (this.closed) return this.moveState();
       const state = await this.moveState();
+      if (this.closed) return state;
       if (!state || state.done) {
         await this.release();
         return state;
       }
       if (!(await this.claim())) {
+        if (!waited) onWait?.();
+        waited = true;
         first = true;
         await this.pause(5_000);
         continue;
       }
       let next: MoveState;
       try {
-        next = await this.copyStep(state, first);
+        next = await this.holding(() => this.copyStep(state, first));
       } catch (error) {
+        if (this.closed) return state;
         // A dropped connection or a busy database: the piece is cleared and copied again after a pause.
-        if (this.closed || ++failed >= COPY_TRIES) throw error;
+        if (++failed >= COPY_TRIES) throw error;
         const wait = Math.min(1_000 * 2 ** (failed - 1), 300_000);
         const reason = error instanceof Error ? [error.message, (error.cause as Error | undefined)?.message].filter(Boolean).join(": ") : String(error);
         console.error(`Runlight: copying visits into ClickHouse failed (${reason}), and tries again in ${Math.round(wait / 1000)} s`);
@@ -875,8 +1154,8 @@ export class ClickHouseStore extends SqlStore {
 
   /**
    * Copies the next piece back in time, and records it as copied. `resuming` first clears what a process
-   * stopped part way through it left in ClickHouse, which nothing else writes to: the piece of the last two
-   * days is copied before any hit is counted, and no hit reaches an older visit.
+   * stopped part way through it left in ClickHouse: the visits that started in it, which no hit reaches (the
+   * piece of the last two days is copied before any hit is counted), and the events the copy wrote into it.
    */
   private async copyStep(state: MoveState, resuming: boolean): Promise<MoveState> {
     const sites = (await this.db.all<{ id: string }>(`SELECT id FROM rl_sites`)).map((s) => String(s.id));
@@ -900,17 +1179,19 @@ export class ClickHouseStore extends SqlStore {
       from = latest + 1 - 86_400_000;
     }
     if (resuming) {
-      await this.clickhouse.run(`DELETE FROM rl_visits WHERE started_at >= ? AND started_at < ?`, [from, to]);
-      await this.clickhouse.run(`DELETE FROM rl_events WHERE (started_at >= ? AND started_at < ?) OR (started_at = 0 AND ts >= ? AND ts < ?)`, [from, to, from, to]);
+      this.still();
+      await this.clickhouse.mutate("rl_visits", `DELETE FROM rl_visits WHERE started_at >= ? AND started_at < ?`, [from, to]);
+      await this.clickhouse.mutate("rl_events", `DELETE FROM rl_events WHERE ts >= ? AND ts < ? AND id >= ${COPIED_ID}`, [from, to]);
     }
     for (const site of sites) await this.copyPiece(site, from, to);
+    this.still();
     if (!(await this.claim())) throw new Error("Runlight: another process took over copying visits into ClickHouse");
     const next = { ...state, through: from };
     await this.setMeta("move", JSON.stringify(next));
     return next;
   }
 
-  /** One site's visits that started in [from, to), and their events, with the events that have no visit in it. */
+  /** One site's visits that started in [from, to), and its events in [from, to), each with its visit's start. */
   private async copyPiece(site: string, from: number, to: number): Promise<void> {
     let after: { at: number; id: string } | null = null;
     for (;;) {
@@ -920,59 +1201,73 @@ export class ClickHouseStore extends SqlStore {
         after ? [site, from, to, after.at, after.at, after.id] : [site, from, to],
       );
       if (!rows.length) break;
+      this.still();
       await this.clickhouse.insert("rl_visits", rows.map(visitFrom), { batched: true });
       if (rows.length < COPY_BATCH) break;
       const last = rows[rows.length - 1]!;
       after = { at: Number(last.started_at), id: String(last.id) };
-      await this.claim();
     }
-    // A visit's events come within EVENT_TAIL_MS of its start, and an event with no visit goes by its own time.
+    // By the events' own time, so each read is one day of them; a visit's start is looked up by its id.
     let next: { ts: number; id: number } | null = null;
     for (;;) {
       const rows: Array<Record<string, unknown>> = await this.db.all(
         `SELECT ${EVENT_COLUMNS.map((c) => `e.${c}`).join(", ")}, e.id AS row_id, s.started_at AS visit_started
          FROM rl_events e LEFT JOIN rl_sessions s ON s.id = e.session
-         WHERE e.site = ? AND e.ts >= ? AND e.ts < ?
-           AND ((s.started_at >= ? AND s.started_at < ?) OR (s.id IS NULL AND e.ts >= ? AND e.ts < ?))${next ? " AND (e.ts > ? OR (e.ts = ? AND e.id > ?))" : ""}
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ?${next ? " AND (e.ts > ? OR (e.ts = ? AND e.id > ?))" : ""}
          ORDER BY e.ts, e.id LIMIT ${COPY_BATCH}`,
-        [site, from - 3_600_000, to + EVENT_TAIL_MS, from, to, from, to, ...(next ? [next.ts, next.ts, next.id] : [])],
+        [site, from, to, ...(next ? [next.ts, next.ts, next.id] : [])],
       );
       if (!rows.length) break;
+      this.still();
       await this.clickhouse.insert("rl_events", rows.map(eventFrom), { batched: true });
       if (rows.length < COPY_BATCH) break;
       const last = rows[rows.length - 1]!;
       next = { ts: Number(last.ts), id: Number(last.row_id) };
-      await this.claim();
     }
   }
 
-  /** How many visits and events each store holds, for the server's `clickhouse status` command. */
-  async counts(): Promise<{ clickhouse: { visits: number; events: number }; other: { visits: number; events: number; copied: number | null } }> {
+  /**
+   * How many visits and events each store holds, for the server's `clickhouse status` command. `late` is the
+   * visits in the other store that started after ClickHouse took over, which only a process running without
+   * CLICKHOUSE_URL can have written there, and which are not in ClickHouse.
+   */
+  async counts(): Promise<{ clickhouse: { visits: number; events: number }; other: { visits: number; events: number; copied: number | null; late: number } }> {
     const count = async (db: Db, sql: string, params: unknown[] = []) => Number((await db.all<{ n: unknown }>(sql, params))[0]?.n ?? 0);
     const state = await this.moveState();
     return {
-      clickhouse: { visits: await count(this.clickhouse, `SELECT uniqExact(id) AS n FROM rl_visits`), events: await count(this.clickhouse, `SELECT count() AS n FROM rl_events`) },
+      // Each month's visits are added up apart, so this counts a year of them in little memory.
+      clickhouse: { visits: await count(this.clickhouse, `SELECT count() AS n FROM rl_sessions`), events: await count(this.clickhouse, `SELECT count() AS n FROM rl_events`) },
       other: {
         visits: await count(this.db, `SELECT COUNT(*) AS n FROM rl_sessions`),
         events: await count(this.db, `SELECT COUNT(*) AS n FROM rl_events`),
         copied: state && !state.done ? await count(this.db, `SELECT COUNT(*) AS n FROM rl_sessions WHERE started_at >= ? AND started_at < ?`, [state.through, state.at]) : null,
+        late: state ? await count(this.db, `SELECT COUNT(*) AS n FROM rl_sessions WHERE started_at >= ?`, [state.at]) : 0,
       },
     };
   }
 
   /**
-   * Empties the other store's visits, events, and rollups once every one is in ClickHouse, which reads
-   * them from then on. For the server's `clickhouse drop-old` command.
+   * Empties the other store of the visits and events copied into ClickHouse, which reads them from then on,
+   * and of its rollups. Visits that started there after ClickHouse took over were never copied, so they stay.
+   * For the server's `clickhouse drop-old` command.
    */
   async dropOld(): Promise<void> {
     const state = await this.moveState();
-    if (state && !state.done) throw new Error("Runlight: visits are still being copied into ClickHouse. Run clickhouse copy to finish first.");
-    await this.emptyOther();
+    if (!state) throw new Error("Runlight: nothing has been copied into ClickHouse, so the visits in the other store are the only ones.");
+    if (!state.done || state.back) throw new Error("Runlight: visits are still being copied into ClickHouse. Run clickhouse copy to finish first.");
+    const sites = (await this.db.all<{ id: string }>(`SELECT id FROM rl_sites`)).map((s) => String(s.id));
+    // A day at a time, as retention deletes, so a big history does not hold the database for minutes.
+    for (const site of sites) {
+      await this.rows.dropBefore(site, state.at);
+      await this.rows.clearRollups(site);
+    }
+    // Rows of sites deleted since, which nothing reads, and the rollups, which ClickHouse does without.
+    for (const table of ["rl_events", "rl_sessions"]) await this.db.run(`DELETE FROM ${table} WHERE site NOT IN (SELECT id FROM rl_sites)`);
+    for (const table of ["rl_rollups", "rl_rollup_days"]) await this.db.run(`DELETE FROM ${table}`);
   }
 
   private async emptyOther(): Promise<void> {
     const sites = (await this.db.all<{ id: string }>(`SELECT id FROM rl_sites`)).map((s) => String(s.id));
-    // A day at a time, as retention deletes, so a big history does not hold the database for minutes.
     for (const site of sites) {
       await this.rows.dropBefore(site, Number.MAX_SAFE_INTEGER);
       await this.rows.clearRollups(site);
@@ -982,13 +1277,41 @@ export class ClickHouseStore extends SqlStore {
 
   /**
    * Copies every visit and event in ClickHouse into the other store, in place of what it held, then empties
-   * ClickHouse, for going back to the other store alone. Only with the copy done and the server stopped;
-   * the server's `clickhouse copy --back` command runs it. Rollups are built again from the rows.
+   * ClickHouse, for going back to the other store alone. Only with the copy done and no server taking hits;
+   * the server's `clickhouse copy --back` command runs it. Rollups are built again from the rows. Stopped
+   * part way, it can be run again: it records when the other store holds everything, before emptying ClickHouse.
    */
   async copyBack(onProgress?: (copied: { visits: number; events: number }) => void): Promise<void> {
     const state = await this.moveState();
-    if (state && !state.done) throw new Error("Runlight: visits are still being copied into ClickHouse. Run clickhouse copy to finish first.");
-    await this.emptyOther();
+    if (!state) throw new Error("Runlight: ClickHouse has nothing to copy back: it was never switched on here, or everything was copied back already.");
+    if (!state.done) throw new Error("Runlight: visits are still being copied into ClickHouse. Run clickhouse copy to finish first.");
+    const ago = await this.liveAgo();
+    if (ago !== null) {
+      throw new Error(
+        `Runlight: a server is still taking hits into ClickHouse (it last said so ${Math.round(ago / 1000)} s ago). Stop every server first; one that stopped without shutting down counts as gone ${LIVE_FOR_MS / 1000} s after it last said so.`,
+      );
+    }
+    if (state.back !== "copied") {
+      const held = await this.clickhouse.all(`SELECT 1 AS x FROM (SELECT 1 FROM rl_visits LIMIT 1 UNION ALL SELECT 1 FROM rl_events LIMIT 1)`);
+      if (!held.length && state.back !== "copying") {
+        const other = await this.db.all(`SELECT 1 AS x FROM rl_sessions LIMIT 1`);
+        if (other.length) throw new Error("Runlight: ClickHouse holds no visits, so copying back would only empty the other store. Nothing was changed.");
+      }
+      await this.setMeta("move", JSON.stringify({ ...state, back: "copying" }));
+      await this.emptyOther();
+      await this.copyOut(onProgress);
+      await this.setMeta("move", JSON.stringify({ ...state, back: "copied" }));
+    }
+    await this.clickhouse.run(`TRUNCATE TABLE rl_visits`);
+    await this.clickhouse.run(`TRUNCATE TABLE rl_events`);
+    this.keys.clear();
+    this.moved = false;
+    // Switched on again later, ClickHouse copies everything afresh.
+    await this.setMeta("move", "");
+  }
+
+  /** Every visit and event in ClickHouse into the other store, a day at a time. */
+  private async copyOut(onProgress?: (copied: { visits: number; events: number }) => void): Promise<void> {
     const copied = { visits: 0, events: 0 };
     const sites = (await this.clickhouse.all<{ site: string }>(`SELECT DISTINCT site FROM rl_visits UNION DISTINCT SELECT DISTINCT site FROM rl_events`)).map((s) => s.site);
     const visitColumns = ["id", "site", "visitor", "started_at", "last_at", "entry_path", "exit_path", "pageviews", "events", "engaged_ms", "imported", ...VISIT_TEXT];
@@ -1027,11 +1350,6 @@ export class ClickHouseStore extends SqlStore {
         }
       }
     }
-    await this.clickhouse.run(`TRUNCATE TABLE rl_visits`);
-    await this.clickhouse.run(`TRUNCATE TABLE rl_events`);
-    this.keys.clear();
-    // Switched on again later, ClickHouse copies everything afresh.
-    await this.setMeta("move", "");
   }
 
   /** The earliest `col` in a ClickHouse table for `site` at `from` or later, or null when there is none. */
@@ -1048,6 +1366,102 @@ export class ClickHouseStore extends SqlStore {
       const values = piece.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ");
       await this.rows.transaction((store) => store.db.run(`INSERT INTO ${table} (${columns.join(", ")}) VALUES ${values}`, piece.flatMap((r) => columns.map((c) => r[c] ?? null))));
     }
+  }
+}
+
+/** The store calls an import's step makes that go into memory; any other call sends what is gathered first. */
+const GATHERED = new Set(["insertSession", "touchSession", "insertEvent", "markImported", "openSession", "deleteSession"]);
+
+/**
+ * One step of an import on ClickHouse. Its visits and events are gathered in memory and sent in a few big
+ * inserts, where a hit at a time would wait on ClickHouse for each row. The visits it makes are found again
+ * from memory, so a later row of the step joins its visit as it would have once that was written.
+ */
+class ImportStep extends ClickHouseStore {
+  /** The store the step's code is given: every call but the gathered ones sends what is gathered first. */
+  readonly store: SqlStore;
+  private visitRows: Array<Record<string, unknown>> = [];
+  private eventRows: Array<Record<string, unknown>> = [];
+  /** The visits this step made, by visitor, and the latest moment each visit it wrote to reached. */
+  private readonly made = new Map<string, Array<{ id: string } & VisitKey>>();
+  private readonly madeKeys = new Map<string, VisitKey>();
+  private readonly lastAt = new Map<string, number>();
+
+  constructor(rows: SqlStore, clickhouse: ClickHouseDb, keys: Map<string, VisitKey>) {
+    super(rows, clickhouse, keys);
+    this.store = new Proxy(this, {
+      get: (target, prop, receiver) => {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function" || prop === "constructor") return value;
+        if (GATHERED.has(String(prop))) return value.bind(target);
+        return async (...args: unknown[]) => {
+          await target.flush();
+          return value.apply(target, args);
+        };
+      },
+    });
+  }
+
+  /** Sends what the step has gathered. */
+  async flush(): Promise<void> {
+    const visits = this.visitRows;
+    const events = this.eventRows;
+    this.visitRows = [];
+    this.eventRows = [];
+    for (let i = 0; i < visits.length; i += 10_000) await this.clickhouse.insert("rl_visits", visits.slice(i, i + 10_000), { batched: true });
+    for (let i = 0; i < events.length; i += 10_000) await this.clickhouse.insert("rl_events", events.slice(i, i + 10_000), { batched: true });
+  }
+
+  protected override async write(table: "rl_visits" | "rl_events", row: Record<string, unknown>): Promise<void> {
+    if (table === "rl_events") return void this.eventRows.push(row);
+    const id = String(row.id);
+    this.lastAt.set(id, Math.max(this.lastAt.get(id) ?? 0, Number(row.last_at)));
+    this.visitRows.push(row);
+  }
+
+  protected override async key(id: string): Promise<VisitKey | null> {
+    return this.madeKeys.get(id) ?? super.key(id);
+  }
+
+  override async insertSession(row: SessionRow): Promise<void> {
+    await super.insertSession(row);
+    const key = { site: row.site, startedAt: row.startedAt, visitor: row.visitor };
+    this.madeKeys.set(row.id, key);
+    this.made.set(row.visitor, [...(this.made.get(row.visitor) ?? []), { id: row.id, ...key }]);
+  }
+
+  override async deleteSession(id: string): Promise<void> {
+    const mine = this.madeKeys.get(id);
+    if (!mine) return super.deleteSession(id);
+    this.visitRows = this.visitRows.filter((r) => r.id !== id);
+    this.eventRows = this.eventRows.filter((r) => r.session !== id);
+    this.madeKeys.delete(id);
+    this.lastAt.delete(id);
+    this.made.set(mine.visitor, (this.made.get(mine.visitor) ?? []).filter((v) => v.id !== id));
+  }
+
+  /** The visit to join, from ClickHouse and from what this step has gathered, by the same rule as ClickHouse's. */
+  override async openSession(site: string, visitors: string[], since: number): Promise<{ id: string; visitor: string } | null> {
+    if (visitors.length === 0) return null;
+    const found = new Map<string, { id: string; visitor: string; startedAt: number; lastAt: number }>();
+    const rows = await this.clickhouse.lookup<{ id: string; visitor: string; started_at: unknown; last_at: unknown }>(
+      `SELECT id, visitor, started_at, last_at FROM rl_sessions WHERE site = ? AND started_at >= ? AND visitor IN (${visitors.map(() => "?").join(", ")})`,
+      [site, since - EVENT_TAIL_MS, ...visitors],
+    );
+    for (const r of rows) found.set(r.id, { id: r.id, visitor: r.visitor, startedAt: Number(r.started_at), lastAt: Number(r.last_at) });
+    for (const visitor of visitors) {
+      for (const v of this.made.get(visitor) ?? []) {
+        if (v.site === site && v.startedAt >= since - EVENT_TAIL_MS) found.set(v.id, { id: v.id, visitor, startedAt: v.startedAt, lastAt: v.startedAt });
+      }
+    }
+    const open = [...found.values()]
+      .map((v) => ({ ...v, lastAt: Math.max(v.lastAt, this.lastAt.get(v.id) ?? 0) }))
+      .filter((v) => v.lastAt >= since)
+      .sort((a, b) => b.lastAt - a.lastAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const row = open[0];
+    if (!row) return null;
+    this.remember(row.id, { site, startedAt: row.startedAt, visitor: row.visitor });
+    return { id: row.id, visitor: row.visitor };
   }
 }
 

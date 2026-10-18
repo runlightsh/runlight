@@ -192,7 +192,7 @@ async function writeStep(
   // The copy would bring in, beside these, what an earlier import of the same days left in the old database.
   if (await runlight.store.moving()) throw new ImportError("Visits are still being copied into ClickHouse. Import once that has finished.", "import_moving");
   const counts = { pageviews: 0, events: 0, visits: 0 };
-  await runlight.store.transaction(async (store) => {
+  await runlight.store.importStep(async (store) => {
     // Days this step writes into are added up again later, with the imported visits in them.
     await store.clearRollups(siteId, { from, to });
     // A failed earlier try at these days (on D1, which has no transactions) can
