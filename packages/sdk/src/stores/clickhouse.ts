@@ -634,6 +634,8 @@ export class ClickHouseStore extends SqlStore {
   }
 
   override async waiting(limit: number, since: number): Promise<{ hits: Array<{ id: string; hit: string }>; left: number } | null> {
+    // A closed store sends nothing, and reads nothing: the other store would open a database afresh.
+    if (this.closed) return null;
     if (!(await this.db.all(`SELECT 1 AS x FROM rl_waiting_hits LIMIT 1`)).length) {
       // None left: another process may send the next ones at once.
       if (this.sending) await this.swapSetting(WAITING_KEY, this.sending, JSON.stringify({ by: "", until: 0 }));

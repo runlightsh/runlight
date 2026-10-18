@@ -127,3 +127,13 @@ test("one process at a time sends the waiting hits", { skip: !CLICKHOUSE }, asyn
   assert.equal((await two.waiting(10, 0))?.hits.length, 1);
   await one.close();
 });
+
+test("a closed store's waiting hits are left alone, so a look on a timer after it closes reads nothing", { skip: !CLICKHOUSE }, async () => {
+  const rows = sqlite({ path: ":memory:" });
+  const store = switched(rows);
+  await store.migrate();
+  await store.wait(Date.now(), "{}");
+  await store.close();
+  // SQLite would open an empty database again here, and say there is no such table.
+  assert.equal(await store.waiting(10, 0), null);
+});
