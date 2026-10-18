@@ -363,8 +363,8 @@ export const JOURNEY_VISITS = 20_000;
 /** How long after a visit starts its events are looked for: far past any real visit. */
 export const EVENT_TAIL_MS = 2 * 86_400_000;
 
-/** How many engagement rows ClickHouse adds up per pageview in one query: about 250 MB of memory. */
-const ENGAGED_PER_SLICE = 1_500_000;
+/** How many engagement rows ClickHouse adds up per pageview in one query: about 500 MB of memory. */
+const ENGAGED_PER_SLICE = 3_000_000;
 
 /** What every table and index name starts with, unless a store is given another prefix in its place. */
 export const PREFIX = "rl_";
@@ -1184,20 +1184,24 @@ export class SqlStore {
       const at = [query.site, lo, hi, ...started.params];
       if (page) {
         for (const row of await this.db.all(`SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS pageviews, ${LIVE_VIEWS} AS views ${ofRest("pageview")} GROUP BY e.path`, at)) bump(row);
-        // Engaged time is added up per pageview first. On ClickHouse a big range goes in slices of its pageviews,
-        // each pageview in one slice, so each slice holds about ENGAGED_PER_SLICE rows in memory at once.
-        let slices = 1;
+        // Engaged time is added up per pageview first. On ClickHouse a big range goes in slices by when each visit
+        // started, so each pageview is in one slice, and each slice reads only its own stretch of the events and
+        // holds about ENGAGED_PER_SLICE of them in memory at once.
+        let slices: Array<[number, number] | null> = [null];
         if (own) {
           const [n] = await this.db.all(`SELECT COUNT(*) AS n ${ofRest("engagement")}`, at);
-          slices = Math.min(64, Math.max(1, Math.ceil(num(n?.n) / ENGAGED_PER_SLICE)));
+          const count = Math.min(64, Math.max(1, Math.ceil(num(n?.n) / ENGAGED_PER_SLICE)));
+          const from = lo;
+          const span = hi - EVENT_TAIL_MS - lo;
+          if (count > 1) slices = Array.from({ length: count }, (_, i) => [from + Math.floor((span * i) / count), from + Math.floor((span * (i + 1)) / count)]);
         }
         const engaged = await Promise.all(
-          Array.from({ length: slices }, (_, i) =>
+          slices.map((slice) =>
             this.db.all(
               `SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest ${ofRest("engagement")}${slices > 1 ? ` AND cityHash64(e.pageview) % ${slices} = ${i}` : ""}
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest ${ofRest("engagement")}${slice ? " AND e.started_at >= ? AND e.started_at < ? AND e.ts >= ? AND e.ts < ?" : ""}
                  GROUP BY e.path, e.pageview) t GROUP BY value`,
-              at,
+              slice ? [...at, slice[0], slice[1], slice[0], slice[1] + EVENT_TAIL_MS] : at,
             ),
           ),
         );
@@ -1399,10 +1403,14 @@ export class SqlStore {
     await this.db.run(`UPDATE rl_sessions SET engaged_ms = COALESCE(engaged_ms, 0) + ? WHERE id = ?`, [ms, id]);
   }
 
-  /** The pageview an engagement ping or event belongs to, with when its visit started and was last active. */
+  /**
+   * The pageview an engagement ping or event belongs to, with when its visit started and was last active.
+   * `since` is the earliest it can be and still count, which a store may use to look in fewer rows.
+   */
   async pageview(
     site: string,
     pageview: string,
+    _since = 0,
   ): Promise<{ session: string; visitor: string; path: string; hostname: string; ts: number; startedAt: number; lastAt: number } | null> {
     const rows = await this.db.all<Record<string, unknown>>(
       `SELECT e.session AS session, e.visitor AS visitor, e.path AS path, e.hostname AS hostname, e.ts AS ts, s.started_at AS started_at, s.last_at AS last_at
@@ -2317,8 +2325,8 @@ export class SqlStore {
       }
       if (from < buckets[buckets.length - 1]!.end) rest.push([from, buckets[buckets.length - 1]!.end]);
     }
-    // MySQL joins the buckets to every visit of the site unless told the whole range as well.
-    const w = rest ? SqlStore.within(rest) : this.db.dialect === "mysql" ? SqlStore.within([[buckets[0]!.start, buckets[buckets.length - 1]!.end]]) : { sql: "1 = 1", params: [] };
+    // MySQL and ClickHouse join the buckets to every visit of the site unless told the whole range as well.
+    const w = rest ? SqlStore.within(rest) : this.db.dialect === "mysql" || this.db.dialect === "clickhouse" ? SqlStore.within([[buckets[0]!.start, buckets[buckets.length - 1]!.end]]) : { sql: "1 = 1", params: [] };
     // Filters and scattered unbuilt days add values of their own; when they would pass D1's 100, the
     // buckets go in halves.
     if (params.length + 1 + w.params.length + scope.params.length + (pv?.params.length ?? 0) > MAX_PARAMS && buckets.length > 1) {
@@ -2339,16 +2347,30 @@ export class SqlStore {
       const at = new Map(used.map((d) => [d.day, inBucket(d)]));
       for (const row of rolled) if (at.has(String(row.day))) bump(at.get(String(row.day))!, row);
     }
-    const rows = await this.db.all<Record<string, unknown>>(
-      `WITH ${bucketTable(this.db.dialect, buckets)}
-       SELECT b.i AS i, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS n, SUM(${pv ? "COALESCE(pv.n, 0)" : "s.pageviews"}) AS views,
-         SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(${DURATION}) AS duration
-       FROM b JOIN rl_sessions s ON s.site = ? AND s.started_at >= b.bs AND s.started_at < b.be
-       ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
-       WHERE ${IS_VISIT}${scope.sql} AND ${w.sql}
-       GROUP BY b.i`,
-      [...params, query.site, ...(pv?.params ?? []), ...scope.params, ...w.params],
-    );
+    const totals = `COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS n, SUM(${pv ? "COALESCE(pv.n, 0)" : "s.pageviews"}) AS views,
+         SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(${DURATION}) AS duration`;
+    const rows =
+      this.db.dialect === "clickhouse"
+        ? // ClickHouse would hold every visit of the site in memory to join them to the buckets, so each visit
+          // finds its bucket in a list instead.
+          await this.db.all<Record<string, unknown>>(
+            `SELECT i, ${totals} FROM (
+               SELECT s.*, arrayFirstIndex((a, z) -> s.started_at >= a AND s.started_at < z, [${buckets.map((b) => Math.trunc(b.start)).join(", ")}], [${buckets.map((b) => Math.trunc(b.end)).join(", ")}]) - 1 AS i
+               FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ?) s
+             ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+             WHERE i >= 0 AND ${IS_VISIT}${scope.sql} AND ${w.sql}
+             GROUP BY i`,
+            [query.site, buckets[0]!.start, buckets[buckets.length - 1]!.end, ...(pv?.params ?? []), ...scope.params, ...w.params],
+          )
+        : await this.db.all<Record<string, unknown>>(
+            `WITH ${bucketTable(this.db.dialect, buckets)}
+             SELECT b.i AS i, ${totals}
+             FROM b JOIN rl_sessions s ON s.site = ? AND s.started_at >= b.bs AND s.started_at < b.be
+             ${pv ? `LEFT JOIN ${pv.sql} pv ON pv.session = s.id` : ""}
+             WHERE ${IS_VISIT}${scope.sql} AND ${w.sql}
+             GROUP BY b.i`,
+            [...params, query.site, ...(pv?.params ?? []), ...scope.params, ...w.params],
+          );
     for (const row of rows) bump(num(row.i), row);
     return buckets.map((bucket, i) => {
       const row = sums.get(i);
