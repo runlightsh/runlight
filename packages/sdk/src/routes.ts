@@ -1838,7 +1838,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       );
       // A share never learns how the install is run.
       // While older visits are still being copied into ClickHouse, how far back the reports reach so far.
-      const moving = shared ? null : await runlight.store.moving();
+      // A ClickHouse that cannot say leaves the banner off, rather than the site list unanswered.
+      const moving = shared ? null : await runlight.store.moving().catch(() => null);
       return json(shared ? { sites } : { sites, managed: scoped?.site === undefined && runlight.managedSites, ...(moving ? { moving } : {}) });
     }
 

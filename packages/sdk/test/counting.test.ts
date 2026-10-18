@@ -243,6 +243,9 @@ for (const kind of STORES) {
     const one = await t.rl.store.settleOpenSession("default", ["v1"], t.now - 60_000, { id: "bbbb", visitor: "v1" });
     const other = await t.rl.store.settleOpenSession("default", ["v1"], t.now - 60_000, { id: "aaaa", visitor: "v1" });
     assert.deepEqual([one.id, other.id], ["aaaa", "aaaa"]);
-    assert.deepEqual((await visitsDb(t.rl.store).all<{ id: string }>(`SELECT id FROM rl_sessions`)).map((r) => r.id), ["aaaa"]);
+    const left = (await visitsDb(t.rl.store).all<{ id: string; n: unknown }>(`SELECT id, pageviews + events AS n FROM rl_sessions ORDER BY id`)).map((r) => [r.id, Number(r.n)]);
+    // ClickHouse leaves the other, as another process may be counting a hit into it that moment; with
+    // nothing in it, it is no visit to any report.
+    assert.deepEqual(left, kind === "clickhouse" ? [["aaaa", 0], ["bbbb", 0]] : [["aaaa", 0]]);
   });
 }

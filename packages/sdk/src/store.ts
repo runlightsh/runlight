@@ -698,6 +698,9 @@ function visitScope(filters: Filter[], site: string, from: number, to: number, d
       // which runs for hours, so it gets NOT EXISTS, an anti join. SQLite reads NOT IN through a
       // temporary index, and runs NOT EXISTS once a visit.
       if (filter.op === "not" && dialect === "postgres") parts.push(`NOT EXISTS (SELECT 1 ${rows} AND e.session = s.id)`);
+      // ClickHouse holds the set of every matching visit's id in memory; their 64-bit hashes take under half
+      // of that, and two visits sharing a hash in one report is far too unlikely to matter.
+      else if (dialect === "clickhouse") parts.push(`cityHash64(s.id) ${filter.op === "not" ? "NOT IN" : "IN"} (SELECT cityHash64(e.session) ${rows})`);
       else parts.push(`s.id ${filter.op === "not" ? "NOT IN" : "IN"} (SELECT e.session ${rows})`);
       params.push(site, from, to + EVENT_TAIL_MS, ...c.params);
     }
@@ -765,6 +768,8 @@ export class SqlStore {
   readonly prefix: string;
   /** Whether upkeep adds up each day into rollups for reports to read. A ClickHouseStore keeps none. */
   readonly keepsRollups: boolean = true;
+  /** On ClickHouse, how many engagement rows the pages report adds up in one query; smaller in tests, to try the slices. */
+  engagedPerSlice = ENGAGED_PER_SLICE;
 
   /**
    * `prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
@@ -917,6 +922,11 @@ export class SqlStore {
       await this.db.run("ROLLBACK");
       throw error;
     }
+  }
+
+  /** Runs one step of an import, whose rows go in together: here in one transaction. */
+  async importStep<T>(fn: (store: SqlStore) => Promise<T>): Promise<T> {
+    return this.transaction(fn);
   }
 
   // Sites
@@ -1117,7 +1127,8 @@ export class SqlStore {
    * Null when no built day helps.
    */
   private async rollupPlan(query: Omit<Query, "from" | "to">, from: number, to: number): Promise<{ days: Array<{ day: string; start: number; end: number }>; rest: Array<[number, number]> } | null> {
-    // ClickHouse reads the visits themselves faster than the others read their rollups, and keeps none.
+    // ClickHouse reads the visits themselves faster than the others read their rollups, and keeps none. This
+    // asks the dialect rather than keepsRollups: reports run on a ClickHouseStore's `visits`, a plain SqlStore.
     if (query.filters.length || this.db.dialect === "clickhouse") return null;
     const rows = await this.db.all(`SELECT day, start_at, end_at FROM rl_rollup_days WHERE site = ? AND start_at >= ? AND end_at <= ? ORDER BY start_at`, [query.site, from, to]);
     if (!rows.length) return null;
@@ -1190,7 +1201,7 @@ export class SqlStore {
         let slices: Array<[number, number] | null> = [null];
         if (own) {
           const [n] = await this.db.all(`SELECT COUNT(*) AS n ${ofRest("engagement")}`, at);
-          const count = Math.min(64, Math.max(1, Math.ceil(num(n?.n) / ENGAGED_PER_SLICE)));
+          const count = Math.min(64, Math.max(1, Math.ceil(num(n?.n) / this.engagedPerSlice)));
           const from = lo;
           const span = hi - EVENT_TAIL_MS - lo;
           if (count > 1) slices = Array.from({ length: count }, (_, i) => [from + Math.floor((span * i) / count), from + Math.floor((span * (i + 1)) / count)]);
@@ -2459,7 +2470,11 @@ export class SqlStore {
     const within = (dimensions: string[]) => {
       const rows = rowScope(query.filters, dimensions, this.db.dialect);
       return {
-        sql: ` AND e.session IN (SELECT s.id FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql})${rows.sql}`,
+        // On ClickHouse, by the ids' hashes, which the set holds in under half the memory.
+        sql:
+          this.db.dialect === "clickhouse"
+            ? ` AND cityHash64(e.session) IN (SELECT cityHash64(s.id) FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql})${rows.sql}`
+            : ` AND e.session IN (SELECT s.id FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql})${rows.sql}`,
         params: [query.site, query.from, query.to, ...scope.params, ...rows.params],
         to: query.to + EVENT_TAIL_MS,
       };

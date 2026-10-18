@@ -201,7 +201,7 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     assert.equal((await after.get("/api/sites")).moving, undefined);
 
     await store.dropOld();
-    assert.deepEqual((await store.counts()).other, { visits: 0, events: 0, copied: null });
+    assert.deepEqual((await store.counts()).other, { visits: 0, events: 0, copied: null, late: 0 });
     assert.deepEqual(await reports(after), expected);
 
     // A visit after the switch goes back too.
@@ -211,6 +211,144 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     assert.deepEqual((await store.counts()).clickhouse, { visits: 0, events: 0 });
     assert.equal(await store.moveState(), null);
     assert.deepEqual(await reports(server(rows, clock)), withNew);
+    // Run again, there is nothing to copy back, and nothing is emptied.
+    await assert.rejects(store.copyBack(), /nothing to copy back/);
+    assert.deepEqual(await reports(server(rows, clock)), withNew);
+  });
+
+  test(`${kind}: a copy back stopped after the other store holds everything finishes when run again`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    await history(server(rows, clock), clock);
+    const store = switched(rows, false);
+    const after = server(store, clock);
+    await after.rl.init();
+    await store.copy();
+    await after.send({ k: "pageview", u: "https://example.com/new", i: "n" }, "203.0.113.9");
+    const expected = await reports(after);
+
+    // ClickHouse goes away just as it is being emptied.
+    const run = store.clickhouse.run.bind(store.clickhouse);
+    store.clickhouse.run = async (sql, params) => {
+      if (sql.includes("TRUNCATE TABLE rl_events")) throw new Error("connection lost");
+      return run(sql, params);
+    };
+    await assert.rejects(store.copyBack(), /connection lost/);
+    store.clickhouse.run = run;
+    // A server will not start on it half done, and running it again finishes it without emptying the other store.
+    await assert.rejects(new ClickHouseStore(rows, store.clickhouse).migrate(), /being copied back/);
+    await store.copyBack();
+    assert.equal(await store.moveState(), null);
+    assert.deepEqual(await reports(server(rows, clock)), expected);
+  });
+
+  test(`${kind}: copy back waits until no server is taking hits, and refuses an empty ClickHouse`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    await history(server(rows, clock), clock);
+    const store = switched(rows, false);
+    await store.migrate();
+    await store.copy();
+    // Another process, a server, is still running on it, then shuts down.
+    const say = (value: string) => (store as unknown as { setMeta(key: string, value: string): Promise<void> }).setMeta("live:another", value);
+    await say(String(Date.now() + 90_000));
+    await assert.rejects(store.copyBack(), /still taking hits/);
+    await say("0");
+    // ClickHouse emptied by hand would leave nothing to copy back but the other store to lose.
+    await store.clickhouse.run("TRUNCATE TABLE rl_visits");
+    await store.clickhouse.run("TRUNCATE TABLE rl_events");
+    await assert.rejects(store.copyBack(), /holds no visits/);
+    assert.ok((await store.counts()).other.visits > 0);
+  });
+
+  test(`${kind}: drop-old leaves the visits a server without ClickHouse wrote after the switch`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    await history(server(rows, clock), clock);
+    const store = switched(rows, false);
+    await store.migrate();
+    await store.copy();
+    // A second server, not yet switched over, counts a visit in the old database.
+    clock.now += MIN;
+    await server(rows, clock).send({ k: "pageview", u: "https://example.com/late", i: "late" }, "203.0.113.8");
+    assert.equal((await store.counts()).other.late, 1);
+    await store.dropOld();
+    const left = await rows.db.all<{ entry_path: string }>(`SELECT entry_path FROM rl_sessions`);
+    assert.deepEqual(left.map((r) => r.entry_path), ["/late"]);
+  });
+
+  test(`${kind}: on ClickHouse that drops repeated inserts, as Cloud does, a piece tried again still copies its visits`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    const before = server(rows, clock);
+    await history(before, clock);
+    const expected = await reports(before);
+
+    const store = switched(rows, false);
+    await store.migrate();
+    for (const table of ["rl_visits", "rl_events"]) await store.clickhouse.run(`ALTER TABLE ${table} MODIFY SETTING non_replicated_deduplication_window = 100`);
+    const insert = store.clickhouse.insert.bind(store.clickhouse);
+    let inserts = 0;
+    store.clickhouse.insert = async (table, batch, options) => {
+      if (++inserts === 4) throw new TypeError("fetch failed", { cause: new Error("other side closed") });
+      return insert(table, batch, options);
+    };
+    assert.equal((await store.copy())?.done, true);
+    assert.deepEqual(await reports(server(store, clock)), expected);
+  });
+
+  test(`${kind}: an AI fetch read from a log into days still being copied stays when a piece is tried again`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    await history(server(rows, clock), clock);
+    const store = switched(rows, false);
+    const after = server(store, clock);
+    await after.rl.init();
+    // A log reader sends a fetch from three days ago, into days the copy has not reached yet.
+    const fetched = clock.now - 3 * DAY;
+    assert.ok(await after.rl.observe(new Request("https://example.com/pricing", { headers: { "user-agent": "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)" } }), fetched));
+    // The connection drops as the events of the piece around it go in, so that piece is cleared and copied again.
+    const insert = store.clickhouse.insert.bind(store.clickhouse);
+    let dropped = false;
+    store.clickhouse.insert = async (table, batch, options) => {
+      if (table === "rl_events" && options?.batched && !dropped && batch.some((r) => Math.abs(Number(r.ts) - fetched) < DAY)) {
+        dropped = true;
+        throw new TypeError("fetch failed", { cause: new Error("other side closed") });
+      }
+      return insert(table, batch, options);
+    };
+    assert.equal((await store.copy())?.done, true);
+    assert.ok(dropped);
+    const [row] = await store.clickhouse.all<{ n: unknown }>(`SELECT count() AS n FROM rl_events WHERE kind = 'fetch'`);
+    assert.equal(Number(row?.n), 1);
+  });
+
+  test(`${kind}: a process that loses its claim part way stops, and the one that takes over copies each visit once`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    const before = server(rows, clock);
+    await history(before, clock);
+    const expected = await reports(before);
+
+    const store = switched(rows, false);
+    await store.migrate();
+    // Part way through, another process holds the claim for a moment, as if this one had stalled past it.
+    const insert = store.clickhouse.insert.bind(store.clickhouse);
+    let inserts = 0;
+    store.clickhouse.insert = async (table, batch, options) => {
+      if (table !== "rl_meta" && ++inserts === 3) await rows.setSetting("clickhouse-copy", JSON.stringify({ by: "someone", until: Date.now() + 1_000 }));
+      return insert(table, batch, options);
+    };
+    const errors: unknown[] = [];
+    const log = console.error;
+    console.error = (...a: unknown[]) => void errors.push(a);
+    try {
+      assert.equal((await store.copy())?.done, true);
+    } finally {
+      console.error = log;
+    }
+    assert.match(String(errors[0]), /another process took over/);
+    assert.deepEqual(await reports(server(store, clock)), expected);
   });
 }
 

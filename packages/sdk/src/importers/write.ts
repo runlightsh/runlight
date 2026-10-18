@@ -2,7 +2,7 @@ import { sha256 } from "../hash.js";
 import type { Runlight } from "../runlight.js";
 import { LinkError, cleanUrl } from "../links.js";
 import { attribute, parsePage, stripWww } from "../sources.js";
-import type { DailyClicks, ForeignClick, ForeignLink } from "./types.js";
+import { ImportError, type DailyClicks, type ForeignClick, type ForeignLink } from "./types.js";
 
 /** Domains run by the shorteners themselves. Links there stay on Runlight's own path. */
 const SHORTENER_DOMAINS = new Set(["bit.ly", "bitly.com", "j.mp", "dub.sh", "dub.co", "dub.link", "short.gy", "rebrand.ly", "rebrandly.com", "rb.gy"]);
@@ -70,6 +70,8 @@ export async function writeLink(
 ): Promise<WriteResult> {
   const id = await importedLinkId(source, foreign.sourceId);
   if (await runlight.store.linkById(id)) return { status: "skipped", clicks: 0 };
+  // As for visits: a piece of the copy tried again would clear clicks written into its days meanwhile.
+  if (await runlight.store.moving()) throw new ImportError("Visits are still being copied into ClickHouse. Import once that has finished.", "import_moving");
   const taken = await runlight.store.linkBySlug(foreign.slug);
   // The same slug to the same place is this link, brought in earlier some other way.
   if (taken && sameUrl(taken.url, foreign.url)) return { status: "skipped", clicks: 0 };
@@ -94,7 +96,7 @@ export async function writeLink(
   let clicks = 0;
   // Nothing in the transaction is one link's own problem (those are checked above),
   // so a failure in it is the database's, and it stops the import rather than marking the link.
-  await runlight.store.transaction(async (store) => {
+  await runlight.store.importStep(async (store) => {
     // On a database without transactions (D1), a failed earlier try can have left
     // some of this link's clicks behind. Clear them, then write the link row last,
     // so a link only counts as imported once all of its history is in.

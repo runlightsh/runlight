@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { ROLLUP_STORES, SAFARI_IPHONE, cleanup, setup } from "./helpers.js";
+import { ROLLUP_STORES, SAFARI_IPHONE, STORES, cleanup, setup, visitsDb } from "./helpers.js";
 
 const DAY = 86_400_000;
 
@@ -118,7 +118,8 @@ for (const kind of ROLLUP_STORES) {
   });
 }
 
-for (const kind of ROLLUP_STORES) {
+// ClickHouse too: it keeps no rollups, but sorts the visits its own way, which must give the same order.
+for (const kind of STORES) {
   test(`${kind}: ties come in code point order, the same before and after the days are built`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     const values = ["alpha", "Zeta", "beta", "Gamma", "émile", "Émile", "_x", "a-b", "ab"];
@@ -133,6 +134,7 @@ for (const kind of ROLLUP_STORES) {
     const expected = [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     const order = async () => ((await t.get(`/api/breakdown?period=7d&dimension=utm_campaign&limit=20`)).rows as Array<{ value: string }>).map((r) => r.value);
     assert.deepEqual(await order(), expected, "read from every visit");
+    if (!t.rl.store.keepsRollups) return;
     assert.ok((await t.rl.buildRollups()) >= 1);
     assert.deepEqual(await order(), expected, "read from rollups");
   });
@@ -283,7 +285,7 @@ for (const kind of ROLLUP_STORES) {
   });
 }
 
-for (const kind of ROLLUP_STORES) {
+for (const kind of STORES) {
   test(`${kind}: a header longer than its column is cut to fit, so the day's rollup still builds`, async () => {
     const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
     t.advance(-2 * 24 * HOUR);
@@ -295,12 +297,14 @@ for (const kind of ROLLUP_STORES) {
       headers: { "sec-ch-ua-platform": long, "sec-ch-ua": `"${"B".repeat(3000)}";v="1"` },
     });
     t.advance(2 * 24 * HOUR);
-    const [row] = await t.rl.store.db.all<{ os: string; entry_path: string }>(`SELECT os, entry_path FROM rl_sessions`);
+    const [row] = await visitsDb(t.rl.store).all<{ os: string; entry_path: string }>(`SELECT os, entry_path FROM rl_sessions`);
     assert.ok(row!.os.length > 50 && row!.os.length <= 100, `os is ${row!.os.length} characters`);
     assert.ok(row!.entry_path.length <= 1000);
-    let built = 0;
-    for (let made = await t.rl.buildRollups(); made > 0; made = await t.rl.buildRollups()) built += made;
-    assert.ok(built >= 1, "the day builds");
+    if (t.rl.store.keepsRollups) {
+      let built = 0;
+      for (let made = await t.rl.buildRollups(); made > 0; made = await t.rl.buildRollups()) built += made;
+      assert.ok(built >= 1, "the day builds");
+    }
     assert.equal((await t.get(`/api/stats?period=7d&compare=off`)).stats.visits, 1);
   });
 }
