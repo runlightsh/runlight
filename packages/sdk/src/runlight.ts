@@ -956,7 +956,7 @@ export class Runlight {
     let session: { id: string; visitor: string } | null = null;
     let reopen = true;
     if (payload.kind === "event" && payload.pageviewId) {
-      const pageview = await this.store.pageview(site.id, payload.pageviewId);
+      const pageview = await this.store.pageview(site.id, payload.pageviewId, now - EVENT_TAIL_MS);
       // An event joins its page's visit unless that visit began longer ago than reports look for its rows
       // (a tab left open for days); it then starts a visit of its own, as any later activity would.
       if (pageview && now - pageview.startedAt < EVENT_TAIL_MS) {
@@ -1177,7 +1177,7 @@ export class Runlight {
 
   private async engagement(site: SiteRow, payload: Payload, now: number): Promise<void> {
     if (payload.engagedMs <= 0) return;
-    const pageview = await this.store.pageview(site.id, payload.pageviewId);
+    const pageview = await this.store.pageview(site.id, payload.pageviewId, now - EVENT_TAIL_MS);
     // Reports look for a visit's rows only so long after it began, so later time on it is let go.
     if (!pageview || now - pageview.startedAt >= EVENT_TAIL_MS) return;
     await this.store.addEngagement(pageview.session, payload.engagedMs);
