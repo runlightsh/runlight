@@ -363,6 +363,9 @@ export const JOURNEY_VISITS = 20_000;
 /** How long after a visit starts its events are looked for: far past any real visit. */
 export const EVENT_TAIL_MS = 2 * 86_400_000;
 
+/** How many engagement rows ClickHouse adds up per pageview in one query: about 250 MB of memory. */
+const ENGAGED_PER_SLICE = 1_500_000;
+
 /** What every table and index name starts with, unless a store is given another prefix in its place. */
 export const PREFIX = "rl_";
 
@@ -1130,9 +1133,9 @@ export class SqlStore {
   }
 
   /** SQL for "a visit that started in one of these stretches". */
-  private static within(rest: Array<[number, number]>): { sql: string; params: number[] } {
+  private static within(rest: Array<[number, number]>, started = "s.started_at"): { sql: string; params: number[] } {
     if (!rest.length) return { sql: "1 = 0", params: [] };
-    return { sql: `(${rest.map(() => "(s.started_at >= ? AND s.started_at < ?)").join(" OR ")})`, params: rest.flat() };
+    return { sql: `(${rest.map(() => `(${started} >= ? AND ${started} < ?)`).join(" OR ")})`, params: rest.flat() };
   }
 
   /**
@@ -1170,15 +1173,35 @@ export class SqlStore {
       // Bounded by time as well, so the events index finds them (see buildRollupDay).
       const lo = Math.min(...plan.rest.map(([a]) => a));
       const hi = Math.max(...plan.rest.map(([, b]) => b)) + EVENT_TAIL_MS;
-      const ofRest = (kind: string) => `FROM ${eventKindTable(this.db.dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${IS_VISIT} AND ${w.sql}`;
-      const at = [query.site, lo, hi, ...w.params];
+      // ClickHouse's events carry the start of their visit, which saves joining each one to it: a pageview or
+      // an event is counted into its visit, and an engagement belongs to a pageview, so the visit counts.
+      const own = this.db.dialect === "clickhouse";
+      const started = own ? SqlStore.within(plan.rest, "e.started_at") : w;
+      const ofRest = (kind: string) =>
+        own
+          ? `FROM rl_events e WHERE e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${started.sql}`
+          : `FROM ${eventKindTable(this.db.dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${IS_VISIT} AND ${w.sql}`;
+      const at = [query.site, lo, hi, ...started.params];
       if (page) {
-        for (const row of await this.db.all(`SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, ${LIVE_VIEWS} AS views ${ofRest("pageview")} GROUP BY e.path`, at)) bump(row);
-        for (const row of await this.db.all(
-          `SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest ${ofRest("engagement")} GROUP BY e.path, e.pageview) t GROUP BY value`,
-          at,
-        )) bump(row);
+        for (const row of await this.db.all(`SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS pageviews, ${LIVE_VIEWS} AS views ${ofRest("pageview")} GROUP BY e.path`, at)) bump(row);
+        // Engaged time is added up per pageview first. On ClickHouse a big range goes in slices of its pageviews,
+        // each pageview in one slice, so each slice holds about ENGAGED_PER_SLICE rows in memory at once.
+        let slices = 1;
+        if (own) {
+          const [n] = await this.db.all(`SELECT COUNT(*) AS n ${ofRest("engagement")}`, at);
+          slices = Math.min(64, Math.max(1, Math.ceil(num(n?.n) / ENGAGED_PER_SLICE)));
+        }
+        const engaged = await Promise.all(
+          Array.from({ length: slices }, (_, i) =>
+            this.db.all(
+              `SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest ${ofRest("engagement")}${slices > 1 ? ` AND cityHash64(e.pageview) % ${slices} = ${i}` : ""}
+                 GROUP BY e.path, e.pageview) t GROUP BY value`,
+              at,
+            ),
+          ),
+        );
+        for (const row of engaged.flat()) bump(row);
       } else {
         for (const row of await this.db.all(`SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events ${ofRest("event")} GROUP BY e.name`, at)) bump(row);
       }
