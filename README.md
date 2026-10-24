@@ -60,7 +60,7 @@ Runlight is also available for eight more languages and three CMSs. Each languag
 | Go | `go get runlight.sh/go` (Go 1.25 or later), with `runlight.sh/go/chi` or `runlight.sh/go/echo` for those routers | [Go](https://runlight.sh/docs/go/) |
 | Java | `sh.runlight:runlight` from Maven Central (Java 21 or later), with `runlight-servlet` or `runlight-spring-boot-starter` | [Java](https://runlight.sh/docs/java/) |
 | .NET | `dotnet add package Runlight.AspNetCore` (.NET 10 or later), or `dotnet tool install --global Runlight.Server` for the standalone server | [.NET](https://runlight.sh/docs/dotnet/) |
-| Elixir | `{:runlight, "~> 0.2"}` in `mix.exs` (Elixir 1.18 or later) | [Elixir](https://runlight.sh/docs/elixir/) |
+| Elixir | `{:runlight, "~> 0.3"}` in `mix.exs` (Elixir 1.18 or later) | [Elixir](https://runlight.sh/docs/elixir/) |
 | Rust | `cargo add runlight --features axum` and `cargo add runlight-sqlx --features sqlite` (Rust 1.88 or later, and 1.94 or later for `runlight-sqlx`) | [Rust](https://runlight.sh/docs/rust/) |
 
 The WordPress, Drupal, and Craft plugins add the script to your site and report AI agents that read its pages. They send to your own Runlight, wherever you run it.

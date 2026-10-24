@@ -10,8 +10,8 @@ Add the crates, and axum if your app does not have it already.
 
 ```toml
 [dependencies]
-runlight = { version = "0.2", features = ["axum"] }
-runlight-sqlx = { version = "0.2", features = ["sqlite"] }
+runlight = { version = "0.3", features = ["axum"] }
+runlight-sqlx = { version = "0.3", features = ["sqlite"] }
 axum = "0.8"
 ```
 
