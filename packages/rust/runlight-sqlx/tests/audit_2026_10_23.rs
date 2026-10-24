@@ -219,9 +219,7 @@ impl Db for Busy {
     }
 
     fn run<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<u64, DbError>> {
-        if sql.starts_with("INSERT INTO rl_events")
-            && self.fail.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
-        {
+        if sql.starts_with("INSERT INTO rl_events") && take_one(&self.fail) {
             return Box::pin(async { Err(DbError("SQLITE_BUSY: database is locked".into())) });
         }
         self.inner.run(sql, params)
@@ -230,6 +228,18 @@ impl Db for Busy {
     fn hold(&self, kind: Hold) -> BoxFuture<'_, Result<Arc<dyn Db>, DbError>> {
         self.inner.hold(kind)
     }
+}
+
+/// Takes one from the count unless it is at zero, and says whether it did.
+fn take_one(count: &AtomicUsize) -> bool {
+    let mut n = count.load(Ordering::SeqCst);
+    while n > 0 {
+        match count.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
 }
 
 struct T {
