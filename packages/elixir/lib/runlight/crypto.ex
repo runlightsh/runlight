@@ -125,13 +125,15 @@ defmodule Runlight.Crypto do
   end
 
   # A scrypt hash's recorded cost, or nil when out of bounds: N a power of two up to 2^20, and r and p small, so
-  # a stored hash cannot ask for a huge amount of memory or time.
+  # a stored hash cannot ask for a huge amount of memory or time. N must also be below 2^(16r), as scrypt itself
+  # requires, so a stored hash past that fails to match rather than throws.
   defp scrypt_cost(n, r, p) do
     [n, r, p] = Enum.map([n, r, p], &Runlight.JS.number/1)
     whole = fn x, max -> Runlight.JS.integer?(x) and x >= 1 and x <= max end
 
-    if whole.(n, 1 <<< 20) and n >= 2 and whole.(r, 32) and whole.(p, 16) and (trunc(n) &&& trunc(n) - 1) == 0,
-      do: {trunc(n), trunc(r), trunc(p)}
+    if whole.(n, 1 <<< 20) and n >= 2 and whole.(r, 32) and whole.(p, 16) and (trunc(n) &&& trunc(n) - 1) == 0 and
+         :math.log2(n) < 16 * r,
+       do: {trunc(n), trunc(r), trunc(p)}
   end
 
   @doc """

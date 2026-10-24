@@ -355,6 +355,9 @@ defmodule Runlight.Accounts.Web do
     acc = web.accounts
 
     lang = Messages.accepted_language(request)
+    # A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+    # plant a session, so these pages take forms only from their own. The browser says where a request came from.
+    cross_site = Request.header(request, "sec-fetch-site") in ["cross-site", "same-site"]
 
     cond do
       path == "/auth.css" ->
@@ -368,6 +371,17 @@ defmodule Runlight.Accounts.Web do
           {"content-type", "application/javascript; charset=utf-8"},
           {"cache-control", "public, max-age=3600"}
         ])
+
+      cross_site and (method == "POST" or path == "/logout") and
+          path in ["/setup", "/login", "/login/code", "/invite", "/logout"] ->
+        html(
+          Pages.login_page(
+            base,
+            %{error: Messages.t(lang, "oauth.anotherSiteTitle"), next: home_path(web), forgot: web.forgot},
+            lang
+          ),
+          403
+        )
 
       path == "/setup" ->
         setup(web, request, url, method)
@@ -447,7 +461,14 @@ defmodule Runlight.Accounts.Web do
             end
         end
 
+      # Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still
+      # stops working.
       path == "/logout" ->
+        case signed_in(web, request) do
+          nil -> :ok
+          user -> Accounts.end_sessions(acc, user["id"])
+        end
+
         redirect("#{base}/login", [{"set-cookie", session_cookie(web, request, "", 0)}])
 
       path == "/invite" ->
@@ -840,6 +861,8 @@ defmodule Runlight.Accounts.Web do
                       now(web)
                     )
 
+                  # Asked for after a password got out: the tokens and apps the account made could still read on.
+                  if JS.prop(input, "revokeTokens") == true, do: drop_tokens_of(web, user["id"])
                   # The new password ends every other sign-in; this browser gets a fresh one.
                   reply(JS.obj(ok: true), 200, [{"set-cookie", fresh_session(web, request, updated)}])
                 rescue
@@ -1133,6 +1156,15 @@ defmodule Runlight.Accounts.Web do
           true
         end
     end
+  end
+
+  @doc "The ids of the tokens an account made."
+  @spec tokens_of(t(), String.t()) :: MapSet.t(String.t())
+  def tokens_of(web, by) do
+    for %{key: key, value: value} <- Store.settings_starting_with(web.rl.store, @made_by),
+        value == by,
+        into: MapSet.new(),
+        do: String.replace_prefix(key, @made_by, "")
   end
 
   @doc "Answers an account page or API request at a path under the base, or nil for anything else."

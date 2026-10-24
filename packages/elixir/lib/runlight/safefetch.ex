@@ -98,32 +98,44 @@ defmodule Runlight.Safefetch do
 
   defp embedded(hi, lo), do: [hi >>> 8, hi &&& 255, lo >>> 8, lo &&& 255]
 
-  defp public_v6?([g0, g1, g2, g3, g4, g5, g6, g7] = g) do
-    cond do
-      # IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64 (64:ff9b::/96).
-      Enum.take(g, 5) |> Enum.all?(&(&1 == 0)) and g5 in [0xFFFF, 0] ->
-        if g5 == 0 and g6 == 0 and g7 <= 1, do: false, else: public_v4?(embedded(g6, g7))
+  defp public_v6?([g0, g1, g2, _, g4, g5, g6, g7] = g) do
+    # IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated (::ffff:0:0:0/96), and
+    # NAT64 (64:ff9b::/96).
+    v4inside = embedded_v4(g)
 
-      g0 == 0x64 and g1 == 0xFF9B and Enum.all?([g2, g3, g4, g5], &(&1 == 0)) ->
-        public_v4?(embedded(g6, g7))
+    cond do
+      v4inside != nil ->
+        if g5 == 0 and g4 == 0 and g6 == 0 and g7 <= 1, do: false, else: public_v4?(v4inside)
 
       # 6to4 carries an IPv4 address in its second and third groups.
       g0 == 0x2002 ->
         public_v4?(embedded(g1, g2))
 
-      (g0 &&& 0xFE00) == 0xFC00 or (g0 &&& 0xFFC0) == 0xFE80 or (g0 &&& 0xFF00) == 0xFF00 ->
+      # Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old site-local,
+      # multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any address.
+      (g0 &&& 0xE000) != 0x2000 ->
         false
 
-      # Teredo, documentation, and discard prefixes.
-      g0 == 0x2001 and g1 in [0, 0xDB8] ->
+      # The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+      g0 == 0x2001 and (g1 < 0x200 or g1 == 0xDB8) ->
         false
 
-      g0 == 0x100 and Enum.all?([g1, g2, g3], &(&1 == 0)) ->
+      (g0 &&& 0xFFF0) == 0x3FF0 ->
         false
 
       true ->
         true
     end
+  end
+
+  # The IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or nil.
+  defp embedded_v4([g0, g1, g2, g3, g4, g5, g6, g7]) do
+    inside =
+      (Enum.all?([g0, g1, g2, g3, g4], &(&1 == 0)) and g5 in [0xFFFF, 0]) or
+        (Enum.all?([g0, g1, g2, g3], &(&1 == 0)) and g4 == 0xFFFF and g5 == 0) or
+        (g0 == 0x64 and g1 == 0xFF9B and Enum.all?([g2, g3, g4, g5], &(&1 == 0)))
+
+    if inside, do: embedded(g6, g7)
   end
 
   # Names clouds give their metadata services.
@@ -147,24 +159,8 @@ defmodule Runlight.Safefetch do
     four = v4(ip)
     g = if four, do: nil, else: v6(ip)
 
-    # IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
-    inner =
-      cond do
-        four != nil ->
-          four
-
-        g == nil ->
-          nil
-
-        Enum.all?(Enum.take(g, 5), &(&1 == 0)) and Enum.at(g, 5) in [0xFFFF, 0] ->
-          embedded(Enum.at(g, 6), Enum.at(g, 7))
-
-        Enum.take(g, 2) == [0x64, 0xFF9B] and Enum.all?(Enum.slice(g, 2, 4), &(&1 == 0)) ->
-          embedded(Enum.at(g, 6), Enum.at(g, 7))
-
-        true ->
-          nil
-      end
+    # IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
+    inner = four || (g && embedded_v4(g))
 
     cond do
       inner != nil -> match?([169, 254, _, _], inner) or inner == [100, 100, 100, 200]
@@ -377,7 +373,7 @@ defmodule Runlight.Safefetch do
     do: if(protocol in ["https:", "http:"], do: Url.origin(next), else: protocol)
 
   # An install on this machine: http://localhost or http://127.0.0.1, with any port.
-  @local_install ~r/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/
+  @local_install ~r/\Ahttp:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|\z)/
 
   @doc false
   # Whether an address can be another Runlight install's: https, or, with `local`, an install on this machine,

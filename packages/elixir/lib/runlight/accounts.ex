@@ -11,7 +11,7 @@ defmodule Runlight.Accounts do
   deleting a site. A viewer reads every site's stats and changes nothing.
 
   A user is a JavaScript object: id, email, hash, role, createdAt,
-  twoFactor, and recoveryLeft.
+  twoFactor, and recoveryLeft, and signedOut once the account has signed out.
   """
 
   alias Runlight.AccountError
@@ -120,12 +120,13 @@ defmodule Runlight.Accounts do
     unless "role" in names, do: run(acc, "ALTER TABLE rl_users ADD COLUMN role #{str.(20)} NOT NULL DEFAULT 'owner'")
 
     # Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's
-    # step.
+    # step. And the mark signing out replaces, later again.
     for {name, type} <- [
           {"totp_secret", "TEXT"},
           {"totp_pending", "TEXT"},
           {"totp_recovery", "TEXT"},
-          {"totp_step", "BIGINT"}
+          {"totp_step", "BIGINT"},
+          {"signed_out", "TEXT"}
         ],
         name not in names do
       run(acc, "ALTER TABLE rl_users ADD COLUMN #{name} #{type}")
@@ -178,8 +179,13 @@ defmodule Runlight.Accounts do
       twoFactor: JS.truthy?(r["totp_secret"]),
       recoveryLeft: length(recovery)
     )
+    |> with_signed_out(r["signed_out"])
     |> with_site(r["site"])
   end
+
+  # A mark signing out replaces, which every session is signed with.
+  defp with_signed_out(value, mark) when mark in [nil, ""], do: value
+  defp with_signed_out(value, mark), do: Object.put(value, "signedOut", JS.string(mark))
 
   # Two-factor: TOTP as authenticator apps expect it (RFC 6238): SHA-1, six digits, 30 seconds.
 
@@ -773,8 +779,20 @@ defmodule Runlight.Accounts do
     end
   end
 
-  # What a session is signed with: the password hash, and whether two-factor is on.
-  defp session_key(user), do: "#{user["hash"]}#{if user["twoFactor"], do: ".2fa", else: ""}"
+  @doc "Ends every session an account has, in every browser, as signing out does."
+  def end_sessions(acc, id) do
+    init(acc)
+    run(acc, "UPDATE rl_users SET signed_out = ? WHERE id = ?", [Crypto.hex(Crypto.random_bytes(8)), id])
+    :ok
+  end
+
+  # What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out replaces,
+  # so changing any of them ends other sessions.
+  defp session_key(user) do
+    two_factor = if user["twoFactor"], do: ".2fa", else: ""
+    signed_out = if user["signedOut"], do: ".#{user["signedOut"]}", else: ""
+    "#{user["hash"]}#{two_factor}#{signed_out}"
+  end
 
   @doc "A long-lived mark for a browser that signed in to an account. A new password withdraws it."
   def device_for(acc, user), do: "#{user["id"]}.#{sign(acc, "device.#{user["id"]}", user["hash"])}"

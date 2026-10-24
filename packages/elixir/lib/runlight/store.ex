@@ -33,10 +33,16 @@ defmodule Runlight.Store do
   # The longest a process waits for another one creating or upgrading the tables before it gives up.
   @lock_wait_ms 30_000
 
-  defstruct [:db, prefix: @prefix]
+  # The most visits a funnel is counted over: the newest in the range, so its rows fit in memory over any range.
+  @funnel_visits 100_000
 
-  @typedoc "A store. `prefix` is what its table and index names start with: `rl_` unless it was given another."
-  @type t :: %__MODULE__{db: Db.t(), prefix: String.t()}
+  defstruct [:db, prefix: @prefix, funnel_visits: @funnel_visits]
+
+  @typedoc """
+  A store. `prefix` is what its table and index names start with: `rl_` unless it was given another.
+  `funnel_visits` is the most visits a funnel is counted over; smaller in tests, to try the cap.
+  """
+  @type t :: %__MODULE__{db: Db.t(), prefix: String.t(), funnel_visits: pos_integer()}
 
   @doc "What every table and index name starts with, unless a store is given another prefix in its place."
   @spec default_prefix() :: String.t()
@@ -1231,9 +1237,30 @@ defmodule Runlight.Store do
   How many visits reached each step, in order, within the same visit. Step
   one is the first matching row in the range; each later step must come
   after the step before it. Filters choose which visits enter the funnel.
+  Past `funnel_visits` visits in the range, only the newest are counted, and
+  `sampled` says so.
   """
-  @spec funnel_counts(t(), map(), Object.t()) :: [non_neg_integer()]
+  @spec funnel_counts(t(), map(), Object.t()) :: %{counts: [non_neg_integer()], sampled: boolean()}
   def funnel_counts(store, query, funnel) do
+    # Past the cap, only the newest visits are counted: the range starts where the oldest of them began.
+    {scope_sql, scope_params} = Sql.visit_scope(query.filters, query.site, query.from, query.to, dialect(store))
+
+    first_row =
+      first(
+        store,
+        """
+        SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND #{visit_sql()}#{scope_sql}
+                 ORDER BY s.started_at DESC, s.id LIMIT #{store.funnel_visits + 1}) x\
+        """,
+        [query.site, query.from, query.to] ++ scope_params
+      )
+
+    sampled = num(first_row && first_row["n"]) > store.funnel_visits
+    query = if sampled, do: %{query | from: max(query.from, num(first_row["t"]) + 1)}, else: query
+    %{counts: funnel_step_counts(store, query, funnel), sampled: sampled}
+  end
+
+  defp funnel_step_counts(store, query, funnel) do
     {v_from, v_sql, v_params} = Sql.visit_rows(query.filters, query.site, query.from, query.to, dialect(store))
     steps = funnel["steps"]
     scopes = Enum.map(steps, &goal_scope(store, JS.obj(kind: &1["kind"], match: &1["match"], name: &1["match"])))

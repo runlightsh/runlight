@@ -68,7 +68,8 @@ defmodule Runlight.Routes do
     :cms,
     :own_hosts,
     :account_of,
-    :token_made
+    :token_made,
+    :tokens_of
   ]
 
   @type t :: %__MODULE__{}
@@ -207,7 +208,8 @@ defmodule Runlight.Routes do
       cms: Keyword.get(opts, :cms) || "",
       own_hosts: Keyword.get(opts, :own_hosts),
       account_of: Keyword.get(opts, :account_of) || if(web, do: &Runlight.Accounts.Web.account_of(web, &1)),
-      token_made: Keyword.get(opts, :token_made) || if(web, do: &Runlight.Accounts.Web.token_made(web, &1, &2))
+      token_made: Keyword.get(opts, :token_made) || if(web, do: &Runlight.Accounts.Web.token_made(web, &1, &2)),
+      tokens_of: Keyword.get(opts, :tokens_of) || if(web, do: &Runlight.Accounts.Web.tokens_of(web, &1))
     }
   end
 
@@ -446,12 +448,14 @@ defmodule Runlight.Routes do
   defp state(routes, key), do: State.get(routes.rl.table, {:routes, routes.id, key})
   defp put_state(routes, key, value), do: State.put(routes.rl.table, {:routes, routes.id, key}, value)
 
-  # The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site.
+  # The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key,
+  # and deleting a site.
   defp admin_only?(path, method) do
     (path == "/api/mail" and method in ["PUT", "DELETE"]) or
       (path == "/api/assistant" and method in ["PUT", "DELETE"]) or
       (path == "/api/assistant/limits" and method == "PUT") or
       (path == "/api/assistant/models" and method == "POST") or
+      (path == "/api/observe-key/new" and method == "POST") or
       (Regex.match?(~r/\A\/api\/sites\/[^\/]+\z/, path) and method == "DELETE")
   end
 
@@ -1869,6 +1873,12 @@ defmodule Runlight.Routes do
 
   ## Tokens
 
+  # The tokens the account behind a request made: none when nothing notes who made what.
+  defp own_tokens(routes, request) do
+    by = if routes.account_of, do: routes.account_of.(request)
+    if by && routes.tokens_of, do: routes.tokens_of.(by), else: MapSet.new()
+  end
+
   defp tokens_api(routes, request, path) do
     rl = routes.rl
     Runlight.init(rl)
@@ -1886,10 +1896,13 @@ defmodule Runlight.Routes do
     end
 
     delete = Regex.run(~r/\A\/api\/tokens\/([a-f0-9]{24})\z/, path)
+    # A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+    mine = if member?(request), do: own_tokens(routes, request)
 
     cond do
       path == "/api/tokens" and request.method == "GET" ->
-        json(JS.obj(tokens: Enum.map(Store.tokens(rl.store), view)))
+        tokens = Enum.filter(Store.tokens(rl.store), &(mine == nil or MapSet.member?(mine, &1["id"])))
+        json(JS.obj(tokens: Enum.map(tokens, view)))
 
       path == "/api/tokens" and request.method == "POST" ->
         with {:ok, body} <- read_json(request) do
@@ -1945,6 +1958,9 @@ defmodule Runlight.Routes do
         else
           {:error, response} -> response
         end
+
+      delete && request.method == "DELETE" && mine != nil && not MapSet.member?(mine, Enum.at(delete, 1)) ->
+        coded("Unknown token", "unknown_token", 404)
 
       delete && request.method == "DELETE" ->
         if Store.delete_token(rl.store, Enum.at(delete, 1)),
@@ -2475,7 +2491,7 @@ defmodule Runlight.Routes do
       path == "/api/assistant/chat" and method == "POST" ->
         assistant_chat(routes, request, url)
 
-      # Only the owner manages tokens: an API token cannot make or revoke one.
+      # Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
       path == "/api/tokens" or String.starts_with?(path, "/api/tokens/") ->
         access = can_read(routes, request)
         if access != true, do: denied(access), else: tokens_api(routes, request, path)
@@ -3452,9 +3468,10 @@ defmodule Runlight.Routes do
         # One funnel at a time, so a page of funnels never takes every database connection at once.
         rows =
           Enum.map(funnels, fn funnel ->
-            counts = Store.funnel_counts(store, query, funnel)
+            %{counts: counts, sampled: sampled} = Store.funnel_counts(store, query, funnel)
             steps = funnel["steps"] |> Enum.zip(counts) |> Enum.map(fn {step, n} -> Object.put(step, "visits", n) end)
-            Object.put(funnel, "steps", steps)
+            row = Object.put(funnel, "steps", steps)
+            if sampled, do: Object.put(row, "sampled", store.funnel_visits), else: row
           end)
 
         json(JS.obj(site: site["id"], range: range_out, funnels: rows))

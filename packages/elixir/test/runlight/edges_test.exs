@@ -238,40 +238,47 @@ defmodule Runlight.EdgesTest do
     assert Connect.install_url("https://example.com/runlight/") == "https://example.com/runlight"
   end
 
-  test "with trust_proxy left at its default, a public address with no proxy header is warned about once" do
+  test "with trust_proxy left at its default, forwarding headers count only from a private address" do
     {store, cleanup} = Stores.store(:sqlite)
     on_exit(cleanup)
     site = [hostnames: ["example.com"]]
     bare = fn ip -> Request.new("https://example.com/e", remote_address: ip) end
 
-    forwarded =
-      Request.new("https://example.com/e", headers: %{"x-forwarded-for" => "8.8.4.4"}, remote_address: "10.0.0.2")
+    forwarded = fn ip ->
+      Request.new("https://example.com/e", headers: %{"x-forwarded-for" => "8.8.4.4"}, remote_address: ip)
+    end
 
     quiet = Runlight.new(store: store, site: site, trust_proxy: true)
 
     said =
-      ExUnit.CaptureLog.capture_log(fn -> assert Runlight.client_ip(quiet, bare.("8.8.8.8")) == "8.8.8.8" end)
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert Runlight.client_ip(quiet, forwarded.("8.8.8.8")) == "8.8.4.4",
+               "trust_proxy set on purpose believes a public address"
+      end)
 
-    refute said =~ "trust_proxy", "trust_proxy set on purpose is never second-guessed"
+    refute said =~ "trust_proxy", "and is never second-guessed"
 
     rl = Runlight.new(store: store, site: site)
 
     said =
       ExUnit.CaptureLog.capture_log(fn ->
-        Runlight.client_ip(rl, forwarded)
-        Runlight.client_ip(rl, bare.("127.0.0.1"))
-        Runlight.client_ip(rl, bare.("192.168.1.5"))
+        assert Runlight.client_ip(rl, forwarded.("10.0.0.2")) == "8.8.4.4", "a proxy on a private network is believed"
+        assert Runlight.client_ip(rl, forwarded.("::ffff:127.0.0.1")) == "8.8.4.4", "and one on this computer"
+        assert Runlight.client_ip(rl, forwarded.(nil)) == "8.8.4.4", "and a platform that passes no address on"
+        assert Runlight.client_ip(rl, bare.("8.8.8.8")) == "8.8.8.8"
       end)
 
-    refute said =~ "trust_proxy", "a proxy's header, or a private or loopback address, says nothing"
+    refute said =~ "trust_proxy", "a public address without forwarding headers says nothing"
 
     said =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert Runlight.client_ip(rl, bare.("8.8.8.8")) == "8.8.8.8"
-        Runlight.client_ip(rl, bare.("1.1.1.1"))
+        assert Runlight.client_ip(rl, forwarded.("1.1.1.1")) == "1.1.1.1",
+               "a client straight from the internet cannot choose its address"
+
+        Runlight.client_ip(rl, forwarded.("1.0.0.1"))
       end)
 
-    assert length(String.split(said, "trust_proxy: false")) == 2, "said once"
+    assert length(String.split(said, "cf-connecting-ip")) == 2, "said once"
   end
 
   test "a request inspected into a log line or an error shows only its method and path" do
