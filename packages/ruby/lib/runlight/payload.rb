@@ -55,9 +55,8 @@ module Runlight
         else
           next
         end
-        # Assigning out["__proto__"] in JavaScript sets the prototype, which a string cannot be, so
-        # nothing is kept; it still counts.
-        out[k] = text if k != "__proto__"
+        # A prop named __proto__ is kept like any other, as the SDK keeps it in an object with no prototype.
+        out[k] = text
         count += 1
       end
       return nil if count.zero?
@@ -67,6 +66,20 @@ module Runlight
 
     # An object's entries in JavaScript's order: keys that are array indexes first, ascending, then the
     # rest in the order they were added.
+    # The events the tracker sends on its own for a link that was followed, each with the link as `url`.
+    LINK_EVENTS = ["Outbound link", "File download"].freeze
+    private_constant :LINK_EVENTS
+
+    # An automatic link event's `url` without its query string or fragment, as page paths are kept, since tokens and
+    # email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a
+    # tracker cached from before is held to it too.
+    def link_props(name, given)
+      return given if given.nil? || !LINK_EVENTS.include?(name) || !given.key?("url")
+
+      given["url"] = given["url"].sub(/[?#].*\z/m, "")
+      given
+    end
+
     def entries(object)
       indexes = []
       names = []
@@ -124,13 +137,13 @@ module Runlight
         "screenHeight" => int(get.call("h"), 0, 20_000),
         "language" => str(get.call("l"), 35),
         "name" => name,
-        "props" => kind == "event" ? props(get.call("p")) : nil,
+        "props" => kind == "event" ? link_props(name, props(get.call("p"))) : nil,
         "pageviewId" => pageview_id,
         "engagedMs" => kind == "engagement" ? int(get.call("e"), 0, MAX_ENGAGED_MS) || 0 : 0,
         "scroll" => int(get.call("d"), 0, 100),
       }
     end
 
-    private_class_method :str, :int, :props, :entries, :parse
+    private_class_method :str, :int, :props, :link_props, :entries, :parse
   end
 end

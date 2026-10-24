@@ -28,7 +28,7 @@ class HttpFetcherTest < Minitest::Test
     end
   end
 
-  CREDENTIALS = { "authorization" => "Bearer secret", "cookie" => "a=b", "proxy-authorization" => "Basic x", "x-api-key" => "key", "x-keep" => "kept" }.freeze
+  CREDENTIALS = { "authorization" => "Bearer secret", "cookie" => "a=b", "proxy-authorization" => "Basic x", "x-api-key" => "key", "apikey" => "key", "x-keep" => "kept" }.freeze
 
   def test_a_redirect_to_another_origin_drops_every_credential_and_keeps_the_rest
     net = Scripted.new("https://a.example.com/start" => [307, "https://b.example.com/next"])

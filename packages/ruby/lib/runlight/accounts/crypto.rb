@@ -132,6 +132,8 @@ module Runlight
         n, r, p = parts[1, 3].map { |part| Js.number(part) }
         whole = ->(v, max) { v.is_a?(Integer) && v >= 1 && v <= max }
         return nil unless whole.call(n, 1 << 20) && n >= 2 && (n & (n - 1)).zero? && whole.call(r, 32) && whole.call(p, 16)
+        # N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than raises.
+        return nil if Math.log2(n) >= 16 * r
 
         { n: n, r: r, p: p }
       end

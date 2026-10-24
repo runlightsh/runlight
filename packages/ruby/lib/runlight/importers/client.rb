@@ -14,11 +14,9 @@ module Runlight
       ISO_DATE = /\A([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?)?\z/i
       private_constant :ISO_DATE
 
-      # sleep: a callable that waits this many milliseconds. owner: true for a service at an address the owner
-      # typed (a self-hosted Umami), fetched only on the public internet, as Safefetch.owner_fetch allows.
-      def initialize(fetcher = nil, sleep = nil, owner: false)
+      # sleep: a callable that waits this many milliseconds.
+      def initialize(fetcher = nil, sleep = nil)
         @fetcher = fetcher || Http::NetFetcher.new
-        @owner = owner
         @sleep = sleep || ->(ms) { Kernel.sleep(ms / 1000.0) if ms.positive? }
       end
 
@@ -26,7 +24,9 @@ module Runlight
         @sleep.call(ms)
       end
 
-      # Fetches JSON, decoded. `init` may hold "headers", "method", and "body".
+      # Fetches JSON, decoded. `init` may hold "headers", "method", and "body". The address can come from whoever
+      # runs an import (a self-hosted Umami), so every service, a hosted one too, is asked only at public https
+      # addresses, with no redirect followed, which would carry the key somewhere else, as public_fetch allows.
       def get_json(url, init = {})
         attempt = 1
         loop do
@@ -35,7 +35,7 @@ module Runlight
           options["method"] = init["method"] unless init["method"].nil?
           options["body"] = init["body"] unless init["body"].nil?
           begin
-            response = @owner ? Safefetch.owner_fetch(url, options, @fetcher) : @fetcher.fetch(url, options)
+            response = Safefetch.public_fetch(url, options.merge("redirects" => 0), @fetcher)
           rescue PrivateAddressError, Http::BodyTooLong
             # An address off the public internet, or an answer past the cap, is the same on every try.
             host = Http::Url.new(url).host

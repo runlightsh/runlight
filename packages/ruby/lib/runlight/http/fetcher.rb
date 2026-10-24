@@ -27,7 +27,7 @@ module Runlight
       REDIRECTS = [301, 302, 303, 307, 308].freeze
       TIMED_OUT = "The operation was aborted due to timeout"
       # Sent only to the origin they were given to.
-      CREDENTIALS = %w[authorization cookie proxy-authorization x-api-key].freeze
+      CREDENTIALS = %w[authorization cookie proxy-authorization x-api-key apikey].freeze
 
       def fetch(url, init = {})
         deadline = monotonic + ((init["timeoutMs"] || 30_000).to_i / 1000.0)

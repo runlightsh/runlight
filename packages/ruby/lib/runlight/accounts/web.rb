@@ -127,6 +127,11 @@ module Runlight
         true
       end
 
+      # The ids of the tokens an account made.
+      def tokens_of(by)
+        @store.settings_starting_with(MADE_BY).select { |row| row["value"] == by }.map { |row| row["key"][MADE_BY.length..] }.to_set
+      end
+
       # Answers an account page or API request at a path under the base, or nil for anything else.
       # context: {"ip" => the connection's address}, optional.
       def handle(request, path, context = {})
@@ -353,6 +358,12 @@ module Runlight
         if path == "/auth.js"
           return Http::Response.new(Pages.auth_js(query.get("lang") || "en"), status: 200, headers: { "content-type" => "application/javascript; charset=utf-8", "cache-control" => "public, max-age=3600" })
         end
+        # A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+        # plant a session, so these pages take forms only from their own. The browser says where a request came from.
+        cross_site = %w[cross-site same-site].include?(request.headers.get("sec-fetch-site") || "")
+        if cross_site && (method == "POST" || path == "/logout") && %w[/setup /login /login/code /invite /logout].include?(path)
+          return html(Pages.login_page(base, { "error" => t.call("oauth.anotherSiteTitle"), "next" => @home_path, "forgot" => @forgot }, lang), 403)
+        end
 
         if path == "/setup"
           return redirect("#{base}/login") if has_account?
@@ -431,7 +442,12 @@ module Runlight
           return signed_in_to(request, user, next_path)
         end
 
-        return redirect("#{base}/login", { "set-cookie" => session_cookie(request, "", 0) }) if path == "/logout"
+        # Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+        if path == "/logout"
+          user = signed_in(request)
+          @accounts.end_sessions(user["id"]) if user
+          return redirect("#{base}/login", { "set-cookie" => session_cookie(request, "", 0) })
+        end
 
         if path == "/invite"
           if method == "GET"
@@ -562,6 +578,8 @@ module Runlight
 
           begin
             updated = @accounts.set_password(user["email"], field(input, "next"), now)
+            # Asked for after a password got out: the tokens and apps the account made could still read on.
+            drop_tokens_of(user["id"]) if input["revokeTokens"] == true
             # The new password ends every other sign-in; this browser gets a fresh one.
             return reply({ "ok" => true }, 200, fresh.call(updated))
           rescue AccountError => e

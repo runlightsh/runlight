@@ -13,8 +13,8 @@ module Runlight
     # stats and changes nothing.
     #
     # A user is a Hash with the TypeScript User's keys: id, email, hash, role ("owner", "admin", "member", or
-    # "viewer"), createdAt, twoFactor (whether sign-in also asks for a code), and recoveryLeft (recovery codes not
-    # yet used). An invite has id, email, role, invitedBy, createdAt, and expiresAt.
+    # "viewer"), createdAt, twoFactor (whether sign-in also asks for a code), recoveryLeft (recovery codes not
+    # yet used), and signedOut (a mark signing out replaces, which every session is signed with, when set). An invite has id, email, role, invitedBy, createdAt, and expiresAt.
     class Accounts
       SESSION_COOKIE = "runlight_session"
       # Thirty days, renewed on every sign-in.
@@ -401,6 +401,13 @@ module Runlight
         Crypto.same_text(sign("#{id}.#{expires}", session_key(user)), signature) ? user : nil
       end
 
+      # Ends every session an account has, in every browser, as signing out does.
+      def end_sessions(id)
+        init
+        @store.db.run("UPDATE rl_users SET signed_out = ? WHERE id = ?", [Hashing.random_id(8), id])
+        nil
+      end
+
       # A long-lived mark for a browser that signed in to an account. With it, failed tries by others
       # against that account cannot lock this browser out; the per-address limit still applies.
       # A new password withdraws it.
@@ -455,7 +462,8 @@ module Runlight
           names = columns.map { |c| (c["name"] || c["NAME"] || "").to_s }
           db.run("ALTER TABLE rl_users ADD COLUMN role #{str.call(20)} NOT NULL DEFAULT 'owner'") unless names.include?("role")
           # Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's step.
-          [%w[totp_secret TEXT], %w[totp_pending TEXT], %w[totp_recovery TEXT], %w[totp_step BIGINT]].each do |name, type|
+          # And the mark signing out replaces, later again.
+          [%w[totp_secret TEXT], %w[totp_pending TEXT], %w[totp_recovery TEXT], %w[totp_step BIGINT], %w[signed_out TEXT]].each do |name, type|
             db.run("ALTER TABLE rl_users ADD COLUMN #{name} #{type}") unless names.include?(name)
           end
           db.run(
@@ -486,6 +494,7 @@ module Runlight
           "createdAt" => Js.number(r["created_at"]),
           "twoFactor" => Js.truthy?(r["totp_secret"]),
           "recoveryLeft" => recovery.length,
+          **(Js.truthy?(r["signed_out"]) ? { "signedOut" => r["signed_out"].to_s } : {}),
         }
       end
 
@@ -580,9 +589,10 @@ module Runlight
         { "invite" => invite, "code" => code }
       end
 
-      # What a session is signed with: the password hash, and whether two-factor is on, so changing either ends other sessions.
+      # What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out
+      # replaces, so changing any of them ends other sessions.
       def session_key(user)
-        "#{user["hash"]}#{user["twoFactor"] ? ".2fa" : ""}"
+        "#{user["hash"]}#{user["twoFactor"] ? ".2fa" : ""}#{user["signedOut"] ? ".#{user["signedOut"]}" : ""}"
       end
 
       def sign(body, hash)

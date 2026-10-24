@@ -22,7 +22,7 @@ The generator writes `config/initializers/runlight.rb`, where you set the siteâ€
 
 Set `RUNLIGHT_TOKEN` to a long random string, then open `/runlight/?token=` followed by that string to sign in. Run `bin/rails runlight:check` every few minutes for the email reports and upkeep.
 
-If nothing sits in front of your app (no load balancer, CDN, or reverse proxy), add `trust_proxy: false` beside `store:` and `site:` (in `Runlight.configure` or `Runlight.new`), so a visitor cannot pick their own address with an `X-Forwarded-For` header. Runlight logs a warning once when it sees requests arrive that way with the default left on.
+By default Runlight reads the visitor's address from `X-Forwarded-For` (and `X-Real-IP` or `CF-Connecting-IP`) only when the request reaches your app from this computer or a private network, where a reverse proxy or load balancer connects from, so a visitor who reaches the app straight from the internet cannot pick their own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of your app, add `trust_proxy: "cf-connecting-ip"` (the header it sets) or `trust_proxy: true` beside `store:` and `site:` (in `Runlight.configure` or `Runlight.new`); Runlight logs a warning once when a public address sends those headers with the default left on. `trust_proxy: false` never reads them.
 
 ## Rack
 
