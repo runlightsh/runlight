@@ -126,29 +126,29 @@ async fn audit_2026_10_23_a_member_sees_and_revokes_only_the_tokens_they_made_an
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn audit_2026_10_23_signing_out_ends_the_accounts_sessions_everywhere_and_only_from_the_dashboards_own_pages() {
+async fn audit_2026_10_23_signing_out_ends_this_browsers_session_signing_out_everywhere_ends_them_all_and_only_from_the_dashboards_own_pages()
+ {
     let t = WithMember::new().await;
+    let cleared = |r: &Response| r.headers.get_set_cookie().iter().any(|c| c.to_lowercase().contains("max-age=0"));
     let other = cookie_of(&t.login(&[]).await);
-    assert_eq!(t.json(&other, "GET", "/api/account", None).await.status, 200);
     let cross_site =
         t.routes.handle(req("GET", "/logout").header("cookie", &t.member).header("sec-fetch-site", "cross-site")).await;
     assert_eq!(cross_site.status, 403, "another site cannot sign anyone out");
-    assert_eq!(t.json(&other, "GET", "/api/account", None).await.status, 200);
     let out = t
         .routes
         .handle(req("GET", "/logout").header("cookie", &t.member).header("sec-fetch-site", "same-origin"))
         .await;
     assert_eq!(out.status, 303);
-    assert_eq!(
-        t.json(&t.member, "GET", "/api/account", None).await.status,
-        401,
-        "the cookie copied before stops working"
-    );
-    assert_eq!(
-        t.json(&other, "GET", "/api/account", None).await.status,
-        401,
-        "and so does the one in the other browser"
-    );
+    assert!(cleared(&out), "this browser's cookie goes");
+    assert_eq!(t.json(&other, "GET", "/api/account", None).await.status, 200, "the other browser stays signed in");
+
+    let third = cookie_of(&t.login(&[]).await);
+    let ended = t.json(&other, "POST", "/api/account/sign-out-everywhere", Some(obj! {})).await;
+    assert_eq!(ended.status, 200);
+    assert!(cleared(&ended));
+    assert_eq!(t.json(&other, "GET", "/api/account", None).await.status, 401, "the browser that asked is signed out");
+    assert_eq!(t.json(&third, "GET", "/api/account", None).await.status, 401, "and so is every other");
+    assert_eq!(t.json(&t.member, "GET", "/api/account", None).await.status, 401, "and a cookie copied before");
     let back = cookie_of(&t.login(&[]).await);
     assert_eq!(t.json(&back, "GET", "/api/account", None).await.status, 200, "signing in again works");
 }
