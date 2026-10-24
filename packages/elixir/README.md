@@ -11,7 +11,7 @@ Add the package to `mix.exs`.
 ```elixir
 def deps do
   [
-    {:runlight, "~> 0.2"}
+    {:runlight, "~> 0.3"}
   ]
 end
 ```

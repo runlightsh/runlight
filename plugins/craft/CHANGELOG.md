@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.3.0 - 2026-10-24
 
 ### Changed
 - Updated the Runlight library to 0.3.0. Outbound link and File download events keep the link without its query string or fragment, and a funnel over more than 100,000 visits counts the newest 100,000.

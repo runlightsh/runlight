@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.2.0
+Stable tag: 0.3.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -121,7 +121,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.3.0 =
 * Updated the bundled Runlight library to 0.3.0. Outbound link and File download events keep the link without its query string or fragment, and a funnel over more than 100,000 visits counts the newest 100,000.
 * Fixed a hit tried again after the database was busy counting twice in its visit.
 * Refused more IPv6 forms of private addresses where a fetch must reach the public internet.

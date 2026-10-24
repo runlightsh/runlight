@@ -2,7 +2,7 @@ defmodule Runlight.MixProject do
   use Mix.Project
 
   # The release's version, the one place it lives; the release script bumps it.
-  @version "0.2.0"
+  @version "0.3.0"
   @source_url "https://github.com/runlightsh/runlight"
 
   def project do
