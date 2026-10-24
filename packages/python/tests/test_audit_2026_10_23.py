@@ -75,17 +75,23 @@ def test_a_member_sees_and_revokes_only_the_tokens_they_made_and_cannot_replace_
     assert t.json(t.owner, "POST", "/api/observe-key/new?site=default", {}).status == 200
 
 
-def test_signing_out_ends_the_accounts_sessions_everywhere_and_only_from_the_dashboards_own_pages() -> None:
+def test_signing_out_ends_this_browsers_session_signing_out_everywhere_ends_them_all_and_only_from_the_dashboards_own_pages() -> None:
     t = WithMember()
     other = cookie_from(t.sign_in())
-    assert t.json(other, "GET", "/api/account").status == 200
     cross_site = t.handler(account_req("/logout", headers={"cookie": t.member, "sec-fetch-site": "cross-site"}))
     assert cross_site.status == 403, "another site cannot sign anyone out"
-    assert t.json(other, "GET", "/api/account").status == 200
     out = t.handler(account_req("/logout", headers={"cookie": t.member, "sec-fetch-site": "same-origin"}))
     assert out.status == 303
-    assert t.json(t.member, "GET", "/api/account").status == 401, "the cookie copied before stops working"
-    assert t.json(other, "GET", "/api/account").status == 401, "and so does the one in the other browser"
+    assert "max-age=0" in (out.headers.get("set-cookie") or "").lower(), "this browser's cookie goes"
+    assert t.json(other, "GET", "/api/account").status == 200, "the other browser stays signed in"
+
+    third = cookie_from(t.sign_in())
+    ended = t.json(other, "POST", "/api/account/sign-out-everywhere", {})
+    assert ended.status == 200
+    assert "max-age=0" in (ended.headers.get("set-cookie") or "").lower()
+    assert t.json(other, "GET", "/api/account").status == 401, "the browser that asked is signed out"
+    assert t.json(third, "GET", "/api/account").status == 401, "and so is every other"
+    assert t.json(t.member, "GET", "/api/account").status == 401, "and a cookie copied before"
     back = cookie_from(t.sign_in())
     assert t.json(back, "GET", "/api/account").status == 200, "signing in again works"
 

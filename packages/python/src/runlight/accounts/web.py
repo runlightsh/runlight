@@ -388,12 +388,8 @@ class AccountsWeb:
             self.code_tries.clear(user["id"])
             return self._signed_in_to(request, user, next_)
 
-        # Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still
-        # stops working.
+        # Signing out ends this browser's session; the account page can end them everywhere.
         if path == "/logout":
-            signed = self.signed_in(request)
-            if signed is not None:
-                self.accounts.end_sessions(signed["id"])
             return _redirect(f"{base}/login", {"set-cookie": self._session_cookie(request, "", 0)})
 
         if path == "/invite":
@@ -516,6 +512,10 @@ class AccountsWeb:
             return _coded("Send JSON", "send_json", 415)
         if path == "/api/account" and method == "GET":
             return _reply({"account": _person(user)})
+        # Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+        if path == "/api/account/sign-out-everywhere" and method == "POST":
+            self.accounts.end_sessions(user["id"])
+            return _reply({"ok": True}, 200, {"set-cookie": self._session_cookie(request, "", 0)})
 
         if path == "/api/account/password" and method == "POST":
             input = _body(request)  # noqa: A001
