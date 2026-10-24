@@ -849,29 +849,42 @@ func TestAMemberSeesAndRevokesOnlyTheTokensTheyMadeAndCannotReplaceASitesAgentsK
 	}
 }
 
-func TestSigningOutEndsTheAccountsSessionsEverywhereAndOnlyFromTheDashboardsOwnPages(t *testing.T) {
+func TestSigningOutEndsThisBrowsersSessionSigningOutEverywhereEndsThemAllAndOnlyFromTheDashboardsOwnPages(t *testing.T) {
 	for _, kind := range Kinds() {
 		t.Run(kind.Name, func(t *testing.T) {
 			m := newWithMember(t, kind)
 			account := func(cookie string) int { return m.json(cookie, "GET", "/api/account", "").Status }
 			other := cookieOf(m.signIn(""))
-			if got := account(other); got != 200 {
-				t.Fatalf("another browser: %d", got)
-			}
 			if r := m.do("GET", "/logout", "", "cookie", m.member, "sec-fetch-site", "cross-site"); r.Status != 403 {
 				t.Errorf("another site cannot sign anyone out: %d", r.Status)
 			}
+			out := m.do("GET", "/logout", "", "cookie", m.member, "sec-fetch-site", "same-origin")
+			if out.Status != 303 {
+				t.Errorf("signing out: %d", out.Status)
+			}
+			if !strings.Contains(strings.ToLower(out.Header.Get("set-cookie")), "max-age=0") {
+				t.Errorf("this browser's cookie goes: %q", out.Header.Get("set-cookie"))
+			}
 			if got := account(other); got != 200 {
-				t.Errorf("still signed in: %d", got)
+				t.Errorf("the other browser stays signed in: %d", got)
 			}
-			if r := m.do("GET", "/logout", "", "cookie", m.member, "sec-fetch-site", "same-origin"); r.Status != 303 {
-				t.Errorf("signing out: %d", r.Status)
+
+			third := cookieOf(m.signIn(""))
+			ended := m.json(other, "POST", "/api/account/sign-out-everywhere", "{}")
+			if ended.Status != 200 {
+				t.Errorf("signing out everywhere: %d %s", ended.Status, ended.Body)
 			}
-			if got := account(m.member); got != 401 {
-				t.Errorf("the cookie copied before stops working: %d", got)
+			if !strings.Contains(strings.ToLower(ended.Header.Get("set-cookie")), "max-age=0") {
+				t.Errorf("its cookie goes: %q", ended.Header.Get("set-cookie"))
 			}
 			if got := account(other); got != 401 {
-				t.Errorf("and so does the one in the other browser: %d", got)
+				t.Errorf("the browser that asked is signed out: %d", got)
+			}
+			if got := account(third); got != 401 {
+				t.Errorf("and so is every other: %d", got)
+			}
+			if got := account(m.member); got != 401 {
+				t.Errorf("and a cookie copied before: %d", got)
 			}
 			if got := account(cookieOf(m.signIn(""))); got != 200 {
 				t.Errorf("signing in again works: %d", got)
