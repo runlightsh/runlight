@@ -73,7 +73,7 @@ final class CryptoTest extends TestCase
         $this->assertTrue(Crypto::checkPassword('a long password', $other));
         $this->assertFalse(Crypto::checkPassword('a long passwore', $other));
         $key = $encode(Scrypt::derive('a long password', $salt, 1024, 8, 2, 32));
-        foreach (['2097152$8$1', '30000$8$1', '1$8$1', '16384$33$1', '16384$8$17', '16384$0$1', 'x$8$1'] as $cost) {
+        foreach (['2097152$8$1', '30000$8$1', '1$8$1', '16384$33$1', '16384$8$17', '16384$0$1', 'x$8$1', '1048576$1$1', '65536$1$1'] as $cost) {
             $this->assertFalse(Crypto::checkPassword('a long password', "scrypt\$$cost\$" . $encode($salt) . "\$$key"), $cost);
         }
     }

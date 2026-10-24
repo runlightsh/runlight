@@ -22,7 +22,8 @@ use Runlight\Store\Stores;
  *   RUNLIGHT_SECRET       signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
  *   RUNLIGHT_TOKEN        also accepted as a bearer token on the API, and makes the first account
  *   RUNLIGHT_URL          the dashboard's public address, which can never become a link domain
- *   TRUST_PROXY           "false" when no proxy sits in front, so forwarded addresses are ignored
+ *   TRUST_PROXY           unset believes forwarded addresses only from a private network; "false" never,
+ *                         "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
  *   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
  *   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
  *   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
@@ -248,13 +249,28 @@ final class Config
     }
 
     /**
-     * "false" with nothing in front, or the one header your proxy sets, such as cf-connecting-ip behind Cloudflare.
-     * Unset stays null, so the library's default applies and it can warn when nothing sits in front.
+     * TRUST_PROXY: "false" with nothing in front, "true" for a CDN that connects from public addresses, or the one
+     * header your proxy sets, such as cf-connecting-ip behind Cloudflare. Unset stays null, so the library's
+     * default applies: forwarding headers count only from a private address. Anything else is a mistake, said so
+     * rather than guessed at, since "0" or "off" read as on would let any client choose its address.
      */
     public function trustProxy(): bool|string|null
     {
-        $value = strtolower($this->get('TRUST_PROXY') ?? '');
-        return $value === '' ? null : ($value === 'false' ? false : (in_array($value, ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip'], true) ? $value : true));
+        $given = $this->get('TRUST_PROXY');
+        $value = strtolower(trim($given ?? ''));
+        if ($value === '') {
+            return null;
+        }
+        if (in_array($value, ['true', '1', 'yes', 'on'], true)) {
+            return true;
+        }
+        if (in_array($value, ['false', '0', 'no', 'off'], true)) {
+            return false;
+        }
+        if (in_array($value, ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip'], true)) {
+            return $value;
+        }
+        throw new \RuntimeException("Runlight: set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not \"$given\"");
     }
 
     /** DB-IP's monthly download, for RUNLIGHT_GEO city (the default) or country, or null. */

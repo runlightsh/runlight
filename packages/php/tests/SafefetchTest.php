@@ -30,7 +30,7 @@ final class SafefetchTest extends TestCase
 
     public function testLinkLocalAndCloudMetadataAddressesAreToldApartFromLoopbackAndPrivateOnes(): void
     {
-        foreach (['169.254.169.254', '169.254.0.1', '100.100.100.200', 'fe80::1', 'fe80::a9fe:a9fe', 'fd00:ec2::254', '::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '64:ff9b::a9fe:a9fe'] as $ip) {
+        foreach (['169.254.169.254', '169.254.0.1', '100.100.100.200', 'fe80::1', 'fe80::a9fe:a9fe', 'fd00:ec2::254', '::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '64:ff9b::a9fe:a9fe', '::ffff:0:a9fe:a9fe'] as $ip) {
             $this->assertTrue(Safefetch::metadataAddress($ip), $ip);
         }
         foreach (['127.0.0.1', '::1', '10.0.0.5', '192.168.1.20', 'fd00::1', 'fd00:ec2::253', '93.184.215.14', 'not an address'] as $ip) {
@@ -46,15 +46,34 @@ final class SafefetchTest extends TestCase
 
     public function testOnlyAddressesOnThePublicInternetCountAsPublic(): void
     {
-        foreach (['93.184.215.14', '1.1.1.1', '2606:4700:4700::1111', '2a00:1450:4001:82a::200e'] as $ip) {
+        foreach (['93.184.215.14', '1.1.1.1', '2606:4700:4700::1111', '2a00:1450:4001:82a::200e', '::ffff:0:808:808', '64:ff9b::808:808'] as $ip) {
             $this->assertTrue(Safefetch::publicAddress($ip), $ip);
         }
         foreach ([
             '127.0.0.1', '10.0.0.1', '172.16.5.4', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '255.255.255.255',
             '::1', '::', 'fe80::1', 'fd00::1', 'ff02::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:169.254.169.254', '64:ff9b::a00:1',
             '2002:a00:1::', '2001:db8::1', '2001:0:4136:e378::1', '[::1]', 'not an address', '1.2.3', '1.2.3.256',
+            // IPv4-translated loopback, local-use NAT64, the old site-local, ORCHID, the newer documentation prefix, and discard.
+            '::ffff:0:7f00:1', '64:ff9b:1::7f00:1', 'fec0::1', '2001:20::1', '3fff::1', '100::1',
         ] as $ip) {
             $this->assertFalse(Safefetch::publicAddress($ip), $ip);
+        }
+    }
+
+    public function testAnInstallOnThisMachineIsOnlyHttpLocalhostOrLoopbackAndNothingAfterIt(): void
+    {
+        foreach (['https://example.com/runlight', 'https://example.com'] as $url) {
+            $this->assertTrue(Safefetch::installAddress($url, false), $url);
+        }
+        foreach (['http://127.0.0.1:8080/runlight', 'http://localhost', 'http://example.com', 'ftp://example.com'] as $url) {
+            $this->assertFalse(Safefetch::installAddress($url, false), $url);
+        }
+        foreach (['http://127.0.0.1:8080/runlight', 'http://localhost', 'http://localhost:3000/runlight'] as $url) {
+            $this->assertTrue(Safefetch::installAddress($url, true), $url);
+        }
+        // A trailing newline cannot pass for the end of the address.
+        foreach (['http://10.0.0.1', 'http://localhost.example.com', 'http://localhost@example.com', 'http://127.0.0.1:80@example.com', "http://localhost\n", "http://127.0.0.1:80\n"] as $url) {
+            $this->assertFalse(Safefetch::installAddress($url, true), $url);
         }
     }
 

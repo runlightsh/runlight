@@ -24,7 +24,7 @@ $rl = new Runlight([
 ]);
 ```
 
-If nothing sits in front of your web server (no load balancer, CDN, or reverse proxy), add `'trustProxy' => false`, so a visitor cannot pick their own address with an `X-Forwarded-For` header. Runlight logs a warning once when it sees requests arrive that way with the default left on.
+By default Runlight believes forwarding headers (`X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`, and `X-Forwarded-Host`) only on a connection from this computer or a private network, where proxies and load balancers connect from, so a visitor who reaches your server straight from the internet cannot pick their own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of your server, set `'trustProxy'` to the header it sets (`'cf-connecting-ip'`) or to `true`; Runlight logs a warning once when a public address sends forwarding headers the default did not believe. `'trustProxy' => false` never reads them.
 
 Send requests under `/runlight` and `/go` to it. In plain PHP that is a few lines at the top of your `index.php`.
 

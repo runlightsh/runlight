@@ -18,10 +18,10 @@ use Runlight\Store\SqlStore;
  * stats and changes nothing.
  *
  * A user is an array with the TypeScript User's keys: id, email, hash, role ("owner", "admin", "member", or
- * "viewer"), createdAt, twoFactor (whether sign-in also asks for a code), and recoveryLeft (recovery codes not
- * yet used). An invite has id, email, role, invitedBy, createdAt, and expiresAt.
+ * "viewer"), createdAt, twoFactor (whether sign-in also asks for a code), recoveryLeft (recovery codes not
+ * yet used), and signedOut when set (a mark signing out replaces, which every session is signed with). An invite has id, email, role, invitedBy, createdAt, and expiresAt.
  *
- * @phpstan-type User array{id: string, email: string, hash: string, role: string, createdAt: int|float, twoFactor: bool, recoveryLeft: int}
+ * @phpstan-type User array{id: string, email: string, hash: string, role: string, createdAt: int|float, twoFactor: bool, recoveryLeft: int, signedOut?: string}
  * @phpstan-type Invite array{id: string, email: string, role: string, invitedBy: string, createdAt: int|float, expiresAt: int|float}
  */
 final class Accounts
@@ -98,7 +98,8 @@ final class Accounts
                 $db->run('ALTER TABLE rl_users ADD COLUMN role ' . $str(20) . " NOT NULL DEFAULT 'owner'");
             }
             // Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's step.
-            foreach ([['totp_secret', 'TEXT'], ['totp_pending', 'TEXT'], ['totp_recovery', 'TEXT'], ['totp_step', 'BIGINT']] as [$name, $type]) {
+            // And the mark signing out replaces, later again.
+            foreach ([['totp_secret', 'TEXT'], ['totp_pending', 'TEXT'], ['totp_recovery', 'TEXT'], ['totp_step', 'BIGINT'], ['signed_out', 'TEXT']] as [$name, $type]) {
                 if (!in_array($name, $names, true)) {
                     $db->run("ALTER TABLE rl_users ADD COLUMN $name $type");
                 }
@@ -134,6 +135,7 @@ final class Accounts
             'createdAt' => Js::number($r['created_at']),
             'twoFactor' => Js::truthy($r['totp_secret'] ?? null),
             'recoveryLeft' => count($recovery),
+            ...(Js::truthy($r['signed_out'] ?? null) ? ['signedOut' => (string) $r['signed_out']] : []),
         ];
     }
 
@@ -684,14 +686,22 @@ final class Accounts
         return Crypto::sameText($this->sign("$id.$expires", $this->sessionKey($user)), $signature) ? $user : null;
     }
 
+    /** Ends every session an account has, in every browser, as signing out does. */
+    public function endSessions(string $id): void
+    {
+        $this->init();
+        $this->store->db->run('UPDATE rl_users SET signed_out = ? WHERE id = ?', [Crypto::hex(Crypto::randomBytes(8)), $id]);
+    }
+
     /**
-     * What a session is signed with: the password hash, and whether two-factor is on, so changing either ends other sessions.
+     * What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out
+     * replaces, so changing any of them ends other sessions.
      *
      * @param User $user
      */
     private function sessionKey(array $user): string
     {
-        return $user['hash'] . ($user['twoFactor'] ? '.2fa' : '');
+        return $user['hash'] . ($user['twoFactor'] ? '.2fa' : '') . (isset($user['signedOut']) && $user['signedOut'] !== '' ? ".{$user['signedOut']}" : '');
     }
 
     /**

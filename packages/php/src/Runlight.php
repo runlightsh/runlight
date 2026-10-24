@@ -35,12 +35,15 @@ use Runlight\Store\SqlStore;
  *   standalone server does. `site` and `sites` are ignored.
  * - geo: callable(string $ip): ?array{country, region, city}, a location for an IP when the platform sends
  *   no location headers, or they are not believed: a platform's headers (cf-ipcountry and the like) count only
- *   with trustProxy on, or on a request built with `platformHeaders` after the caller checked where it came from.
- * - trustProxy: true (default), false, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the
- *   client IP from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then
- *   X-Real-IP, then CF-Connecting-IP. Name one of them to read only that header, such as "cf-connecting-ip"
- *   behind Cloudflare and another proxy. False reads only the connection's address, for an app nothing sits
- *   in front of.
+ *   when trustProxy believes forwarding headers, or on a request built with `platformHeaders` after the caller
+ *   checked where it came from.
+ * - trustProxy: true, false, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the client IP
+ *   from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then X-Real-IP,
+ *   then CF-Connecting-IP. Name one of them to read only that header, such as "cf-connecting-ip" behind
+ *   Cloudflare and another proxy. Left out, the headers count only on a connection from this computer or a
+ *   private network, where proxies and load balancers connect from, so a client that reaches the app straight
+ *   from the internet cannot choose its own address. True reads them from anywhere, for a CDN that connects
+ *   from public addresses. False reads only the connection's address.
  * - linkPath: where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go".
  * - mail: how email reports, invites, and sign-in links are sent. Either a mail service in code (a Transports
  *   config plus `from` and `fromName`), which the dashboard shows and cannot change, or a mailer of the app's
@@ -137,7 +140,9 @@ final class Runlight
     /** @var (callable(string): ?array)|null */
     private $geo;
     private bool|string $trustProxy;
-    /** True until trustProxy left at its default has been seen answering a public address directly, and warned about once. */
+    /** True when trustProxy was left at its default, which believes forwarding headers only from a private address. */
+    private bool $trustPrivate;
+    /** True until a public address has sent forwarding headers that the default did not believe, and been warned about once. */
     private bool $warnDirect;
     /** Whether that warning is shared with other requests, so it comes at most once a day rather than once a request. */
     private bool $warnShared;
@@ -186,7 +191,8 @@ final class Runlight
         }
         $this->geo = $options['geo'] ?? null;
         $this->trustProxy = $options['trustProxy'] ?? true;
-        $this->warnDirect = ($options['trustProxy'] ?? null) === null;
+        $this->trustPrivate = ($options['trustProxy'] ?? null) === null;
+        $this->warnDirect = $this->trustPrivate;
         $this->warnShared = !isset($options['now']);
         $perMinute = $options['rateLimit'] ?? 120;
         // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
@@ -1243,7 +1249,7 @@ final class Runlight
      */
     public function clientIp(Request $request, array $context = []): string
     {
-        if ($this->trustProxy !== false) {
+        if ($this->trusts($request, $context)) {
             $h = $request->headers;
             $last = static function (string $name) use ($h): ?string {
                 $value = $h->get($name);
@@ -1259,17 +1265,35 @@ final class Runlight
             if ($forwarded !== null && Js::trim($forwarded) !== '') {
                 return Js::trim($forwarded);
             }
-            // A public address with no forwarding header means nothing sits in front, and then any client
-            // could name its own address in one. Said once, only when trustProxy was left at its default.
-            $ip = (string) ($context['ip'] ?? $request->remoteAddress);
-            if ($this->warnDirect && $ip !== '' && Safefetch::publicAddress($ip)) {
-                $this->warnDirect = false;
-                if ($this->firstWarningToday()) {
-                    Log::write("Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set 'trustProxy' => false when nothing sits in front of this server, or put a proxy in front that sets the header.");
-                }
-            }
         }
         return (string) ($context['ip'] ?? $request->remoteAddress);
+    }
+
+    /**
+     * Whether a request's forwarding headers count. Left at its default, trustProxy believes them only on a
+     * connection from this computer or a private network, or one whose address the app did not pass on, since
+     * a client reaching the server straight from the internet could write them itself.
+     *
+     * @param array{ip?: string} $context
+     */
+    private function trusts(Request $request, array $context): bool
+    {
+        if ($this->trustProxy === false) {
+            return false;
+        }
+        $ip = (string) ($context['ip'] ?? $request->remoteAddress);
+        if (!$this->trustPrivate || $ip === '' || !Safefetch::publicAddress($ip)) {
+            return true;
+        }
+        // Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
+        $h = $request->headers;
+        if ($this->warnDirect && ($h->has('x-forwarded-for') || $h->has('x-real-ip') || $h->has('cf-connecting-ip'))) {
+            $this->warnDirect = false;
+            if ($this->firstWarningToday()) {
+                Log::write("Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set 'trustProxy' to the header it sets ('cf-connecting-ip') or to true.");
+            }
+        }
+        return false;
     }
 
     /**
@@ -1310,8 +1334,15 @@ final class Runlight
         }
         $today = $this->store->salt($day, Hash::randomSalt());
         $yesterday = $this->store->saltIfExists(Time::addDays($day, -1));
-        $this->dropOldSalts($now);
-        return $this->salts[$timezone] = ['day' => $day, 'today' => $today, 'yesterday' => $yesterday];
+        // Kept before old salts go, so dropping yesterday's from the store drops it from here too.
+        $this->salts[$timezone] = ['day' => $day, 'today' => $today, 'yesterday' => $yesterday];
+        try {
+            $this->dropOldSalts($now);
+        } catch (\Throwable $error) {
+            unset($this->salts[$timezone]);
+            throw $error;
+        }
+        return $this->salts[$timezone];
     }
 
     /**
@@ -1344,10 +1375,14 @@ final class Runlight
         $this->store->dropSaltsExcept(array_map('strval', array_keys($needed)));
     }
 
-    /** The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is. */
-    private function forwardedHost(Request $request): ?string
+    /**
+     * The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.
+     *
+     * @param array{ip?: string} $context
+     */
+    private function forwardedHost(Request $request, array $context = []): ?string
     {
-        return $this->trustProxy !== false ? $request->headers->get('x-forwarded-host') : null;
+        return $this->trusts($request, $context) ? $request->headers->get('x-forwarded-host') : null;
     }
 
     /**
@@ -1388,9 +1423,12 @@ final class Runlight
         // A database too busy to take the hit right now (every pooled connection held by long reports, or
         // another process writing the SQLite file) gets it a little later, at the time it arrived.
         $now = $this->now();
+        // How far recording got: a hit tried again after a write failed skips the writes that went in, so a
+        // visit's counts never take the same hit twice.
+        $done = [];
         for ($attempt = 1; ; $attempt++) {
             try {
-                $this->record($payload, $request, $context, $now);
+                $this->record($payload, $request, $context, $now, $done);
                 return;
             } catch (\Throwable $error) {
                 if ($attempt >= 3 || !self::busy($error)) {
@@ -1401,7 +1439,13 @@ final class Runlight
         }
     }
 
-    private function record(array $payload, Request $request, array $context, int $now): void
+    /**
+     * Records one hit. `$done` is how far an earlier try of it got: its visit (session), and whether
+     * touchSession (touched) and addEngagement (engaged) went in.
+     *
+     * @param array{session?: array{id: string, visitor: string}, touched?: true, engaged?: true} $done
+     */
+    private function record(array $payload, Request $request, array $context, int $now, array &$done = []): void
     {
         // Managed sites load from the database in init(), so it must come first.
         $this->init();
@@ -1412,19 +1456,19 @@ final class Runlight
         }
 
         if ($payload['kind'] === 'engagement') {
-            $this->engagement($site, $payload, $now);
+            $this->engagement($site, $payload, $now, $done);
             return;
         }
 
         $page = Sources::parsePage($url);
-        $session = null;
+        $session = $done['session'] ?? null;
         $reopen = true;
         if ($payload['kind'] === 'event' && $payload['pageviewId'] !== '') {
             $pageview = $this->store->pageview($site['id'], $payload['pageviewId']);
             // An event joins its page's visit unless that visit began longer ago than reports look for its rows
             // (a tab left open for days); it then starts a visit of its own, as any later activity would.
             if ($pageview !== null && $now - $pageview['startedAt'] < SqlStore::EVENT_TAIL_MS) {
-                $session = ['id' => $pageview['session'], 'visitor' => $pageview['visitor']];
+                $session ??= ['id' => $pageview['session'], 'visitor' => $pageview['visitor']];
                 // A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
                 $reopen = $now - $pageview['lastAt'] <= self::SESSION_IDLE_MS;
                 if ($now - $pageview['startedAt'] > 3_600_000) {
@@ -1437,8 +1481,12 @@ final class Runlight
             'screen' => Js::truthy($payload['screenWidth']) && Js::truthy($payload['screenHeight']) ? "{$payload['screenWidth']}x{$payload['screenHeight']}" : '',
             'language' => $payload['language'],
         ]);
+        $done['session'] = $session;
 
-        $this->store->touchSession($session['id'], $now, $payload['kind'], $page['path'], $reopen);
+        if (!isset($done['touched'])) {
+            $this->store->touchSession($session['id'], $now, $payload['kind'], $page['path'], $reopen);
+            $done['touched'] = true;
+        }
         $this->store->insertEvent([
             'site' => $site['id'],
             'ts' => $now,
@@ -1493,7 +1541,7 @@ final class Runlight
             ],
             $client['screenWidth'] ?? null,
         );
-        $location = Geo::locate($request->headers, $ip, $this->geo, $this->trustProxy !== false || $request->platformHeaders);
+        $location = Geo::locate($request->headers, $ip, $this->geo, $this->trusts($request, $context) || $request->platformHeaders);
         $this->store->insertSession([
             'id' => $session['id'],
             'site' => $site['id'],
@@ -1574,7 +1622,7 @@ final class Runlight
     {
         $url = new Url($request->url);
         // A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
-        $given = $this->forwardedHost($request) ?? $request->headers->get('host') ?? $url->host();
+        $given = $this->forwardedHost($request, $context) ?? $request->headers->get('host') ?? $url->host();
         $host = Sources::stripWww(explode(':', Js::trim(explode(',', $given)[0]))[0]);
         if (!isset($this->linkDomainSet()[$host])) {
             return null;
@@ -1612,7 +1660,7 @@ final class Runlight
     {
         $this->init();
         $url = new Url($request->url);
-        $host = Sources::stripWww(explode(':', $this->forwardedHost($request) ?? $request->headers->get('host') ?? $url->host())[0]);
+        $host = Sources::stripWww(explode(':', $this->forwardedHost($request, $context) ?? $request->headers->get('host') ?? $url->host())[0]);
         $link = $this->store->linkBySlug($slug);
         // The app's own link path answers for every link, so a link whose domain
         // was removed keeps working; a link domain answers only for its own links.
@@ -1652,7 +1700,8 @@ final class Runlight
         return new Response('', 302, ['location' => $link['url'], 'cache-control' => 'no-store', 'referrer-policy' => 'no-referrer-when-downgrade']);
     }
 
-    private function engagement(array $site, array $payload, int $now): void
+    /** @param array{engaged?: true} $done */
+    private function engagement(array $site, array $payload, int $now, array &$done): void
     {
         if ($payload['engagedMs'] <= 0) {
             return;
@@ -1662,7 +1711,10 @@ final class Runlight
         if ($pageview === null || $now - $pageview['startedAt'] >= SqlStore::EVENT_TAIL_MS) {
             return;
         }
-        $this->store->addEngagement($pageview['session'], $payload['engagedMs']);
+        if (!isset($done['engaged'])) {
+            $this->store->addEngagement($pageview['session'], $payload['engagedMs']);
+            $done['engaged'] = true;
+        }
         // Only a visit that began more than an hour ago can belong to a day that is already added up.
         if ($now - $pageview['startedAt'] > 3_600_000) {
             $this->store->touchedOldVisit($site['id'], (int) $pageview['startedAt'], $now - self::ROLLUP_DELAY_MS + 3_600_000);

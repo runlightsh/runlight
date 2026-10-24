@@ -93,7 +93,7 @@ final class Standalone
             'secret' => $options['secret'],
         ];
         // Both left out when not given: on its own clock Runlight shares the rate limit and its proxy warning
-        // across requests, and with trustProxy at its default it can warn when nothing sits in front.
+        // across requests, and with trustProxy at its default it believes forwarding headers only from a private address.
         if (isset($options['now'])) {
             $runlight['now'] = $options['now'];
         }

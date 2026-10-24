@@ -117,29 +117,44 @@ final class Safefetch
             return false;
         }
         $embedded = static fn (int $hi, int $lo): array => [$hi >> 8, $hi & 255, $lo >> 8, $lo & 255];
-        $zero = static fn (array $groups): bool => array_filter($groups, static fn ($x) => $x !== 0) === [];
-        // IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64 (64:ff9b::/96).
-        if ($zero(array_slice($g, 0, 5)) && ($g[5] === 0xffff || $g[5] === 0)) {
-            return $g[5] === 0 && $g[6] === 0 && $g[7] <= 1 ? false : self::publicV4($embedded($g[6], $g[7]));
-        }
-        if ($g[0] === 0x64 && $g[1] === 0xff9b && $zero(array_slice($g, 2, 4))) {
-            return self::publicV4($embedded($g[6], $g[7]));
+        // IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated (::ffff:0:0:0/96),
+        // and NAT64 (64:ff9b::/96).
+        $inside = self::embeddedV4($g);
+        if ($inside !== null) {
+            return $g[5] === 0 && $g[4] === 0 && $g[6] === 0 && $g[7] <= 1 ? false : self::publicV4($inside);
         }
         // 6to4 carries an IPv4 address in its second and third groups.
         if ($g[0] === 0x2002) {
             return self::publicV4($embedded($g[1], $g[2]));
         }
-        if (($g[0] & 0xfe00) === 0xfc00 || ($g[0] & 0xffc0) === 0xfe80 || ($g[0] & 0xff00) === 0xff00) {
+        // Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old site-local,
+        // multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any address.
+        if (($g[0] & 0xe000) !== 0x2000) {
             return false;
         }
-        // Teredo, documentation, and discard prefixes.
-        if ($g[0] === 0x2001 && ($g[1] === 0 || $g[1] === 0xdb8)) {
+        // The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+        if ($g[0] === 0x2001 && ($g[1] < 0x200 || $g[1] === 0xdb8)) {
             return false;
         }
-        if ($g[0] === 0x100 && $zero(array_slice($g, 1, 3))) {
+        if (($g[0] & 0xfff0) === 0x3ff0) {
             return false;
         }
         return true;
+    }
+
+    /**
+     * The IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or null.
+     *
+     * @param list<int> $g
+     * @return list<int>|null
+     */
+    private static function embeddedV4(array $g): ?array
+    {
+        $zero = static fn (array $groups): bool => array_filter($groups, static fn ($x) => $x !== 0) === [];
+        $inside = ($zero(array_slice($g, 0, 5)) && ($g[5] === 0xffff || $g[5] === 0))
+            || ($zero(array_slice($g, 0, 4)) && $g[4] === 0xffff && $g[5] === 0)
+            || ($g[0] === 0x64 && $g[1] === 0xff9b && $zero(array_slice($g, 2, 4)));
+        return $inside ? [$g[6] >> 8, $g[6] & 255, $g[7] >> 8, $g[7] & 255] : null;
     }
 
     /** Names clouds give their metadata services. */
@@ -155,11 +170,8 @@ final class Safefetch
         $four = self::v4($ip);
         $g = $four === null ? self::v6($ip) : null;
         $zero = static fn (array $groups): bool => array_filter($groups, static fn ($x) => $x !== 0) === [];
-        // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
-        $inner = $four;
-        if ($inner === null && $g !== null && (($zero(array_slice($g, 0, 5)) && ($g[5] === 0xffff || $g[5] === 0)) || ($g[0] === 0x64 && $g[1] === 0xff9b && $zero(array_slice($g, 2, 4))))) {
-            $inner = [$g[6] >> 8, $g[6] & 255, $g[7] >> 8, $g[7] & 255];
-        }
+        // IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
+        $inner = $four ?? ($g !== null ? self::embeddedV4($g) : null);
         if ($inner !== null) {
             return ($inner[0] === 169 && $inner[1] === 254) || $inner === [100, 100, 100, 200];
         }
@@ -475,7 +487,7 @@ final class Safefetch
     }
 
     /** An install on this machine: http://localhost or http://127.0.0.1, with any port. */
-    private const LOCAL_INSTALL = '#^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)#';
+    private const LOCAL_INSTALL = '#^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)#D';
 
     /**
      * Whether an address can be another Runlight install's: https, or, with `local`, an install on this machine,

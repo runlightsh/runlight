@@ -44,6 +44,8 @@ use Runlight\Store\SqlStore;
  * - ownHosts: callable(): iterable<string>, more names the dashboard is reached at.
  * - accountOf: callable(Request): ?string, the account a request comes from (internal, for the standalone server).
  * - tokenMade: callable(array $token, string $by): bool, notes who made a token (internal).
+ * - tokensOf: callable(string $by): array<string, true>, the ids of the tokens an account made, so a member sees and
+ *   revokes only their own (internal).
  */
 final class Routes
 {
@@ -113,6 +115,8 @@ final class Routes
     private readonly ?\Closure $accountOf;
     /** @var (\Closure(array<string, mixed>, string): bool)|null */
     private readonly ?\Closure $tokenMade;
+    /** @var (\Closure(string): array<string, true>)|null */
+    private readonly ?\Closure $tokensOf;
     /** @var array<string, mixed> */
     private readonly array $oauth;
 
@@ -180,6 +184,7 @@ final class Routes
         $this->signOut = isset($options['signOut']) ? (string) $options['signOut'] : ($web ? "{$this->base}/logout" : null);
         $this->accountOf = isset($options['accountOf']) ? \Closure::fromCallable($options['accountOf']) : ($web ? fn (Request $r): ?string => $web->accountOf($r) : null);
         $this->tokenMade = isset($options['tokenMade']) ? \Closure::fromCallable($options['tokenMade']) : ($web ? fn (array $row, string $by): bool => $web->tokenMade($row, $by) : null);
+        $this->tokensOf = isset($options['tokensOf']) ? \Closure::fromCallable($options['tokensOf']) : ($web ? fn (string $by): array => $web->tokensOf($by) : null);
         $authorize = $options['authorize'] ?? null;
         $oauth = [
             'runlight' => $runlight,
@@ -738,13 +743,14 @@ final class Routes
         return $cookie !== '' && self::constantTimeEqual($cookie, self::cookieValue($this->token));
     }
 
-    /** The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site. */
+    /** The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key, and deleting a site. */
     private static function adminOnly(string $path, string $method): bool
     {
         return ($path === '/api/mail' && ($method === 'PUT' || $method === 'DELETE'))
             || ($path === '/api/assistant' && ($method === 'PUT' || $method === 'DELETE'))
             || ($path === '/api/assistant/limits' && $method === 'PUT')
             || ($path === '/api/assistant/models' && $method === 'POST')
+            || ($path === '/api/observe-key/new' && $method === 'POST')
             || (preg_match('#^/api/sites/[^/]+\z#', $path) && $method === 'DELETE');
     }
 
@@ -1679,12 +1685,26 @@ final class Routes
         return null;
     }
 
+    /**
+     * The tokens the account behind a request made: none when nothing notes who made what.
+     *
+     * @return array<string, true>
+     */
+    private function ownTokens(Request $request): array
+    {
+        $by = $this->accountOf !== null ? ($this->accountOf)($request) : null;
+        return $by !== null && $by !== '' && $this->tokensOf !== null ? ($this->tokensOf)($by) : [];
+    }
+
     private function tokensApi(Request $request, string $path): Response
     {
         $this->rl->init();
         $view = fn (array $t): array => ['id' => $t['id'], 'name' => $t['name'], 'site' => $t['site'], 'scope' => $t['scope'], 'hint' => $t['hint'], 'createdAt' => $t['createdAt'], 'lastUsedAt' => $t['lastUsedAt']];
+        // A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+        $mine = isset($this->members[$request]) ? $this->ownTokens($request) : null;
         if ($path === '/api/tokens' && $request->method === 'GET') {
-            return self::json(['tokens' => array_map($view, $this->store()->tokens())]);
+            $tokens = array_values(array_filter($this->store()->tokens(), static fn (array $t): bool => $mine === null || isset($mine[$t['id']])));
+            return self::json(['tokens' => array_map($view, $tokens)]);
         }
         if ($path === '/api/tokens' && $request->method === 'POST') {
             $body = self::readJson($request);
@@ -1722,6 +1742,9 @@ final class Routes
             return self::json(['token' => $view($row), 'secret' => $secret], 201);
         }
         if (preg_match('#^/api/tokens/([a-f0-9]{24})\z#', $path, $match) && $request->method === 'DELETE') {
+            if ($mine !== null && !isset($mine[$match[1]])) {
+                return self::coded('Unknown token', 'unknown_token', 404);
+            }
             return $this->store()->deleteToken($match[1]) ? self::json(['ok' => true]) : self::coded('Unknown token', 'unknown_token', 404);
         }
         return self::coded('Not found', 'not_found', 404);
@@ -2154,7 +2177,7 @@ final class Routes
             return $this->chat($request, $url);
         }
 
-        // Only the owner manages tokens: an API token cannot make or revoke one.
+        // Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
         if ($path === '/api/tokens' || str_starts_with($path, '/api/tokens/')) {
             $access = $this->canRead($request);
             if ($access !== true) {
@@ -2778,8 +2801,11 @@ final class Routes
             // One funnel at a time, so a page of funnels never takes every database connection at once.
             $rows = [];
             foreach ($store->funnels($site['id']) as $funnel) {
-                $counts = $store->funnelCounts($query, $funnel);
+                ['counts' => $counts, 'sampled' => $sampled] = $store->funnelCounts($query, $funnel);
                 $funnel['steps'] = array_map(fn (array $step, int $i) => array_merge($step, ['visits' => $counts[$i]]), $funnel['steps'], array_keys($funnel['steps']));
+                if ($sampled) {
+                    $funnel['sampled'] = $store->funnelVisits;
+                }
                 $rows[] = $funnel;
             }
             return self::json(['site' => $site['id'], 'range' => $rangeOut, 'funnels' => $rows]);

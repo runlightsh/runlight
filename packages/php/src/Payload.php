@@ -42,6 +42,26 @@ final class Payload
         return (int) min($max, max($min, Js::round($value)));
     }
 
+    /** The events the tracker sends on its own for a link that was followed, each with the link as `url`. */
+    private const LINK_EVENTS = ['Outbound link', 'File download'];
+
+    /**
+     * An automatic link event's `url` without its query string or fragment, as page paths are kept, since tokens and
+     * email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a
+     * tracker cached from before is held to it too.
+     *
+     * @param array<string, string>|null $given
+     * @return array<string, string>|null
+     */
+    private static function linkProps(string $name, ?array $given): ?array
+    {
+        if ($given === null || !in_array($name, self::LINK_EVENTS, true) || !array_key_exists('url', $given)) {
+            return $given;
+        }
+        $given['url'] = preg_replace('/[?#].*\z/s', '', $given['url']) ?? $given['url'];
+        return $given;
+    }
+
     /** @return array<string, string>|null */
     private static function props(mixed $value): ?array
     {
@@ -68,11 +88,8 @@ final class Payload
             } else {
                 continue;
             }
-            // Assigning out["__proto__"] in JavaScript sets the prototype, which a string cannot be, so
-            // nothing is kept; it still counts.
-            if ($k !== '__proto__') {
-                $out[$k] = $text;
-            }
+            // TypeScript reads props into an object with no prototype, so a prop named __proto__ is kept like any other.
+            $out[$k] = $text;
             $count++;
         }
         if ($count === 0) {
@@ -177,7 +194,7 @@ final class Payload
             'screenHeight' => self::int($get('h'), 0, 20000),
             'language' => self::str($get('l'), 35),
             'name' => $name,
-            'props' => $kind === 'event' ? self::props($get('p')) : null,
+            'props' => $kind === 'event' ? self::linkProps($name, self::props($get('p'))) : null,
             'pageviewId' => $pageviewId,
             'engagedMs' => $kind === 'engagement' ? self::int($get('e'), 0, self::MAX_ENGAGED_MS) ?? 0 : 0,
             'scroll' => self::int($get('d'), 0, 100),
