@@ -84,4 +84,7 @@ public sealed class RoutesOptions
 
     /// <summary>Notes who made a token, and false takes it back (internal, for the standalone server).</summary>
     public Func<JsObject, string, CancellationToken, Task<bool>>? TokenMade { get; init; }
+
+    /// <summary>The ids of the tokens an account made, so a member sees and revokes only their own (internal, for the standalone server).</summary>
+    public Func<string, CancellationToken, Task<HashSet<string>>>? TokensOf { get; init; }
 }

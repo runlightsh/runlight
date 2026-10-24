@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Runlight.Http;
 
 namespace Runlight;
@@ -55,6 +56,28 @@ public sealed class Payload
         return (long)Math.Min(max, Math.Max(min, Js.Round(n)));
     }
 
+    /// <summary>The events the tracker sends on its own for a link that was followed, each with the link as <c>url</c>.</summary>
+    private static readonly HashSet<string> LinkEvents = new(StringComparer.Ordinal) { "Outbound link", "File download" };
+
+    /// <summary>
+    /// An automatic link event's <c>url</c> without its query string or fragment, as page paths are kept, since tokens
+    /// and email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a
+    /// tracker cached from before is held to it too.
+    /// </summary>
+    private static JsObject? LinkProps(string name, JsObject? given)
+    {
+        if (given == null || !LinkEvents.Contains(name) || given.Get("url") is not string url)
+        {
+            return given;
+        }
+        int cut = url.IndexOfAny(['?', '#']);
+        if (cut >= 0)
+        {
+            given["url"] = url[..cut];
+        }
+        return given;
+    }
+
     private static JsObject? PropsOf(object? value)
     {
         if (value is not JsObject o)
@@ -91,12 +114,8 @@ public sealed class Payload
             {
                 continue;
             }
-            // Assigning out["__proto__"] in JavaScript sets the prototype, which a string cannot
-            // be, so nothing is kept; it still counts.
-            if (k != "__proto__")
-            {
-                output.Set(k, text);
-            }
+            // A prop named __proto__ is kept like any other rather than lost.
+            output.Set(k, text);
             count++;
         }
         return count == 0 ? null : output;
@@ -157,7 +176,7 @@ public sealed class Payload
             ScreenHeight = Int(body.Get("h"), 0, 20000),
             Language = Str(body.Get("l"), 35),
             Name = name,
-            Props = k == "event" ? PropsOf(body.Get("p")) : null,
+            Props = k == "event" ? LinkProps(name, PropsOf(body.Get("p"))) : null,
             PageviewId = pageviewId,
             EngagedMs = k == "engagement" ? Int(body.Get("e"), 0, MaxEngagedMs) ?? 0 : 0,
             Scroll = Int(body.Get("d"), 0, 100),

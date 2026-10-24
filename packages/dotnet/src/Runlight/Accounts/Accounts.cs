@@ -106,7 +106,8 @@ public sealed class Accounts
                     await db.RunAsync("ALTER TABLE rl_users ADD COLUMN role " + Str(20) + " NOT NULL DEFAULT 'owner'", null, cancellationToken).ConfigureAwait(false);
                 }
                 // Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's step.
-                foreach (var (name, type) in new[] { ("totp_secret", "TEXT"), ("totp_pending", "TEXT"), ("totp_recovery", "TEXT"), ("totp_step", "BIGINT") })
+                // And the mark signing out replaces, later again.
+                foreach (var (name, type) in new[] { ("totp_secret", "TEXT"), ("totp_pending", "TEXT"), ("totp_recovery", "TEXT"), ("totp_step", "BIGINT"), ("signed_out", "TEXT") })
                 {
                     if (!names.Contains(name))
                     {
@@ -139,16 +140,22 @@ public sealed class Accounts
     private static List<object?> RecoveryList(object? stored) =>
         Js.Truthy(stored) && Json.Parse(Sql.S(stored)) is List<object?> list ? list : [];
 
-    private static JsObject Row(JsObject r) => WithSite(new JsObject()
+    private static JsObject Row(JsObject r)
     {
-        ["id"] = Sql.S(r.Get("id")),
-        ["email"] = Sql.S(r.Get("email")),
-        ["hash"] = Sql.S(r.Get("hash")),
-        ["role"] = RoleFrom(r.Get("role")),
-        ["createdAt"] = Js.Number(r.Get("created_at")),
-        ["twoFactor"] = Js.Truthy(r.Get("totp_secret")),
-        ["recoveryLeft"] = (long)RecoveryList(r.Get("totp_recovery")).Count,
-    }, r.Str("site"));
+        var user = WithSite(new JsObject()
+        {
+            ["id"] = Sql.S(r.Get("id")),
+            ["email"] = Sql.S(r.Get("email")),
+            ["hash"] = Sql.S(r.Get("hash")),
+            ["role"] = RoleFrom(r.Get("role")),
+            ["createdAt"] = Js.Number(r.Get("created_at")),
+            ["twoFactor"] = Js.Truthy(r.Get("totp_secret")),
+            ["recoveryLeft"] = (long)RecoveryList(r.Get("totp_recovery")).Count,
+        }, r.Str("site"));
+        // A mark signing out replaces, which every session is signed with.
+        if (Js.Truthy(r.Get("signed_out"))) user["signedOut"] = Sql.S(r.Get("signed_out"));
+        return user;
+    }
 
     internal static JsObject WithSite(JsObject value, string? site) { if (site != null) value["site"] = site; return value; }
 
@@ -710,8 +717,19 @@ public sealed class Accounts
         return Crypto.SameText(Sign(id + "." + expires, SessionKey(user)), signature) ? user : null;
     }
 
-    /// <summary>What a session is signed with: the password hash, and whether two-factor is on, so changing either ends other sessions.</summary>
-    private static string SessionKey(JsObject user) => UserHash(user) + (user.Bool("twoFactor") ? ".2fa" : "");
+    /// <summary>Ends every session an account has, in every browser, as signing out does.</summary>
+    public async Task EndSessionsAsync(string id, CancellationToken cancellationToken = default)
+    {
+        await InitAsync(cancellationToken).ConfigureAwait(false);
+        await Db.RunAsync("UPDATE rl_users SET signed_out = ? WHERE id = ?", [Crypto.Hex(Crypto.RandomBytes(8)), id], cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out
+    /// replaces, so changing any of them ends other sessions.
+    /// </summary>
+    private static string SessionKey(JsObject user) =>
+        UserHash(user) + (user.Bool("twoFactor") ? ".2fa" : "") + (user.Str("signedOut") is { Length: > 0 } mark ? "." + mark : "");
 
     /// <summary>
     /// A long-lived mark for a browser that signed in to an account. With it, failed tries by others against that

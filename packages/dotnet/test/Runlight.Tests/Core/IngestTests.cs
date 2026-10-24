@@ -381,9 +381,11 @@ public sealed class IngestTests : CoreTestCase
     }
 
     [Fact]
-    public async Task With_TrustProxy_left_at_its_default_a_public_address_with_no_proxy_header_is_warned_about_once()
+    public async Task With_TrustProxy_left_at_its_default_forwarding_headers_count_only_from_a_private_address()
     {
-        static Request R(Headers headers) => new("https://example.com/", "GET", headers, "", "192.0.2.9");
+        static Request R(Headers headers) => new("https://example.com/", "GET", headers, "", "");
+        var bare = new Headers();
+        var forwarded = new Headers { ["x-forwarded-for"] = "8.8.4.4" };
         var store = await Databases.FreshAsync("sqlite");
         var said = new StringWriter();
         var stderr = Console.Error;
@@ -391,19 +393,20 @@ public sealed class IngestTests : CoreTestCase
         try
         {
             var quiet = new Runlight(new RunlightOptions { Store = store, TrustProxy = true });
-            Assert.Equal("8.8.8.8", quiet.ClientIp(R(new Headers()), "8.8.8.8"));
-            Assert.Equal("", said.ToString()); // set on purpose, never second-guessed
+            Assert.Equal("8.8.4.4", quiet.ClientIp(R(forwarded), "8.8.8.8")); // TrustProxy set on purpose believes a public address
+            Assert.Equal("", said.ToString()); // and is never second-guessed
 
             var rl = new Runlight(new RunlightOptions { Store = store });
-            rl.ClientIp(R(new Headers { ["x-forwarded-for"] = "8.8.4.4" }), "10.0.0.2");
-            rl.ClientIp(R(new Headers()), "127.0.0.1");
-            rl.ClientIp(R(new Headers()), "192.168.1.5");
-            Assert.Equal("", said.ToString()); // a proxy's header, or a private or loopback address, says nothing
-            Assert.Equal("8.8.8.8", rl.ClientIp(R(new Headers()), "8.8.8.8"));
-            rl.ClientIp(R(new Headers()), "1.1.1.1");
+            Assert.Equal("8.8.4.4", rl.ClientIp(R(forwarded), "10.0.0.2")); // a proxy on a private network is believed
+            Assert.Equal("8.8.4.4", rl.ClientIp(R(forwarded), "::ffff:127.0.0.1")); // and one on this computer
+            Assert.Equal("8.8.4.4", rl.ClientIp(R(forwarded))); // and a platform that passes no address on
+            Assert.Equal("8.8.8.8", rl.ClientIp(R(bare), "8.8.8.8"));
+            Assert.Equal("", said.ToString()); // a public address without forwarding headers says nothing
+            Assert.Equal("1.1.1.1", rl.ClientIp(R(forwarded), "1.1.1.1")); // a client straight from the internet cannot choose its address
+            rl.ClientIp(R(forwarded), "1.0.0.1");
             var lines = said.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
             Assert.Single(lines); // said once
-            Assert.Contains("TrustProxy = false", lines[0], StringComparison.Ordinal);
+            Assert.Contains("cf-connecting-ip", lines[0], StringComparison.Ordinal);
         }
         finally
         {

@@ -41,6 +41,9 @@ public static class Sql
     /// <summary>The most visits journeys reads, newest first.</summary>
     public const int JourneyVisits = 20_000;
 
+    /// <summary>The most visits a funnel is counted over: the newest in the range, so its rows fit in memory over any range.</summary>
+    public const int FunnelVisits = 100_000;
+
     /// <summary>How long after a visit starts its events are looked for: far past any real visit.</summary>
     public const long EventTailMs = 2 * 86_400_000L;
 

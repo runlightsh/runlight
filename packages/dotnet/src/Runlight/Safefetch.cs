@@ -175,35 +175,45 @@ public static partial class Safefetch
             return false;
         }
         static int[] Embedded(int hi, int lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255];
-        static bool Zero(IEnumerable<int> groups) => groups.All(x => x == 0);
-        // IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64 (64:ff9b::/96).
-        if (Zero(g.Take(5)) && (g[5] == 0xffff || g[5] == 0))
+        // IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated (::ffff:0:0:0/96),
+        // and NAT64 (64:ff9b::/96).
+        int[]? inside = EmbeddedV4(g);
+        if (inside != null)
         {
-            return g[5] == 0 && g[6] == 0 && g[7] <= 1 ? false : PublicV4(Embedded(g[6], g[7]));
-        }
-        if (g[0] == 0x64 && g[1] == 0xff9b && Zero(g.Skip(2).Take(4)))
-        {
-            return PublicV4(Embedded(g[6], g[7]));
+            return g[5] == 0 && g[4] == 0 && g[6] == 0 && g[7] <= 1 ? false : PublicV4(inside);
         }
         // 6to4 carries an IPv4 address in its second and third groups.
         if (g[0] == 0x2002)
         {
             return PublicV4(Embedded(g[1], g[2]));
         }
-        if ((g[0] & 0xfe00) == 0xfc00 || (g[0] & 0xffc0) == 0xfe80 || (g[0] & 0xff00) == 0xff00)
+        // Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old site-local,
+        // multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any address.
+        if ((g[0] & 0xe000) != 0x2000)
         {
             return false;
         }
-        // Teredo, documentation, and discard prefixes.
-        if (g[0] == 0x2001 && (g[1] == 0 || g[1] == 0xdb8))
+        // The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+        if (g[0] == 0x2001 && (g[1] < 0x200 || g[1] == 0xdb8))
         {
             return false;
         }
-        if (g[0] == 0x100 && Zero(g.Skip(1).Take(3)))
+        if ((g[0] & 0xfff0) == 0x3ff0)
         {
             return false;
         }
         return true;
+    }
+
+    /// <summary>The IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or null.</summary>
+    private static int[]? EmbeddedV4(int[] g)
+    {
+        static bool Zero(IEnumerable<int> groups) => groups.All(x => x == 0);
+        bool inside =
+            (Zero(g.Take(5)) && (g[5] == 0xffff || g[5] == 0))
+            || (Zero(g.Take(4)) && g[4] == 0xffff && g[5] == 0)
+            || (g[0] == 0x64 && g[1] == 0xff9b && Zero(g.Skip(2).Take(4)));
+        return inside ? [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255] : null;
     }
 
     /// <summary>Names clouds give their metadata services.</summary>
@@ -222,10 +232,8 @@ public static partial class Safefetch
         int[]? four = V4(ip);
         int[]? g = four == null ? V6(ip) : null;
         static bool Zero(IEnumerable<int> groups) => groups.All(x => x == 0);
-        // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
-        int[]? inner = four ?? (g != null && ((Zero(g.Take(5)) && (g[5] == 0xffff || g[5] == 0)) || (g[0] == 0x64 && g[1] == 0xff9b && Zero(g.Skip(2).Take(4))))
-            ? [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255]
-            : null);
+        // IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
+        int[]? inner = four ?? (g != null ? EmbeddedV4(g) : null);
         if (inner != null)
         {
             return (inner[0] == 169 && inner[1] == 254) || (inner[0] == 100 && inner[1] == 100 && inner[2] == 100 && inner[3] == 200);
@@ -401,6 +409,7 @@ public static partial class Safefetch
                 MaxBytes = init.MaxBytes,
                 Truncate = init.Truncate,
                 Resolve = pin,
+                Public = true,
             };
             Response answer;
             try

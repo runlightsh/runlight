@@ -80,7 +80,7 @@ public sealed class CryptoTests
     public void A_scrypt_cost_out_of_bounds_is_refused_not_run()
     {
         string[] parts = Crypto.HashPassword("a long password").Split('$');
-        foreach (string cost in new[] { "2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1" })
+        foreach (string cost in new[] { "2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "1048576$1$1", "65536$1$1" })
         {
             Assert.False(Crypto.CheckPassword("a long password", "scrypt$" + cost + "$" + parts[4] + "$" + parts[5]), cost);
         }

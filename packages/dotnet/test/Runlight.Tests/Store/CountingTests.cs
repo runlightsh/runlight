@@ -55,7 +55,7 @@ public sealed class CountingTests : StoreTestCase
                 var totals = await store.GoalTotalsAsync(query, goal);
                 double visitors = await store.VisitorsAsync(query);
                 var events = (await store.BreakdownAsync(query, "event", 10, 0)).Select(r => (object?)(Js.String(r.Get("value")) + ":" + Js.String(r.Get("events")))).ToList();
-                return J(L(totals.Get("conversions"), visitors > 0 ? totals.Num("visitors") / visitors : 0, await store.FunnelCountsAsync(query, funnel), (await store.EventPropKeysAsync(query, "Signup")).Count, events));
+                return J(L(totals.Get("conversions"), visitors > 0 ? totals.Num("visitors") / visitors : 0, (await store.FunnelCountsAsync(query, funnel)).Counts, (await store.EventPropKeysAsync(query, "Signup")).Count, events));
             }
             string label = J(filters);
             Assert.True(J(L(2, 1, L(2, 2), 1, L("Signup:2"))) == await Read(day5), "the visits that started on the 5th " + label + ": " + await Read(day5));
@@ -172,7 +172,7 @@ public sealed class CountingTests : StoreTestCase
         var funnel = Funnel(new string('e', 24), "Checkout", NOW, Step("page", "/#/cart"), Step("page", "/#/thanks"));
         var totals = await store.GoalTotalsAsync(Today(), goal);
         Same(L(2, 2), L(totals.Get("conversions"), totals.Get("visitors")));
-        Same(L(2, 2), await store.FunnelCountsAsync(Today(), funnel));
+        Same(L(2, 2), (await store.FunnelCountsAsync(Today(), funnel)).Counts);
     }
 
     [Theory]
@@ -321,8 +321,8 @@ public sealed class CountingTests : StoreTestCase
         await VisitAsync(store, "a", "v1", t, [], [Pv("/pricing", t, "a1"), Ev("Signup", t, null)]);
         var same = Funnel(new string('1', 24), "Same moment", NOW, Step("page", "/pricing"), Step("event", "Signup"));
         var twice = Funnel(new string('2', 24), "Twice", NOW, Step("page", "/pricing"), Step("page", "/pricing"));
-        Same(L(1, 1), await store.FunnelCountsAsync(Today(), same));
-        Same(L(1, 0), await store.FunnelCountsAsync(Today(), twice), "one pageview is not two steps");
+        Same(L(1, 1), (await store.FunnelCountsAsync(Today(), same)).Counts);
+        Same(L(1, 0), (await store.FunnelCountsAsync(Today(), twice)).Counts, "one pageview is not two steps");
     }
 
     [Theory]
@@ -351,12 +351,12 @@ public sealed class CountingTests : StoreTestCase
         // As funnelFrom makes it from "https://example.com/pricing*", "Signup", and "welcome".
         var funnel = Funnel(new string('f', 24), "Signup", NOW, Step("page", "/pricing*"), Step("event", "Signup"), Step("page", "/welcome"));
         await store.SaveFunnelAsync(funnel);
-        Same(L(3, 2, 1), await store.FunnelCountsAsync(Today(), (await store.FunnelsAsync("default"))[0]));
+        Same(L(3, 2, 1), (await store.FunnelCountsAsync(Today(), (await store.FunnelsAsync("default"))[0])).Counts);
         // Filters choose which visits enter. The Signup events were sent from /signup, so a page filter finds them.
-        Same(L(2, 2, 1), await store.FunnelCountsAsync(Today(F("page", "is", "/signup")), funnel));
+        Same(L(2, 2, 1), (await store.FunnelCountsAsync(Today(F("page", "is", "/signup")), funnel)).Counts);
         var changed = Funnel(funnel.Str("id")!, "Signup flow", NOW, Step("page", "/pricing"), Step("page", "/welcome"));
         await store.SaveFunnelAsync(changed);
-        Same(L(3, 1), await store.FunnelCountsAsync(Today(), (await store.FunnelsAsync("default"))[0]));
+        Same(L(3, 1), (await store.FunnelCountsAsync(Today(), (await store.FunnelsAsync("default"))[0])).Counts);
         await store.DeleteFunnelAsync(funnel.Str("id")!);
         Assert.Empty(await store.FunnelsAsync("default"));
     }

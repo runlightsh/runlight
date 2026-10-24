@@ -92,7 +92,10 @@ public sealed class CrossImplementationTests : IAsyncLifetime
             case "goalSeries":
                 return await store.GoalSeriesAsync(O(0), O(1), Os(2));
             case "funnelCounts":
-                return await store.FunnelCountsAsync(O(0), O(1));
+                {
+                    var (counts, sampled) = await store.FunnelCountsAsync(O(0), O(1));
+                    return new JsObject { ["counts"] = counts, ["sampled"] = sampled };
+                }
             case "journeyPages":
                 {
                     var (rows, sampled) = await store.JourneyPagesAsync(O(0), I(1));
@@ -160,7 +163,13 @@ public sealed class CrossImplementationTests : IAsyncLifetime
             string actual;
             try
             {
-                actual = J(Wf(await AnswerAsync(store, call.Str("method")!, call.Arr("args")!)));
+                object? answer = await AnswerAsync(store, call.Str("method")!, call.Arr("args")!);
+                // A fixture made before funnels said whether they were sampled holds the counts alone.
+                if (call.Str("method") == "funnelCounts" && call.Get("result") is List<object?> && answer is JsObject funnel)
+                {
+                    answer = funnel.Get("counts");
+                }
+                actual = J(Wf(answer));
             }
             catch (Exception e)
             {

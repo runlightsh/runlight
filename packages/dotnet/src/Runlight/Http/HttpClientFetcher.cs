@@ -13,7 +13,9 @@ namespace Runlight.Http;
 /// Fetches with <see cref="HttpClient"/>, following redirects itself. A pinned request never goes through a
 /// proxy, which would look the name up again itself and connect wherever it liked, and connects only to the
 /// addresses its pins name: a hop to a host and port they do not name is refused, never looked up. Others
-/// take the system's proxy, if it has one.
+/// take the system's proxy, if it has one. Public fetches, checked against private addresses, have a handler
+/// of their own, so a connection opened for a service fetch, which may reach a private network, is never used
+/// again for a public fetch to the same host and port, nor the other way round.
 /// </summary>
 public sealed class HttpClientFetcher : IFetcher, IDisposable
 {
@@ -24,8 +26,15 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
     /// <summary>Headers that describe a body, dropped with it when a redirect turns a request into a GET.</summary>
     private static readonly string[] BodyHeaders = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
 
+    /// <summary>
+    /// The most an answer may weigh when the request names no limit, enough for a connected install's largest
+    /// export, so no server can stream an answer into memory without end.
+    /// </summary>
+    public const long DefaultMaxBytes = 100 * 1024 * 1024;
+
     private readonly HttpClient _client;
     private readonly HttpClient _direct;
+    private readonly HttpClient _public;
 
     public HttpClientFetcher()
         : this(null)
@@ -37,6 +46,7 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
     {
         _client = Client(useProxy: true, proxy);
         _direct = Client(useProxy: false, null);
+        _public = Client(useProxy: false, null);
     }
 
     private static HttpClient Client(bool useProxy, IWebProxy? proxy)
@@ -61,6 +71,7 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
     {
         _client.Dispose();
         _direct.Dispose();
+        _public.Dispose();
     }
 
     private static async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancellationToken)
@@ -182,7 +193,9 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                         }
                     }
                 }
-                using var answer = await (pinned ? _direct : _client).SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                // Public fetches never share a connection with the others: each kind has its own pool.
+                var client = init.Public ? _public : pinned ? _direct : _client;
+                using var answer = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
                 int status = (int)answer.StatusCode;
                 if (init.Redirect != "manual" && status is 301 or 302 or 303 or 307 or 308 && answer.Headers.Location != null)
                 {
@@ -247,6 +260,11 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
 
     private static async Task<byte[]> ReadAsync(HttpResponseMessage answer, FetchInit init, CancellationToken cancellationToken)
     {
+        long max = init.MaxBytes ?? DefaultMaxBytes;
+        if (answer.Content.Headers.ContentLength is long declared && declared > max && !init.Truncate)
+        {
+            throw new BodyTooLongException("Body over " + max.ToString(System.Globalization.CultureInfo.InvariantCulture) + " bytes");
+        }
         var stream = await answer.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         await using (stream.ConfigureAwait(false))
         {
@@ -259,7 +277,7 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
                 {
                     return output.ToArray();
                 }
-                if (init.MaxBytes is long max && output.Length + n > max)
+                if (output.Length + n > max)
                 {
                     if (init.Truncate)
                     {
