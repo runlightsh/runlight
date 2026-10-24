@@ -28,10 +28,8 @@ defmodule Runlight.Payload do
           {:halt, {out, count}}
         else
           k = key |> JS.trim() |> JS.slice(0, 60)
-
-          # Assigning out["__proto__"] in JavaScript sets the prototype, which a string cannot be, so
-          # the key is counted and never kept.
-          put = fn v -> if k == "__proto__", do: out, else: Object.put(out, k, v) end
+          # A prop named __proto__ is kept like any other, as the reference's object without a prototype keeps it.
+          put = fn v -> Object.put(out, k, v) end
 
           cond do
             k == "" -> {:cont, {out, count}}
@@ -47,6 +45,21 @@ defmodule Runlight.Payload do
   end
 
   defp props(_), do: nil
+
+  # The events the tracker sends on its own for a link that was followed, each with the link as `url`.
+  @link_events ["Outbound link", "File download"]
+
+  # An automatic link event's `url` without its query string or fragment, as page paths are kept, since tokens and
+  # email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a tracker
+  # cached from before is held to it too.
+  defp link_props(name, %Object{} = given) when name in @link_events do
+    case given["url"] do
+      url when is_binary(url) -> Object.put(given, "url", url |> String.split(["?", "#"], parts: 2) |> hd())
+      _ -> given
+    end
+  end
+
+  defp link_props(_name, given), do: given
 
   @doc "The tracker's hit, or nil when it is not one."
   @spec parse(String.t()) :: map() | nil
@@ -71,7 +84,7 @@ defmodule Runlight.Payload do
         screen_height: int(body["h"], 0, 20_000),
         language: str(body["l"], 35),
         name: name,
-        props: if(kind == "event", do: props(body["p"])),
+        props: if(kind == "event", do: link_props(name, props(body["p"]))),
         pageview_id: pageview_id,
         engaged_ms: if(kind == "engagement", do: int(body["e"], 0, @max_engaged_ms) || 0, else: 0),
         scroll: int(body["d"], 0, 100)

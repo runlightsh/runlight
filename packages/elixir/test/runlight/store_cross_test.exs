@@ -92,7 +92,7 @@ defmodule Runlight.StoreCrossTest do
         Store.goal_totals_all(store, query(q), goals)
 
       {"funnelCounts", [q, f]} ->
-        Store.funnel_counts(store, query(q), f)
+        funnel(Store.funnel_counts(store, query(q), f))
 
       {"journeyPages", [q, n]} ->
         journey(Store.journey_pages(store, query(q), n))
@@ -185,6 +185,8 @@ defmodule Runlight.StoreCrossTest do
         Store.salt_if_exists(store, d)
     end
   end
+
+  defp funnel(%{counts: counts, sampled: sampled}), do: JS.obj(counts: counts, sampled: sampled)
 
   defp journey(%{rows: rows, sampled: sampled}),
     do: JS.obj(rows: Enum.map(rows, &JS.obj(session: &1.session, path: &1.path)), sampled: sampled)

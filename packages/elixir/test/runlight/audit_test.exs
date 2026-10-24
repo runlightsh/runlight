@@ -2,7 +2,9 @@ defmodule Runlight.AuditTest do
   @moduledoc """
   The audit fixes of 2026-10-16 as the SDK's tests check them: password costs, sign-in rehashing, forgotten sites,
   salts that outlast a visit, click goal renames, clipped text, settled visits, hostname suggestions, and the smaller
-  report edges.
+  report edges. Then the audit of 2026-10-23: members' tokens, signing out everywhere, cross-site form posts,
+  tokens taken back with a new password, the throttle's eviction, the salt cache, retried hits, the funnel cap, and
+  automatic link events.
   """
   use ExUnit.Case, async: false
 
@@ -77,7 +79,18 @@ defmodule Runlight.AuditTest do
     refute Crypto.check_password("a long passwore", recorded)
 
     # A cost out of bounds is refused without running it.
-    for cost <- ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "16.5$8$1"] do
+    for cost <- [
+          "2097152$8$1",
+          "30000$8$1",
+          "1$8$1",
+          "16384$33$1",
+          "16384$8$17",
+          "16384$0$1",
+          "x$8$1",
+          "16.5$8$1",
+          "1048576$1$1",
+          "65536$1$1"
+        ] do
       hash = "scrypt$#{cost}$#{Crypto.base64url(salt)}$#{Crypto.base64url(key)}"
       {micros, false} = :timer.tc(fn -> Crypto.check_password("a long password", hash) end)
       assert micros < 500_000, cost
@@ -539,5 +552,295 @@ defmodule Runlight.AuditTest do
     assert host.("010.1.1.1") == "8.1.1.1"
     for bad <- ["08.1.1.1", "1.2.3.4.5", "1.2.3.09", "256.1.1.1"], do: assert_raise(ArgumentError, fn -> host.(bad) end)
     assert host.("1.2.3.4.example") == "1.2.3.4.example"
+  end
+
+  # The audit of 2026-10-23.
+
+  defp account_req(path, opts), do: Request.new("https://example.com/runlight#{path}", opts)
+
+  defp form_post(fields, headers \\ []),
+    do: [
+      method: "POST",
+      headers: [{"content-type", "application/x-www-form-urlencoded"} | headers],
+      body: URI.encode_query(fields)
+    ]
+
+  defp cookie_from(response) do
+    response.headers
+    |> Enum.find_value("", fn {k, v} -> if String.downcase(k) == "set-cookie", do: v end)
+    |> String.split(";")
+    |> hd()
+  end
+
+  # An install with accounts: its owner, and a member who joined by invite.
+  defp with_member do
+    {rl, _} = harness(:sqlite, nil, at("2026-10-06T12:00:00Z"), secret: String.duplicate("k", 64))
+    routes = Runlight.routes(rl, token: "app-token", accounts: true)
+    handler = &Runlight.Routes.handle(routes, &1)
+
+    json = fn cookie, method, path, body ->
+      handler.(
+        account_req(path,
+          method: method,
+          headers: [{"cookie", cookie}, {"content-type", "application/json"}],
+          body: if(body == nil, do: "", else: Jason.encode!(body))
+        )
+      )
+    end
+
+    owner =
+      cookie_from(
+        handler.(
+          account_req(
+            "/setup",
+            form_post(%{
+              code: "app-token",
+              email: "jon@example.com",
+              password: "a long password",
+              again: "a long password"
+            })
+          )
+        )
+      )
+
+    sent = json.(owner, "POST", "/api/people", %{allSites: true, email: "mo@example.com", role: "member"})
+    invite = URI.parse(Jason.decode!(sent.body)["link"])
+    code = URI.decode_query(invite.query)["code"]
+
+    member =
+      cookie_from(
+        handler.(
+          account_req("/invite", form_post(%{code: code, password: "a long password", again: "a long password"}))
+        )
+      )
+
+    %{rl: rl, handler: handler, json: json, owner: owner, member: member}
+  end
+
+  defp sign_in(handler, headers \\ []) do
+    handler.(
+      account_req(
+        "/login",
+        form_post(%{email: "mo@example.com", password: "a long password", next: "/runlight/"}, headers)
+      )
+    )
+  end
+
+  test "audit 2026-10-23: a member sees and revokes only the tokens they made, and cannot replace a site's agents key" do
+    %{json: json, owner: owner, member: member} = with_member()
+    make = fn cookie, name -> Jason.decode!(json.(cookie, "POST", "/api/tokens", %{name: name}).body)["token"]["id"] end
+    owners = make.(owner, "Owner's")
+    mine = make.(member, "Member's")
+
+    listed = fn cookie ->
+      Jason.decode!(json.(cookie, "GET", "/api/tokens", nil).body)["tokens"] |> Enum.map(& &1["id"]) |> Enum.sort()
+    end
+
+    assert listed.(member) == [mine]
+    assert listed.(owner) == Enum.sort([owners, mine]), "the owner sees every token"
+    assert json.(member, "DELETE", "/api/tokens/#{owners}", nil).status == 404, "the owner's token is not the member's"
+    assert listed.(owner) == Enum.sort([owners, mine])
+    assert json.(member, "DELETE", "/api/tokens/#{mine}", nil).status == 200
+    assert json.(member, "POST", "/api/observe-key/new?site=default", %{}).status == 403
+    assert json.(owner, "POST", "/api/observe-key/new?site=default", %{}).status == 200
+  end
+
+  test "audit 2026-10-23: signing out ends the account's sessions everywhere, and only from the dashboard's own pages" do
+    %{handler: handler, json: json, member: member} = with_member()
+    other = cookie_from(sign_in(handler))
+    assert json.(other, "GET", "/api/account", nil).status == 200
+
+    cross_site = handler.(account_req("/logout", headers: [{"cookie", member}, {"sec-fetch-site", "cross-site"}]))
+    assert cross_site.status == 403, "another site cannot sign anyone out"
+    assert json.(other, "GET", "/api/account", nil).status == 200
+
+    out = handler.(account_req("/logout", headers: [{"cookie", member}, {"sec-fetch-site", "same-origin"}]))
+    assert out.status == 303
+    assert json.(member, "GET", "/api/account", nil).status == 401, "the cookie copied before stops working"
+    assert json.(other, "GET", "/api/account", nil).status == 401, "and so does the one in the other browser"
+
+    back = cookie_from(sign_in(handler))
+    assert json.(back, "GET", "/api/account", nil).status == 200, "signing in again works"
+  end
+
+  test "audit 2026-10-23: the sign-in forms take a post only from their own pages" do
+    %{handler: handler} = with_member()
+
+    for site <- ["cross-site", "same-site"] do
+      refused = sign_in(handler, [{"sec-fetch-site", site}])
+      assert refused.status == 403, site
+      refute Enum.any?(refused.headers, fn {k, _} -> String.downcase(k) == "set-cookie" end), "#{site}: no session"
+    end
+
+    assert sign_in(handler, [{"sec-fetch-site", "same-origin"}]).status == 303
+  end
+
+  test "audit 2026-10-23: a new password can take back the tokens the account made" do
+    %{json: json, member: member} = with_member()
+    json.(member, "POST", "/api/tokens", %{name: "Kept"})
+
+    changed =
+      json.(member, "POST", "/api/account/password", %{current: "a long password", next: "another long password"})
+
+    fresh = cookie_from(changed)
+    kept = json.(fresh, "GET", "/api/tokens", nil)
+    assert kept.status == 200, kept.body
+    assert length(Jason.decode!(kept.body)["tokens"]) == 1, "kept unless asked"
+
+    latest =
+      cookie_from(
+        json.(fresh, "POST", "/api/account/password", %{
+          current: "another long password",
+          next: "a third long password",
+          revokeTokens: true
+        })
+      )
+
+    assert Jason.decode!(json.(latest, "GET", "/api/tokens", nil).body)["tokens"] == []
+  end
+
+  test "audit 2026-10-23: a flood of made-up names cannot reset the count of one close to its limit" do
+    {rl, _} = harness(:sqlite, nil, at("2026-10-06T12:00:00Z"))
+    throttle = Runlight.Accounts.Throttle.new(rl.table, :audit_flood, 3)
+    now = System.os_time(:millisecond)
+    assert Runlight.Accounts.Throttle.take(throttle, "target", now)
+    assert Runlight.Accounts.Throttle.take(throttle, "target", now)
+    for i <- 0..10_049, do: Runlight.Accounts.Throttle.take(throttle, "made-up-#{i}", now)
+    assert Runlight.Accounts.Throttle.take(throttle, "target", now)
+    refute Runlight.Accounts.Throttle.take(throttle, "target", now), "the target's earlier tries still count"
+  end
+
+  test "audit 2026-10-23: yesterday's salt leaves memory when it leaves the store, on the first hit after midnight" do
+    {rl, clock} = harness(:sqlite, nil, at("2026-10-06T12:00:00Z"))
+    hit(rl, JS.obj(k: "pageview", u: "https://example.com/"), "203.0.113.1")
+    advance(clock, 13 * @hour)
+    hit(rl, JS.obj(k: "pageview", u: "https://example.com/"), "203.0.113.9")
+    cached = Runlight.State.get(rl.table, {:salts, "UTC"})
+    assert cached.day == "2026-10-07"
+    assert cached.yesterday == nil, "no visit was left open, so yesterday's salt is gone from here too"
+  end
+
+  defmodule Busy do
+    @moduledoc false
+    # A Db whose next few event inserts fail as a busy SQLite does.
+    @behaviour Runlight.Db
+
+    def new(inner, fails), do: %Db{module: __MODULE__, dialect: inner.dialect, state: %{inner: inner, fails: fails}}
+
+    @impl Db
+    def all(db, sql, params), do: Db.all(db.state.inner, sql, params)
+
+    @impl Db
+    def run(db, sql, params) do
+      if sql =~ "INSERT INTO rl_events" and Agent.get_and_update(db.state.fails, &{&1, &1 - 1}) > 0,
+        do: raise("SQLITE_BUSY: database is locked")
+
+      Db.run(db.state.inner, sql, params)
+    end
+
+    @impl Db
+    def affected(db, sql, params), do: Db.affected(db.state.inner, sql, params)
+    @impl Db
+    def transaction(db, fun), do: Db.transaction(db.state.inner, fun)
+    @impl Db
+    def exclusive(db, fun), do: Db.exclusive(db.state.inner, fun)
+  end
+
+  test "audit 2026-10-23: a hit tried again after the store was busy counts once" do
+    {store, cleanup} = Stores.store(:sqlite)
+    on_exit(cleanup)
+    {:ok, fails} = Agent.start_link(fn -> 0 end)
+    now = at("2026-10-06T12:00:00Z")
+
+    rl =
+      Runlight.new(
+        store: Store.new(Busy.new(store.db, fails)),
+        site: [hostnames: ["example.com"], timezone: "UTC"],
+        now: fn -> now end
+      )
+
+    Runlight.init(rl)
+    Agent.update(fails, fn _ -> 2 end)
+    hit(rl, JS.obj(k: "pageview", u: "https://example.com/", i: "p1"), "203.0.113.1")
+    Agent.update(fails, fn _ -> 1 end)
+    hit(rl, JS.obj(k: "engagement", u: "https://example.com/", i: "p1", e: 5000), "203.0.113.1")
+    [visit] = Store.all_rows(rl.store, "SELECT pageviews, engaged_ms FROM rl_sessions", [])
+    assert JS.number(visit["pageviews"]) == 1
+    assert JS.number(visit["engaged_ms"]) == 5000
+    assert length(Store.all_rows(rl.store, "SELECT id FROM rl_events WHERE kind = 'pageview'", [])) == 1
+  end
+
+  test "audit 2026-10-23: a funnel over more visits than the cap counts the newest and says so" do
+    {rl, clock} = harness(:sqlite, nil, at("2026-10-06T12:00:00Z"))
+
+    for ip <- ["203.0.113.1", "203.0.113.2", "203.0.113.3"] do
+      hit(rl, JS.obj(k: "pageview", u: "https://example.com/pricing"), ip)
+      advance(clock, @minute)
+    end
+
+    routes = Runlight.routes(rl, token: "secret")
+
+    Runlight.Routes.handle(
+      routes,
+      Request.new("https://example.com/runlight/api/funnels?site=default",
+        method: "POST",
+        headers: [{"authorization", "Bearer secret"}, {"content-type", "application/json"}],
+        body:
+          Jason.encode!(%{
+            name: "F",
+            steps: [%{kind: "page", match: "/pricing"}, %{kind: "page", match: "/thanks"}]
+          })
+      )
+    )
+
+    capped = Runlight.routes(%{rl | store: %{rl.store | funnel_visits: 2}}, token: "secret")
+    [funnel] = Jason.decode!(api(capped, "/api/funnels?period=today").body)["funnels"]
+    assert funnel["sampled"] == 2
+    assert hd(funnel["steps"])["visits"] == 2
+
+    roomy = Runlight.routes(%{rl | store: %{rl.store | funnel_visits: 10}}, token: "secret")
+    refute Map.has_key?(hd(Jason.decode!(api(roomy, "/api/funnels?period=today").body)["funnels"]), "sampled")
+  end
+
+  test "audit 2026-10-23: a prop named __proto__ is kept" do
+    {rl, _} = harness(:sqlite, nil, at("2026-10-06T12:00:00Z"))
+
+    Runlight.collect(
+      rl,
+      Request.new("https://example.com/runlight/e",
+        method: "POST",
+        headers: [{"user-agent", @chrome}, {"x-forwarded-for", "203.0.113.1"}],
+        body: ~s({"k":"event","u":"https://example.com/","n":"Odd","p":{"__proto__":"x","plain":"y"}})
+      )
+    )
+
+    [row] = Store.all_rows(rl.store, "SELECT props FROM rl_events WHERE name = 'Odd'", [])
+    assert Jason.decode!(row["props"]) == %{"__proto__" => "x", "plain" => "y"}
+  end
+
+  test "audit 2026-10-23: an automatic link event keeps its link without the query string or fragment" do
+    {rl, _} = harness(:sqlite, nil, at("2026-10-06T12:00:00Z"))
+
+    send_event = fn name, url ->
+      hit(rl, JS.obj(k: "event", u: "https://example.com/", n: name, p: JS.obj(url: url)), "203.0.113.1")
+    end
+
+    send_event.("Outbound link", "https://other.example/reset?token=abc&email=a@b.example#top")
+    send_event.("File download", "https://example.com/a.pdf?sig=x")
+    send_event.("Signup", "https://example.com/?plan=pro")
+    rows = Store.all_rows(rl.store, "SELECT name, props FROM rl_events ORDER BY name", [])
+
+    assert Enum.map(rows, &[&1["name"], Jason.decode!(&1["props"])["url"]]) == [
+             ["File download", "https://example.com/a.pdf"],
+             ["Outbound link", "https://other.example/reset"],
+             ["Signup", "https://example.com/?plan=pro"]
+           ]
+  end
+
+  test "audit 2026-10-23: a local install's address cannot end in a newline" do
+    assert Runlight.Safefetch.install_address?("http://localhost:3000/", true)
+    assert Runlight.Safefetch.install_address?("http://127.0.0.1", true)
+    refute Runlight.Safefetch.install_address?("http://localhost\n", true)
+    refute Runlight.Safefetch.install_address?("http://127.0.0.1:8080\n", true)
   end
 end

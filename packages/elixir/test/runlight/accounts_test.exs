@@ -143,12 +143,13 @@ defmodule Runlight.AccountsTest do
     Throttle.fail(t, "gone", 0)
     Throttle.clear(t, "gone")
     for n <- 1..10_050, do: Throttle.fail(t, "made-up #{n}", 0)
-    assert keys.() == 10_000
+    # Past the ceiling, those with the fewest tries go, down to nine tenths of it, and the last 50 come after.
+    assert keys.() == 9_050
     assert Throttle.blocked?(t, "real", 0)
     refute Throttle.blocked?(t, "made-up 1", 0) or Throttle.blocked?(t, "made-up 50", 0)
     # Expired keys go first, and the count starts again from what is left.
-    for n <- 1..11, do: Throttle.fail(t, "later #{n}", 15 * 60_000)
-    assert keys.() == 11
+    for n <- 1..951, do: Throttle.fail(t, "later #{n}", 15 * 60_000)
+    assert keys.() == 951
   end
 
   test "a code is accepted once, even by two processes", %{rl: rl, acc: acc} do

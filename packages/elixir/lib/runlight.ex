@@ -37,10 +37,15 @@ defmodule Runlight do
     * `:geo` - a lookup for an IP when the platform sends no location headers,
       such as `Runlight.Geo.file_lookup("GeoLite2-City.mmdb")`.
     * `:trust_proxy` - read the client's address from forwarding headers:
-      `true` (the default: the last X-Forwarded-For entry, then X-Real-IP,
-      then CF-Connecting-IP), one header's name, or `false` for the
-      connection's own address. Left unset, it warns once when a request
-      comes straight from a public address with none of those headers.
+      the last X-Forwarded-For entry, which the nearest proxy wrote, then
+      X-Real-IP, then CF-Connecting-IP. Name one of them to read only that
+      header, such as "cf-connecting-ip" behind Cloudflare and another proxy.
+      Left unset, the headers count only on a connection from this computer
+      or a private network, where proxies and load balancers connect from, so
+      a client that reaches the app straight from the internet cannot choose
+      its own address. `true` reads them from anywhere, for a CDN that
+      connects from public addresses. `false` reads only the connection's own
+      address.
     * `:link_path` - where short links on the app's own domain live, default
       "/go".
     * `:mail` - how email reports, invites, and sign-in links are sent.
@@ -100,7 +105,7 @@ defmodule Runlight do
     :managed_sites,
     :geo,
     :trust_proxy,
-    :warn_direct,
+    :trust_private,
     :limit,
     :now,
     :link_path,
@@ -204,8 +209,8 @@ defmodule Runlight do
       managed_sites: managed,
       geo: Keyword.get(opts, :geo),
       trust_proxy: if(is_nil(opts[:trust_proxy]), do: true, else: opts[:trust_proxy]),
-      # Warned about once, when trust_proxy was left at its default and answers a public address directly.
-      warn_direct: is_nil(opts[:trust_proxy]),
+      # Left at its default, trust_proxy believes forwarding headers only from a private address.
+      trust_private: is_nil(opts[:trust_proxy]),
       limit: limit,
       now: Keyword.get(opts, :now) || fn -> System.os_time(:millisecond) end,
       link_path: link_path,
@@ -1376,7 +1381,7 @@ defmodule Runlight do
   @spec client_ip(t(), Request.t()) :: String.t()
   def client_ip(rl, %Request{} = request) do
     forwarded =
-      if rl.trust_proxy do
+      if trusts?(rl, request) do
         h = request.headers
 
         last = fn name ->
@@ -1393,19 +1398,35 @@ defmodule Runlight do
         end
       end
 
-    if forwarded && JS.trim(forwarded) != "" do
-      JS.trim(forwarded)
-    else
-      # A public address with no forwarding header means nothing sits in front, and then any client
-      # could name its own address in one. Said once, only when trust_proxy was left at its default.
-      if rl.warn_direct && request.remote_address && Safefetch.public_address?(request.remote_address) &&
-           :ets.insert_new(rl.table, {:warned_direct, true}) do
-        Logger.warning(
-          "Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set trust_proxy: false when nothing sits in front of this server, or put a proxy in front that sets the header."
-        )
-      end
+    if forwarded && JS.trim(forwarded) != "",
+      do: JS.trim(forwarded),
+      else: request.remote_address || ""
+  end
 
-      request.remote_address || ""
+  # Whether a request's forwarding headers count. Left at its default, trust_proxy believes them only on a
+  # connection from this computer or a private network, or one whose address the app did not pass on, since a
+  # client reaching the server straight from the internet could write them itself.
+  defp trusts?(rl, request) do
+    cond do
+      rl.trust_proxy in [nil, false, ""] ->
+        false
+
+      not rl.trust_private or request.remote_address in [nil, ""] or
+          not Safefetch.public_address?(request.remote_address) ->
+        true
+
+      true ->
+        # Said once: a CDN that connects from public addresses needs trust_proxy set, or its visitors all look alike.
+        h = request.headers
+
+        if Enum.any?(["x-forwarded-for", "x-real-ip", "cf-connecting-ip"], &Headers.get(h, &1)) &&
+             :ets.insert_new(rl.table, {:warned_direct, true}) do
+          Logger.warning(
+            "Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set trust_proxy to the header it sets (cf-connecting-ip) or to true."
+          )
+        end
+
+        false
     end
   end
 
@@ -1420,8 +1441,18 @@ defmodule Runlight do
       _ ->
         today = Store.salt(rl.store, day, Hash.random_salt())
         yesterday = Store.salt_if_exists(rl.store, Time.add_days(day, -1))
-        drop_old_salts(rl, now)
-        State.put(rl.table, {:salts, timezone}, %{day: day, today: today, yesterday: yesterday})
+        # Kept before old salts go, so dropping yesterday's from the store drops it from here too.
+        salts = State.put(rl.table, {:salts, timezone}, %{day: day, today: today, yesterday: yesterday})
+
+        try do
+          drop_old_salts(rl, now)
+        rescue
+          error ->
+            State.delete(rl.table, {:salts, timezone})
+            reraise error, __STACKTRACE__
+        end
+
+        State.get(rl.table, {:salts, timezone}) || salts
     end
   end
 
@@ -1463,8 +1494,8 @@ defmodule Runlight do
     :ok
   end
 
-  # The host a proxy says the request was for, read only when proxy headers are trusted.
-  defp forwarded_host(rl, request), do: if(rl.trust_proxy, do: Request.header(request, "x-forwarded-host"))
+  # The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.
+  defp forwarded_host(rl, request), do: if(trusts?(rl, request), do: Request.header(request, "x-forwarded-host"))
 
   @doc "Handles one tracker request. Always succeeds; bad input is dropped quietly."
   @spec collect(t(), Request.t()) :: :ok
@@ -1482,24 +1513,36 @@ defmodule Runlight do
          # waits a moment at most and is then dropped, rather than holding its request until that is done.
          true <- ready_within?(rl, @tracker_wait_ms) do
       now = now(rl)
-      record_with_retries(rl, payload, request, now, 1)
+      done = make_ref()
+
+      try do
+        record_with_retries(rl, payload, request, now, done, 1)
+      after
+        Process.delete({:runlight_done, done})
+      end
     else
       _ -> :ok
     end
   end
 
   # A database too busy to take the hit right now gets it a little later, at the time it arrived.
-  defp record_with_retries(rl, payload, request, now, attempt) do
-    record(rl, payload, request, now)
+  defp record_with_retries(rl, payload, request, now, done, attempt) do
+    record(rl, payload, request, now, done)
   rescue
     error ->
       if attempt >= 3 or not busy?(error) do
         reraise error, __STACKTRACE__
       else
         Process.sleep(500 * attempt)
-        record_with_retries(rl, payload, request, now, attempt + 1)
+        record_with_retries(rl, payload, request, now, done, attempt + 1)
       end
   end
+
+  # How far recording a hit got: its visit, and which of its writes went in. A hit tried again after a write failed
+  # skips the ones before it, so a visit's counts never take the same hit twice. Kept in the process dictionary,
+  # since a failed try leaves by raising.
+  defp progress(done), do: Process.get({:runlight_done, done}, %{})
+  defp progressed(done, key, value), do: Process.put({:runlight_done, done}, Map.put(progress(done), key, value))
 
   defp busy?(error) do
     Regex.match?(
@@ -1508,7 +1551,7 @@ defmodule Runlight do
     )
   end
 
-  defp record(rl, payload, request, now) do
+  defp record(rl, payload, request, now, done) do
     # Managed sites load from the database in init(), so it must come first.
     init(rl)
     hostname = payload.url.hostname
@@ -1519,7 +1562,7 @@ defmodule Runlight do
         :ok
 
       payload.kind == "engagement" ->
-        engagement(rl, site, payload, now)
+        engagement(rl, site, payload, now, done)
 
       true ->
         page = Sources.parse_page(payload.url)
@@ -1535,12 +1578,13 @@ defmodule Runlight do
                   Store.touched_old_visit(rl.store, site["id"], pageview.started_at, now - @rollup_delay_ms + 3_600_000)
 
               # A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
-              {%{id: pageview.session, visitor: pageview.visitor}, now - pageview.last_at <= session_idle_ms()}
+              {progress(done)[:session] || %{id: pageview.session, visitor: pageview.visitor},
+               now - pageview.last_at <= session_idle_ms()}
             else
-              {nil, true}
+              {progress(done)[:session], true}
             end
           else
-            {nil, true}
+            {progress(done)[:session], true}
           end
 
         session =
@@ -1555,7 +1599,12 @@ defmodule Runlight do
               language: payload.language
             })
 
-        Store.touch_session(rl.store, session.id, now, payload.kind, page.path, reopen)
+        progressed(done, :session, session)
+
+        unless progress(done)[:touched] do
+          Store.touch_session(rl.store, session.id, now, payload.kind, page.path, reopen)
+          progressed(done, :touched, true)
+        end
 
         Store.insert_event(rl.store, %{
           site: site["id"],
@@ -1606,7 +1655,7 @@ defmodule Runlight do
               client[:screen_width]
             )
 
-          location = Runlight.Geo.locate(request.headers, ip, rl.geo, rl.trust_proxy not in [nil, false, ""])
+          location = Runlight.Geo.locate(request.headers, ip, rl.geo, trusts?(rl, request))
 
           Store.insert_session(rl.store, %{
             id: session.id,
@@ -1806,12 +1855,15 @@ defmodule Runlight do
     end
   end
 
-  defp engagement(rl, site, payload, now) do
+  defp engagement(rl, site, payload, now, done) do
     pageview = if payload.engaged_ms > 0, do: Store.pageview(rl.store, site["id"], payload.pageview_id)
 
     # Reports look for a visit's rows only so long after it began, so later time on it is let go.
     if pageview && now - pageview.started_at < Runlight.Store.Sql.event_tail_ms() do
-      Store.add_engagement(rl.store, pageview.session, payload.engaged_ms)
+      unless progress(done)[:engaged] do
+        Store.add_engagement(rl.store, pageview.session, payload.engaged_ms)
+        progressed(done, :engaged, true)
+      end
 
       # Only a visit that began more than an hour ago can belong to a day that is already added up.
       if now - pageview.started_at > 3_600_000,

@@ -119,19 +119,20 @@ defmodule Runlight.Accounts.Throttle do
   end
 
   # The keys are counted as they come and go, and the table is looked through only once there are more than the
-  # ceiling. Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the table has a
-  # hard ceiling and a flood of made-up names cannot wipe out a real block. The count is set again from what is left.
+  # ceiling. Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+  # ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block, or the count
+  # of a name someone is close to blocking. The count is set again from what is left.
   defp evict(t, now) do
     entries = :ets.match_object(t.table, {{:throttle, t.name, :_}, :_})
-    entries = Enum.sort_by(entries, fn {_, e} -> e.seq end)
     {expired, live} = Enum.split_with(entries, fn {_, e} -> e.until <= now end)
     Enum.each(expired, fn {k, _} -> :ets.delete(t.table, k) end)
-    over = length(live) - @max_throttled
+    over = if length(live) > @max_throttled, do: length(live) - div(@max_throttled * 9, 10), else: 0
 
     if over > 0 do
-      {unblocked, blocked} = Enum.split_with(live, fn {_, e} -> e.count < t.limit end)
-      drop = Enum.take(unblocked ++ blocked, over)
-      Enum.each(drop, fn {k, _} -> :ets.delete(t.table, k) end)
+      live
+      |> Enum.sort_by(fn {_, e} -> {e.count, e.seq} end)
+      |> Enum.take(over)
+      |> Enum.each(fn {k, _} -> :ets.delete(t.table, k) end)
     end
 
     State.put(t.table, {:throttle_size, t.name}, length(live) - max(over, 0))
