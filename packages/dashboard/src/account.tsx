@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { ApiError, api, type InviteSent, type PendingInvite, type Person, type Site } from "./api.js";
+import { ApiError, api, signOut, type InviteSent, type PendingInvite, type Person, type Site } from "./api.js";
 import { day } from "./format.js";
 import { errorText, t, tn, type Key } from "./i18n.js";
 import { Secret } from "./secret.js";
@@ -84,8 +84,42 @@ export function AccountSheet({ me, onClose }: { me: Person; onClose: () => void 
           </div>
         </form>
         <TwoFactor me={me} />
+        <SignOutEverywhere />
       </div>
     </Sheet>
+  );
+}
+
+/** Account, signing out in every browser at once, for a device that is lost or a cookie that got out. */
+function SignOutEverywhere() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const go = () => {
+    if (!window.confirm(t("account.everywhereConfirm"))) return;
+    setBusy(true);
+    setError("");
+    api
+      .signOutEverywhere()
+      .then(() => (signOut ? location.assign(signOut) : location.reload()))
+      .catch((err: Error) => {
+        setError(err.message);
+        setBusy(false);
+      });
+  };
+  return (
+    <div class="link-form">
+      <div class="field-row">
+        <span class="field-label">{t("account.everywhere")}</span>
+        <span class="field-hint">{t("account.everywhereHint")}</span>
+      </div>
+      <div class="settings-actions start">
+        <button type="button" disabled={busy} onClick={go}>
+          <Icon name="signOut" />
+          {t("account.everywhere")}
+        </button>
+        {error ? <span class="settings-error">{error}</span> : null}
+      </div>
+    </div>
   );
 }
 

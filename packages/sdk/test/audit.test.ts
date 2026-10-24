@@ -388,18 +388,25 @@ test("audit 2026-10-23: a member sees and revokes only the tokens they made, and
   assert.equal((await json(owner, "POST", "/api/observe-key/new?site=default", {})).status, 200);
 });
 
-test("audit 2026-10-23: signing out ends the account's sessions everywhere, and only from the dashboard's own pages", async () => {
+test("audit 2026-10-23: signing out ends this browser's session, signing out everywhere ends them all, and only from the dashboard's own pages", async () => {
   const { handler, json, member } = await withMember();
-  const other = cookieFrom(await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }))));
-  assert.equal((await json(other, "GET", "/api/account")).status, 200);
+  const signIn = async () => cookieFrom(await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }))));
+  const other = await signIn();
   const crossSite = await handler(accountReq("/logout", { headers: { cookie: member, "sec-fetch-site": "cross-site" } }));
   assert.equal(crossSite.status, 403, "another site cannot sign anyone out");
-  assert.equal((await json(other, "GET", "/api/account")).status, 200);
   const out = await handler(accountReq("/logout", { headers: { cookie: member, "sec-fetch-site": "same-origin" } }));
   assert.equal(out.status, 303);
-  assert.equal((await json(member, "GET", "/api/account")).status, 401, "the cookie copied before stops working");
-  assert.equal((await json(other, "GET", "/api/account")).status, 401, "and so does the one in the other browser");
-  const back = cookieFrom(await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }))));
+  assert.match(out.headers.get("set-cookie") ?? "", /Max-Age=0/i, "this browser's cookie goes");
+  assert.equal((await json(other, "GET", "/api/account")).status, 200, "the other browser stays signed in");
+
+  const third = await signIn();
+  const ended = await json(other, "POST", "/api/account/sign-out-everywhere", {});
+  assert.equal(ended.status, 200);
+  assert.match(ended.headers.get("set-cookie") ?? "", /Max-Age=0/i);
+  assert.equal((await json(other, "GET", "/api/account")).status, 401, "the browser that asked is signed out");
+  assert.equal((await json(third, "GET", "/api/account")).status, 401, "and so is every other");
+  assert.equal((await json(member, "GET", "/api/account")).status, 401, "and a cookie copied before");
+  const back = await signIn();
   assert.equal((await json(back, "GET", "/api/account")).status, 200, "signing in again works");
 });
 

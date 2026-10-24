@@ -338,10 +338,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       return signedInTo(request, user, next);
     }
 
-    // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+    // Signing out ends this browser's session; the account page can end them everywhere.
     if (path === "/logout") {
-      const user = await signedIn(request);
-      if (user) await accounts.endSessions(user.id);
       return redirect(`${base}/login`, { "set-cookie": sessionCookie(request, "", 0) });
     }
 
@@ -392,6 +390,11 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
     if (request.method === "POST" && type !== "application/json") return coded("Send JSON", "send_json", 415);
     if (path === "/api/account" && request.method === "GET") return reply({ account: person(user) });
+    // Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+    if (path === "/api/account/sign-out-everywhere" && request.method === "POST") {
+      await accounts.endSessions(user.id);
+      return reply({ ok: true }, 200, { "set-cookie": sessionCookie(request, "", 0) });
+    }
     if (path === "/api/account/password" && request.method === "POST") {
       const input = await body(request);
       if (!input) return coded("Send JSON", "send_json", 415);

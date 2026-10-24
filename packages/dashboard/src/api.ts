@@ -473,6 +473,7 @@ export const api = {
   deleteFunnel: (site: string, id: string) => del(`funnels/${id}${siteQuery(site)}`),
   account: () => get<{ account: Person }>("account", new URLSearchParams()),
   changePassword: (current: string, next: string, revokeTokens = false) => send<{ ok: true }>("POST", "account/password", { current, next, ...(revokeTokens ? { revokeTokens: true } : {}) }),
+  signOutEverywhere: () => send<{ ok: true }>("POST", "account/sign-out-everywhere", {}),
   twoFactorStart: (password: string) => send<{ secret: string; uri: string }>("POST", "account/2fa/start", { password }),
   twoFactorConfirm: (code: string) => send<{ recovery: string[] }>("POST", "account/2fa/confirm", { code }),
   twoFactorRecovery: (password: string) => send<{ recovery: string[] }>("POST", "account/2fa/recovery", { password }),
