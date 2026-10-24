@@ -9,13 +9,13 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - `trustProxy` left at its default believes forwarding headers (`X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`, and `X-Forwarded-Host`) only on a connection from this computer or a private network, where proxies and load balancers connect from, or one whose address the app does not pass on, as on a hosting platform's functions. A client reaching the app straight from the internet can no longer choose its own address and get round the rate limits. Behind a CDN that connects from public addresses, such as Cloudflare in front of the server with nothing between, set `trustProxy` (`TRUST_PROXY` on the server) to its header, `cf-connecting-ip`, or to true; Runlight warns once when it sees forwarding headers it did not believe. `TRUST_PROXY` takes true, false, 1, 0, yes, no, on, off, or a header's name, and refuses anything else, where before "0" or "off" turned it on.
 - A funnel over more than 100,000 visits counts the newest 100,000 in the range, and says so under it, as Journeys does, so a long range on a big site no longer reads every matching row into memory.
 - Outbound link and File download events, which the tracker sends on its own, keep the link without its query string or fragment, as page paths are kept, since tokens and email addresses ride in them. The server drops them, so a tracker cached from before is held to it too.
-- Signing out ends the account's sessions in every browser, so a session cookie copied before stops working.
 
 ### Security
 
 - A member sees and revokes only the API tokens they made, where before they could list and revoke everyone's, the owner's included, and only an owner or admin can replace a site's agents key.
 - The sign-in, two-factor, setup, invite, and sign-out pages refuse a form posted from another site, or a sibling one, so a page elsewhere cannot sign someone in to an account that is not theirs, plant a session, or sign them out.
 - Changing your password can also revoke the API tokens and connected apps your account made, for when a password got out.
+- Account has Sign out everywhere, which ends the account's sessions in every browser, so a session cookie copied before stops working, as on a lost phone. Signing out from the menu still ends only this browser's.
 - A flood of sign-in tries under made-up names can no longer wipe out the count of a name close to its limit.
 - Yesterday's salt is dropped from memory on the first hit after midnight when no visit is left open, as it is from the database, rather than lingering until the next scheduled check.
 - More IPv6 forms of private addresses are refused where a fetch must reach the public internet: IPv4-translated (`::ffff:0:0/96`), local-use NAT64 (`64:ff9b:1::/48`), the old site-local range, and everything outside global unicast.
