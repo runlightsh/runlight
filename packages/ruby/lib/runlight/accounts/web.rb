@@ -442,10 +442,8 @@ module Runlight
           return signed_in_to(request, user, next_path)
         end
 
-        # Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+        # Signing out ends this browser's session; the account page can end them everywhere.
         if path == "/logout"
-          user = signed_in(request)
-          @accounts.end_sessions(user["id"]) if user
           return redirect("#{base}/login", { "set-cookie" => session_cookie(request, "", 0) })
         end
 
@@ -567,6 +565,12 @@ module Runlight
         # Writes must be JSON, which a form on another page cannot send, even those with no body.
         return coded("Send JSON", "send_json", 415) if method == "POST" && media_type(request) != "application/json"
         return reply({ "account" => person(user) }) if path == "/api/account" && method == "GET"
+
+        # Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+        if path == "/api/account/sign-out-everywhere" && method == "POST"
+          @accounts.end_sessions(user["id"])
+          return reply({ "ok" => true }, 200, { "set-cookie" => session_cookie(request, "", 0) })
+        end
 
         fresh = ->(updated) { { "set-cookie" => session_cookie(request, @accounts.session_for(updated, now), Accounts::SESSION_MS / 1000) } }
         if path == "/api/account/password" && method == "POST"
