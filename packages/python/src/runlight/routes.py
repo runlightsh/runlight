@@ -27,6 +27,8 @@ answers every request under the base path. Options take the TypeScript names:
 - ownHosts: a callable giving more names the dashboard is reached at, which can never be link domains either.
 - accountOf (internal): callable(Request) giving the account a request comes from.
 - tokenMade (internal): callable(token, by) noting who made a token; False takes it back.
+- tokensOf (internal): callable(by) giving the ids of the tokens an account made, so a member sees and revokes
+  only their own.
 """
 
 from __future__ import annotations
@@ -579,6 +581,7 @@ class Routes:
         self.sign_out = options["signOut"] if options.get("signOut") is not None else (f"{self.base}/logout" if web else None)
         self.account_of = options["accountOf"] if options.get("accountOf") is not None else (web.account_of if web else None)
         self.token_made = options["tokenMade"] if options.get("tokenMade") is not None else ((lambda row, by: web.token_made(row, by)) if web else None)
+        self.tokens_of = options["tokensOf"] if options.get("tokensOf") is not None else ((lambda by: web.tokens_of(by)) if web else None)
         authorize = options.get("authorize")
         oauth: dict[str, Any] = {
             "runlight": runlight,
@@ -608,12 +611,14 @@ class Routes:
     # Access.
 
     def _admin_only(self, path: str, method: str) -> bool:
-        """The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site."""
+        """The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's
+        agents key, and deleting a site."""
         return (
             (path == "/api/mail" and method in ("PUT", "DELETE"))
             or (path == "/api/assistant" and method in ("PUT", "DELETE"))
             or (path == "/api/assistant/limits" and method == "PUT")
             or (path == "/api/assistant/models" and method == "POST")
+            or (path == "/api/observe-key/new" and method == "POST")
             or (bool(re.fullmatch(r"/api/sites/[^/]+", path)) and method == "DELETE")
         )
 
@@ -1451,6 +1456,11 @@ class Routes:
 
     # API tokens.
 
+    def _own_tokens(self, request: Request) -> set[str]:
+        """The tokens the account behind a request made: none when nothing notes who made what."""
+        by = self.account_of(request) if self.account_of else None
+        return set(self.tokens_of(by)) if by and self.tokens_of else set()
+
     def _tokens_api(self, request: Request, path: str) -> Response:
         rl = self.rl
         rl.init()
@@ -1458,8 +1468,10 @@ class Routes:
         def view(t: Mapping[str, Any]) -> dict[str, Any]:
             return {"id": t["id"], "name": t["name"], "site": t["site"], "scope": t["scope"], "hint": t["hint"], "createdAt": t["createdAt"], "lastUsedAt": t["lastUsedAt"]}
 
+        # A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+        mine = self._own_tokens(request) if request in self.members else None
         if path == "/api/tokens" and request.method == "GET":
-            return json({"tokens": [view(t) for t in rl.store.tokens()]})
+            return json({"tokens": [view(t) for t in rl.store.tokens() if mine is None or t["id"] in mine]})
         if path == "/api/tokens" and request.method == "POST":
             body = self._read_json(request)
             if isinstance(body, Response):
@@ -1487,6 +1499,8 @@ class Routes:
             return json({"token": view(row), "secret": secret}, 201)
         match = re.fullmatch(r"/api/tokens/([a-f0-9]{24})", path)
         if match and request.method == "DELETE":
+            if mine is not None and match.group(1) not in mine:
+                return coded("Unknown token", "unknown_token", 404)
             return json({"ok": True}) if rl.store.delete_token(match.group(1)) else coded("Unknown token", "unknown_token", 404)
         return coded("Not found", "not_found", 404)
 
@@ -1862,7 +1876,7 @@ class Routes:
         if path == "/api/assistant/chat" and method == "POST":
             return self._chat(request, url)
 
-        # Only the owner manages tokens: an API token cannot make or revoke one.
+        # Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
         if path == "/api/tokens" or path.startswith("/api/tokens/"):
             access = self._can_read(request)
             if access is not True:
@@ -2414,8 +2428,13 @@ class Routes:
             # One funnel at a time, so a page of funnels never takes every database connection at once.
             rows = []
             for funnel in store.funnels(site["id"]):
-                counts = store.funnel_counts(query, funnel)
-                rows.append({**funnel, "steps": [{**step, "visits": counts[i]} for i, step in enumerate(funnel["steps"])]})
+                counted = store.funnel_counts(query, funnel)
+                counts = counted["counts"]
+                rows.append({
+                    **funnel,
+                    "steps": [{**step, "visits": counts[i]} for i, step in enumerate(funnel["steps"])],
+                    **({"sampled": store.funnel_visits} if counted["sampled"] else {}),
+                })
             return json({"site": site["id"], "range": range_out, "funnels": rows})
 
         if path == "/api/event-props":

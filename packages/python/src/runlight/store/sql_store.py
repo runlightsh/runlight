@@ -39,6 +39,7 @@ from .sql import (
     BUILT_DAYS,
     DURATION,
     EVENT_TAIL_MS,
+    FUNNEL_VISITS,
     IS_VISIT,
     JOURNEY_VISITS,
     LIVE_VIEWS,
@@ -115,6 +116,8 @@ class SqlStore:
         self._ready = False
         # Whether a full migrate went over every table and index in this process.
         self._checked_all = False
+        # The most visits a funnel is counted over; smaller in tests, to try the cap.
+        self.funnel_visits = FUNNEL_VISITS
 
     def tables(self) -> list[str]:
         """The store's tables as named in the database, for an app removing Runlight: each one by name, since another
@@ -859,10 +862,22 @@ class SqlStore:
     def delete_funnel(self, id: str) -> None:
         self.db.run("DELETE FROM rl_funnels WHERE id = ?", [id])
 
-    def funnel_counts(self, query: dict[str, Any], funnel: dict[str, Any]) -> list[int]:
-        """How many visits reached each step, in order, within the same visit. Step one is the first matching row in
-        the range; each later step must come after the step before it. Filters choose which visits enter the
-        funnel."""
+    def funnel_counts(self, query: dict[str, Any], funnel: dict[str, Any]) -> dict[str, Any]:
+        """How many visits reached each step, in order, within the same visit, as {counts, sampled}. Step one is the
+        first matching row in the range; each later step must come after the step before it. Filters choose which
+        visits enter the funnel."""
+        # Past funnel_visits visits in the range, only the newest are counted: the range starts where the oldest of
+        # them began.
+        scope = visit_scope(query["filters"], query["site"], query["from"], query["to"], self.db.dialect())
+        found = self.db.all(
+            f"""SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND {IS_VISIT}{scope['sql']}
+         ORDER BY s.started_at DESC, s.id LIMIT {int(self.funnel_visits) + 1}) x""",
+            [query["site"], query["from"], query["to"], *scope["params"]],
+        )
+        first = found[0] if found else {}
+        sampled = num(first.get("n")) > self.funnel_visits
+        if sampled:
+            query = {**query, "from": max(query["from"], num(first.get("t")) + 1)}
         # The rows of the picked visits that match any step, in order, read once and walked here: a join from each
         # step to the next is planned badly by Postgres, which cannot guess how many visits go on.
         v = visit_rows(query["filters"], query["site"], query["from"], query["to"], self.db.dialect())
@@ -894,7 +909,7 @@ class SqlStore:
             if reached < len(counts) and num(row[f"m{reached}"]) == 1:
                 reached += 1
         close()
-        return counts
+        return {"counts": counts, "sampled": sampled}
 
     def journey_pages(self, query: dict[str, Any], per_visit: int) -> dict[str, Any]:
         """Each visit's pageviews in order, at most `per_visit` of them, for journeys. A window function keeps the

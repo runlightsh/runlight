@@ -128,7 +128,7 @@ def _role_of(value: Any) -> str | None:
 
 class AccountsWeb:
     """What accounts_web() hands back: `accounts`, and signed_in(), access(), account_of(), token_made(),
-    has_account(), and handle()."""
+    tokens_of(), has_account(), and handle()."""
 
     def __init__(self, options: Mapping[str, Any]) -> None:
         self.rl = options["runlight"]
@@ -153,15 +153,16 @@ class AccountsWeb:
         # cannot keep the server hashing; a request with no known address skips that one,
         # since it would hold up everyone at once.
         # Each try counts before the password is checked, and a right one is taken back.
-        # Counts by address stay in the process, as TypeScript keeps them, so no address reaches the database.
-        self.per_address = Throttle(self.store, "address", 10, memory=True)
-        self.per_account = Throttle(self.store, "account", 50)
-        self.per_ip = Throttle(self.store, "ip", 30, memory=True)
+        # The counts live in the database, so every worker process shares them, hashed with a key for the day, so
+        # nothing made from an address lasts past a day.
+        self.per_address = Throttle(self.store, "address", 10, clock=self.now)
+        self.per_account = Throttle(self.store, "account", 50, clock=self.now)
+        self.per_ip = Throttle(self.store, "ip", 30, clock=self.now)
         # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
         # Password re-checks in Account: ten.
-        self.code_tries = Throttle(self.store, "code", 5)
-        self.confirm_tries = Throttle(self.store, "confirm", 5)
-        self.rechecks = Throttle(self.store, "recheck", 10)
+        self.code_tries = Throttle(self.store, "code", 5, clock=self.now)
+        self.confirm_tries = Throttle(self.store, "confirm", 5, clock=self.now)
+        self.rechecks = Throttle(self.store, "recheck", 10, clock=self.now)
 
     def now(self) -> int:
         return self._now()
@@ -312,6 +313,11 @@ class AccountsWeb:
             return Response(AUTH_CSS, 200, {"content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600"})
         if path == "/auth.js":
             return Response(auth_js(query.get("lang") or "en"), 200, {"content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600"})
+        # A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+        # plant a session, so these pages take forms only from their own. The browser says where a request came from.
+        cross_site = request.headers.get("sec-fetch-site") in ("cross-site", "same-site")
+        if cross_site and (method == "POST" or path == "/logout") and path in ("/setup", "/login", "/login/code", "/invite", "/logout"):
+            return _html(login_page(base, {"error": t("oauth.anotherSiteTitle"), "next": self.home_path, "forgot": self.forgot}, lang), 403)
 
         if path == "/setup":
             if self.has_account():
@@ -382,7 +388,12 @@ class AccountsWeb:
             self.code_tries.clear(user["id"])
             return self._signed_in_to(request, user, next_)
 
+        # Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still
+        # stops working.
         if path == "/logout":
+            signed = self.signed_in(request)
+            if signed is not None:
+                self.accounts.end_sessions(signed["id"])
             return _redirect(f"{base}/login", {"set-cookie": self._session_cookie(request, "", 0)})
 
         if path == "/invite":
@@ -515,6 +526,9 @@ class AccountsWeb:
                 return refused
             try:
                 updated = self.accounts.set_password(user["email"], _field(input, "next"), now)
+                # Asked for after a password got out: the tokens and apps the account made could still read on.
+                if input.get("revokeTokens") is True:
+                    self._drop_tokens_of(user["id"])
                 # The new password ends every other sign-in; this browser gets a fresh one.
                 return _reply({"ok": True}, 200, self._fresh(request, updated))
             except AccountError as error:
@@ -673,6 +687,10 @@ class AccountsWeb:
             return False
         self.store.set_setting(f"{MADE_BY}{token['id']}", by)
         return True
+
+    def tokens_of(self, by: str) -> set[str]:
+        """The ids of the tokens an account made."""
+        return {s["key"][len(MADE_BY) :] for s in self.store.settings_starting_with(MADE_BY) if s["value"] == by}
 
     def handle(self, request: Request, path: str, context: Mapping[str, Any] | None = None) -> Response | None:
         """Answers an account page or API request at a path under the base, or None for anything else."""

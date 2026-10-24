@@ -83,7 +83,7 @@ def test_a_hash_records_its_cost_and_a_cost_out_of_bounds_is_refused_not_run():
     # The same bytes any language's scrypt gives for that cost, so every port can check them.
     again = hashlib.scrypt(b"a long password", salt=crypto.from_base64url(salt), n=32768, r=8, p=3, maxmem=256 * 32768 * 8, dklen=32)
     assert crypto.base64url(again) == key
-    for cost in ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "16384$8$1.5"]:
+    for cost in ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "16384$8$1.5", "1048576$1$1", "65536$1$1"]:
         assert crypto.check_password("a long password", f"scrypt${cost}${salt}${key}") is False, cost
 
 

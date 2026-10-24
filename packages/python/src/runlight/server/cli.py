@@ -8,7 +8,8 @@ cli.ts). Settings come from the environment:
     RUNLIGHT_SECRET   signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
     RUNLIGHT_TOKEN    also accepted as a bearer token on the API
     RUNLIGHT_URL      the dashboard's public address, which can never become a link domain
-    TRUST_PROXY       "false" when no proxy sits in front, so forwarded addresses are ignored
+    TRUST_PROXY       unset believes forwarded addresses only from a private network; "false" never,
+                      "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
     RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
     CRON_SECRET       lets a scheduler run the check over HTTP, at POST /api/check
     RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
@@ -48,8 +49,9 @@ Settings are environment variables. PORT (3000) and HOST (0.0.0.0) set where it
 listens. DATA_DIR (./runlight-data) holds the SQLite file and the secret, and
 DATABASE_URL switches to Postgres, MySQL, or MariaDB. RUNLIGHT_SECRET signs
 sessions and encrypts saved keys, RUNLIGHT_TOKEN also works as a bearer token
-on the API, and TRUST_PROXY=false ignores forwarded addresses when nothing sits
-in front.
+on the API. Forwarded addresses count only from a proxy on this computer or a
+private network; TRUST_PROXY=false ignores them, and behind a CDN that connects
+from public addresses, TRUST_PROXY names its header, such as cf-connecting-ip.
 RUNLIGHT_URL is the dashboard's public address, such as
 https://stats.example.com, which short links can never take over.
 RUNLIGHT_GEO picks where locations come from when no platform header gives
@@ -127,14 +129,21 @@ class Settings:
         return url
 
     def trust_proxy(self) -> bool | str | None:
-        """"false" with nothing in front, or the one header your proxy sets, such as cf-connecting-ip. Unset stays
-        None, so the library's default applies and it can warn when nothing sits in front."""
-        value = (env_value("TRUST_PROXY") or "").lower()
+        """TRUST_PROXY: "false" with nothing in front, "true" for a CDN that connects from public addresses, or the
+        one header your proxy sets, such as cf-connecting-ip behind Cloudflare. Unset stays None, so the library's
+        default applies: forwarding headers count only from a private address. Anything else is a mistake, said so
+        rather than guessed at, since "0" or "off" read as on would let any client choose its address."""
+        given = env_value("TRUST_PROXY")
+        value = (given or "").strip().lower()
         if not value:
             return None
-        if value == "false":
+        if value in ("true", "1", "yes", "on"):
+            return True
+        if value in ("false", "0", "no", "off"):
             return False
-        return value if value in ("x-forwarded-for", "x-real-ip", "cf-connecting-ip") else True
+        if value in ("x-forwarded-for", "x-real-ip", "cf-connecting-ip"):
+            return value
+        raise ValueError(f'Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not "{given}"')
 
     def geo(self) -> tuple[Any, Any]:
         """The DB-IP download (or None) and the lookup to use (or None)."""
