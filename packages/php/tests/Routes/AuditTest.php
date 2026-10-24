@@ -232,19 +232,26 @@ final class AuditTest extends TestCase
         $this->assertSame(200, $json($owner, 'POST', '/api/observe-key/new?site=default', new \stdClass())->status);
     }
 
-    public function testSigningOutEndsTheAccountsSessionsEverywhereAndOnlyFromTheDashboardsOwnPages(): void
+    public function testSigningOutEndsThisBrowsersSessionSigningOutEverywhereEndsThemAllAndOnlyFromTheDashboardsOwnPages(): void
     {
         ['handler' => $handler, 'json' => $json, 'member' => $member] = self::withMember();
-        $other = self::cookieFrom($handler(self::formPost('/login', ['email' => 'mo@example.com', 'password' => 'a long password', 'next' => '/runlight/'])));
-        $this->assertSame(200, $json($other, 'GET', '/api/account')->status);
+        $signIn = static fn (): string => self::cookieFrom($handler(self::formPost('/login', ['email' => 'mo@example.com', 'password' => 'a long password', 'next' => '/runlight/'])));
+        $other = $signIn();
         $crossSite = $handler(self::accountReq('/logout', 'GET', ['cookie' => $member, 'sec-fetch-site' => 'cross-site']));
         $this->assertSame(403, $crossSite->status, 'another site cannot sign anyone out');
-        $this->assertSame(200, $json($other, 'GET', '/api/account')->status);
         $out = $handler(self::accountReq('/logout', 'GET', ['cookie' => $member, 'sec-fetch-site' => 'same-origin']));
         $this->assertSame(303, $out->status);
-        $this->assertSame(401, $json($member, 'GET', '/api/account')->status, 'the cookie copied before stops working');
-        $this->assertSame(401, $json($other, 'GET', '/api/account')->status, 'and so does the one in the other browser');
-        $back = self::cookieFrom($handler(self::formPost('/login', ['email' => 'mo@example.com', 'password' => 'a long password', 'next' => '/runlight/'])));
+        $this->assertMatchesRegularExpression('/Max-Age=0/i', (string) $out->headers->get('set-cookie'), "this browser's cookie goes");
+        $this->assertSame(200, $json($other, 'GET', '/api/account')->status, 'the other browser stays signed in');
+
+        $third = $signIn();
+        $ended = $json($other, 'POST', '/api/account/sign-out-everywhere', new \stdClass());
+        $this->assertSame(200, $ended->status);
+        $this->assertMatchesRegularExpression('/Max-Age=0/i', (string) $ended->headers->get('set-cookie'));
+        $this->assertSame(401, $json($other, 'GET', '/api/account')->status, 'the browser that asked is signed out');
+        $this->assertSame(401, $json($third, 'GET', '/api/account')->status, 'and so is every other');
+        $this->assertSame(401, $json($member, 'GET', '/api/account')->status, 'and a cookie copied before');
+        $back = $signIn();
         $this->assertSame(200, $json($back, 'GET', '/api/account')->status, 'signing in again works');
     }
 
