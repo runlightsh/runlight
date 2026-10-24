@@ -623,14 +623,9 @@ public sealed class Web
             return SignedInTo(request, user, next);
         }
 
-        // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+        // Signing out ends this browser's session; the account page can end them everywhere.
         if (path == "/logout")
         {
-            var user = await SignedInAsync(request, cancellationToken).ConfigureAwait(false);
-            if (user != null)
-            {
-                await Accounts.EndSessionsAsync(user.Str("id")!, cancellationToken).ConfigureAwait(false);
-            }
             return Redirect(b + "/login", SessionCookie(request, "", 0));
         }
 
@@ -817,6 +812,12 @@ public sealed class Web
         if (path == "/api/account" && method == "GET")
         {
             return Reply(new JsObject { ["account"] = Person(user) });
+        }
+        // Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+        if (path == "/api/account/sign-out-everywhere" && method == "POST")
+        {
+            await Accounts.EndSessionsAsync(userId, cancellationToken).ConfigureAwait(false);
+            return Reply(new JsObject { ["ok"] = true }, 200, SessionCookie(request, "", 0));
         }
         string Fresh(JsObject updated) => SessionCookie(request, Accounts.SessionFor(updated, now), Accounts.SessionMs / 1000);
         if (path == "/api/account/password" && method == "POST")

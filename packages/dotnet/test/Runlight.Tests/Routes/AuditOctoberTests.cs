@@ -87,18 +87,24 @@ public sealed class AuditOctoberTests : RoutesTestCase
     }
 
     [Fact]
-    public async Task Signing_out_ends_the_accounts_sessions_everywhere_and_only_from_the_dashboards_own_pages()
+    public async Task Signing_out_ends_this_browsers_session_signing_out_everywhere_ends_them_all_and_only_from_the_dashboards_own_pages()
     {
         var t = await WithMember.CreateAsync();
         string other = CookieOf(await t.HandleAsync(FormPost("/login", MoSignsIn)));
-        Assert.Equal(200, (await t.JsonAsync(other, "GET", "/api/account")).Status);
         var crossSite = await t.HandleAsync(AccountReq("/logout", "GET", H(("cookie", t.Member), ("sec-fetch-site", "cross-site"))));
         Assert.Equal(403, crossSite.Status); // another site cannot sign anyone out
-        Assert.Equal(200, (await t.JsonAsync(other, "GET", "/api/account")).Status);
         var signedOut = await t.HandleAsync(AccountReq("/logout", "GET", H(("cookie", t.Member), ("sec-fetch-site", "same-origin"))));
         Assert.Equal(303, signedOut.Status);
-        Assert.Equal(401, (await t.JsonAsync(t.Member, "GET", "/api/account")).Status); // the cookie copied before stops working
-        Assert.Equal(401, (await t.JsonAsync(other, "GET", "/api/account")).Status); // and so does the one in the other browser
+        Assert.Contains("max-age=0", signedOut.Headers.Get("set-cookie") ?? "", StringComparison.OrdinalIgnoreCase); // this browser's cookie goes
+        Assert.Equal(200, (await t.JsonAsync(other, "GET", "/api/account")).Status); // the other browser stays signed in
+
+        string third = CookieOf(await t.HandleAsync(FormPost("/login", MoSignsIn)));
+        var ended = await t.JsonAsync(other, "POST", "/api/account/sign-out-everywhere", new JsObject());
+        Assert.Equal(200, ended.Status);
+        Assert.Contains("max-age=0", ended.Headers.Get("set-cookie") ?? "", StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(401, (await t.JsonAsync(other, "GET", "/api/account")).Status); // the browser that asked is signed out
+        Assert.Equal(401, (await t.JsonAsync(third, "GET", "/api/account")).Status); // and so is every other
+        Assert.Equal(401, (await t.JsonAsync(t.Member, "GET", "/api/account")).Status); // and a cookie copied before
         string back = CookieOf(await t.HandleAsync(FormPost("/login", MoSignsIn)));
         Assert.Equal(200, (await t.JsonAsync(back, "GET", "/api/account")).Status); // signing in again works
     }
