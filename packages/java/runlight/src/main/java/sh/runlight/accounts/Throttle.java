@@ -285,12 +285,13 @@ public final class Throttle {
     }
   }
 
-  private record Kept(String key, long until, boolean blocked) {}
+  private record Kept(String key, long until, long count) {}
 
   /**
-   * Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the
-   * counts have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when
-   * a new entry is made, since only then can there be more.
+   * Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths
+   * of the ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot
+   * wipe out a block, or the count of a name someone is close to blocking. Run when a new entry is
+   * made, since only then can there be more.
    */
   private void prune(long now) {
     synchronized (this) {
@@ -317,24 +318,22 @@ public final class Throttle {
         store.setSetting(key, null);
         continue;
       }
-      entries.add(new Kept(key, until, field(entry, "count") >= limit));
+      entries.add(new Kept(key, until, field(entry, "count")));
     }
     int size = entries.size();
     if (size <= Accounts.MAX_THROTTLED) {
       return size;
     }
-    // Oldest first: each entry's window started windowMs before its end.
-    entries.sort(Comparator.comparingLong(Kept::until));
-    for (boolean blocked : new boolean[] {false, true}) {
-      for (Kept entry : entries) {
-        if (size <= Accounts.MAX_THROTTLED) {
-          return size;
-        }
-        if (entry.blocked() == blocked) {
-          store.setSetting(entry.key(), null);
-          size--;
-        }
+    // Fewest tries first, and oldest first among equals: each entry's window started windowMs
+    // before its end.
+    entries.sort(Comparator.comparingLong(Kept::count).thenComparingLong(Kept::until));
+    int keep = (int) Math.floor(Accounts.MAX_THROTTLED * 0.9);
+    for (Kept entry : entries) {
+      if (size <= keep) {
+        break;
       }
+      store.setSetting(entry.key(), null);
+      size--;
     }
     return size;
   }

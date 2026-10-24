@@ -164,26 +164,36 @@ public final class Safefetch {
     if (g == null) {
       return false;
     }
-    // IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64
-    // (64:ff9b::/96).
-    if (zero(g, 0, 5) && (g[5] == 0xffff || g[5] == 0)) {
-      return g[5] == 0 && g[6] == 0 && g[7] <= 1 ? false : publicV4(embedded(g[6], g[7]));
-    }
-    if (g[0] == 0x64 && g[1] == 0xff9b && zero(g, 2, 6)) {
-      return publicV4(embedded(g[6], g[7]));
+    // IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated
+    // (::ffff:0:0:0/96), and NAT64 (64:ff9b::/96).
+    int[] inside = embeddedV4(g);
+    if (inside != null) {
+      return g[5] == 0 && g[4] == 0 && g[6] == 0 && g[7] <= 1 ? false : publicV4(inside);
     }
     // 6to4 carries an IPv4 address in its second and third groups.
     if (g[0] == 0x2002) {
       return publicV4(embedded(g[1], g[2]));
     }
-    if ((g[0] & 0xfe00) == 0xfc00 || (g[0] & 0xffc0) == 0xfe80 || (g[0] & 0xff00) == 0xff00) {
+    // Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old
+    // site-local, multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any
+    // address.
+    if ((g[0] & 0xe000) != 0x2000) {
       return false;
     }
-    // Teredo, documentation, and discard prefixes.
-    if (g[0] == 0x2001 && (g[1] == 0 || g[1] == 0xdb8)) {
+    // The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+    if (g[0] == 0x2001 && (g[1] < 0x200 || g[1] == 0xdb8)) {
       return false;
     }
-    return !(g[0] == 0x100 && zero(g, 1, 4));
+    return (g[0] & 0xfff0) != 0x3ff0;
+  }
+
+  /** The IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or null. */
+  private static int[] embeddedV4(int[] g) {
+    boolean inside =
+        (zero(g, 0, 5) && (g[5] == 0xffff || g[5] == 0))
+            || (zero(g, 0, 4) && g[4] == 0xffff && g[5] == 0)
+            || (g[0] == 0x64 && g[1] == 0xff9b && zero(g, 2, 6));
+    return inside ? embedded(g[6], g[7]) : null;
   }
 
   /**
@@ -195,15 +205,8 @@ public final class Safefetch {
   public static boolean metadataAddress(String ip) {
     int[] four = v4(ip);
     int[] g = four != null ? null : v6(ip);
-    // IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is
-    // read as IPv4.
-    int[] inner = four;
-    if (inner == null
-        && g != null
-        && ((zero(g, 0, 5) && (g[5] == 0xffff || g[5] == 0))
-            || (g[0] == 0x64 && g[1] == 0xff9b && zero(g, 2, 6)))) {
-      inner = embedded(g[6], g[7]);
-    }
+    // IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
+    int[] inner = four != null ? four : g != null ? embeddedV4(g) : null;
     if (inner != null) {
       return (inner[0] == 169 && inner[1] == 254)
           || (inner[0] == 100 && inner[1] == 100 && inner[2] == 100 && inner[3] == 200);

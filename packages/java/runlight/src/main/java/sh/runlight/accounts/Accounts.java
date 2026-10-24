@@ -138,12 +138,13 @@ public final class Accounts {
                         + " NOT NULL DEFAULT 'owner'");
               }
               // Two-factor came later still: the secret (sealed), one being set up, recovery code
-              // hashes, and the last code's step.
+              // hashes, and the last code's step. And the mark signing out replaces, later again.
               String[][] added = {
                 {"totp_secret", "TEXT"},
                 {"totp_pending", "TEXT"},
                 {"totp_recovery", "TEXT"},
-                {"totp_step", "BIGINT"}
+                {"totp_step", "BIGINT"},
+                {"signed_out", "TEXT"}
               };
               for (String[] column : added) {
                 if (!names.contains(column[0])) {
@@ -205,7 +206,7 @@ public final class Accounts {
   }
 
   private static Map<String, Object> row(Map<String, Object> r) {
-    return withSite(
+    Map<String, Object> user =
         Json.object(
             "id", Js.string(r.get("id")),
             "email", Js.string(r.get("email")),
@@ -213,8 +214,10 @@ public final class Accounts {
             "role", roleFrom(r.get("role")),
             "createdAt", Js.num(Js.toNumber(r.get("created_at"))),
             "twoFactor", Js.truthy(r.get("totp_secret")),
-            "recoveryLeft", (long) stringList(r.get("totp_recovery")).size()),
-        r.get("site"));
+            "recoveryLeft", (long) stringList(r.get("totp_recovery")).size());
+    // A mark signing out replaces, which every session is signed with.
+    if (Js.truthy(r.get("signed_out"))) user.put("signedOut", Js.string(r.get("signed_out")));
+    return withSite(user, r.get("site"));
   }
 
   public static Map<String, Object> withSite(Map<String, Object> value, Object site) {
@@ -849,12 +852,23 @@ public final class Accounts {
     return Crypto.sameText(sign(id + "." + expires, sessionKey(user)), signature) ? user : null;
   }
 
+  /** Ends every session an account has, in every browser, as signing out does. */
+  public void endSessions(String id) {
+    init();
+    db().run(
+            "UPDATE rl_users SET signed_out = ? WHERE id = ?",
+            List.of(Crypto.hex(Crypto.randomBytes(8)), id));
+  }
+
   /**
-   * What a session is signed with: the password hash, and whether two-factor is on, so changing
-   * either ends other sessions.
+   * What a session is signed with: the password hash, whether two-factor is on, and a mark that
+   * signing out replaces, so changing any of them ends other sessions.
    */
   private static String sessionKey(Map<String, Object> user) {
-    return user.get("hash") + (Boolean.TRUE.equals(user.get("twoFactor")) ? ".2fa" : "");
+    Object signedOut = user.get("signedOut");
+    return user.get("hash")
+        + (Boolean.TRUE.equals(user.get("twoFactor")) ? ".2fa" : "")
+        + (Js.truthy(signedOut) ? "." + signedOut : "");
   }
 
   /**

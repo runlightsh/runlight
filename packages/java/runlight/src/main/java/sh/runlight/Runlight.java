@@ -123,10 +123,14 @@ public final class Runlight
    *   <li>managedSites: sites are added, changed, and deleted in the dashboard and kept in the
    *       database, as the standalone server does. site and sites are ignored.
    *   <li>geo: a location for an IP when the platform sends no location headers.
-   *   <li>trustProxy: true (default), false, or one of "x-forwarded-for", "x-real-ip",
+   *   <li>trustProxy: unset (default), true, false, or one of "x-forwarded-for", "x-real-ip",
    *       "cf-connecting-ip". Read the client IP from forwarding headers: the last X-Forwarded-For
    *       entry, which the nearest proxy wrote, then X-Real-IP, then CF-Connecting-IP. Name one of
-   *       them to read only that header. False reads only the connection's address.
+   *       them to read only that header. Left unset, the headers count only on a connection from
+   *       this computer or a private network, where proxies and load balancers connect from, so a
+   *       client that reaches the app straight from the internet cannot choose its own address.
+   *       True reads them from anywhere, for a CDN that connects from public addresses. False reads
+   *       only the connection's address.
    *   <li>linkPath: where short links on the app's own domain live, as {linkPath}/{slug}. Default
    *       "/go".
    *   <li>mail: how email reports, invites, and sign-in links are sent. Either a mail service in
@@ -288,8 +292,14 @@ public final class Runlight
   private final Object trustProxy;
 
   /**
-   * True until trustProxy left at its default has been seen answering a public address directly,
-   * and warned about once.
+   * True when trustProxy was left at its default, which believes forwarding headers only from a
+   * private address.
+   */
+  private final boolean trustPrivate;
+
+  /**
+   * True until a public address has sent forwarding headers that the default did not believe, and
+   * been warned about once.
    */
   private final AtomicBoolean warnDirect;
 
@@ -382,7 +392,8 @@ public final class Runlight
     this.configured = List.copyOf(rows);
     this.geo = options.geo;
     this.trustProxy = options.trustProxy == null ? (Object) true : options.trustProxy;
-    this.warnDirect = new AtomicBoolean(options.trustProxy == null);
+    this.trustPrivate = options.trustProxy == null;
+    this.warnDirect = new AtomicBoolean(trustPrivate);
     Object perMinute = options.rateLimit == null ? (Object) 120L : options.rateLimit;
     // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
     double number = Boolean.FALSE.equals(perMinute) ? Double.NaN : Js.toNumber(perMinute);
@@ -1883,7 +1894,7 @@ public final class Runlight
    */
   @Override
   public String clientIp(Request request, Map<String, Object> context) {
-    if (!Boolean.FALSE.equals(trustProxy)) {
+    if (trusts(request, context)) {
       Headers h = request.headers();
       String forwarded;
       if (Boolean.TRUE.equals(trustProxy)) {
@@ -1903,22 +1914,48 @@ public final class Runlight
         return Js.trim(forwarded);
       }
     }
+    return connectionAddress(request, context);
+  }
+
+  /** The connection's own address: the given ip, or else the request's remoteAddress. */
+  private static String connectionAddress(Request request, Map<String, Object> context) {
     Object ip = context == null ? null : context.get("ip");
-    String address = ip instanceof String given ? given : request.remoteAddress();
-    // A public address with no forwarding header means nothing sits in front, and then any client
-    // could name its own address in one. Said once, only when trustProxy was left at its default.
+    return ip instanceof String given ? given : request.remoteAddress();
+  }
+
+  /**
+   * Whether a request's forwarding headers count. Left at its default, trustProxy believes them
+   * only on a connection from this computer or a private network, or one whose address the app did
+   * not pass on, since a client reaching the server straight from the internet could write them
+   * itself.
+   */
+  private boolean trusts(Request request, Map<String, Object> context) {
+    if (Boolean.FALSE.equals(trustProxy)) {
+      return false;
+    }
+    String address = connectionAddress(request, context);
+    if (!trustPrivate
+        || address == null
+        || address.isEmpty()
+        || !Safefetch.publicAddress(address)) {
+      return true;
+    }
+    // Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors
+    // all look alike.
+    Headers h = request.headers();
     if (warnDirect.get()
-        && address != null
-        && Safefetch.publicAddress(address)
+        && (h.get("x-forwarded-for") != null
+            || h.get("x-real-ip") != null
+            || h.get("cf-connecting-ip") != null)
         && warnDirect.compareAndSet(true, false)) {
       log(
-          "Runlight: a request came straight from a public address with no proxy in front, but"
-              + " trustProxy is on by default, so a client could send X-Forwarded-For and choose"
-              + " its own address, getting round the rate limits. Set .trustProxy(false) when"
-              + " nothing sits in front of this server, or put a proxy in front that sets the"
-              + " header.");
+          "Runlight: a request came from a public address with forwarding headers, which are not"
+              + " believed by default, since a client could write them itself and choose its own"
+              + " address. Behind a CDN that connects from public addresses, such as Cloudflare in"
+              + " front of this server, set .trustProxy to the header it sets"
+              + " (\"cf-connecting-ip\") or to true.");
     }
-    return address;
+    return false;
   }
 
   /** The visitor's address, read from the request alone. */
@@ -1953,10 +1990,18 @@ public final class Runlight
     }
     String today = store.salt(day, Hash.randomSalt());
     String yesterday = store.saltIfExists(Time.addDays(day, -1));
-    dropOldSalts(now);
     Salts fresh = new Salts(day, today, yesterday);
+    // Kept before old salts go, so dropping yesterday's from the store drops it from here too.
     salts.put(timezone, fresh);
-    return fresh;
+    try {
+      dropOldSalts(now);
+    } catch (RuntimeException error) {
+      salts.remove(timezone);
+      throw error;
+    }
+    // As the drop left it, without yesterday's when that went.
+    Salts kept = salts.get(timezone);
+    return kept != null && kept.day().equals(day) ? kept : fresh;
   }
 
   /**
@@ -1999,8 +2044,8 @@ public final class Runlight
    * The host a proxy says the request was for, read only when proxy headers are trusted, as the
    * client's address is.
    */
-  private String forwardedHost(Request request) {
-    return !Boolean.FALSE.equals(trustProxy) ? request.headers().get("x-forwarded-host") : null;
+  private String forwardedHost(Request request, Map<String, Object> context) {
+    return trusts(request, context) ? request.headers().get("x-forwarded-host") : null;
   }
 
   /**
@@ -2049,9 +2094,10 @@ public final class Runlight
     // A database too busy to take the hit right now (every pooled connection held by long reports,
     // or another process writing the SQLite file) gets it a little later, at the time it arrived.
     long now = now();
+    Progress done = new Progress();
     for (int attempt = 1; ; attempt++) {
       try {
-        record(payload, request, context, now);
+        record(payload, request, context, now, done);
         return;
       } catch (RuntimeException error) {
         if (attempt >= 3 || !busy(error)) {
@@ -2072,8 +2118,23 @@ public final class Runlight
     return ua == null ? "" : ua;
   }
 
+  /**
+   * How far recording a hit got: its visit, and which of its writes went in. A hit tried again
+   * after a write failed skips the ones before it, so a visit's counts never take the same hit
+   * twice.
+   */
+  private static final class Progress {
+    Map<String, Object> session;
+    boolean touched;
+    boolean engaged;
+  }
+
   private void record(
-      Map<String, Object> payload, Request request, Map<String, Object> context, long now) {
+      Map<String, Object> payload,
+      Request request,
+      Map<String, Object> context,
+      long now,
+      Progress done) {
     // Managed sites load from the database in init(), so it must come first.
     init();
     Url url = (Url) payload.get("url");
@@ -2088,12 +2149,12 @@ public final class Runlight
 
     String kind = (String) payload.get("kind");
     if (kind.equals("engagement")) {
-      engagement(site, payload, now);
+      engagement(site, payload, now, done);
       return;
     }
 
     Map<String, Object> page = Sources.parsePage(url);
-    Map<String, Object> session = null;
+    Map<String, Object> session = done.session;
     boolean reopen = true;
     String pageviewId = (String) payload.get("pageviewId");
     if (kind.equals("event") && !pageviewId.isEmpty()) {
@@ -2102,7 +2163,9 @@ public final class Runlight
       // its rows (a tab left open for days); it then starts a visit of its own, as any later
       // activity would.
       if (pageview != null && now - Js.asLong(pageview.get("startedAt")) < SqlStore.EVENT_TAIL_MS) {
-        session = Json.object("id", pageview.get("session"), "visitor", pageview.get("visitor"));
+        if (session == null) {
+          session = Json.object("id", pageview.get("session"), "visitor", pageview.get("visitor"));
+        }
         // A visit idle past the 30 minutes stays ended: the event counts in it without reopening
         // it.
         reopen = now - Js.asLong(pageview.get("lastAt")) <= SESSION_IDLE_MS;
@@ -2130,7 +2193,12 @@ public final class Runlight
               (String) payload.get("language"));
     }
 
-    store.touchSession((String) session.get("id"), now, kind, (String) page.get("path"), reopen);
+    done.session = session;
+
+    if (!done.touched) {
+      store.touchSession((String) session.get("id"), now, kind, (String) page.get("path"), reopen);
+      done.touched = true;
+    }
     store.insertEvent(
         Json.object(
             "site",
@@ -2207,7 +2275,7 @@ public final class Runlight
                   "mobile", h.get("sec-ch-ua-mobile"),
                   "platform", h.get("sec-ch-ua-platform")),
               screenWidth instanceof Number n ? n.doubleValue() : null);
-      Map<String, Object> location = Geo.locate(h, address, geo, Js.truthy(trustProxy));
+      Map<String, Object> location = Geo.locate(h, address, geo, trusts(request, context));
       Map<String, Object> utm = Js.map(page.get("utm"));
       Map<String, Object> row = new LinkedHashMap<>();
       row.put("id", session.get("id"));
@@ -2295,7 +2363,7 @@ public final class Runlight
     Url url = new Url(request.url());
     // A forwarded host only counts behind a proxy that sets it; otherwise any client could pick
     // one.
-    String given = forwardedHost(request);
+    String given = forwardedHost(request, context);
     if (given == null) {
       given = request.headers().get("host");
     }
@@ -2340,7 +2408,7 @@ public final class Runlight
       Request request, String slug, String domain, Map<String, Object> context) {
     init();
     Url url = new Url(request.url());
-    String given = forwardedHost(request);
+    String given = forwardedHost(request, context);
     if (given == null) {
       given = request.headers().get("host");
     }
@@ -2426,7 +2494,8 @@ public final class Runlight
             "no-referrer-when-downgrade"));
   }
 
-  private void engagement(Map<String, Object> site, Map<String, Object> payload, long now) {
+  private void engagement(
+      Map<String, Object> site, Map<String, Object> payload, long now, Progress done) {
     long engaged = Js.asLong(payload.get("engagedMs"));
     if (engaged <= 0) {
       return;
@@ -2437,7 +2506,10 @@ public final class Runlight
     if (pageview == null || now - Js.asLong(pageview.get("startedAt")) >= SqlStore.EVENT_TAIL_MS) {
       return;
     }
-    store.addEngagement((String) pageview.get("session"), engaged);
+    if (!done.engaged) {
+      store.addEngagement((String) pageview.get("session"), engaged);
+      done.engaged = true;
+    }
     // Only a visit that began more than an hour ago can belong to a day that is already added up.
     if (now - Js.asLong(pageview.get("startedAt")) > 3_600_000) {
       store.touchedOldVisit(
@@ -2505,7 +2577,7 @@ public final class Runlight
               .contains(m.group(1).toLowerCase(Locale.ROOT))) {
         return false;
       }
-      String host = forwardedHost(request);
+      String host = forwardedHost(request, Map.of());
       if (host == null) {
         host = request.headers().get("host");
       }

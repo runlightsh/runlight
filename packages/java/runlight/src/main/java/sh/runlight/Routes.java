@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiPredicate;
@@ -210,6 +211,8 @@ public final class Routes {
    *   <li>ownHosts: more names the dashboard is reached at.
    *   <li>accountOf: the account a request comes from (internal, for the standalone server).
    *   <li>tokenMade: notes who made a token (internal).
+   *   <li>tokensOf: the ids of the tokens an account made, so a member sees and revokes only their
+   *       own (internal).
    * </ul>
    */
   public static final class Options {
@@ -228,6 +231,7 @@ public final class Routes {
     public Supplier<Iterable<String>> ownHosts;
     public Function<Request, String> accountOf;
     public BiPredicate<Map<String, Object>, String> tokenMade;
+    public Function<String, Set<String>> tokensOf;
 
     public Options basePath(String value) {
       basePath = value;
@@ -307,6 +311,11 @@ public final class Routes {
       tokenMade = value;
       return this;
     }
+
+    public Options tokensOf(Function<String, Set<String>> value) {
+      tokensOf = value;
+      return this;
+    }
   }
 
   private final Runlight rl;
@@ -322,6 +331,7 @@ public final class Routes {
   private final String signOut;
   private final Function<Request, String> accountOf;
   private final BiPredicate<Map<String, Object>, String> tokenMade;
+  private final Function<String, Set<String>> tokensOf;
   private final OAuth.Context oauth;
 
   /** Requests from a manage token, already checked against its one site, act as the owner's. */
@@ -419,6 +429,7 @@ public final class Routes {
         options.accountOf != null ? options.accountOf : w != null ? w::accountOf : null;
     this.tokenMade =
         options.tokenMade != null ? options.tokenMade : w != null ? w::tokenMade : null;
+    this.tokensOf = options.tokensOf != null ? options.tokensOf : w != null ? w::tokensOf : null;
     Function<Request, Object> authorize = options.authorize;
     OAuth.Context context = new OAuth.Context(runlight, base, r -> Boolean.TRUE.equals(canRead(r)));
     context.isReader =
@@ -1167,14 +1178,15 @@ public final class Routes {
   }
 
   /**
-   * The controls a member cannot change: the mail service and its keys, the assistant's settings,
-   * and deleting a site.
+   * The controls a member cannot change: the mail service and its keys, the assistant's settings, a
+   * site's agents key, and deleting a site.
    */
   private static boolean adminOnly(String path, String method) {
     return (path.equals("/api/mail") && (method.equals("PUT") || method.equals("DELETE")))
         || (path.equals("/api/assistant") && (method.equals("PUT") || method.equals("DELETE")))
         || (path.equals("/api/assistant/limits") && method.equals("PUT"))
         || (path.equals("/api/assistant/models") && method.equals("POST"))
+        || (path.equals("/api/observe-key/new") && method.equals("POST"))
         || (SITE_PATH.matcher(path).find() && method.equals("DELETE"));
   }
 
@@ -2545,13 +2557,24 @@ public final class Routes {
         429);
   }
 
+  /** The tokens the account behind a request made: none when nothing notes who made what. */
+  private Set<String> ownTokens(Request request) {
+    String by = accountOf != null ? accountOf.apply(request) : null;
+    return by != null && tokensOf != null ? tokensOf.apply(by) : Set.of();
+  }
+
   private Response tokensApi(Request request, String path) {
     rl.init();
     String method = request.method();
+    // A member makes tokens like anyone who manages sites, but sees and revokes only the ones they
+    // made.
+    Set<String> mine = members.containsKey(request) ? ownTokens(request) : null;
     if (path.equals("/api/tokens") && method.equals("GET")) {
       List<Object> tokens = new ArrayList<>();
       for (Map<String, Object> t : store().tokens()) {
-        tokens.add(tokenView(t));
+        if (mine == null || mine.contains(Js.string(t.get("id")))) {
+          tokens.add(tokenView(t));
+        }
       }
       return json(Json.object("tokens", tokens));
     }
@@ -2599,6 +2622,9 @@ public final class Routes {
     }
     Matcher match = TOKEN_PATH.matcher(path);
     if (match.find() && method.equals("DELETE")) {
+      if (mine != null && !mine.contains(match.group(1))) {
+        return coded("Unknown token", "unknown_token", 404);
+      }
       return store().deleteToken(match.group(1))
           ? json(Json.object("ok", true))
           : coded("Unknown token", "unknown_token", 404);
@@ -3131,7 +3157,8 @@ public final class Routes {
       return chat(request, url);
     }
 
-    // Only the owner manages tokens: an API token cannot make or revoke one.
+    // Only people at the dashboard manage tokens, a member only their own: an API token cannot make
+    // or revoke one.
     if (path.equals("/api/tokens") || path.startsWith("/api/tokens/")) {
       Object access = canRead(request);
       if (!Boolean.TRUE.equals(access)) {
@@ -4025,7 +4052,8 @@ public final class Routes {
       // One funnel at a time, so a page of funnels never takes every database connection at once.
       List<Object> rows = new ArrayList<>();
       for (Map<String, Object> funnel : store.funnels(siteId)) {
-        List<Object> counts = store.funnelCounts(query, funnel);
+        SqlStore.FunnelCounts counted = store.funnelCounts(query, funnel);
+        List<Object> counts = counted.counts();
         List<Object> steps = new ArrayList<>();
         List<Object> given = Js.list(funnel.get("steps"));
         for (int i = 0; i < given.size(); i++) {
@@ -4035,6 +4063,9 @@ public final class Routes {
         }
         Map<String, Object> row = new LinkedHashMap<>(funnel);
         row.put("steps", steps);
+        if (counted.sampled()) {
+          row.put("sampled", (long) store.funnelVisits);
+        }
         rows.add(row);
       }
       return json(Json.object("site", siteId, "range", out, "funnels", rows));

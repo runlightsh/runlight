@@ -703,30 +703,50 @@ class IngestTest {
   }
 
   @Test
-  void withTrustProxyLeftAtItsDefaultAPublicAddressWithNoProxyHeaderIsWarnedAboutOnce() {
+  void withTrustProxyLeftAtItsDefaultForwardingHeadersCountOnlyFromAPrivateAddress() {
     SqlStore store = Stores.sqlite(":memory:");
     PrintStream err = System.err;
     ByteArrayOutputStream said = new ByteArrayOutputStream();
     System.setErr(new PrintStream(said, true, StandardCharsets.UTF_8));
     try {
+      Request bare = new Request("https://example.com/e", "GET", Headers.of(), new byte[0], null);
+      Request forwarded =
+          new Request(
+              "https://example.com/e",
+              "GET",
+              Headers.of("x-forwarded-for", "8.8.4.4"),
+              new byte[0],
+              null);
       Runlight quiet = new Runlight(new Runlight.Options().store(store).trustProxy(true));
-      assertEquals("8.8.8.8", quiet.clientIp(from(), Json.object("ip", "8.8.8.8")));
       assertEquals(
-          "", said.toString(StandardCharsets.UTF_8), "set on purpose, never second-guessed");
+          "8.8.4.4",
+          quiet.clientIp(forwarded, Json.object("ip", "8.8.8.8")),
+          "trustProxy set on purpose believes a public address");
+      assertEquals("", said.toString(StandardCharsets.UTF_8), "and is never second-guessed");
 
       Runlight rl = new Runlight(new Runlight.Options().store(store));
-      rl.clientIp(from("x-forwarded-for", "8.8.4.4"), Json.object("ip", "10.0.0.2"));
-      rl.clientIp(from(), Json.object("ip", "127.0.0.1"));
-      rl.clientIp(from(), Json.object("ip", "192.168.1.5"));
+      assertEquals(
+          "8.8.4.4",
+          rl.clientIp(forwarded, Json.object("ip", "10.0.0.2")),
+          "a proxy on a private network is believed");
+      assertEquals(
+          "8.8.4.4",
+          rl.clientIp(forwarded, Json.object("ip", "::ffff:127.0.0.1")),
+          "and one on this computer");
+      assertEquals("8.8.4.4", rl.clientIp(forwarded), "and a platform that passes no address on");
+      assertEquals("8.8.8.8", rl.clientIp(bare, Json.object("ip", "8.8.8.8")));
       assertEquals(
           "",
           said.toString(StandardCharsets.UTF_8),
-          "a proxy's header, or a private or loopback address, says nothing");
-      assertEquals("8.8.8.8", rl.clientIp(from(), Json.object("ip", "8.8.8.8")));
-      rl.clientIp(from(), Json.object("ip", "1.1.1.1"));
+          "a public address without forwarding headers says nothing");
+      assertEquals(
+          "1.1.1.1",
+          rl.clientIp(forwarded, Json.object("ip", "1.1.1.1")),
+          "a client straight from the internet cannot choose its address");
+      rl.clientIp(forwarded, Json.object("ip", "1.0.0.1"));
       List<String> lines = said.toString(StandardCharsets.UTF_8).lines().toList();
       assertEquals(1, lines.size(), "said once");
-      assertTrue(lines.get(0).contains(".trustProxy(false)"));
+      assertTrue(lines.get(0).contains("cf-connecting-ip"));
     } finally {
       System.setErr(err);
     }

@@ -126,7 +126,9 @@ class CryptoTest {
             "16384$33$1",
             "16384$8$17",
             "16384$0$1",
-            "x$8$1")) {
+            "x$8$1",
+            "1048576$1$1",
+            "65536$1$1")) {
       long started = System.nanoTime();
       assertFalse(
           Crypto.checkPassword("a long password", "scrypt$" + cost + "$" + salt + "$" + key), cost);

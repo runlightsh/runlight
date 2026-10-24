@@ -81,7 +81,8 @@ public final class Standalone {
    *   <li>url: the dashboard's public address, such as https://stats.example.com. It can never
    *       become a link domain, short links never answer on it, and emails link to it whatever Host
    *       header a request carries.
-   *   <li>trustProxy: true (the default), false, or the one header the proxy sets.
+   *   <li>trustProxy: unset (the default, believing forwarding headers only from a private
+   *       address), true, false, or the one header the proxy sets.
    *   <li>geo, geoCredit: where locations come from, and whether to credit DB-IP for them.
    *   <li>setupCode: the one-time code that unlocks /setup while no account exists; setupWhere,
    *       when set, has the page that asks for it say the link is in the file setup.txt.
@@ -195,8 +196,8 @@ public final class Standalone {
 
     Runlight.Options settings =
         new Runlight.Options().store(store).managedSites(true).secret(options.secret).now(now);
-    // Unset stays unset, so the library's default applies and it can warn when nothing sits in
-    // front.
+    // Unset stays unset, so the library's default applies: forwarding headers count only from a
+    // private address.
     if (options.trustProxy != null) {
       settings.trustProxy(options.trustProxy);
     }

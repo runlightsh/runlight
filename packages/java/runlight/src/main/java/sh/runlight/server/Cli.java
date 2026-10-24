@@ -68,8 +68,10 @@ public final class Cli {
       DATA_DIR (./runlight-data) holds the SQLite file, the secret, and the setup
       link, and DATABASE_URL switches to Postgres, MySQL, or MariaDB.
       RUNLIGHT_SECRET signs sessions and encrypts saved keys, RUNLIGHT_TOKEN also
-      works as a bearer token on the API, and TRUST_PROXY=false ignores forwarded
-      addresses when nothing sits in front.
+      works as a bearer token on the API. Forwarded addresses count only from a
+      proxy on this computer or a private network; TRUST_PROXY=false ignores them,
+      and behind a CDN that connects from public addresses, TRUST_PROXY names its
+      header, such as cf-connecting-ip.
       RUNLIGHT_URL is the dashboard's public address, such as
       https://stats.example.com, which short links can never take over.
       RUNLIGHT_GEO picks where locations come from when no platform header gives

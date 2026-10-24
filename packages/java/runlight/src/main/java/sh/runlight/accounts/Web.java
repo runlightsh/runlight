@@ -1,9 +1,11 @@
 package sh.runlight.accounts;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -558,6 +560,22 @@ public final class Web {
               "cache-control",
               "public, max-age=3600"));
     }
+    // A form posted from another site, or a sibling one, could sign someone in to an account that
+    // is not theirs or plant a session, so these pages take forms only from their own. The browser
+    // says where a request came from.
+    String fetchSite = request.headers().get("sec-fetch-site");
+    boolean crossSite = "cross-site".equals(fetchSite) || "same-site".equals(fetchSite);
+    if (crossSite
+        && (method.equals("POST") || path.equals("/logout"))
+        && List.of("/setup", "/login", "/login/code", "/invite", "/logout").contains(path)) {
+      return html(
+          Pages.loginPage(
+              base,
+              Json.object(
+                  "error", t.t("oauth.anotherSiteTitle"), "next", homePath, "forgot", forgot),
+              lang),
+          403);
+    }
 
     if (path.equals("/setup")) {
       if (hasAccount()) {
@@ -702,7 +720,13 @@ public final class Web {
       return signedInTo(request, user, next);
     }
 
+    // Signing out ends the account's sessions in every browser, not just this one, so a cookie
+    // copied before still stops working.
     if (path.equals("/logout")) {
+      Map<String, Object> user = signedIn(request);
+      if (user != null) {
+        accounts.endSessions((String) user.get("id"));
+      }
       return redirect(base + "/login", "set-cookie", sessionCookie(request, "", 0));
     }
 
@@ -972,6 +996,11 @@ public final class Web {
       try {
         Map<String, Object> updated =
             accounts.setPassword((String) user.get("email"), field(input, "next"), at);
+        // Asked for after a password got out: the tokens and apps the account made could still
+        // read on.
+        if (Boolean.TRUE.equals(input.get("revokeTokens"))) {
+          dropTokensOf((String) user.get("id"));
+        }
         // The new password ends every other sign-in; this browser gets a fresh one.
         return reply(
             Json.object("ok", true), 200, "set-cookie", freshSession(request, updated, at));
@@ -1256,6 +1285,17 @@ public final class Web {
     }
     store.setSetting(MADE_BY + token.get("id"), by);
     return true;
+  }
+
+  /** The ids of the tokens an account made. */
+  public Set<String> tokensOf(String by) {
+    Set<String> ids = new HashSet<>();
+    for (Map<String, Object> setting : store.settingsStartingWith(MADE_BY)) {
+      if (by.equals(setting.get("value"))) {
+        ids.add(((String) setting.get("key")).substring(MADE_BY.length()));
+      }
+    }
+    return ids;
   }
 
   /** As {@link #handle(Request, String, Map)} with no context. */

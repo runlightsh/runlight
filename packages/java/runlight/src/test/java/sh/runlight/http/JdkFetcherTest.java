@@ -181,6 +181,40 @@ class JdkFetcherTest {
   }
 
   @Test
+  void aFetchGivenNoCapIsHeldToTheDefaultOne() throws IOException {
+    JdkFetcher fetcher = new JdkFetcher();
+    long over = JdkFetcher.DEFAULT_MAX_BYTES + 1;
+    BodyTooLong streamed =
+        assertThrows(BodyTooLong.class, () -> fetcher.fetch(base() + "/bytes?n=" + over));
+    assertEquals("Body over " + JdkFetcher.DEFAULT_MAX_BYTES + " bytes", streamed.getMessage());
+
+    // An answer that says it is longer is refused before any of it is read.
+    try (ServerSocket liar = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+      Thread answering =
+          new Thread(
+              () -> {
+                try (Socket s = liar.accept()) {
+                  s.getInputStream().read();
+                  s.getOutputStream()
+                      .write(
+                          ("HTTP/1.1 200 OK\r\ncontent-length: " + over + "\r\n\r\nshort")
+                              .getBytes(StandardCharsets.US_ASCII));
+                  s.getOutputStream().flush();
+                  Thread.sleep(5000);
+                } catch (IOException | InterruptedException e) {
+                  // The test is over.
+                }
+              });
+      answering.start();
+      long started = System.nanoTime();
+      assertThrows(
+          BodyTooLong.class, () -> fetcher.fetch("http://127.0.0.1:" + liar.getLocalPort() + "/"));
+      assertTrue((System.nanoTime() - started) / 1_000_000 < 2000, "without waiting for the body");
+      answering.interrupt();
+    }
+  }
+
+  @Test
   void bodiesComeBackDecodedAndEmptyWhereTheyHaveNone() {
     JdkFetcher fetcher = new JdkFetcher();
     assertEquals("squeezed ".repeat(100), fetcher.fetch(base() + "/gzip").text());

@@ -53,7 +53,8 @@ class SafefetchTest {
             "fd00:ec2::254",
             "::ffff:169.254.169.254",
             "::ffff:a9fe:a9fe",
-            "64:ff9b::a9fe:a9fe")) {
+            "64:ff9b::a9fe:a9fe",
+            "::ffff:0:a9fe:a9fe")) {
       assertTrue(Safefetch.metadataAddress(ip), ip);
     }
     for (String ip :
@@ -81,7 +82,13 @@ class SafefetchTest {
   @Test
   void onlyAddressesOnThePublicInternetCountAsPublic() {
     for (String ip :
-        List.of("93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e")) {
+        List.of(
+            "93.184.215.14",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "2a00:1450:4001:82a::200e",
+            "::ffff:0:808:808",
+            "64:ff9b::808:808")) {
       assertTrue(Safefetch.publicAddress(ip), ip);
     }
     for (String ip :
@@ -110,7 +117,15 @@ class SafefetchTest {
             "[::1]",
             "not an address",
             "1.2.3",
-            "1.2.3.256")) {
+            "1.2.3.256",
+            // IPv4-translated loopback, local-use NAT64, the old site-local, ORCHID, the newer
+            // documentation prefix, and discard.
+            "::ffff:0:7f00:1",
+            "64:ff9b:1::7f00:1",
+            "fec0::1",
+            "2001:20::1",
+            "3fff::1",
+            "100::1")) {
       assertFalse(Safefetch.publicAddress(ip), ip);
     }
   }

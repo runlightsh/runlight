@@ -183,12 +183,14 @@ public final class Crypto {
     double r = Js.toNumber(parts[2]);
     double p = Js.toNumber(parts[3]);
     // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount
-    // of memory or time.
+    // of memory or time. N must also be below 2^(16r), as scrypt itself requires, so a stored hash
+    // past that fails to match rather than throws.
     if (!whole(n, 1 << 20)
         || n < 2
         || ((long) n & ((long) n - 1)) != 0
         || !whole(r, 32)
-        || !whole(p, 16)) {
+        || !whole(p, 16)
+        || Long.numberOfTrailingZeros((long) n) >= 16 * r) {
       return null;
     }
     return new int[] {(int) n, (int) r, (int) p};
