@@ -12,3 +12,5 @@ golang.org/x/text v0.40.0 h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=
 golang.org/x/text v0.40.0/go.mod h1:hpnzDAfGV753zIKo+wk3u1bVKCGPbrnF7+7LBF/UHVY=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+runlight.sh/go v0.2.0 h1:27SY6zvvrrW3sT5hd4FfZPhfUEjnwRf2172zxmHWWlg=
+runlight.sh/go v0.2.0/go.mod h1:q/Vh/UipPZDIWWHbIl60n3lmGQ9ByxUHuz/E6knwHlI=
