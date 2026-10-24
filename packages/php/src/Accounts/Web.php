@@ -499,12 +499,8 @@ final class Web
             return $this->signedInTo($request, $user, $next);
         }
 
-        // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+        // Signing out ends this browser's session; the account page can end them everywhere.
         if ($path === '/logout') {
-            $user = $this->signedIn($request);
-            if ($user !== null) {
-                $this->accounts->endSessions($user['id']);
-            }
             return self::redirect("$base/login", ['set-cookie' => $this->sessionCookie($request, '', 0)]);
         }
 
@@ -670,6 +666,11 @@ final class Web
         }
         if ($path === '/api/account' && $method === 'GET') {
             return self::reply(['account' => self::person($user)]);
+        }
+        // Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+        if ($path === '/api/account/sign-out-everywhere' && $method === 'POST') {
+            $this->accounts->endSessions($user['id']);
+            return self::reply(['ok' => true], 200, ['set-cookie' => $this->sessionCookie($request, '', 0)]);
         }
         $fresh = fn (array $updated): array => ['set-cookie' => $this->sessionCookie($request, $this->accounts->sessionFor($updated, $now), intdiv(Accounts::SESSION_MS, 1000))];
         if ($path === '/api/account/password' && $method === 'POST') {
