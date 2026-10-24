@@ -17,12 +17,13 @@ module Runlight
   #   standalone server does. `site` and `sites` are ignored.
   # - geo: a callable taking an IP and giving { "country", "region", "city" } or nil, a location for an IP when
   #   the platform sends no location headers.
-  # - trustProxy: true (default), false, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the
-  #   client IP from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then
-  #   X-Real-IP, then CF-Connecting-IP. Name one of them to read only that header, such as "cf-connecting-ip"
-  #   behind Cloudflare and another proxy. False reads only the connection's address, for an app nothing sits
-  #   in front of. Left unset, it warns once when a request comes straight from a public address with none of
-  #   those headers.
+  # - trustProxy: true, false, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the client IP
+  #   from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then X-Real-IP,
+  #   then CF-Connecting-IP. Name one of them to read only that header, such as "cf-connecting-ip" behind
+  #   Cloudflare and another proxy. Left unset, the headers count only on a connection from this computer or a
+  #   private network, where proxies and load balancers connect from, so a client that reaches the app straight
+  #   from the internet cannot choose its own address. True reads them from anywhere, for a CDN that connects
+  #   from public addresses. False reads only the connection's address.
   # - linkPath: where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go".
   # - mail: how email reports, invites, and sign-in links are sent. Either a mail service in code (a Transports
   #   config plus `from` and `fromName`), which the dashboard shows and cannot change, or a mailer of the app's
@@ -124,8 +125,10 @@ module Runlight
 
       @geo = options["geo"]
       @trust_proxy = options["trustProxy"].nil? ? true : options["trustProxy"]
-      # True until trustProxy left at its default has been seen answering a public address directly, and warned about once.
-      @warn_direct = options["trustProxy"].nil?
+      # True when trustProxy was left at its default, which believes forwarding headers only from a private address.
+      @trust_private = options["trustProxy"].nil?
+      # True until a public address has sent forwarding headers that the default did not believe, and been warned about once.
+      @warn_direct = @trust_private
       per_minute = options["rateLimit"].nil? ? 120 : options["rateLimit"]
       # false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
       number = per_minute == false ? Float::NAN : Js.number(per_minute)
@@ -781,7 +784,7 @@ module Runlight
     # Cloudflare before nginx) reads only that one. Otherwise it is the connection's address: the
     # context's "ip", or else the request's own remote_address.
     def client_ip(request, context = {})
-      if @trust_proxy != false
+      if trusts?(request, context)
         h = request.headers
         last = lambda do |name|
           value = h.get(name)
@@ -799,16 +802,27 @@ module Runlight
                     end
         return Js.trim(forwarded) if !forwarded.nil? && Js.trim(forwarded) != ""
       end
-      ip = context_ip(context)
-      ip = (ip.nil? ? request.remote_address : ip).to_s
-      # A public address with no forwarding header means nothing sits in front, and then any client
-      # could name its own address in one. Said once, only when trustProxy was left at its default.
-      if @warn_direct && Safefetch.public_address?(ip)
-        @warn_direct = false
-        warn("Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set trust_proxy: false when nothing sits in front of this server, or put a proxy in front that sets the header.")
-      end
-      ip
+      connection_ip(request, context).to_s
     end
+
+    # Whether a request's forwarding headers count. Left at its default, trustProxy believes them only on a
+    # connection from this computer or a private network, or one whose address the app did not pass on, since a
+    # client reaching the server straight from the internet could write them itself.
+    def trusts?(request, context = {})
+      return false if @trust_proxy == false
+
+      ip = connection_ip(request, context)
+      return true if !@trust_private || ip.nil? || ip.to_s == "" || !Safefetch.public_address?(ip.to_s)
+
+      # Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
+      h = request.headers
+      if @warn_direct && (h.has?("x-forwarded-for") || h.has?("x-real-ip") || h.has?("cf-connecting-ip"))
+        @warn_direct = false
+        warn("Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set trust_proxy to the header it sets (cf-connecting-ip) or to true.")
+      end
+      false
+    end
+    private :trusts?
 
     # Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing raises.
     def collect(request, context = {})
@@ -834,8 +848,11 @@ module Runlight
       # another process writing the SQLite file) gets it a little later, at the time it arrived.
       at = now
       attempt = 1
+      # How far recording the hit got: its visit, and which of its writes went in. A hit tried again after a write
+      # failed skips the ones before it, so a visit's counts never take the same hit twice.
+      done = {}
       begin
-        record(payload, request, context, at)
+        record(payload, request, context, at, done)
       rescue StandardError => e
         raise if attempt >= 3 || !busy?(e)
 
@@ -872,7 +889,7 @@ module Runlight
     def link_domain_response(request, context = {})
       url = Http::Url.new(request.url)
       # A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
-      given = forwarded_host(request) || request.headers.get("host") || url.host
+      given = forwarded_host(request, context) || request.headers.get("host") || url.host
       host = Sources.strip_www(Js.trim(given.split(",", -1).first.to_s).split(":", -1).first.to_s)
       return nil unless link_domain_set.key?(host)
 
@@ -899,7 +916,7 @@ module Runlight
     def redirect(request, slug, domain, context = {})
       init
       url = Http::Url.new(request.url)
-      host = Sources.strip_www((forwarded_host(request) || request.headers.get("host") || url.host).split(":", -1).first.to_s)
+      host = Sources.strip_www((forwarded_host(request, context) || request.headers.get("host") || url.host).split(":", -1).first.to_s)
       link = @store.link_by_slug(slug)
       # The app's own link path answers for every link, so a link whose domain
       # was removed keeps working; a link domain answers only for its own links.
@@ -1290,8 +1307,16 @@ module Runlight
 
       today = @store.salt(day, Hashing.random_salt)
       yesterday = @store.salt_if_exists(Dates.add_days(day, -1))
-      drop_old_salts(at)
-      @salts[timezone] = { "day" => day, "today" => today, "yesterday" => yesterday }
+      salts = { "day" => day, "today" => today, "yesterday" => yesterday }
+      # Kept before old salts go, so dropping yesterday's from the store drops it from here too.
+      @salts[timezone] = salts
+      begin
+        drop_old_salts(at)
+      rescue StandardError
+        @salts.delete(timezone)
+        raise
+      end
+      salts
     end
 
     # Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
@@ -1319,11 +1344,17 @@ module Runlight
     end
 
     # The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.
-    def forwarded_host(request)
-      @trust_proxy == false ? nil : request.headers.get("x-forwarded-host")
+    def forwarded_host(request, context = {})
+      trusts?(request, context) ? request.headers.get("x-forwarded-host") : nil
     end
 
-    def record(payload, request, context, at)
+    # The connection's own address: the context's "ip", or else the request's remote_address, or nil.
+    def connection_ip(request, context)
+      ip = context_ip(context)
+      ip.nil? ? request.remote_address : ip
+    end
+
+    def record(payload, request, context, at, done = {})
       # Managed sites load from the database in init(), so it must come first.
       init
       url = payload["url"]
@@ -1331,19 +1362,19 @@ module Runlight
       return if site.nil?
 
       if payload["kind"] == "engagement"
-        engagement(site, payload, at)
+        engagement(site, payload, at, done)
         return
       end
 
       page = Sources.parse_page(url)
-      session = nil
+      session = done["session"]
       reopen = true
       if payload["kind"] == "event" && payload["pageviewId"] != ""
         pageview = @store.pageview(site["id"], payload["pageviewId"])
         # An event joins its page's visit unless that visit began longer ago than reports look for its rows
         # (a tab left open for days); it then starts a visit of its own, as any later activity would.
         if !pageview.nil? && at - pageview["startedAt"] < Store::SqlStore::EVENT_TAIL_MS
-          session = { "id" => pageview["session"], "visitor" => pageview["visitor"] }
+          session ||= { "id" => pageview["session"], "visitor" => pageview["visitor"] }
           # A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
           reopen = at - pageview["lastAt"] <= SESSION_IDLE_MS
           if at - pageview["startedAt"] > 3_600_000
@@ -1359,8 +1390,12 @@ module Runlight
       session ||= session_for(site, request, context, page, payload["referrer"], at, {
         "screenWidth" => payload["screenWidth"], "screen" => screen, "language" => payload["language"],
       })
+      done["session"] = session
 
-      @store.touch_session(session["id"], at, payload["kind"], page["path"], reopen)
+      unless done["touched"]
+        @store.touch_session(session["id"], at, payload["kind"], page["path"], reopen)
+        done["touched"] = true
+      end
       @store.insert_event({
         "site" => site["id"],
         "ts" => at,
@@ -1401,7 +1436,7 @@ module Runlight
         "mobile" => request.headers.get("sec-ch-ua-mobile"),
         "platform" => request.headers.get("sec-ch-ua-platform"),
       }, client["screenWidth"])
-      location = Geo.locate(request.headers, ip, @geo, Js.truthy?(@trust_proxy))
+      location = Geo.locate(request.headers, ip, @geo, trusts?(request, context))
       row = {
         "id" => session["id"],
         "site" => site["id"],
@@ -1434,14 +1469,17 @@ module Runlight
       domains
     end
 
-    def engagement(site, payload, at)
+    def engagement(site, payload, at, done = {})
       return if payload["engagedMs"] <= 0
 
       pageview = @store.pageview(site["id"], payload["pageviewId"])
       # Reports look for a visit's rows only so long after it began, so later time on it is let go.
       return if pageview.nil? || at - pageview["startedAt"] >= Store::SqlStore::EVENT_TAIL_MS
 
-      @store.add_engagement(pageview["session"], payload["engagedMs"])
+      unless done["engaged"]
+        @store.add_engagement(pageview["session"], payload["engagedMs"])
+        done["engaged"] = true
+      end
       # Only a visit that began more than an hour ago can belong to a day that is already added up.
       if at - pageview["startedAt"] > 3_600_000
         @store.touched_old_visit(site["id"], pageview["startedAt"].to_i, at - ROLLUP_DELAY_MS + 3_600_000)

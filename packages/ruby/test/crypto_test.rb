@@ -56,7 +56,7 @@ class CryptoTest < Minitest::Test
     _, _, _, _, salt, key = made.split("$")
     again = Scrypt.derive("a long password", Crypto.from_base64url(salt), 32_768, 8, 3, 32)
     assert_equal key, Crypto.base64url(again)
-    %w[2097152$8$1 30000$8$1 1$8$1 16384$33$1 16384$8$17 16384$0$1 x$8$1].each do |cost|
+    %w[2097152$8$1 30000$8$1 1$8$1 16384$33$1 16384$8$17 16384$0$1 x$8$1 1048576$1$1 65536$1$1].each do |cost|
       refute Crypto.check_password("a long password", "scrypt$#{cost}$#{salt}$#{key}"), cost
     end
   end

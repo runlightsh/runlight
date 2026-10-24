@@ -80,20 +80,28 @@ module Runlight
       return false if g.nil?
 
       embedded = ->(hi, lo) { [hi >> 8, hi & 255, lo >> 8, lo & 255] }
-      zero = ->(groups) { groups.all?(&:zero?) }
-      # IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64 (64:ff9b::/96).
-      if zero.call(g[0, 5]) && (g[5] == 0xffff || g[5].zero?)
-        return g[5].zero? && g[6].zero? && g[7] <= 1 ? false : public_v4?(embedded.call(g[6], g[7]))
-      end
-      return public_v4?(embedded.call(g[6], g[7])) if g[0] == 0x64 && g[1] == 0xff9b && zero.call(g[2, 4])
+      # IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated (::ffff:0:0:0/96),
+      # and NAT64 (64:ff9b::/96).
+      inside = embedded_v4(g)
+      return g[5].zero? && g[4].zero? && g[6].zero? && g[7] <= 1 ? false : public_v4?(inside) unless inside.nil?
       # 6to4 carries an IPv4 address in its second and third groups.
       return public_v4?(embedded.call(g[1], g[2])) if g[0] == 0x2002
-      return false if (g[0] & 0xfe00) == 0xfc00 || (g[0] & 0xffc0) == 0xfe80 || (g[0] & 0xff00) == 0xff00
-      # Teredo, documentation, and discard prefixes.
-      return false if g[0] == 0x2001 && (g[1].zero? || g[1] == 0xdb8)
-      return false if g[0] == 0x100 && zero.call(g[1, 3])
+      # Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old site-local,
+      # multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any address.
+      return false if (g[0] & 0xe000) != 0x2000
+      # The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+      return false if g[0] == 0x2001 && (g[1] < 0x200 || g[1] == 0xdb8)
+      return false if (g[0] & 0xfff0) == 0x3ff0
 
       true
+    end
+
+    # The IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or nil.
+    def embedded_v4(g)
+      inside = (g[0, 5].all?(&:zero?) && (g[5] == 0xffff || g[5].zero?)) ||
+               (g[0, 4].all?(&:zero?) && g[4] == 0xffff && g[5].zero?) ||
+               (g[0] == 0x64 && g[1] == 0xff9b && g[2, 4].all?(&:zero?))
+      inside ? [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255] : nil
     end
 
     # Names clouds give their metadata services.
@@ -105,10 +113,8 @@ module Runlight
     def metadata_address?(ip)
       four = v4(ip)
       g = four.nil? ? v6(ip) : nil
-      # IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
-      if four.nil? && !g.nil? && ((g[0, 5].all?(&:zero?) && (g[5] == 0xffff || g[5].zero?)) || (g[0] == 0x64 && g[1] == 0xff9b && g[2, 4].all?(&:zero?)))
-        four = [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255]
-      end
+      # IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
+      four = embedded_v4(g) if four.nil? && !g.nil?
       return (four[0] == 169 && four[1] == 254) || four == [100, 100, 100, 200] unless four.nil?
       return false if g.nil?
       return true if (g[0] & 0xffc0) == 0xfe80

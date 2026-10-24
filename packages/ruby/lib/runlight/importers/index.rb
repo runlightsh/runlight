@@ -25,8 +25,9 @@ module Runlight
         raise ImportError.new("Runlight cannot import from #{source}", "import_source", { "source" => source }) if name.nil?
 
         runlight.init
-        # Umami is at an address the owner typed; the others are their services' own.
-        client = Client.new(runlight.fetcher, owner: source == "umami")
+        # Umami is at an address the owner typed, and the others are their services' own; each is asked only on the
+        # public internet.
+        client = Client.new(runlight.fetcher)
         importer = Importers.const_get(name).new(client, -> { runlight.now })
         known = lambda do |source_id, slug = nil, url = nil|
           return true unless runlight.store.link_by_id(Write.imported_link_id(source, Js.string(source_id))).nil?

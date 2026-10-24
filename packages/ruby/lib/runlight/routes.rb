@@ -31,6 +31,8 @@ module Runlight
   # - accountOf: a callable taking the Request and returning the account it comes from, or nil (internal, for the
   #   standalone server).
   # - tokenMade: a callable taking a token row and who made it, returning whether that is allowed (internal).
+  # - tokensOf: a callable taking an account id, returning the ids of the tokens it made, so a member sees and
+  #   revokes only their own (internal).
   class Routes
     COOKIE = "runlight_token"
     IMPLEMENTATION = { "library" => "runlight", "language" => "ruby" }.freeze
@@ -169,6 +171,7 @@ module Runlight
       @sign_out = options["signOut"].nil? ? (web ? "#{@base}/logout" : nil) : options["signOut"].to_s
       @account_of = options["accountOf"] || (web ? ->(r) { web.account_of(r) } : nil)
       @token_made = options["tokenMade"] || (web ? ->(row, by) { web.token_made(row, by) } : nil)
+      @tokens_of = options["tokensOf"] || (web ? ->(by) { web.tokens_of(by) } : nil)
       authorize = options["authorize"]
       oauth = {
         "runlight" => runlight,
@@ -471,12 +474,14 @@ module Runlight
         n.is_a?(Float) ? (n.finite? ? n.to_i : 0) : n.to_i
       end
 
-      # The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site.
+      # The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key,
+      # and deleting a site.
       def admin_only?(path, method)
         (path == "/api/mail" && %w[PUT DELETE].include?(method)) ||
           (path == "/api/assistant" && %w[PUT DELETE].include?(method)) ||
           (path == "/api/assistant/limits" && method == "PUT") ||
           (path == "/api/assistant/models" && method == "POST") ||
+          (path == "/api/observe-key/new" && method == "POST") ||
           (path.match?(%r{\A/api/sites/[^/]+\z}) && method == "DELETE")
       end
 
@@ -1481,13 +1486,23 @@ module Runlight
       nil
     end
 
+    # The tokens the account behind a request made: none when nothing notes who made what.
+    def own_tokens(request)
+      by = @account_of&.call(request)
+      !by.nil? && by != "" && @tokens_of ? @tokens_of.call(by) : Set.new
+    end
+
     def tokens_api(request, path)
       @rl.init
       view = lambda do |t|
         { "id" => t["id"], "name" => t["name"], "site" => t["site"], "scope" => t["scope"], "hint" => t["hint"],
           "createdAt" => t["createdAt"], "lastUsedAt" => t["lastUsedAt"] }
       end
-      return json({ "tokens" => store.tokens.map(&view) }) if path == "/api/tokens" && request.method == "GET"
+      # A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+      mine = @members.key?(request) ? own_tokens(request) : nil
+      if path == "/api/tokens" && request.method == "GET"
+        return json({ "tokens" => store.tokens.select { |t| mine.nil? || mine.include?(t["id"]) }.map(&view) })
+      end
 
       if path == "/api/tokens" && request.method == "POST"
         body = read_json(request)
@@ -1517,6 +1532,8 @@ module Runlight
         return json({ "token" => view.call(row), "secret" => secret }, 201)
       end
       if (match = path.match(%r{\A/api/tokens/([a-f0-9]{24})\z})) && request.method == "DELETE"
+        return coded("Unknown token", "unknown_token", 404) if mine && !mine.include?(match[1])
+
         return store.delete_token(match[1]) ? json({ "ok" => true }) : coded("Unknown token", "unknown_token", 404)
       end
 
@@ -1898,7 +1915,7 @@ module Runlight
       end
       return chat(request, url) if path == "/api/assistant/chat" && method == "POST"
 
-      # Only the owner manages tokens: an API token cannot make or revoke one.
+      # Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
       if path == "/api/tokens" || path.start_with?("/api/tokens/")
         access = can_read(request)
         return denied(access) if access != true
@@ -2456,8 +2473,10 @@ module Runlight
         return json({ "site" => site["id"], "funnels" => store.funnels(site["id"]) }) if params.get("definitions") == "1"
         # One funnel at a time, so a page of funnels never takes every database connection at once.
         rows = store.funnels(site["id"]).map do |funnel|
-          counts = store.funnel_counts(query, funnel)
-          funnel.merge("steps" => funnel["steps"].each_with_index.map { |step, i| step.merge("visits" => counts[i]) })
+          counted = store.funnel_counts(query, funnel)
+          counts = counted["counts"]
+          row = funnel.merge("steps" => funnel["steps"].each_with_index.map { |step, i| step.merge("visits" => counts[i]) })
+          counted["sampled"] ? row.merge("sampled" => store.funnel_visits) : row
         end
         return json({ "site" => site["id"], "range" => range_out, "funnels" => rows })
       end

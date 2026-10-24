@@ -34,7 +34,7 @@ class StoreCountingTest < StoreTestCase
         totals = store.goal_totals(query, goal)
         visitors = store.visitors(query)
         events = store.breakdown(query, "event", 10, 0).map { |r| "#{r["value"]}:#{r["events"]}" }
-        [totals["conversions"], visitors.positive? ? totals["visitors"].fdiv(visitors) : 0, store.funnel_counts(query, funnel), store.event_prop_keys(query, "Signup").length, events]
+        [totals["conversions"], visitors.positive? ? totals["visitors"].fdiv(visitors) : 0, store.funnel_counts(query, funnel)["counts"], store.event_prop_keys(query, "Signup").length, events]
       end
       label = Runlight::Json.encode(filters)
       assert_equal [2, 1, [2, 2], 1, ["Signup:2"]], read.call(day5), "the visits that started on the 5th #{label}"
@@ -122,7 +122,7 @@ class StoreCountingTest < StoreTestCase
     totals = store.goal_totals(today, goal)
     assert_equal ["/#/thanks", 2, 2], [goal["match"], totals["conversions"], totals["visitors"]]
     assert_equal ["/#/cart", "/#/thanks"], funnel["steps"].map { |s| s["match"] }
-    assert_equal [2, 2], store.funnel_counts(today, funnel)
+    assert_equal [2, 2], store.funnel_counts(today, funnel)["counts"]
   end
 
   on_each "page_and_hostname_filters_together_count_pageviews_matching_both" do |kind|
@@ -237,8 +237,8 @@ class StoreCountingTest < StoreTestCase
     Seed.visit(store, "a", "v1", t, {}, [["pageview", "/pricing", t, "a1"], ["event", "Signup", t, nil]])
     same = Runlight::Funnels.funnel_from({ "name" => "Same moment", "steps" => [{ "kind" => "page", "match" => "/pricing" }, { "kind" => "event", "match" => "Signup" }] }, "default", [], NOW)
     twice = Runlight::Funnels.funnel_from({ "name" => "Twice", "steps" => [{ "kind" => "page", "match" => "/pricing" }, { "kind" => "page", "match" => "/pricing" }] }, "default", [same], NOW)
-    assert_equal [1, 1], store.funnel_counts(today, same)
-    assert_equal [1, 0], store.funnel_counts(today, twice), "one pageview is not two steps"
+    assert_equal [1, 1], store.funnel_counts(today, same)["counts"]
+    assert_equal [1, 0], store.funnel_counts(today, twice)["counts"], "one pageview is not two steps"
   end
 
   on_each "a_funnel_counts_visits_that_took_each_step_in_order_within_one_visit" do |kind|
@@ -265,13 +265,13 @@ class StoreCountingTest < StoreTestCase
     funnel = Runlight::Funnels.funnel_from({ "name" => "Signup", "steps" => [{ "kind" => "page", "match" => "https://example.com/pricing*" }, { "kind" => "event", "match" => "Signup" }, { "kind" => "page", "match" => "welcome" }] }, "default", [], NOW)
     assert_equal ["/pricing*", "Signup", "/welcome"], funnel["steps"].map { |s| s["match"] }, "a pasted URL keeps its path; a bare path gains its slash"
     store.save_funnel(funnel)
-    assert_equal [3, 2, 1], store.funnel_counts(today, store.funnels("default")[0])
+    assert_equal [3, 2, 1], store.funnel_counts(today, store.funnels("default")[0])["counts"]
     # Filters choose which visits enter. The Signup events were sent from /signup, so a page filter finds them.
-    assert_equal [2, 2, 1], store.funnel_counts(today(["page", "is", "/signup"]), funnel)
+    assert_equal [2, 2, 1], store.funnel_counts(today(["page", "is", "/signup"]), funnel)["counts"]
     changed = Runlight::Funnels.funnel_from({ "name" => "Signup flow", "steps" => [{ "kind" => "page", "match" => "/pricing" }, { "kind" => "page", "match" => "/welcome" }] }, "default", [funnel], NOW + 1, funnel["id"])
     assert_equal funnel["createdAt"], changed["createdAt"]
     store.save_funnel(changed)
-    assert_equal [3, 1], store.funnel_counts(today, store.funnels("default")[0])
+    assert_equal [3, 1], store.funnel_counts(today, store.funnels("default")[0])["counts"]
     store.delete_funnel(funnel["id"])
     assert_equal [], store.funnels("default")
   end

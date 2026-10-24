@@ -25,6 +25,7 @@ module Runlight
     class SqlStore
       BOUNCE_MS = Sql::BOUNCE_MS
       JOURNEY_VISITS = Sql::JOURNEY_VISITS
+      FUNNEL_VISITS = Sql::FUNNEL_VISITS
       EVENT_TAIL_MS = Sql::EVENT_TAIL_MS
       MYSQL_COLLATION = Sql::MYSQL_COLLATION
 
@@ -34,6 +35,8 @@ module Runlight
       attr_reader :db,
                   # What the store's table and index names start with: `rl_` unless it was given another.
                   :prefix
+      # The most visits a funnel is counted over; smaller in tests, to try the cap.
+      attr_accessor :funnel_visits
 
       # `prefix` takes the place of `rl_` at the start of every table and index name, so two apps can each keep
       # Runlight's tables in one database. A database that is already prefixed keeps its own.
@@ -45,6 +48,7 @@ module Runlight
         end
         @db = db
         @prefix = prefix
+        @funnel_visits = FUNNEL_VISITS
         @ready = false
         @checked_all = false
       end
@@ -575,7 +579,18 @@ module Runlight
       # How many visits reached each step, in order, within the same visit. Step
       # one is the first matching row in the range; each later step must come
       # after the step before it. Filters choose which visits enter the funnel.
+      # {"counts" => Array<Integer>, "sampled" => bool}
       def funnel_counts(query, funnel)
+        # Past funnel_visits visits in the range, only the newest are counted: the range starts where the oldest
+        # of them began.
+        scope = Sql.visit_scope(query["filters"], query["site"], query["from"], query["to"], @db.dialect)
+        first = @db.all(
+          "SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND #{Sql::IS_VISIT}#{scope["sql"]}
+         ORDER BY s.started_at DESC, s.id LIMIT #{@funnel_visits + 1}) x",
+          [query["site"], query["from"], query["to"], *scope["params"]],
+        )[0] || {}
+        sampled = Sql.num(first["n"]) > @funnel_visits
+        query = query.merge("from" => [query["from"], Sql.num(first["t"]) + 1].max) if sampled
         # The rows of the picked visits that match any step, in order, read once and walked here: a join from
         # each step to the next is planned badly by Postgres, which cannot guess how many visits go on.
         v = Sql.visit_rows(query["filters"], query["site"], query["from"], query["to"], @db.dialect)
@@ -611,7 +626,7 @@ module Runlight
           reached += 1 if reached < counts.length && Sql.num(row["m#{reached}"]) == 1
         end
         close.call
-        counts
+        { "counts" => counts, "sampled" => sampled }
       end
 
       # Each visit's pageviews in order, at most `per_visit` of them, for journeys.

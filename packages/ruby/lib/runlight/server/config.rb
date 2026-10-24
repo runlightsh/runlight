@@ -16,7 +16,8 @@ module Runlight
     #   RUNLIGHT_SECRET       signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
     #   RUNLIGHT_TOKEN        also accepted as a bearer token on the API, and makes the first account
     #   RUNLIGHT_URL          the dashboard's public address, which can never become a link domain
-    #   TRUST_PROXY           "false" when no proxy sits in front, so forwarded addresses are ignored
+    #   TRUST_PROXY           unset believes forwarded addresses only from a private network; "false" never,
+    #                         "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
     #   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
     #   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
     #   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
@@ -115,7 +116,7 @@ module Runlight
       end
 
       # false with nothing in front, or the one header your proxy sets, such as cf-connecting-ip behind Cloudflare.
-      # Unset stays nil, so the library's default applies and it can warn when nothing sits in front.
+      # Unset stays nil, so the library's default applies: forwarding headers count only from a private address.
       def trust_proxy
         value = (get("TRUST_PROXY") || "").downcase
         return nil if value == ""

@@ -192,9 +192,10 @@ module Runlight
         save(id, entry)
       end
 
-      # Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
-      # have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when a new entry is
-      # made, since only then can there be more.
+      # Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+      # ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+      # or the count of a name someone is close to blocking. Run when a new entry is made, since only then can
+      # there be more.
       def prune(now)
         entries = []
         @store.settings_starting_with(prefix).each do |row|
@@ -204,23 +205,13 @@ module Runlight
             @store.set_setting(row["key"], nil)
             next
           end
-          entries << { "key" => row["key"], "until" => until_ms, "blocked" => entry.is_a?(Hash) && int(entry["count"]) >= @limit }
+          entries << { "key" => row["key"], "until" => until_ms, "count" => int(entry["count"]) }
         end
-        size = entries.length
-        return if size <= Accounts::MAX_THROTTLED
+        return if entries.length <= Accounts::MAX_THROTTLED
 
-        # Oldest first: each entry's window started windowMs before its end.
-        entries = entries.each_with_index.sort_by { |e, i| [e["until"], i] }.map(&:first)
-        [false, true].each do |blocked|
-          entries.each do |e|
-            return if size <= Accounts::MAX_THROTTLED
-
-            if e["blocked"] == blocked
-              @store.set_setting(e["key"], nil)
-              size -= 1
-            end
-          end
-        end
+        # Fewest tries first, and among equals the oldest: each entry's window started windowMs before its end.
+        fewest = entries.each_with_index.sort_by { |e, i| [e["count"], e["until"], i] }.map(&:first)
+        fewest.first(entries.length - (Accounts::MAX_THROTTLED * 0.9).floor).each { |e| @store.set_setting(e["key"], nil) }
       end
     end
   end
