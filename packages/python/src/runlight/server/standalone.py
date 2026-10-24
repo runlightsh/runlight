@@ -53,7 +53,7 @@ class RunlightServer:
             "secret": options["secret"],
             "now": now,
         }
-        # Left out when it was not given, so Runlight's default applies and can warn when nothing sits in front.
+        # Left out when it was not given, so Runlight's default applies: forwarding headers count only from a private address.
         if trust is not None:
             runlight["trustProxy"] = trust
         if options.get("geo") is not None:

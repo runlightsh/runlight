@@ -56,15 +56,27 @@ def _props(value: Any) -> dict[str, str] | None:
             text = "true" if raw else "false"
         else:
             continue
-        # Assigning out["__proto__"] in JavaScript sets the prototype, which a string cannot be, so nothing is
-        # kept; it still counts.
-        if k != "__proto__":
-            out[k] = text
+        # TypeScript reads props into an object with no prototype, so a prop named __proto__ is kept like any other.
+        out[k] = text
         count += 1
     if count == 0:
         return None
     # JavaScript's own key order: keys that are array indexes first, ascending, then the rest as added.
     return {key: out[key] for key in _js.object_keys(out)}
+
+
+# The events the tracker sends on its own for a link that was followed, each with the link as `url`.
+LINK_EVENTS = frozenset({"Outbound link", "File download"})
+
+
+def _link_props(name: str | None, given: dict[str, str] | None) -> dict[str, str] | None:
+    """An automatic link event's `url` without its query string or fragment, as page paths are kept, since tokens and
+    email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a
+    tracker cached from before is held to it too."""
+    if given is None or name not in LINK_EVENTS or "url" not in given:
+        return given
+    given["url"] = re.split(r"[?#]", given["url"], maxsplit=1)[0]
+    return given
 
 
 def _loads(text: str) -> tuple[bool, Any]:
@@ -222,7 +234,7 @@ def parse_payload(text: str) -> dict[str, Any] | None:
         "screenHeight": _int(body.get("h"), 0, 20000),
         "language": _str(body.get("l"), 35),
         "name": name,
-        "props": _props(body.get("p")) if kind == "event" else None,
+        "props": _link_props(name, _props(body.get("p"))) if kind == "event" else None,
         "pageviewId": pageview_id,
         "engagedMs": engaged if engaged is not None else 0,
         "scroll": _int(body.get("d"), 0, 100),

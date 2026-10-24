@@ -43,7 +43,7 @@ def test_goals_funnels_and_event_properties_count_visits_by_when_they_started_wi
             totals = s.goal_totals(query, g)
             visitors = s.visitors(query)
             events = [f"{r['value']}:{r['events']}" for r in s.breakdown(query, "event", 10, 0)]
-            return [totals["conversions"], totals["visitors"] / visitors if visitors > 0 else 0, s.funnel_counts(query, funnel), len(s.event_prop_keys(query, "Signup")), events]
+            return [totals["conversions"], totals["visitors"] / visitors if visitors > 0 else 0, s.funnel_counts(query, funnel)["counts"], len(s.event_prop_keys(query, "Signup")), events]
 
         assert read(day5) == [2, 1, [2, 2], 1, ["Signup:2"]], f"the visits that started on the 5th {filters}"
         assert read(day5 + DAY) == [0, 0, [0, 0], 0, []], f"nothing that started on the 6th converted {filters}"
@@ -137,7 +137,7 @@ def test_a_page_goal_or_funnel_step_for_a_hash_route_counts_that_route_only(data
     totals = s.goal_totals(today(), g)
     assert [g["match"], totals["conversions"], totals["visitors"]] == ["/#/thanks", 2, 2]
     assert [x["match"] for x in funnel["steps"]] == ["/#/cart", "/#/thanks"]
-    assert s.funnel_counts(today(), funnel) == [2, 2]
+    assert s.funnel_counts(today(), funnel)["counts"] == [2, 2]
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -267,8 +267,8 @@ def test_funnel_steps_in_the_same_millisecond_both_count_and_one_row_never_count
     visit(s, "a", "v1", t, {}, [("pageview", "/pricing", t, "a1"), ("event", "Signup", t, None)])
     same = funnel_from({"name": "Same moment", "steps": [{"kind": "page", "match": "/pricing"}, {"kind": "event", "match": "Signup"}]}, "default", [], NOW)
     twice = funnel_from({"name": "Twice", "steps": [{"kind": "page", "match": "/pricing"}, {"kind": "page", "match": "/pricing"}]}, "default", [same], NOW)
-    assert s.funnel_counts(today(), same) == [1, 1]
-    assert s.funnel_counts(today(), twice) == [1, 0], "one pageview is not two steps"
+    assert s.funnel_counts(today(), same)["counts"] == [1, 1]
+    assert s.funnel_counts(today(), twice)["counts"] == [1, 0], "one pageview is not two steps"
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -302,13 +302,13 @@ def test_a_funnel_counts_visits_that_took_each_step_in_order_within_one_visit(da
     )
     assert [x["match"] for x in funnel["steps"]] == ["/pricing*", "Signup", "/welcome"], "a pasted URL keeps its path; a bare path gains its slash"
     s.save_funnel(funnel)
-    assert s.funnel_counts(today(), s.funnels("default")[0]) == [3, 2, 1]
+    assert s.funnel_counts(today(), s.funnels("default")[0])["counts"] == [3, 2, 1]
     # Filters choose which visits enter. The Signup events were sent from /signup, so a page filter finds them.
-    assert s.funnel_counts(today(("page", "is", "/signup")), funnel) == [2, 2, 1]
+    assert s.funnel_counts(today(("page", "is", "/signup")), funnel)["counts"] == [2, 2, 1]
     changed = funnel_from({"name": "Signup flow", "steps": [{"kind": "page", "match": "/pricing"}, {"kind": "page", "match": "/welcome"}]}, "default", [funnel], NOW + 1, funnel["id"])
     assert changed["createdAt"] == funnel["createdAt"]
     s.save_funnel(changed)
-    assert s.funnel_counts(today(), s.funnels("default")[0]) == [3, 1]
+    assert s.funnel_counts(today(), s.funnels("default")[0])["counts"] == [3, 1]
     s.delete_funnel(funnel["id"])
     assert s.funnels("default") == []
 

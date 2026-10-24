@@ -13,10 +13,12 @@ Options, with the TS names (as a dict, or as keyword arguments in snake_case, `r
   standalone server does. `site` and `sites` are ignored.
 - geo: a callable(ip) giving {"country", "region", "city"} or None, a location for an IP when the platform
   sends no location headers.
-- trustProxy: True (default), False, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the
-  client IP from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then
-  X-Real-IP, then CF-Connecting-IP. Name one of them to read only that header. False reads only the
-  connection's address, for an app nothing sits in front of.
+- trustProxy: True, False, or one of "x-forwarded-for", "x-real-ip", "cf-connecting-ip". Read the client IP
+  from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy wrote, then X-Real-IP, then
+  CF-Connecting-IP. Name one of them to read only that header. Left out, the headers count only on a connection
+  from this computer or a private network, where proxies and load balancers connect from, so a client that
+  reaches the app straight from the internet cannot choose its own address. True reads them from anywhere, for a
+  CDN that connects from public addresses. False reads only the connection's address.
 - linkPath: where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go".
 - mail: how email reports, invites, and sign-in links are sent. Either a mail service in code (a transports
   config plus `from` and `fromName`), which the dashboard shows and cannot change, or a mailer of the app's own,
@@ -198,9 +200,11 @@ class Runlight:
         self._geo = opts.get("geo")
         trust = opts.get("trustProxy", True)
         self._trust_proxy: bool | str = True if trust is None else trust
-        # True until trustProxy left at its default has been seen answering a public address directly, and warned
+        # True when trustProxy was left at its default, which believes forwarding headers only from a private address.
+        self._trust_private = opts.get("trustProxy") is None
+        # True until a public address has sent forwarding headers that the default did not believe, and been warned
         # about once.
-        self._warn_direct = opts.get("trustProxy") is None
+        self._warn_direct = self._trust_private
         per_minute = opts.get("rateLimit", 120)
         if per_minute is None:
             per_minute = 120
@@ -1051,7 +1055,7 @@ class Runlight:
         context = context or {}
         ip = context.get("ip")
         address = str(ip) if ip is not None else request.remote_address
-        if self._trust_proxy is not False:
+        if self._trusts(request, context):
             h = request.headers
 
             def last(name: str) -> str | None:
@@ -1073,15 +1077,27 @@ class Runlight:
                 forwarded = h.get(str(self._trust_proxy))
             if forwarded is not None and _js.trim(forwarded):
                 return _js.trim(forwarded)
-            # A public address with no forwarding header means nothing sits in front, and then any client could
-            # name its own address in one. Said once, only when trustProxy was left at its default.
-            if self._warn_direct and address and public_address(address):
-                self._warn_direct = False
-                print(
-                    "Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set trust_proxy=False when nothing sits in front of this server, or put a proxy in front that sets the header.",
-                    file=sys.stderr,
-                )
         return address
+
+    def _trusts(self, request: Request, context: Mapping[str, Any] | None = None) -> bool:
+        """Whether a request's forwarding headers count. Left at its default, trustProxy believes them only on a
+        connection from this computer or a private network, or one whose address the app did not pass on, since a
+        client reaching the server straight from the internet could write them itself."""
+        if self._trust_proxy is False:
+            return False
+        ip = (context or {}).get("ip")
+        address = str(ip) if ip is not None else request.remote_address
+        if not self._trust_private or not address or not public_address(address):
+            return True
+        # Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
+        h = request.headers
+        if self._warn_direct and (h.get("x-forwarded-for") is not None or h.get("x-real-ip") is not None or h.get("cf-connecting-ip") is not None):
+            self._warn_direct = False
+            print(
+                "Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set trustProxy to the header it sets (cf-connecting-ip) or to True.",
+                file=sys.stderr,
+            )
+        return False
 
     def _current_salts(self, now: int, timezone: str) -> dict[str, Any]:
         """Today's salt in a site's timezone and, if it still exists, yesterday's. Salts follow the site's own days,
@@ -1095,9 +1111,14 @@ class Runlight:
             return cached
         today = self.store.salt(day, random_salt())
         yesterday = self.store.salt_if_exists(add_days(day, -1))
-        self._drop_old_salts(now)
         salts = {"day": day, "today": today, "yesterday": yesterday}
+        # Kept before old salts go, so dropping yesterday's from the store drops it from here too.
         self._salts[timezone] = salts
+        try:
+            self._drop_old_salts(now)
+        except BaseException:
+            self._salts.pop(timezone, None)
+            raise
         return salts
 
     def _drop_old_salts(self, now: int) -> None:
@@ -1125,10 +1146,10 @@ class Runlight:
                     cached["yesterday"] = None
         self.store.drop_salts_except(sorted(needed))
 
-    def _forwarded_host(self, request: Request) -> str | None:
+    def _forwarded_host(self, request: Request, context: Mapping[str, Any] | None = None) -> str | None:
         """The host a proxy says the request was for, read only when proxy headers are trusted, as the client's
         address is."""
-        return request.headers.get("x-forwarded-host") if self._trust_proxy is not False else None
+        return request.headers.get("x-forwarded-host") if self._trusts(request, context) else None
 
     # Tracking
 
@@ -1161,10 +1182,12 @@ class Runlight:
         # A database too busy to take the hit right now (every pooled connection held by long reports, or another
         # process writing the SQLite file) gets it a little later, at the time it arrived.
         now = self.now()
+        # How far recording the hit got, so one tried again skips the writes that went in already.
+        done: dict[str, Any] = {}
         attempt = 1
         while True:
             try:
-                self._record(payload, request, context, now)
+                self._record(payload, request, context, now, done)
                 return
             except Exception as error:
                 if attempt >= 3 or not _busy(error):
@@ -1172,7 +1195,10 @@ class Runlight:
                 time.sleep(0.5 * attempt)
                 attempt += 1
 
-    def _record(self, payload: Mapping[str, Any], request: Request, context: Mapping[str, Any], now: int) -> None:
+    def _record(self, payload: Mapping[str, Any], request: Request, context: Mapping[str, Any], now: int, done: dict[str, Any] | None = None) -> None:
+        """Records one hit. `done` notes how far it got: its visit ("session"), and which of its writes went in
+        ("touched", "engaged"). A hit tried again after a write failed skips the ones before it, so a visit's counts
+        never take the same hit twice."""
         from .sources import parse_page
         from .store import EVENT_TAIL_MS
 
@@ -1182,18 +1208,21 @@ class Runlight:
         site = self.site_for(url.hostname, payload.get("site")) or self._setup_site(url.hostname, payload.get("site"))
         if site is None:
             return
+        if done is None:
+            done = {}
         if payload["kind"] == "engagement":
-            self._engagement(site, payload, now)
+            self._engagement(site, payload, now, done)
             return
         page = parse_page(url)
-        session = None
+        session = done.get("session")
         reopen = True
         if payload["kind"] == "event" and payload.get("pageviewId"):
             pageview = self.store.pageview(site["id"], payload["pageviewId"])
             # An event joins its page's visit unless that visit began longer ago than reports look for its rows (a
             # tab left open for days); it then starts a visit of its own, as any later activity would.
             if pageview is not None and now - pageview["startedAt"] < EVENT_TAIL_MS:
-                session = {"id": pageview["session"], "visitor": pageview["visitor"]}
+                if session is None:
+                    session = {"id": pageview["session"], "visitor": pageview["visitor"]}
                 # A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
                 reopen = now - pageview["lastAt"] <= SESSION_IDLE_MS
                 if now - pageview["startedAt"] > 3_600_000:
@@ -1211,7 +1240,10 @@ class Runlight:
                 now,
                 {"screenWidth": width, "screen": screen, "language": payload.get("language", "")},
             )
-        self.store.touch_session(session["id"], now, payload["kind"], page["path"], reopen)
+        done["session"] = session
+        if not done.get("touched"):
+            self.store.touch_session(session["id"], now, payload["kind"], page["path"], reopen)
+            done["touched"] = True
         self.store.insert_event(
             {
                 "site": site["id"],
@@ -1273,7 +1305,7 @@ class Runlight:
                 },
                 client.get("screenWidth"),
             )
-            location = locate(request.headers, ip, self._geo, bool(self._trust_proxy))
+            location = locate(request.headers, ip, self._geo, self._trusts(request, context))
             self.store.insert_session(
                 {
                     "id": session["id"],
@@ -1356,7 +1388,7 @@ class Runlight:
 
         url = Url(request.url)
         # A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
-        given = self._forwarded_host(request)
+        given = self._forwarded_host(request, context)
         if given is None:
             given = request.headers.get("host")
         if given is None:
@@ -1391,7 +1423,7 @@ class Runlight:
         context = context or {}
         self.init()
         url = Url(request.url)
-        given = self._forwarded_host(request)
+        given = self._forwarded_host(request, context)
         if given is None:
             given = request.headers.get("host")
         if given is None:
@@ -1441,7 +1473,7 @@ class Runlight:
             {"location": link["url"], "cache-control": "no-store", "referrer-policy": "no-referrer-when-downgrade"},
         )
 
-    def _engagement(self, site: Mapping[str, Any], payload: Mapping[str, Any], now: int) -> None:
+    def _engagement(self, site: Mapping[str, Any], payload: Mapping[str, Any], now: int, done: dict[str, Any]) -> None:
         from .store import EVENT_TAIL_MS
 
         if payload["engagedMs"] <= 0:
@@ -1450,7 +1482,9 @@ class Runlight:
         # Reports look for a visit's rows only so long after it began, so later time on it is let go.
         if pageview is None or now - pageview["startedAt"] >= EVENT_TAIL_MS:
             return
-        self.store.add_engagement(pageview["session"], payload["engagedMs"])
+        if not done.get("engaged"):
+            self.store.add_engagement(pageview["session"], payload["engagedMs"])
+            done["engaged"] = True
         # Only a visit that began more than an hour ago can belong to a day that is already added up.
         if now - pageview["startedAt"] > 3_600_000:
             self.store.touched_old_visit(site["id"], int(pageview["startedAt"]), now - ROLLUP_DELAY_MS + 3_600_000)
@@ -1586,6 +1620,10 @@ class Runlight:
         for timezone in dict.fromkeys(site["timezone"] for site in self.sites):
             self._current_salts(self.now(), timezone)
         self._drop_old_salts(self.now())
+        # Sign-in counts that ran out, and hashing keys older than yesterday, so nothing made from an address lasts a day.
+        from .accounts.auth import Throttle
+
+        Throttle.sweep(self.store, self.now())
         # Every site's retention covers any one site's that is still waiting.
         with self._pruning_lock:
             self._pruning = []

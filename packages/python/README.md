@@ -26,7 +26,7 @@ rl = Runlight(
 )
 ```
 
-If nothing sits in front of your app (no load balancer, CDN, or reverse proxy), add `trust_proxy=False`, so a visitor cannot pick their own address with an `X-Forwarded-For` header. Runlight logs a warning once when it sees requests arrive that way with the default left on.
+Runlight reads the visitor's address from `X-Forwarded-For` and similar headers only when the request comes from this computer or a private network, where proxies and load balancers connect from, so a visitor who reaches your app straight from the internet cannot pick their own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of your server, add `trust_proxy="cf-connecting-ip"` (the header it sets) or `trust_proxy=True`. Runlight logs a warning once when a public address sends forwarding headers that the default did not believe. `trust_proxy=False` never reads them.
 
 Put it in front of your app. In Flask that is one line.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import re
 import threading
@@ -189,26 +190,40 @@ def test_two_factor_codes_work_once_and_recovery_codes_are_crossed_off(databases
     assert accounts.confirm_two_factor(user["id"], totp(secret, step), NOW) is None, "a cancelled set-up confirms nothing"
 
 
-def test_a_throttle_in_memory_keeps_its_counts_out_of_the_database(databases):
+def test_throttle_ids_are_hashed_with_a_key_for_the_day_so_nothing_made_from_an_address_outlasts_a_day(databases):
     store = fresh(databases, "sqlite")
-    # Counts left in the settings by an earlier version are deleted on first use.
-    store.set_setting("throttle:address:old", '{"count":3,"until":9999999999999}')
-    throttle = Throttle(store, "address", 3, 1000, memory=True)
-    pair = "jon@example.com\n203.0.113.9"
-    for _ in range(3):
-        assert throttle.take(pair, NOW) is True
-    assert throttle.take(pair, NOW) is False
-    assert throttle.blocked(pair, NOW) is True
-    assert throttle.blocked(pair, NOW + 1000) is False, "a window ends"
-    throttle.forgive(pair)
-    assert throttle.blocked(pair, NOW) is False
-    throttle.fail(pair, NOW)
-    assert throttle.blocked(pair, NOW) is True
-    throttle.clear(pair)
-    assert throttle.blocked(pair, NOW) is False
-    assert store.settings_starting_with("throttle:address:") == []
-    assert store.setting("throttle-key") is None, "no hashing key is kept for it either"
-    assert Throttle(store, "address", 3, 1000, memory=True).blocked(pair, NOW) is False, "each process counts its own"
+    now = NOW
+    throttle = Throttle(store, "ip", 3, 15 * 60_000, clock=lambda: now)
+    store.set_setting("throttle-key", "the one key kept before")
+    assert throttle.take("203.0.113.7", now) is True
+
+    def day(ms: int) -> str:
+        return "throttle-key:" + datetime.datetime.fromtimestamp(ms // 1000, datetime.UTC).strftime("%Y-%m-%d")
+
+    assert store.setting(day(now)) is not None
+    assert store.setting("throttle-key") is None, "the old lasting key is gone"
+    [first] = [s["key"] for s in store.settings_starting_with("throttle:ip:")]
+    throttle.forgive("203.0.113.7")
+
+    # The next day has its own key, so the same address gets another id; yesterday's key stays a day for windows
+    # across midnight.
+    now += 86_400_000
+    assert throttle.take("203.0.113.7", now) is True
+    assert first not in [s["key"] for s in store.settings_starting_with("throttle:ip:")], "the same address, another id"
+    assert store.setting(day(now - 86_400_000)) is not None
+
+    # Two days on, the first key has gone, and so has every count that ran out.
+    now += 86_400_000
+    assert throttle.take("198.51.100.1", now) is True
+    assert store.setting(day(NOW)) is None, "keys older than yesterday are deleted"
+    assert len(store.settings_starting_with("throttle:ip:")) == 1
+
+    # The scheduled check's sweep takes counts that ran out, from every throttle.
+    store.set_setting("throttle:account:old", '{"count":2,"until":1}')
+    Throttle.sweep(store, now + 15 * 60_000)
+    assert store.settings_starting_with("throttle:") == []
+    assert store.setting(day(now)) is not None, "today's key stays"
+    assert store.setting(day(NOW)) is None
 
 
 @pytest.mark.parametrize("kind", store_kinds())
@@ -322,7 +337,7 @@ def test_an_old_table_gains_roles_and_keeps_one_owner(databases):
 
 def test_the_throttle_counts_before_the_check_and_forgives_a_right_try(databases):
     store = fresh(databases, "sqlite")
-    throttle = Throttle(store, "test", 3, 1000)
+    throttle = Throttle(store, "test", 3, 1000, clock=lambda: NOW)
     for _ in range(3):
         assert throttle.take("jon@example.com", NOW) is True
     assert throttle.blocked("jon@example.com", NOW) is True

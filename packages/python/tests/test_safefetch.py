@@ -29,7 +29,7 @@ def dns(names: dict[str, list[str]]) -> Callable[[str], list[str]]:
 
 
 def test_link_local_and_cloud_metadata_addresses_are_told_apart_from_loopback_and_private_ones():
-    for ip in ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe"]:
+    for ip in ["169.254.169.254", "169.254.0.1", "100.100.100.200", "fe80::1", "fe80::a9fe:a9fe", "fd00:ec2::254", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe", "::ffff:0:a9fe:a9fe"]:
         assert metadata_address(ip) is True, ip
     for ip in ["127.0.0.1", "::1", "10.0.0.5", "192.168.1.20", "fd00::1", "fd00:ec2::253", "93.184.215.14", "not an address"]:
         assert metadata_address(ip) is False, ip
@@ -48,13 +48,15 @@ def hops(answers: list[Response]) -> FakeFetcher:
 
 
 def test_only_addresses_on_the_public_internet_count_as_public() -> None:
-    for ip in ["93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e"]:
+    for ip in ["93.184.215.14", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4001:82a::200e", "::ffff:0:808:808", "64:ff9b::808:808"]:
         assert public_address(ip), ip
     for ip in [
         "127.0.0.1", "10.0.0.1", "172.16.5.4", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1",
         "255.255.255.255", "::1", "::", "fe80::1", "fd00::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:7f00:1",
         "::ffff:169.254.169.254", "64:ff9b::a00:1", "2002:a00:1::", "2001:db8::1", "2001:0:4136:e378::1", "[::1]",
         "not an address", "1.2.3", "1.2.3.256",
+        # IPv4-translated loopback, local-use NAT64, the old site-local, ORCHID, the newer documentation prefix, and discard.
+        "::ffff:0:7f00:1", "64:ff9b:1::7f00:1", "fec0::1", "2001:20::1", "3fff::1", "100::1",
     ]:  # fmt: skip
         assert not public_address(ip), ip
 

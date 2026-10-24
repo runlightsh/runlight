@@ -102,22 +102,32 @@ def public_address(ip: str) -> bool:
     def embedded(hi: int, lo: int) -> list[int]:
         return [hi >> 8, hi & 255, lo >> 8, lo & 255]
 
-    # IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64 (64:ff9b::/96).
-    if all(x == 0 for x in g[:5]) and g[5] in (0xFFFF, 0):
-        return False if g[5] == 0 and g[6] == 0 and g[7] <= 1 else _public_v4(embedded(g[6], g[7]))
-    if g[0] == 0x64 and g[1] == 0xFF9B and all(x == 0 for x in g[2:6]):
-        return _public_v4(embedded(g[6], g[7]))
+    # IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated (::ffff:0:0:0/96),
+    # and NAT64 (64:ff9b::/96).
+    inside = _embedded_v4(g)
+    if inside is not None:
+        return False if g[5] == 0 and g[4] == 0 and g[6] == 0 and g[7] <= 1 else _public_v4(inside)
     # 6to4 carries an IPv4 address in its second and third groups.
     if g[0] == 0x2002:
         return _public_v4(embedded(g[1], g[2]))
-    if (g[0] & 0xFE00) == 0xFC00 or (g[0] & 0xFFC0) == 0xFE80 or (g[0] & 0xFF00) == 0xFF00:
+    # Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old site-local,
+    # multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any address.
+    if (g[0] & 0xE000) != 0x2000:
         return False
-    # Teredo, documentation, and discard prefixes.
-    if g[0] == 0x2001 and g[1] in (0, 0xDB8):
+    # The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+    if g[0] == 0x2001 and (g[1] < 0x200 or g[1] == 0xDB8):
         return False
-    if g[0] == 0x100 and all(x == 0 for x in g[1:4]):
-        return False
-    return True
+    return (g[0] & 0xFFF0) != 0x3FF0
+
+
+def _embedded_v4(g: list[int]) -> list[int] | None:
+    """The IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or None."""
+    inside = (
+        (all(x == 0 for x in g[:5]) and g[5] in (0xFFFF, 0))
+        or (all(x == 0 for x in g[:4]) and g[4] == 0xFFFF and g[5] == 0)
+        or (g[0] == 0x64 and g[1] == 0xFF9B and all(x == 0 for x in g[2:6]))
+    )
+    return [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255] if inside else None
 
 
 # Names clouds give their metadata services.
@@ -131,12 +141,9 @@ def metadata_address(ip: str) -> bool:
     four = _v4(ip)
     g = None if four is not None else _v6(ip)
     inner = four
-    # IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
+    # IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
     if inner is None and g is not None:
-        mapped = all(x == 0 for x in g[:5]) and g[5] in (0xFFFF, 0)
-        nat64 = g[0] == 0x64 and g[1] == 0xFF9B and all(x == 0 for x in g[2:6])
-        if mapped or nat64:
-            inner = [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255]
+        inner = _embedded_v4(g)
     if inner is not None:
         return (inner[0] == 169 and inner[1] == 254) or inner == [100, 100, 100, 200]
     if g is None:

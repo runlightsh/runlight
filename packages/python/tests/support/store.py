@@ -275,4 +275,7 @@ def answer(s: SqlStore, call: dict[str, Any]) -> Any:
     result = getattr(s, snake(call["method"]))(*call["args"])
     if call["method"] == "rollupDays":
         result = sorted(result)
+    # Funnel counts came back as a bare list before the cap on visits; a fixture written then holds only the counts.
+    if call["method"] == "funnelCounts" and isinstance(call.get("result"), list):
+        result = result["counts"]
     return result

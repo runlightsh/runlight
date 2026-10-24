@@ -2,15 +2,18 @@
 signed in. The standalone server always has them, and an app turns them on with routes({"accounts": True}).
 
 A user is a dict with the TypeScript User's keys: id, email, hash, role ("owner", "admin", "member", or
-"viewer"), createdAt, twoFactor (whether sign-in also asks for a code), and recoveryLeft (recovery codes not yet
-used). An invite has id, email, role, invitedBy, createdAt, and expiresAt.
+"viewer"), createdAt, twoFactor (whether sign-in also asks for a code), recoveryLeft (recovery codes not yet
+used), and signedOut when set (a mark signing out replaces, which every session is signed with). An invite has
+id, email, role, invitedBy, createdAt, and expiresAt.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 import struct
 import threading
+import time as _time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -255,8 +258,14 @@ class Accounts:
             if "role" not in names:
                 db.run(f"ALTER TABLE rl_users ADD COLUMN role {text(20)} NOT NULL DEFAULT 'owner'")
             # Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last
-            # code's step.
-            for name, kind in (("totp_secret", "TEXT"), ("totp_pending", "TEXT"), ("totp_recovery", "TEXT"), ("totp_step", "BIGINT")):
+            # code's step. And the mark signing out replaces, later again.
+            for name, kind in (
+                ("totp_secret", "TEXT"),
+                ("totp_pending", "TEXT"),
+                ("totp_recovery", "TEXT"),
+                ("totp_step", "BIGINT"),
+                ("signed_out", "TEXT"),
+            ):
                 if name not in names:
                     db.run(f"ALTER TABLE rl_users ADD COLUMN {name} {kind}")
             db.run(
@@ -290,6 +299,7 @@ class Accounts:
             "createdAt": _js.number(r["created_at"]),
             "twoFactor": _js.truthy(r.get("totp_secret")),
             "recoveryLeft": len(_recovery_list(r.get("totp_recovery"))),
+            **({"signedOut": _js.string(r["signed_out"])} if _js.truthy(r.get("signed_out")) else {}),
         }
 
     def _seal(self, text: str) -> str:
@@ -676,10 +686,16 @@ class Accounts:
             return None
         return user if same_text(self._sign(f"{id_}.{expires}", self._session_key(user)), signed) else None
 
+    def end_sessions(self, id: str) -> None:  # noqa: A002
+        """Ends every session an account has, in every browser, as signing out does."""
+        self._init()
+        self.store.db.run("UPDATE rl_users SET signed_out = ? WHERE id = ?", [hex(random_bytes(8)), id])
+
     def _session_key(self, user: dict[str, Any]) -> str:
-        """What a session is signed with: the password hash, and whether two-factor is on, so changing either ends
-        other sessions."""
-        return f"{user['hash']}{'.2fa' if user['twoFactor'] else ''}"
+        """What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out
+        replaces, so changing any of them ends other sessions."""
+        signed_out = user.get("signedOut")
+        return f"{user['hash']}{'.2fa' if user['twoFactor'] else ''}{f'.{signed_out}' if signed_out else ''}"
 
     def device_for(self, user: dict[str, Any]) -> str:
         """A long-lived mark for a browser that signed in to an account. With it, failed tries by others
@@ -701,72 +717,95 @@ class Accounts:
 
 class Throttle:
     """Counts failed sign-ins under a key and refuses more than a few in a while.
-    Keys are hashed, so the counts never hold an address or an email as it was
-    given.
+    Keys are hashed with a key made for the day, so the counts never hold an
+    address or an email as it was given.
 
     TypeScript keeps the counts in its process. A Python app often runs several
     worker processes, so here they live in the database's settings, as the PHP
     port keeps them: "throttle:<name>:<id>" holding {count, until}, and the
-    hashing key as "throttle-key". Every process of an install then shares the
-    same counts, and the two ports read each other's.
+    hashing key as "throttle-key:<UTC day>". Every process of an install then
+    shares the same counts, and the two ports read each other's.
 
-    With `memory`, the counts stay in the process instead, hashed with a key
-    made at start, as TypeScript keeps them. That is for keys holding a client's
-    address: the database never sees them, so a copy of it cannot be used to
-    work out who tried to sign in from where."""
+    Some ids come from an address, so none may last past a day: each UTC day
+    has its own key, keys older than yesterday are deleted, and counts that ran
+    out go when read, when a new count starts, and in the scheduled check. A
+    window that crosses midnight starts again under the new day's key."""
 
-    _KEY = "throttle-key"
+    _KEY = "throttle-key:"
+    # The one key kept before keys were made each day.
+    _OLD_KEY = "throttle-key"
 
-    def __init__(self, store: SqlStore, name: str, limit: int = 10, window_ms: int = 15 * 60_000, memory: bool = False) -> None:
+    def __init__(
+        self, store: SqlStore, name: str, limit: int = 10, window_ms: int = 15 * 60_000, clock: Callable[[], int] | None = None
+    ) -> None:
         self.store = store
         self.name = name
         self.limit = limit
         self.window_ms = window_ms
+        # Milliseconds since the epoch, for forgive() and clear(), which are given no time.
+        self._clock: Callable[[], int] = clock if clock is not None else (lambda: int(_time.time() * 1000))
         self._lock = threading.Lock()
-        self._memory: dict[str, dict[str, int]] | None = {} if memory else None
-        self._memory_salt = random_bytes(16)
-        # Counts kept in the settings before they moved into the process are deleted on first use.
-        self._swept = not memory
+        # Today's key once read, so each count does not read it again.
+        self._salts: tuple[str, str] | None = None
 
-    def _salt(self) -> str:
-        saved = self.store.setting(self._KEY)
-        if saved:
-            return saved
-        from ..hash import random_id
+    @staticmethod
+    def _day(now: int) -> str:
+        return _dt.datetime.fromtimestamp(now // 1000, _dt.UTC).strftime("%Y-%m-%d")
 
-        made = random_id(16)
-        self.store.set_setting(self._KEY, made)
-        return made
+    def _salt(self, now: int) -> str:
+        day = self._day(now)
+        if self._salts is not None and self._salts[0] == day:
+            return self._salts[1]
+        key = self._KEY + day
+        saved = self.store.setting(key)
+        if not saved:
+            from ..hash import random_id
 
-    def _id(self, key: str) -> str:
-        salt: str | bytes = self._memory_salt if self._memory is not None else self._salt()
-        return base64url(hmac("SHA-256", salt, key))[:22]
+            # Kept only if there is none yet, so two processes starting at once settle on one key.
+            made = random_id(16)
+            db = self.store.db
+            db.run(upsert(db.dialect(), "rl_settings", ['"key"', "value"], ['"key"'], []), [key, made])
+            saved = self.store.setting(key) or made
+            if saved == made:
+                Throttle.sweep(self.store, now)
+        self._salts = (day, saved)
+        return saved
 
-    def _sweep(self) -> None:
-        if self._swept:
-            return
-        self._swept = True
-        for setting in self.store.settings_starting_with(self._prefix()):
-            self.store.set_setting(setting["key"], None)
+    @staticmethod
+    def sweep(store: SqlStore, now: int) -> None:
+        """Deletes the counts of every throttle that have run out, the hashing keys older than yesterday, and the
+        one key kept before there was one a day, so nothing an id was made from outlasts a day. The scheduled
+        check runs it, and so does the first count of each day."""
+        keep = {Throttle._KEY + Throttle._day(now), Throttle._KEY + Throttle._day(now - 86_400_000)}
+        for setting in store.settings_starting_with(Throttle._KEY):
+            if setting["key"] not in keep:
+                store.set_setting(setting["key"], None)
+        if store.setting(Throttle._OLD_KEY) is not None:
+            store.set_setting(Throttle._OLD_KEY, None)
+        for setting in store.settings_starting_with("throttle:"):
+            ok, entry = _js.try_loads(setting["value"])
+            if not ok or not isinstance(entry, dict) or int(_js.number(entry.get("until", 0))) <= now:
+                store.db.run('DELETE FROM rl_settings WHERE "key" = ? AND value = ?', [setting["key"], setting["value"]])
+
+    def _id(self, key: str, now: int) -> str:
+        return base64url(hmac("SHA-256", self._salt(now), key))[:22]
 
     def _prefix(self) -> str:
         return f"throttle:{self.name}:"
 
-    def _entry(self, id_: str) -> dict[str, int] | None:
-        if self._memory is not None:
-            return self._memory.get(id_)
-        saved = self.store.setting(self._prefix() + id_)
-        ok, entry = _js.try_loads(saved) if saved is not None else (False, None)
-        if not ok or not isinstance(entry, dict):
+    def _entry(self, id_: str, now: int) -> dict[str, int] | None:
+        """A count still running. One that has run out is deleted as it is read."""
+        key = self._prefix() + id_
+        saved = self.store.setting(key)
+        if saved is None:
+            return None
+        ok, entry = _js.try_loads(saved)
+        if not ok or not isinstance(entry, dict) or int(_js.number(entry.get("until", 0))) <= now:
+            self._drop(key, saved)
             return None
         return {"count": int(_js.number(entry.get("count", 0))), "until": int(_js.number(entry.get("until", 0)))}
 
     def _save(self, id_: str, entry: dict[str, int]) -> None:
-        if self._memory is not None:
-            # Newest last, so the map's order is the order entries were made, as a JavaScript Map keeps it.
-            self._memory.pop(id_, None)
-            self._memory[id_] = entry
-            return
         self.store.set_setting(self._prefix() + id_, _js.dumps(entry))
 
     def _turn(self, id_: str, make: bool, fn: Callable[[], T]) -> T:
@@ -774,10 +813,6 @@ class Throttle:
         room under the limit: one thread at a time in this process, and a transaction holding the entry's row
         against other processes. SQLite's transaction holds the whole file; on Postgres and MySQL the row is
         locked, made first (empty, which reads as expired) when `make` asks and it is not there yet."""
-        if self._memory is not None:
-            self._sweep()
-            with self._lock:
-                return fn()
         db = self.store.db
 
         def step(_db: Any) -> T:
@@ -793,19 +828,11 @@ class Throttle:
             return db.transaction(step)
 
     def blocked(self, key: str, now: int) -> bool:
-        return self._is_blocked(self._id(key), now)
-
-    def _is_blocked(self, id_: str, now: int) -> bool:
-        if self._memory is not None:
-            with self._lock:
-                return self._blocked_now(id_, now)
-        return self._blocked_now(id_, now)
+        return self._blocked_now(self._id(key, now), now)
 
     def _blocked_now(self, id_: str, now: int) -> bool:
-        entry = self._entry(id_)
-        if entry is None or entry["until"] <= now:
-            return False
-        return entry["count"] >= self.limit
+        entry = self._entry(id_, now)
+        return entry is not None and entry["count"] >= self.limit
 
     def take(self, key: str, now: int) -> bool:
         """Counts a try before the slow check it guards, so a burst that arrives
@@ -813,7 +840,7 @@ class Throttle:
         False, counting nothing, when the key is already at its limit. A try
         that turns out right is taken back with forgive(). The check and the
         count happen as one step, across threads and processes."""
-        id_ = self._id(key)
+        id_ = self._id(key, now)
 
         def step() -> tuple[bool, bool]:
             if self._blocked_now(id_, now):
@@ -827,31 +854,30 @@ class Throttle:
 
     def forgive(self, key: str) -> None:
         """Takes back one counted try, for one that turned out right."""
-        id_ = self._id(key)
+        now = self._clock()
+        id_ = self._id(key, now)
 
         def step() -> None:
-            entry = self._entry(id_)
+            entry = self._entry(id_, now)
             if entry is not None and entry["count"] > 0:
                 entry["count"] -= 1
-                if self._memory is None:
-                    self._save(id_, entry)
+                self._save(id_, entry)
 
         self._turn(id_, False, step)
 
     def fail(self, key: str, now: int) -> None:
-        id_ = self._id(key)
+        id_ = self._id(key, now)
         if self._turn(id_, True, lambda: self._count(id_, now)):
             self._prune(now)
 
     def _count(self, id_: str, now: int) -> bool:
         """Counts a try, and says whether that made a new entry."""
-        entry = self._entry(id_)
-        if entry is None or entry["until"] <= now:
+        entry = self._entry(id_, now)
+        if entry is None:
             self._save(id_, {"count": 1, "until": now + self.window_ms})
             return True
         entry["count"] += 1
-        if self._memory is None:
-            self._save(id_, entry)
+        self._save(id_, entry)
         return False
 
     def _drop(self, key: str, value: str) -> None:
@@ -859,13 +885,10 @@ class Throttle:
         self.store.db.run('DELETE FROM rl_settings WHERE "key" = ? AND value = ?', [key, value])
 
     def _prune(self, now: int) -> None:
-        """Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
-        have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when a new entry is
-        made, since only then can there be more."""
-        if self._memory is not None:
-            with self._lock:
-                self._prune_memory(now)
-            return
+        """Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+        ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+        or the count of a name someone is close to blocking. Run when a new entry is made, since only then can
+        there be more."""
         entries = []
         for setting in self.store.settings_starting_with(self._prefix()):
             ok, entry = _js.try_loads(setting["value"])
@@ -874,39 +897,13 @@ class Throttle:
                 self._drop(setting["key"], setting["value"])
                 continue
             count = int(_js.number(entry.get("count", 0))) if isinstance(entry, dict) else 0
-            entries.append({"key": setting["key"], "value": setting["value"], "until": until, "blocked": count >= self.limit})
-        size = len(entries)
-        if size <= MAX_THROTTLED:
+            entries.append({"key": setting["key"], "value": setting["value"], "until": until, "count": count})
+        if len(entries) <= MAX_THROTTLED:
             return
-        # Oldest first: each entry's window started window_ms before its end.
-        entries.sort(key=lambda e: e["until"])
-        for blocked in (False, True):
-            for entry in entries:
-                if size <= MAX_THROTTLED:
-                    return
-                if entry["blocked"] is blocked:
-                    self._drop(entry["key"], entry["value"])
-                    size -= 1
-
-    def _prune_memory(self, now: int) -> None:
-        failures = self._memory
-        assert failures is not None
-        if len(failures) <= MAX_THROTTLED:
-            return
-        for k in [k for k, v in failures.items() if v["until"] <= now]:
-            del failures[k]
-        for k in [k for k, v in failures.items() if v["count"] < self.limit]:
-            if len(failures) <= MAX_THROTTLED:
-                break
-            del failures[k]
-        for k in list(failures):
-            if len(failures) <= MAX_THROTTLED:
-                break
-            del failures[k]
+        # Each entry's window started window_ms before its end, so the earliest end is the oldest.
+        entries.sort(key=lambda e: (e["count"], e["until"]))
+        for entry in entries[: len(entries) - MAX_THROTTLED * 9 // 10]:
+            self._drop(entry["key"], entry["value"])
 
     def clear(self, key: str) -> None:
-        if self._memory is not None:
-            with self._lock:
-                self._memory.pop(self._id(key), None)
-            return
-        self.store.set_setting(self._prefix() + self._id(key), None)
+        self.store.set_setting(self._prefix() + self._id(key, self._clock()), None)

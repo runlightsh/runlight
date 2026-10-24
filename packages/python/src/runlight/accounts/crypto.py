@@ -107,6 +107,10 @@ def _scrypt_cost(parts: list[str]) -> dict[str, int] | None:
     # N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
     if not whole(n, 1 << 20) or n < 2 or (int(n) & (int(n) - 1)) != 0 or not whole(r, 32) or not whole(p, 16):
         return None
+    # N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than
+    # raises.
+    if int(n).bit_length() - 1 >= 16 * int(r):
+        return None
     return {"N": int(n), "r": int(r), "p": int(p)}
 
 
