@@ -53,6 +53,8 @@ export interface User {
   twoFactor: boolean;
   /** Recovery codes not yet used. */
   recoveryLeft: number;
+  /** A mark signing out replaces, which every session is signed with. */
+  signedOut?: string;
 }
 
 // Two-factor: TOTP as authenticator apps expect it (RFC 6238): SHA-1, six digits, 30 seconds.
@@ -203,7 +205,8 @@ export class Accounts {
             );
       if (!columns.some((c) => c.name === "role")) await this.store.db.run(`ALTER TABLE rl_users ADD COLUMN role ${str(20)} NOT NULL DEFAULT 'owner'`);
       // Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's step.
-      for (const [name, type] of [["totp_secret", "TEXT"], ["totp_pending", "TEXT"], ["totp_recovery", "TEXT"], ["totp_step", "BIGINT"]] as const) {
+      // And the mark signing out replaces, later again.
+      for (const [name, type] of [["totp_secret", "TEXT"], ["totp_pending", "TEXT"], ["totp_recovery", "TEXT"], ["totp_step", "BIGINT"], ["signed_out", "TEXT"]] as const) {
         if (!columns.some((c) => c.name === name)) await this.store.db.run(`ALTER TABLE rl_users ADD COLUMN ${name} ${type}`);
       }
       await this.store.db.run(
@@ -240,6 +243,7 @@ export class Accounts {
       createdAt: Number(r.created_at),
       twoFactor: Boolean(r.totp_secret),
       recoveryLeft: recovery.length,
+      ...(r.signed_out ? { signedOut: String(r.signed_out) } : {}),
     };
   }
 
@@ -615,9 +619,18 @@ export class Accounts {
     return sameText(await this.sign(`${id}.${expires}`, this.sessionKey(user)), signature) ? user : null;
   }
 
-  /** What a session is signed with: the password hash, and whether two-factor is on, so changing either ends other sessions. */
+  /** Ends every session an account has, in every browser, as signing out does. */
+  async endSessions(id: string): Promise<void> {
+    await this.init();
+    await this.store.db.run(`UPDATE rl_users SET signed_out = ? WHERE id = ?`, [hex(randomBytes(8)), id]);
+  }
+
+  /**
+   * What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out
+   * replaces, so changing any of them ends other sessions.
+   */
   private sessionKey(user: User): string {
-    return `${user.hash}${user.twoFactor ? ".2fa" : ""}`;
+    return `${user.hash}${user.twoFactor ? ".2fa" : ""}${user.signedOut ? `.${user.signedOut}` : ""}`;
   }
 
   /**
@@ -707,17 +720,14 @@ export class Throttle {
       this.failures.delete(id);
       this.failures.set(id, { count: 1, until: now + this.windowMs });
     } else entry.count++;
-    // Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the map
-    // has a hard ceiling and a flood of made-up names cannot wipe out a real block.
+    // Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+    // ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+    // or the count of a name someone is close to blocking.
     if (this.failures.size > MAX_THROTTLED) {
       for (const [k, v] of this.failures) if (v.until <= now) this.failures.delete(k);
-      for (const [k, v] of this.failures) {
-        if (this.failures.size <= MAX_THROTTLED) break;
-        if (v.count < this.limit) this.failures.delete(k);
-      }
-      for (const k of this.failures.keys()) {
-        if (this.failures.size <= MAX_THROTTLED) break;
-        this.failures.delete(k);
+      if (this.failures.size > MAX_THROTTLED) {
+        const fewest = [...this.failures].sort((a, b) => a[1].count - b[1].count);
+        for (const [k] of fewest.slice(0, this.failures.size - Math.floor(MAX_THROTTLED * 0.9))) this.failures.delete(k);
       }
     }
   }

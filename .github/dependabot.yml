@@ -1,6 +1,7 @@
 # Weekly pull requests for the pinned GitHub Actions (each is pinned by
-# commit SHA, with its version in a comment, which Dependabot keeps in step)
-# and for the Docker base image's digest in the Dockerfile. Every pull
+# commit SHA, with its version in a comment, which Dependabot keeps in step),
+# for the Docker base image's digest in the Dockerfile, and for each
+# language's packages, one grouped pull request per ecosystem. Every pull
 # request runs CI like any other.
 version: 2
 updates:
@@ -20,3 +21,66 @@ updates:
     ignore:
       - dependency-name: node
         update-types: ["version-update:semver-major"]
+  - package-ecosystem: npm
+    directories: ["/"]
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+  - package-ecosystem: composer
+    directories: ["/packages/php", "/plugins/craft", "/plugins/drupal"]
+    schedule:
+      interval: weekly
+    groups:
+      composer:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directories: ["/packages/python"]
+    schedule:
+      interval: weekly
+    groups:
+      pip:
+        patterns: ["*"]
+  - package-ecosystem: bundler
+    directories: ["/packages/ruby"]
+    schedule:
+      interval: weekly
+    groups:
+      bundler:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directories: ["/packages/go", "/packages/go/chi", "/packages/go/echo", "/packages/go/cmd/runlight", "/packages/go/dbtest"]
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directories: ["/packages/rust"]
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: maven
+    directories: ["/packages/java"]
+    schedule:
+      interval: weekly
+    groups:
+      maven:
+        patterns: ["*"]
+  - package-ecosystem: nuget
+    directories: ["/packages/dotnet"]
+    schedule:
+      interval: weekly
+    groups:
+      nuget:
+        patterns: ["*"]
+  - package-ecosystem: mix
+    directories: ["/packages/elixir"]
+    schedule:
+      interval: weekly
+    groups:
+      mix:
+        patterns: ["*"]

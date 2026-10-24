@@ -359,6 +359,8 @@ async function inPieces<T, R>(items: T[], size: number, run: (piece: T[]) => Pro
 
 /** The most visits journeys reads, newest first. */
 export const JOURNEY_VISITS = 20_000;
+/** The most visits a funnel is counted over: the newest in the range, so its rows fit in memory over any range. */
+export const FUNNEL_VISITS = 100_000;
 
 /** How long after a visit starts its events are looked for: far past any real visit. */
 export const EVENT_TAIL_MS = 2 * 86_400_000;
@@ -815,6 +817,8 @@ export class SqlStore {
   readonly keepsRollups: boolean = true;
   /** On ClickHouse, how many engagement rows the pages report adds up in one query; smaller in tests, to try the slices. */
   engagedPerSlice = ENGAGED_PER_SLICE;
+  /** The most visits a funnel is counted over; smaller in tests, to try the cap. */
+  funnelVisits = FUNNEL_VISITS;
   /**
    * On ClickHouse, the earliest visit start from which every event carries its visit's columns (see
    * CARRIED_COLUMNS), so reports over those visits can filter the events by them. Null elsewhere.
@@ -1696,7 +1700,17 @@ export class SqlStore {
    * one is the first matching row in the range; each later step must come
    * after the step before it. Filters choose which visits enter the funnel.
    */
-  async funnelCounts(query: Query, funnel: FunnelRow): Promise<number[]> {
+  async funnelCounts(query: Query, funnel: FunnelRow): Promise<{ counts: number[]; sampled: boolean }> {
+    // Past FUNNEL_VISITS visits in the range, only the newest are counted: the range starts where the oldest
+    // of them began.
+    const scope = visitScope(query.filters, query.site, query.from, query.to, this.db.dialect);
+    const [first] = await this.db.all(
+      `SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ${IS_VISIT}${scope.sql}
+         ORDER BY s.started_at DESC, s.id LIMIT ${this.funnelVisits + 1}) x`,
+      [query.site, query.from, query.to, ...scope.params],
+    );
+    const sampled = num(first?.n) > this.funnelVisits;
+    if (sampled) query = { ...query, from: Math.max(query.from, num(first?.t) + 1) };
     // The rows of the picked visits that match any step, in order, read once and walked here: a join from
     // each step to the next is planned badly by Postgres, which cannot guess how many visits go on.
     const v = visitRows(query.filters, query.site, query.from, query.to, this.db.dialect, true);
@@ -1730,7 +1744,7 @@ export class SqlStore {
       if (reached < counts.length && num(row[`m${reached}`]) === 1) reached++;
     }
     close();
-    return counts;
+    return { counts, sampled };
   }
 
   /**

@@ -2,6 +2,33 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Changed
+
+- `trustProxy` left at its default believes forwarding headers (`X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`, and `X-Forwarded-Host`) only on a connection from this computer or a private network, where proxies and load balancers connect from, or one whose address the app does not pass on, as on a hosting platform's functions. A client reaching the app straight from the internet can no longer choose its own address and get round the rate limits. Behind a CDN that connects from public addresses, such as Cloudflare in front of the server with nothing between, set `trustProxy` (`TRUST_PROXY` on the server) to its header, `cf-connecting-ip`, or to true; Runlight warns once when it sees forwarding headers it did not believe. `TRUST_PROXY` takes true, false, 1, 0, yes, no, on, off, or a header's name, and refuses anything else, where before "0" or "off" turned it on.
+- A funnel over more than 100,000 visits counts the newest 100,000 in the range, and says so under it, as Journeys does, so a long range on a big site no longer reads every matching row into memory.
+- Outbound link and File download events, which the tracker sends on its own, keep the link without its query string or fragment, as page paths are kept, since tokens and email addresses ride in them. The server drops them, so a tracker cached from before is held to it too.
+- Signing out ends the account's sessions in every browser, so a session cookie copied before stops working.
+
+### Security
+
+- A member sees and revokes only the API tokens they made, where before they could list and revoke everyone's, the owner's included, and only an owner or admin can replace a site's agents key.
+- The sign-in, two-factor, setup, invite, and sign-out pages refuse a form posted from another site, or a sibling one, so a page elsewhere cannot sign someone in to an account that is not theirs, plant a session, or sign them out.
+- Changing your password can also revoke the API tokens and connected apps your account made, for when a password got out.
+- A flood of sign-in tries under made-up names can no longer wipe out the count of a name close to its limit.
+- Yesterday's salt is dropped from memory on the first hit after midnight when no visit is left open, as it is from the database, rather than lingering until the next scheduled check.
+- More IPv6 forms of private addresses are refused where a fetch must reach the public internet: IPv4-translated (`::ffff:0:0/96`), local-use NAT64 (`64:ff9b:1::/48`), the old site-local range, and everything outside global unicast.
+- A stored scrypt hash whose cost scrypt itself refuses (N at or above 2^(16r)) matches nothing, rather than failing the sign-in with an error.
+- A request body declared over 10 MB is refused with 413 before it is read, and JSON bodies are read up to that cap on every host, not only behind the Node adapter.
+
+### Fixed
+
+- A hit tried again after the database was busy, or kept for ClickHouse and sent later, no longer counts twice in its visit's pageviews, events, or engaged time.
+- ClickHouse sets `non_replicated_deduplication_window` on its tables, so a batch of hits sent again after a dropped connection is stored once on a plain ClickHouse too, not only on replicated tables and ClickHouse Cloud.
+- Hits that waited for ClickHouse are let go of a few visitors at a time as they are sent, and the server finishes sending the ones under way before it stops, so a restart sends few of them again.
+- The server makes its data folder readable only by its own user, caps the location download at 512 MB unpacked, names a bad `RUNLIGHT_GEO` rather than failing on a missing file, stops once on a second Ctrl-C, and `agents` refuses a flag with no value. Its help suggests `RUNLIGHT_OBSERVE_KEY` over `--key`, which other people on the computer can see.
+
 ## 0.2.0 - 2026-10-18
 
 ### Added

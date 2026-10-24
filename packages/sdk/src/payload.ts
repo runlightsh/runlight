@@ -29,7 +29,8 @@ function int(value: unknown, min: number, max: number): number | undefined {
 
 function props(value: unknown): Record<string, string> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const out: Record<string, string> = {};
+  // No prototype, so a prop named __proto__ is kept like any other rather than lost.
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   let count = 0;
   for (const [key, raw] of Object.entries(value)) {
     if (count >= MAX_PROPS) break;
@@ -42,6 +43,20 @@ function props(value: unknown): Record<string, string> | null {
     count++;
   }
   return count > 0 ? out : null;
+}
+
+/** The events the tracker sends on its own for a link that was followed, each with the link as `url`. */
+const LINK_EVENTS = new Set(["Outbound link", "File download"]);
+
+/**
+ * An automatic link event's `url` without its query string or fragment, as page paths are kept, since tokens and
+ * email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a
+ * tracker cached from before is held to it too.
+ */
+function linkProps(name: string, given: Record<string, string> | null): Record<string, string> | null {
+  if (!given || !LINK_EVENTS.has(name) || given.url === undefined) return given;
+  given.url = given.url.replace(/[?#].*$/s, "");
+  return given;
 }
 
 export function parsePayload(text: string): Payload | null {
@@ -83,7 +98,7 @@ export function parsePayload(text: string): Payload | null {
     screenHeight: int(body.h, 0, 20000),
     language: str(body.l, 35),
     name,
-    props: kind === "event" ? props(body.p) : null,
+    props: kind === "event" ? linkProps(name, props(body.p)) : null,
     pageviewId,
     engagedMs: kind === "engagement" ? int(body.e, 0, MAX_ENGAGED_MS) ?? 0 : 0,
     scroll: int(body.d, 0, 100),

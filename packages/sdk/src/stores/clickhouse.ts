@@ -423,8 +423,8 @@ export function clickhouseDb(options: { url: string; maxQueries?: number; queryT
     writes(() => {
       // From here on the batch is closed: rows that come now start the next one.
       if (gathering.get(table) === batch) gathering.delete(table);
-      // Each batch is its own, so one sent again after a dropped connection is not counted twice where
-      // ClickHouse deduplicates (replicated tables, and ClickHouse Cloud).
+      // Each batch is its own, so one sent again after a dropped connection is not counted twice: replicated
+      // tables and ClickHouse Cloud deduplicate by it, and a plain MergeTree with the window migrate() sets.
       const settings = { async_insert: "1", wait_for_async_insert: "1", async_insert_deduplicate: "1", insert_deduplication_token: crypto.randomUUID() };
       return send(`INSERT INTO ${table} FORMAT JSONEachRow\n${batch.rows.join("\n")}`, settings);
     }).then(
@@ -584,6 +584,12 @@ export class ClickHouseStore extends SqlStore {
     this.schema ??= (async () => {
       await this.clickhouse.createDatabase();
       for (const statement of SCHEMA) await this.clickhouse.run(statement);
+      // A hit's insert sent again after a dropped connection carries the same token, and a plain MergeTree
+      // only drops the second copy with a window of tokens kept. Replicated tables keep one already, and a
+      // ClickHouse that will not take the setting goes on without it.
+      for (const table of ["rl_visits", "rl_events"]) {
+        await this.clickhouse.run(`ALTER TABLE ${table} MODIFY SETTING non_replicated_deduplication_window = 1000`).catch(() => {});
+      }
       const version = await this.meta("schema");
       if (version === "1") {
         // Events written before carry no visit columns, so reports read them through their visits as before.

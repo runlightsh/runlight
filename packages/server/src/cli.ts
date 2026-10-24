@@ -10,11 +10,12 @@
  *   RUNLIGHT_SECRET   signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
  *   RUNLIGHT_TOKEN    also accepted as a bearer token on the API
  *   RUNLIGHT_URL      the dashboard's public address, which can never become a link domain
- *   TRUST_PROXY       "false" when no proxy sits in front, so forwarded addresses are ignored
+ *   TRUST_PROXY       unset believes forwarded addresses only from a private network; "false" never,
+ *                     "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
  *   RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
  */
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import path from "node:path";
 import type { SqlStore } from "@runlight/sdk";
@@ -42,8 +43,9 @@ listens. DATA_DIR (./runlight-data) holds the SQLite file and the secret, and
 DATABASE_URL switches to Postgres, MySQL, or MariaDB, and CLICKHOUSE_URL keeps
 the visits and events in ClickHouse, with the rest where it was. RUNLIGHT_SECRET signs
 sessions and encrypts saved keys, RUNLIGHT_TOKEN also works as a bearer token
-on the API, and TRUST_PROXY=false ignores forwarded addresses when nothing sits
-in front.
+on the API. Forwarded addresses count only from a proxy on this computer or a
+private network; TRUST_PROXY=false ignores them, and behind a CDN that connects
+from public addresses, TRUST_PROXY names its header, such as cf-connecting-ip.
 RUNLIGHT_URL is the dashboard's public address, such as
 https://stats.example.com, which short links can never take over.
 RUNLIGHT_GEO picks where locations come from when no platform header gives
@@ -83,6 +85,21 @@ async function openRowStore(dataDir: string): Promise<SqlStore> {
   return sqlite({ path: path.join(dataDir, "runlight.db") });
 }
 
+/**
+ * TRUST_PROXY: "false" with nothing in front, "true" for a CDN that connects from public addresses, or the one
+ * header your proxy sets, such as cf-connecting-ip behind Cloudflare. Unset stays unset, so the library's
+ * default applies: forwarding headers count only from a private address. Anything else is a mistake, said so
+ * rather than guessed at, since "0" or "off" read as on would let any client choose its address.
+ */
+function trustProxyFrom(given: string | undefined): boolean | "x-forwarded-for" | "x-real-ip" | "cf-connecting-ip" | undefined {
+  const value = given?.trim().toLowerCase();
+  if (value === undefined || value === "") return undefined;
+  if (["true", "1", "yes", "on"].includes(value)) return true;
+  if (["false", "0", "no", "off"].includes(value)) return false;
+  if (value === "x-forwarded-for" || value === "x-real-ip" || value === "cf-connecting-ip") return value;
+  throw new Error(`Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not "${given}"`);
+}
+
 /** RUNLIGHT_SECRET, or one made on first run and kept beside the data, readable only by this user. */
 function secretFor(dataDir: string): string {
   return env("RUNLIGHT_SECRET") ?? secretIn(dataDir);
@@ -91,11 +108,12 @@ function secretFor(dataDir: string): string {
 const AGENTS_HELP = `Count AI agents on a site that has only the script tag, from its web server's log.
 
 Usage:
-  npx @runlight/server agents --log /var/log/nginx/access.log --to https://stats.example.com --key rlo_...
+  RUNLIGHT_OBSERVE_KEY=rlo_... npx @runlight/server agents --log /var/log/nginx/access.log --to https://stats.example.com
 
   --log <file>    The access log, in nginx or Apache's combined format, or Caddy's JSON
   --to <url>      Your Runlight, as its dashboard address (or RUNLIGHT_URL)
-  --key <key>     The site's agents key from Settings, Install (or RUNLIGHT_OBSERVE_KEY)
+  --key <key>     The site's agents key from Settings, Install. Better in RUNLIGHT_OBSERVE_KEY,
+                  since other people on this computer can see a command's arguments
   --site <url>    The site's address, such as https://example.com, when the log has no host in it
   --follow        Keep running and send fetches as they happen
   --state <file>  Remember where it stopped, so the next run, or a restarted --follow, starts there.
@@ -107,7 +125,10 @@ Docs: https://runlight.sh/docs/server/#ai-agents-from-a-log
 async function agents(args: string[]): Promise<void> {
   const flag = (name: string) => {
     const at = args.indexOf(`--${name}`);
-    return at >= 0 ? args[at + 1] : undefined;
+    if (at < 0) return undefined;
+    const value = args[at + 1];
+    if (value === undefined || value.startsWith("--")) throw new Error(`Give --${name} a value`);
+    return value;
   };
   if (args.includes("--help") || args.includes("-h")) return void process.stdout.write(AGENTS_HELP);
   const log = flag("log");
@@ -145,11 +166,15 @@ async function main(): Promise<void> {
   if (command === "agents") return agents(args);
 
   const dataDir = path.resolve(env("DATA_DIR") ?? "./runlight-data");
-  mkdirSync(dataDir, { recursive: true });
+  // Only this user's: the database, the secret, and the location data are in it.
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   if (command === "clickhouse") return clickhouseCommand(args, dataDir);
   const store = await openStore(dataDir);
   const geoSetting = env("RUNLIGHT_GEO") ?? "city";
   const geo = geoSetting === "city" || geoSetting === "country" ? new Geo(path.join(dataDir, "geo"), geoSetting) : null;
+  if (!geo && geoSetting !== "off" && !existsSync(path.resolve(geoSetting))) {
+    throw new Error(`Set RUNLIGHT_GEO to city, country, off, or the path of an .mmdb file; there is no file at ${path.resolve(geoSetting)}`);
+  }
   const lookup = geo ? geo.lookup : geoSetting !== "off" ? fileLookup(path.resolve(geoSetting)) : undefined;
   const url = env("RUNLIGHT_URL");
   if (url && !/^https?:\/\/[^/?#]+\/?$/.test(url)) throw new Error("Set RUNLIGHT_URL to the dashboard's address only, such as https://stats.example.com");
@@ -163,9 +188,7 @@ async function main(): Promise<void> {
     store,
     secret: secretFor(dataDir),
     ...(env("RUNLIGHT_TOKEN") ? { token: env("RUNLIGHT_TOKEN") } : {}),
-    // "false" with nothing in front, or the one header your proxy sets, such as cf-connecting-ip behind Cloudflare.
-    // Unset stays unset, so the library's default applies and it can warn when nothing sits in front.
-    trustProxy: ((value) => (value === undefined || value === "" ? undefined : value === "false" ? false : value === "x-forwarded-for" || value === "x-real-ip" || value === "cf-connecting-ip" ? value : true))(env("TRUST_PROXY")?.toLowerCase()),
+    trustProxy: trustProxyFrom(env("TRUST_PROXY")),
   });
 
   if (command === "password") {
@@ -224,9 +247,14 @@ async function main(): Promise<void> {
   const timer = setInterval(tick, 5 * 60_000);
   timer.unref();
 
+  let stopping = false;
   const stop = () => {
+    if (stopping) return;
+    stopping = true;
     clearInterval(timer);
-    http.close(() => void (monitoring?.close() ?? Promise.resolve()).finally(() => store.close()).finally(() => process.exit(0)));
+    // Hits waiting for ClickHouse that are being sent now finish first, so the next start does not send them again.
+    const settled = Promise.race([server.runlight.flushWaiting(), new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
+    http.close(() => void settled.catch(() => {}).then(() => monitoring?.close()).finally(() => store.close()).finally(() => process.exit(0)));
     setTimeout(() => process.exit(0), 5000).unref();
   };
   process.on("SIGTERM", stop);

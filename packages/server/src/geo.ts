@@ -6,7 +6,7 @@
  */
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { Reader, type CityResponse } from "mmdb-lib";
@@ -97,8 +97,8 @@ export class Geo {
       try {
         const answer = await this.download(url, { signal: AbortSignal.timeout(10 * 60_000) });
         if (!answer.ok || !answer.body) continue;
-        const partial = `${this.file(name)}.partial`;
-        await pipeline(Readable.fromWeb(answer.body as never), createGunzip(), createWriteStream(partial));
+        const partial = `${this.file(name)}.partial.${process.pid}`;
+        await pipeline(Readable.fromWeb(answer.body as never), createGunzip(), capped(MOST_BYTES), createWriteStream(partial));
         new Reader(readFileSync(partial));
         renameSync(partial, this.file(name));
         this.open(this.file(name));
@@ -108,10 +108,24 @@ export class Geo {
         return;
       } catch (error) {
         this.log(`Runlight: could not download location data from ${url}: ${(error as Error).message}`);
-        rmSync(`${this.file(name)}.partial`, { force: true });
+        rmSync(`${this.file(name)}.partial.${process.pid}`, { force: true });
       }
     }
   }
+}
+
+/** The most a database may unpack to, several times the city file's size, so a bad download cannot fill the disk. */
+const MOST_BYTES = 512 * 1024 * 1024;
+
+/** Passes bytes through, and fails once more than `most` have gone by. */
+function capped(most: number): Transform {
+  let seen = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      seen += chunk.length;
+      done(seen > most ? new Error(`the location data unpacks to more than ${most / 1024 / 1024} MB`) : null, chunk);
+    },
+  });
 }
 
 /** A lookup from an MMDB file the owner supplies, such as MaxMind's GeoLite2 City. */

@@ -94,7 +94,7 @@ createServer(async (req, res) => {
   if (path.startsWith("/go/")) return void links(req, res);
   if (path.startsWith("/runlight")) return void routes(req, res);
   res.writeHead(302, { location: "/runlight/" }).end();
-}).listen(PORT, () => console.log(`Runlight dev dashboard: http://localhost:${PORT}/runlight/`));
+}).listen(PORT, "127.0.0.1", () => console.log(`Runlight dev dashboard: http://127.0.0.1:${PORT}/runlight/`));
 
 // Made-up traffic with a weekly rhythm, slow growth, and the mix of sources,
 // places, and devices a small personal site gets.

@@ -50,7 +50,7 @@ test("new password hashes record their scrypt cost, and a cost out of bounds is 
   const [, , , , salt, key] = made.split("$");
   const again = scryptSync("a long password", Buffer.from(salt!, "base64url"), 32, { N: 32768, r: 8, p: 3, maxmem: 256 * 32768 * 8 });
   assert.equal(again.toString("base64url"), key);
-  for (const cost of ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1"]) {
+  for (const cost of ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "1048576$1$1", "65536$1$1"]) {
     assert.equal(await checkPassword("a long password", `scrypt$${cost}$${salt}$${key}`), false, cost);
   }
 });

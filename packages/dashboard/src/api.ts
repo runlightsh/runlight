@@ -163,6 +163,8 @@ export interface Funnel {
   id: string;
   name: string;
   steps: Array<FunnelStep & { visits?: number }>;
+  /** Counted over only this many visits, the newest in a range with more. */
+  sampled?: number;
 }
 
 /** Someone invited to the standalone server who has not chosen a password yet. */
@@ -470,7 +472,7 @@ export const api = {
     send<{ funnel: Funnel }>(id ? "PATCH" : "POST", `funnels${id ? `/${id}` : ""}${siteQuery(site)}`, funnel),
   deleteFunnel: (site: string, id: string) => del(`funnels/${id}${siteQuery(site)}`),
   account: () => get<{ account: Person }>("account", new URLSearchParams()),
-  changePassword: (current: string, next: string) => send<{ ok: true }>("POST", "account/password", { current, next }),
+  changePassword: (current: string, next: string, revokeTokens = false) => send<{ ok: true }>("POST", "account/password", { current, next, ...(revokeTokens ? { revokeTokens: true } : {}) }),
   twoFactorStart: (password: string) => send<{ secret: string; uri: string }>("POST", "account/2fa/start", { password }),
   twoFactorConfirm: (code: string) => send<{ recovery: string[] }>("POST", "account/2fa/confirm", { code }),
   twoFactorRecovery: (password: string) => send<{ recovery: string[] }>("POST", "account/2fa/recovery", { password }),

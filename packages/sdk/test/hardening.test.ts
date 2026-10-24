@@ -207,7 +207,7 @@ test("a proxy's x-forwarded-host is only believed when proxy headers are trusted
   assert.equal(await ask(setup("sqlite", { site }).rl), true, "behind a trusted proxy, its header names the host");
 });
 
-test("with trustProxy left at its default, a public address with no proxy header is warned about once", () => {
+test("with trustProxy left at its default, forwarding headers count only from a private address", () => {
   const warn = console.warn;
   const said: string[] = [];
   console.warn = (message: string) => void said.push(message);
@@ -215,18 +215,19 @@ test("with trustProxy left at its default, a public address with no proxy header
     const bare = new Request("https://example.com/e");
     const forwarded = new Request("https://example.com/e", { headers: { "x-forwarded-for": "8.8.4.4" } });
     const quiet = setup("sqlite", { site: { hostnames: ["example.com"] }, trustProxy: true }).rl;
-    assert.equal(quiet.clientIp(bare, { ip: "8.8.8.8" }), "8.8.8.8");
-    assert.deepEqual(said, [], "trustProxy set on purpose is never second-guessed");
+    assert.equal(quiet.clientIp(forwarded, { ip: "8.8.8.8" }), "8.8.4.4", "trustProxy set on purpose believes a public address");
+    assert.deepEqual(said, [], "and is never second-guessed");
 
     const rl = setup("sqlite", { site: { hostnames: ["example.com"] } }).rl;
-    rl.clientIp(forwarded, { ip: "10.0.0.2" });
-    rl.clientIp(bare, { ip: "127.0.0.1" });
-    rl.clientIp(bare, { ip: "192.168.1.5" });
-    assert.deepEqual(said, [], "a proxy's header, or a private or loopback address, says nothing");
+    assert.equal(rl.clientIp(forwarded, { ip: "10.0.0.2" }), "8.8.4.4", "a proxy on a private network is believed");
+    assert.equal(rl.clientIp(forwarded, { ip: "::ffff:127.0.0.1" }), "8.8.4.4", "and one on this computer");
+    assert.equal(rl.clientIp(forwarded), "8.8.4.4", "and a platform that passes no address on");
     assert.equal(rl.clientIp(bare, { ip: "8.8.8.8" }), "8.8.8.8");
-    rl.clientIp(bare, { ip: "1.1.1.1" });
+    assert.deepEqual(said, [], "a public address without forwarding headers says nothing");
+    assert.equal(rl.clientIp(forwarded, { ip: "1.1.1.1" }), "1.1.1.1", "a client straight from the internet cannot choose its address");
+    rl.clientIp(forwarded, { ip: "1.0.0.1" });
     assert.equal(said.length, 1, "said once");
-    assert.match(said[0]!, /trustProxy: false/);
+    assert.match(said[0]!, /cf-connecting-ip/);
   } finally {
     console.warn = warn;
   }
