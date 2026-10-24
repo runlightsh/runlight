@@ -8,7 +8,8 @@
 //	RUNLIGHT_SECRET   signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
 //	RUNLIGHT_TOKEN    also accepted as a bearer token on the API
 //	RUNLIGHT_URL      the dashboard's public address, which can never become a link domain
-//	TRUST_PROXY       "false" when no proxy sits in front, so forwarded addresses are ignored
+//	TRUST_PROXY       unset believes forwarded addresses only from a private network; "false" never,
+//	                  "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
 //	RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
 package main
 
@@ -55,8 +56,9 @@ Settings are environment variables. PORT (3000) and HOST (0.0.0.0) set where it
 listens. DATA_DIR (./runlight-data) holds the SQLite file and the secret, and
 DATABASE_URL switches to Postgres, MySQL, or MariaDB. RUNLIGHT_SECRET signs
 sessions and encrypts saved keys, RUNLIGHT_TOKEN also works as a bearer token
-on the API, and TRUST_PROXY=false ignores forwarded addresses when nothing sits
-in front.
+on the API. Forwarded addresses count only from a proxy on this computer or a
+private network; TRUST_PROXY=false ignores them, and behind a CDN that connects
+from public addresses, TRUST_PROXY names its header, such as cf-connecting-ip.
 RUNLIGHT_URL is the dashboard's public address, such as
 https://stats.example.com, which short links can never take over.
 RUNLIGHT_GEO picks where locations come from when no platform header gives
@@ -321,16 +323,8 @@ func run(args []string) error {
 	}
 	options := server.Options{Store: store, Secret: secret, Token: env("RUNLIGHT_TOKEN"), URL: address, Geo: lookup, GeoCredit: geo != nil,
 		Logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }}
-	// "false" with nothing in front, or the one header your proxy sets, such as cf-connecting-ip behind Cloudflare.
-	switch proxy := strings.ToLower(env("TRUST_PROXY")); proxy {
-	case "false":
-		options.IgnoreProxy = true
-	case "x-forwarded-for", "x-real-ip", "cf-connecting-ip":
-		options.ProxyHeader = proxy
-	case "":
-		// Unset stays unset, so the library's default applies and it can warn when nothing sits in front.
-	default:
-		options.TrustProxy = true
+	if err := trustProxyFrom(env("TRUST_PROXY"), &options); err != nil {
+		return err
 	}
 	srv, err := server.New(options)
 	if err != nil {
@@ -459,6 +453,25 @@ func run(args []string) error {
 	defer release()
 	_ = http.Shutdown(shutdown)
 	srv.Runlight.Idle()
+	return nil
+}
+
+// trustProxyFrom reads TRUST_PROXY: "false" with nothing in front, "true" for a CDN that connects from public
+// addresses, or the one header your proxy sets, such as cf-connecting-ip behind Cloudflare. Unset stays unset,
+// so the library's default applies: forwarding headers count only from a private address. Anything else is a
+// mistake, said so rather than guessed at, since "0" or "off" read as on would let any client choose its address.
+func trustProxyFrom(given string, options *server.Options) error {
+	switch value := strings.ToLower(strings.TrimSpace(given)); value {
+	case "":
+	case "true", "1", "yes", "on":
+		options.TrustProxy = true
+	case "false", "0", "no", "off":
+		options.IgnoreProxy = true
+	case "x-forwarded-for", "x-real-ip", "cf-connecting-ip":
+		options.ProxyHeader = value
+	default:
+		return fmt.Errorf("Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not %q", given)
+	}
 	return nil
 }
 

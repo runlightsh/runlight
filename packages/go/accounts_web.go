@@ -3,6 +3,7 @@ package runlight
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -409,6 +410,13 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 		}
 		return web.NewResponse(200, []byte(accounts.AuthJSFor(asked)), "content-type", "application/javascript; charset=utf-8", "cache-control", "public, max-age=3600"), nil
 	}
+	// A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+	// plant a session, so these pages take forms only from their own. The browser says where a request came from.
+	if site := request.Header.Get("sec-fetch-site"); (site == "cross-site" || site == "same-site") && (method == "POST" || path == "/logout") &&
+		slices.Contains([]string{"/setup", "/login", "/login/code", "/invite", "/logout"}, path) {
+		home := w.home
+		return html(accounts.LoginPage(base, accounts.LoginOptions{Error: tr.T("oauth.anotherSiteTitle", nil), Next: &home, Forgot: w.o.Forgot}, lang), 403), nil
+	}
 	if path == "/setup" {
 		has, err := w.HasAccount(ctx)
 		if err != nil {
@@ -530,7 +538,17 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 		return w.signedInTo(request, *user, next)
 	}
 
+	// Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
 	if path == "/logout" {
+		user, err := w.SignedIn(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		if user != nil {
+			if err := w.Accounts.EndSessions(ctx, user.ID); err != nil {
+				return nil, err
+			}
+		}
 		return redirect(base+"/login", "set-cookie", w.sessionCookie(request, "", 0)), nil
 	}
 
@@ -765,6 +783,12 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		updated, err := w.Accounts.SetPassword(ctx, user.Email, field(input, "next"), w.now(), "")
 		if err != nil {
 			return accountErrorAnswer(err, 400)
+		}
+		// Asked for after a password got out: the tokens and apps the account made could still read on.
+		if input.Value("revokeTokens") == true {
+			if err := w.dropTokensOf(ctx, user.ID); err != nil {
+				return nil, err
+			}
 		}
 		// The new password ends every other sign-in; this browser gets a fresh one.
 		cookie, err := w.freshSession(request, updated)
@@ -1096,6 +1120,21 @@ func (w *AccountsWeb) TokenMade(ctx context.Context, token TokenRow, by string) 
 		return false
 	}
 	return w.r.Store.SetSetting(ctx, madeBy+token.ID, &by) == nil
+}
+
+// TokensOf is the ids of the tokens an account made.
+func (w *AccountsWeb) TokensOf(ctx context.Context, by string) (map[string]bool, error) {
+	settings, err := w.r.Store.SettingsStartingWith(ctx, madeBy)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, s := range settings {
+		if s.Value == by {
+			out[s.Key[len(madeBy):]] = true
+		}
+	}
+	return out, nil
 }
 
 // Handle answers an account page or API request at a path under the base, or nil for anything else.

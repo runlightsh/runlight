@@ -440,7 +440,7 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 		}
 	}
 
-	// Only the owner manages tokens: an API token cannot make or revoke one.
+	// Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
 	if path == "/api/tokens" || strings.HasPrefix(path, "/api/tokens/") {
 		if access := rt.canRead(c); access != canFull {
 			return denied(access), nil
@@ -1234,7 +1234,7 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 		// One funnel at a time, so a page of funnels never takes every database connection at once.
 		rows := []any{}
 		for _, funnel := range funnels {
-			counts, err := r.Store.FunnelCounts(ctx, query, funnel)
+			counts, sampled, err := r.Store.FunnelCounts(ctx, query, funnel)
 			if err != nil {
 				return nil, err
 			}
@@ -1244,6 +1244,9 @@ func (rt *Routes) reads(c *call, path string, u *whatwg.URL) (*Response, error) 
 				steps = append(steps, js.NewObject("kind", step.Kind, "match", step.Match, "visits", counts[i]))
 			}
 			row.Set("steps", steps)
+			if sampled {
+				row.Set("sampled", r.Store.FunnelCap())
+			}
 			rows = append(rows, row)
 		}
 		return jsonAnswer(js.NewObject("site", site.ID, "range", ranged, "funnels", rows), 200), nil

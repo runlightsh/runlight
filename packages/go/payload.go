@@ -3,6 +3,7 @@ package runlight
 import (
 	"math"
 	"regexp"
+	"strings"
 
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/whatwg"
@@ -80,16 +81,31 @@ func payloadProps(value any) *js.Object {
 		default:
 			continue
 		}
-		// Assigning a string to __proto__ changes nothing in JavaScript, yet it still counts.
-		if k != "__proto__" {
-			out.Set(k, value)
-		}
+		// A prop named __proto__ is kept like any other rather than lost.
+		out.Set(k, value)
 		count++
 	}
 	if count == 0 {
 		return nil
 	}
 	return out
+}
+
+// linkEvents are the events the tracker sends on its own for a link that was followed, each with the link as url.
+var linkEvents = map[string]bool{"Outbound link": true, "File download": true}
+
+// linkProps takes an automatic link event's url without its query string or fragment, as page paths are kept,
+// since tokens and email addresses ride in them. Done here rather than in the tracker, which has no bytes to
+// spare, and so a tracker cached from before is held to it too.
+func linkProps(name string, given *js.Object) *js.Object {
+	if given == nil || !linkEvents[name] || !given.Has("url") {
+		return given
+	}
+	url, _ := given.Value("url").(string)
+	if at := strings.IndexAny(url, "?#"); at >= 0 {
+		given.Set("url", url[:at])
+	}
+	return given
 }
 
 var alphanumeric = regexp.MustCompile(`^[A-Za-z0-9]+$`)
@@ -143,7 +159,7 @@ func ParsePayload(text string) *Payload {
 		Scroll:       payloadInt(body.Value("d"), 0, 100),
 	}
 	if kind == "event" {
-		p.Props = payloadProps(body.Value("p"))
+		p.Props = linkProps(name, payloadProps(body.Value("p")))
 	}
 	if kind == "engagement" {
 		if e := payloadInt(body.Value("e"), 0, maxEngagedMs); e != nil {

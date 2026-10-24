@@ -101,7 +101,8 @@ func call(ctx context.Context, s *runlight.Store, method string, args []any) (an
 		for _, st := range js.Arr(js.Dig(a(1), "steps")) {
 			f.Steps = append(f.Steps, runlight.FunnelStep{Kind: js.Str(js.Dig(st, "kind")), Match: js.Str(js.Dig(st, "match"))})
 		}
-		return s.FunnelCounts(ctx, queryOf(a(0)), f)
+		counts, sampled, err := s.FunnelCounts(ctx, queryOf(a(0)), f)
+		return js.NewObject("counts", counts, "sampled", sampled), err
 	case "journeyPages":
 		rows, sampled, err := s.JourneyPages(ctx, queryOf(a(0)), n(1))
 		return js.NewObject("rows", rows, "sampled", sampled), err

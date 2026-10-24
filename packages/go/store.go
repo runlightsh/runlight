@@ -26,6 +26,10 @@ type Store struct {
 
 	mu    sync.Mutex
 	ready bool
+
+	// FunnelVisits is the most visits a funnel is counted over: 0 is FunnelVisits (100,000). Smaller in
+	// tests, to try the cap.
+	FunnelVisits int
 }
 
 // NewStore is a store over a Db: SQLite(db), Postgres(db), or MySQL(db).
@@ -1243,8 +1247,21 @@ func (s *Store) DeleteFunnel(ctx context.Context, id string) error {
 // FunnelCounts is how many visits reached each step, in order, within the
 // same visit. Step one is the first matching row in the range; each later
 // step must come after the step before it. Filters choose which visits
-// enter the funnel.
-func (s *Store) FunnelCounts(ctx context.Context, query Query, funnel FunnelRow) ([]int64, error) {
+// enter the funnel. Past FunnelVisits visits in the range, only the newest
+// are counted, and sampled is true.
+func (s *Store) FunnelCounts(ctx context.Context, query Query, funnel FunnelRow) (counts []int64, sampled bool, err error) {
+	// Past the cap, only the newest visits are counted: the range starts where the oldest of them began.
+	most := s.FunnelCap()
+	scope := visitScope(query.Filters, query.Site, query.From, query.To, s.dialect())
+	first, err := s.db.All(ctx, `SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND `+isVisit+scope.sql+`
+         ORDER BY s.started_at DESC, s.id LIMIT `+strconv.Itoa(most+1)+`) x`, append([]any{query.Site, query.From, query.To}, scope.params...)...)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(first) > 0 && numInt(first[0]["n"]) > int64(most) {
+		sampled = true
+		query.From = max(query.From, numInt(first[0]["t"])+1)
+	}
 	// The rows of the picked visits that match any step, in order, read once and walked here: a join from
 	// each step to the next is planned badly by Postgres, which cannot guess how many visits go on.
 	v := visitRows(query.Filters, query.Site, query.From, query.To, s.dialect())
@@ -1265,9 +1282,9 @@ func (s *Store) FunnelCounts(ctx context.Context, query Query, funnel FunnelRow)
        FROM `+v.from+` WHERE `+v.sql+` AND (`+strings.Join(anys, " OR ")+`)
        ORDER BY e.session, e.ts, e.id`, params...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	counts := make([]int64, len(funnel.Steps))
+	counts = make([]int64, len(funnel.Steps))
 	session := ""
 	started := false
 	reached := 0
@@ -1290,7 +1307,15 @@ func (s *Store) FunnelCounts(ctx context.Context, query Query, funnel FunnelRow)
 		}
 	}
 	closeVisit()
-	return counts, nil
+	return counts, sampled, nil
+}
+
+// FunnelCap is the most visits a funnel is counted over.
+func (s *Store) FunnelCap() int {
+	if s.FunnelVisits > 0 {
+		return s.FunnelVisits
+	}
+	return FunnelVisits
 }
 
 // JourneyPages are each visit's pageviews in order, at most perVisit of

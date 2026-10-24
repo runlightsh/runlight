@@ -78,6 +78,8 @@ type RoutesOptions struct {
 	AccountOf func(ctx context.Context, request *Request) string
 	// TokenMade notes who made a token. False when they can no longer make one, which takes it back.
 	TokenMade func(ctx context.Context, token TokenRow, by string) bool
+	// TokensOf is the ids of the tokens an account made, so a member sees and revokes only their own.
+	TokensOf func(ctx context.Context, by string) (map[string]bool, error)
 }
 
 // Routes are the dashboard and its API, the tracker's endpoint, and the
@@ -97,6 +99,7 @@ type Routes struct {
 	signOut    string
 	accountOf  func(ctx context.Context, request *Request) string
 	tokenMade  func(ctx context.Context, token TokenRow, by string) bool
+	tokensOf   func(ctx context.Context, by string) (map[string]bool, error)
 	oauth      *oauthHost
 
 	mu         sync.Mutex
@@ -202,6 +205,10 @@ func (r *Runlight) Routes(options RoutesOptions) (*Routes, error) {
 	rt.tokenMade = options.TokenMade
 	if rt.tokenMade == nil && rt.web != nil {
 		rt.tokenMade = rt.web.TokenMade
+	}
+	rt.tokensOf = options.TokensOf
+	if rt.tokensOf == nil && rt.web != nil {
+		rt.tokensOf = rt.web.TokensOf
 	}
 	rt.oauth = &oauthHost{
 		r:    r,
@@ -1623,10 +1630,30 @@ func tokenView(t TokenRow) *js.Object {
 	return js.NewObject("id", t.ID, "name", t.Name, "site", t.Site, "scope", t.Scope, "hint", t.Hint, "createdAt", t.CreatedAt, "lastUsedAt", t.LastUsedAt)
 }
 
+// ownTokens are the tokens the account behind a request made: none when nothing notes who made what.
+func (rt *Routes) ownTokens(c *call) (map[string]bool, error) {
+	by := ""
+	if rt.accountOf != nil {
+		by = rt.accountOf(c.ctx, c.req)
+	}
+	if by == "" || rt.tokensOf == nil {
+		return map[string]bool{}, nil
+	}
+	return rt.tokensOf(c.ctx, by)
+}
+
 func (rt *Routes) tokensAPI(c *call, path string) (*Response, error) {
 	ctx, request := c.ctx, c.req
 	if err := rt.r.Init(ctx); err != nil {
 		return nil, err
+	}
+	// A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+	var mine map[string]bool
+	if c.member {
+		var err error
+		if mine, err = rt.ownTokens(c); err != nil {
+			return nil, err
+		}
 	}
 	if path == "/api/tokens" && request.Method == "GET" {
 		tokens, err := rt.r.Store.Tokens(ctx)
@@ -1635,7 +1662,9 @@ func (rt *Routes) tokensAPI(c *call, path string) (*Response, error) {
 		}
 		views := []any{}
 		for _, t := range tokens {
-			views = append(views, tokenView(t))
+			if mine == nil || mine[t.ID] {
+				views = append(views, tokenView(t))
+			}
 		}
 		return jsonAnswer(js.NewObject("tokens", views), 200), nil
 	}
@@ -1681,6 +1710,9 @@ func (rt *Routes) tokensAPI(c *call, path string) (*Response, error) {
 		return jsonAnswer(js.NewObject("token", tokenView(row), "secret", secret), 201), nil
 	}
 	if m := tokenPath.FindStringSubmatch(path); m != nil && request.Method == "DELETE" {
+		if mine != nil && !mine[m[1]] {
+			return Coded("Unknown token", "unknown_token", 404, nil), nil
+		}
 		ok, err := rt.r.Store.DeleteToken(ctx, m[1])
 		if err != nil {
 			return nil, err
@@ -1694,11 +1726,12 @@ func (rt *Routes) tokensAPI(c *call, path string) (*Response, error) {
 }
 
 // adminOnly are the controls a member cannot change: the mail service and
-// its keys, the assistant's settings, and deleting a site.
+// its keys, the assistant's settings, a site's agents key, and deleting a site.
 func adminOnly(path, method string) bool {
 	return (path == "/api/mail" && (method == "PUT" || method == "DELETE")) ||
 		(path == "/api/assistant" && (method == "PUT" || method == "DELETE")) ||
 		(path == "/api/assistant/limits" && method == "PUT") ||
 		(path == "/api/assistant/models" && method == "POST") ||
+		(path == "/api/observe-key/new" && method == "POST") ||
 		(manageSite.MatchString(path) && method == "DELETE")
 }

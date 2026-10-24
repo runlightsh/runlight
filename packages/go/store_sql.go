@@ -32,6 +32,9 @@ const builtDays = "SELECT day FROM rl_rollup_days WHERE site = ? AND start_at >=
 // JourneyVisits is the most visits journeys reads, newest first.
 const JourneyVisits = 20_000
 
+// FunnelVisits is the most visits a funnel is counted over: the newest in the range, so its rows fit in memory over any range.
+const FunnelVisits = 100_000
+
 // EventTailMs is how long after a visit starts its events are looked for: far past any real visit.
 const EventTailMs = 2 * 86_400_000
 
