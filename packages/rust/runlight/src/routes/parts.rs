@@ -742,8 +742,8 @@ impl Routes {
         Ok(coded("Method not allowed", "method_not_allowed", 405, None))
     }
 
-    /// API tokens: only the owner makes and revokes them.
-    pub(crate) async fn tokens_api(&self, request: &Request, path: &str) -> R {
+    /// API tokens: people at the dashboard make and revoke them, a member only their own.
+    pub(crate) async fn tokens_api(&self, request: &Request, path: &str, call: &Call) -> R {
         let rl = self.rl();
         rl.init().await?;
         let view = |t: &TokenRow| {
@@ -753,8 +753,17 @@ impl Routes {
             }
         };
         let method = request.method.as_str();
+        // A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+        let mine = if call.is_member() { Some(glue::own_tokens(self, request).await?) } else { None };
         if path == "/api/tokens" && method == "GET" {
-            let tokens: Vec<Value> = rl.store().tokens().await?.iter().map(view).collect();
+            let tokens: Vec<Value> = rl
+                .store()
+                .tokens()
+                .await?
+                .iter()
+                .filter(|t| mine.as_ref().is_none_or(|mine| mine.contains(&t.id)))
+                .map(view)
+                .collect();
             return Ok(json(&obj! { "tokens" => Value::Array(tokens) }, 200, &[]));
         }
         if path == "/api/tokens" && method == "POST" {
@@ -808,6 +817,9 @@ impl Routes {
         if let Some(id) = crate::re::group(js_re!(r"^/api/tokens/([a-f0-9]{24})$"), path, 1)
             && method == "DELETE"
         {
+            if mine.as_ref().is_some_and(|mine| !mine.contains(&id)) {
+                return Ok(coded("Unknown token", "unknown_token", 404, None));
+            }
             return Ok(if rl.store().delete_token(&id).await? {
                 json(&obj! { "ok" => true }, 200, &[])
             } else {

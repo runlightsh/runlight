@@ -352,13 +352,13 @@ impl Routes {
             return Ok(answer);
         }
 
-        // Only the owner manages tokens: an API token cannot make or revoke one.
+        // Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
         if path == "/api/tokens" || path.starts_with("/api/tokens/") {
             let access = self.can_read(request, call).await;
             if access != CanRead::Yes {
                 return Ok(self.denied(access));
             }
-            return self.tokens_api(request, path).await;
+            return self.tokens_api(request, path, call).await;
         }
 
         if let Some(remote) = &connected
@@ -928,7 +928,7 @@ impl Routes {
             // One funnel at a time, so a page of funnels never takes every database connection at once.
             let mut rows = Vec::new();
             for funnel in store.funnels(&site.id).await? {
-                let counts = store.funnel_counts(query, &funnel).await?;
+                let (counts, sampled) = store.funnel_counts(query, &funnel).await?;
                 let steps: Vec<Value> = funnel
                     .steps
                     .iter()
@@ -937,6 +937,9 @@ impl Routes {
                     .collect();
                 let Value::Object(mut o) = funnel.to_value() else { unreachable!() };
                 o.set("steps", Value::Array(steps));
+                if sampled {
+                    o.set("sampled", store.funnel_visits());
+                }
                 rows.push(Value::Object(o));
             }
             return Ok(json(

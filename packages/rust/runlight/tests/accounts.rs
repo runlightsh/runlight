@@ -239,9 +239,10 @@ fn the_throttle_keeps_a_ceiling_and_its_blocks() {
     for i in 0..10_050 {
         throttle.fail(&format!("made up {i}"), now);
     }
-    assert_eq!(throttle.size(), 10_000);
+    // Past the ceiling, the fewest tries went first, oldest first, down to nine tenths of it; 50 came after.
+    assert_eq!(throttle.size(), 9_050);
     assert!(throttle.blocked("blocked", now), "a flood of made-up names cannot wipe out a real block");
-    // The oldest names that were not blocked went first, and the newest stayed.
+    // The oldest names with the fewest tries went first, and the newest stayed.
     throttle.fail("made up 0", now);
     assert!(!throttle.blocked("made up 0", now), "counted afresh");
     throttle.fail("made up 10049", now);

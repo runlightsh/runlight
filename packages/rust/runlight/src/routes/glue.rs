@@ -163,6 +163,14 @@ pub(crate) async fn account_of(routes: &Routes, request: &Request) -> Result<Opt
     }
 }
 
+/// The tokens the account behind a request made: none when nothing notes who made what.
+pub(crate) async fn own_tokens(routes: &Routes, request: &Request) -> Result<std::collections::HashSet<String>, Error> {
+    match (&routes.0.web, account_of(routes, request).await?) {
+        (Some(web), Some(by)) => web.tokens_of(&by).await,
+        _ => Ok(std::collections::HashSet::new()),
+    }
+}
+
 /// Notes that `by` made a token; false when they can no longer make one (options.tokenMade, or the accounts web's).
 pub(crate) async fn token_made_by(routes: &Routes, row: &TokenRow, by: &str) -> Result<bool, Error> {
     match &routes.0.web {

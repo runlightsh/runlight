@@ -12,5 +12,5 @@ mod sql_store;
 pub use db::*;
 pub use prefixed::{LOCK_WAIT, PREFIX, Prefixed, TABLES, TablesBusyError, check_prefix, lock_wait, lock_wait_in_tests};
 pub use rows::*;
-pub use sql::{BOUNCE_MS, EVENT_TAIL_MS, JOURNEY_VISITS, MYSQL_COLLATION, js_order};
+pub use sql::{BOUNCE_MS, EVENT_TAIL_MS, FUNNEL_VISITS, JOURNEY_VISITS, MYSQL_COLLATION, js_order};
 pub use sql_store::SqlStore;

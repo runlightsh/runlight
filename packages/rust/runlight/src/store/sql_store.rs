@@ -32,6 +32,8 @@ pub struct SqlStore {
     db: Arc<dyn Db>,
     prefix: Arc<str>,
     ready: Arc<tokio::sync::Mutex<bool>>,
+    /// The most visits a funnel is counted over; smaller in tests, to try the cap.
+    funnel_visits: Arc<std::sync::atomic::AtomicI64>,
 }
 
 /// How to answer a range from rollups: the built days inside it, and the stretches left over.
@@ -179,7 +181,12 @@ impl SqlStore {
     /// [`Prefixed`] one).
     pub fn new(db: Arc<dyn Db>) -> SqlStore {
         let prefix: Arc<str> = db.prefix().unwrap_or(PREFIX).into();
-        SqlStore { db, prefix, ready: Arc::new(tokio::sync::Mutex::new(false)) }
+        SqlStore {
+            db,
+            prefix,
+            ready: Arc::new(tokio::sync::Mutex::new(false)),
+            funnel_visits: Arc::new(std::sync::atomic::AtomicI64::new(FUNNEL_VISITS)),
+        }
     }
 
     /// A store whose table and index names start with `prefix` in place of `rl_`, so two apps can each
@@ -215,7 +222,12 @@ impl SqlStore {
 
     /// A store on another connection (one held for a transaction), sharing nothing else.
     fn on(&self, db: Arc<dyn Db>) -> SqlStore {
-        SqlStore { db, prefix: self.prefix.clone(), ready: self.ready.clone() }
+        SqlStore {
+            db,
+            prefix: self.prefix.clone(),
+            ready: self.ready.clone(),
+            funnel_visits: self.funnel_visits.clone(),
+        }
     }
 
     async fn all(&self, sql: &str, params: Vec<Param>) -> R<Vec<Row>> {
@@ -1250,10 +1262,40 @@ impl SqlStore {
         Ok(())
     }
 
-    /// How many visits reached each step, in order, within the same visit. Step one is the first
-    /// matching row in the range; each later step must come after the step before it.
-    pub async fn funnel_counts(&self, query: &Query, funnel: &FunnelRow) -> R<Vec<f64>> {
-        let v = visit_rows(&query.filters, &query.site, query.from, query.to, self.dialect());
+    /// The most visits a funnel is counted over: [`FUNNEL_VISITS`] unless a test lowered it.
+    pub fn funnel_visits(&self) -> i64 {
+        self.funnel_visits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Lowers the most visits a funnel is counted over, for tests of the cap.
+    #[doc(hidden)]
+    pub fn set_funnel_visits(&self, most: i64) {
+        self.funnel_visits.store(most, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many visits reached each step, in order, within the same visit, and whether only the newest
+    /// [`funnel_visits`](Self::funnel_visits) visits in the range were counted. Step one is the first matching
+    /// row in the range; each later step must come after the step before it.
+    pub async fn funnel_counts(&self, query: &Query, funnel: &FunnelRow) -> R<(Vec<f64>, bool)> {
+        // Past funnel_visits visits in the range, only the newest are counted: the range starts where the oldest
+        // of them began.
+        let most = self.funnel_visits();
+        let scope = visit_scope(&query.filters, &query.site, query.from, query.to, self.dialect());
+        let first = self
+            .first(
+                &format!(
+                    "SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND {IS_VISIT}{}
+         ORDER BY s.started_at DESC, s.id LIMIT {}) x",
+                    scope.sql,
+                    most + 1
+                ),
+                concat(vec![params![&query.site, query.from, query.to], scope.params]),
+            )
+            .await?
+            .unwrap_or_default();
+        let sampled = first.num("n") > most as f64;
+        let from = if sampled { query.from.max(first.int("t") + 1) } else { query.from };
+        let v = visit_rows(&query.filters, &query.site, from, query.to, self.dialect());
         let scopes: Vec<Frag> =
             funnel.steps.iter().map(|step| self.goal_scope(&step.kind, &step.match_, &step.match_)).collect();
         let sql = format!(
@@ -1295,7 +1337,7 @@ impl SqlStore {
         for c in counts.iter_mut().take(reached) {
             *c += 1.0;
         }
-        Ok(counts)
+        Ok((counts, sampled))
     }
 
     /// Each visit's pageviews in order, at most `per_visit` of them, for journeys. A window function

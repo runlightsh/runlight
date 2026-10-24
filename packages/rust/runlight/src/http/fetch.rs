@@ -21,7 +21,8 @@ pub struct FetchInit {
     /// The whole request's limit, in milliseconds.
     pub timeout_ms: u64,
     /// Stop reading past this many bytes: `FetchError::TooLong`, or with
-    /// `truncate`, the first `max_bytes` (the start of a page).
+    /// `truncate`, the first `max_bytes` (the start of a page). `None` is
+    /// [`DEFAULT_MAX_BYTES`].
     pub max_bytes: Option<usize>,
     /// With `max_bytes`, hand back the first bytes rather than fail.
     pub truncate: bool,
@@ -77,6 +78,11 @@ impl FetchInit {
         self
     }
 }
+
+/// The most an answer may weigh when the request names no limit, enough for
+/// a connected install's largest export, so no server can stream an answer
+/// into memory without end.
+pub const DEFAULT_MAX_BYTES: usize = 100 * 1024 * 1024;
 
 /// No answer came back: refused, timed out, bad TLS, or a body past its cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,13 +207,15 @@ impl Fetcher for ReqwestFetcher {
             for (name, value) in answer.headers() {
                 headers.append(name.as_str(), &String::from_utf8_lossy(value.as_bytes()));
             }
+            let max = init.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            if !init.truncate && answer.content_length().is_some_and(|n| n > max as u64) {
+                return Err(FetchError::TooLong(max));
+            }
             let mut body = Vec::new();
             loop {
                 match answer.chunk().await {
                     Ok(Some(chunk)) => {
-                        if let Some(max) = init.max_bytes
-                            && body.len() + chunk.len() > max
-                        {
+                        if body.len() + chunk.len() > max {
                             if init.truncate {
                                 body.extend_from_slice(&chunk[..max - body.len()]);
                                 break;

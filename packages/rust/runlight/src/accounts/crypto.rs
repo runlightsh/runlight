@@ -166,8 +166,8 @@ pub fn scrypt_derive(password: &[u8], salt: &[u8], n: u64, r: u32, p: u32, lengt
     Some(out)
 }
 
-fn scrypt_key(password: &str, salt: &[u8], length: usize, cost: ScryptCost) -> Vec<u8> {
-    scrypt_derive(password.as_bytes(), salt, cost.n, cost.r, cost.p, length).expect("a bounded scrypt cost")
+fn scrypt_key(password: &str, salt: &[u8], length: usize, cost: ScryptCost) -> Option<Vec<u8>> {
+    scrypt_derive(password.as_bytes(), salt, cost.n, cost.r, cost.p, length)
 }
 
 /// A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key). `None`
@@ -182,11 +182,13 @@ fn scrypt_cost(parts: &[&str]) -> Option<ScryptCost> {
     let [n, r, p] = [parts[1], parts[2], parts[3]].map(crate::js::text_number);
     let whole = |n: f64, max: f64| crate::js::is_integer(n) && (1.0..=max).contains(&n);
     // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
+    // N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than throws.
     if !whole(n, f64::from(1u32 << 20))
         || n < 2.0
         || !(n as u64).is_power_of_two()
         || !whole(r, 32.0)
         || !whole(p, 16.0)
+        || f64::from((n as u64).trailing_zeros()) >= 16.0 * r
     {
         return None;
     }
@@ -209,7 +211,7 @@ pub fn hash_password(password: &str) -> String {
         SCRYPT.r,
         SCRYPT.p,
         base64url(&salt),
-        base64url(&scrypt_key(password, &salt, 32, SCRYPT))
+        base64url(&scrypt_key(password, &salt, 32, SCRYPT).expect("the new hash's own scrypt cost"))
     )
 }
 
@@ -226,7 +228,8 @@ pub fn check_password(password: &str, stored: &str) -> bool {
         if expected.len() < MIN_KEY_BYTES {
             return false;
         }
-        return same_bytes(&scrypt_key(password, &salt, expected.len(), cost), &expected);
+        // A cost scrypt itself refuses matches nothing, rather than failing the sign-in.
+        return scrypt_key(password, &salt, expected.len(), cost).is_some_and(|key| same_bytes(&key, &expected));
     }
     if parts[0] == "pbkdf2" && parts.len() == 4 {
         let rounds = crate::js::text_number(parts[1]);
