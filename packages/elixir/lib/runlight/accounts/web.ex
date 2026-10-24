@@ -461,14 +461,8 @@ defmodule Runlight.Accounts.Web do
             end
         end
 
-      # Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still
-      # stops working.
+      # Signing out ends this browser's session; the account page can end them everywhere.
       path == "/logout" ->
-        case signed_in(web, request) do
-          nil -> :ok
-          user -> Accounts.end_sessions(acc, user["id"])
-        end
-
         redirect("#{base}/login", [{"set-cookie", session_cookie(web, request, "", 0)}])
 
       path == "/invite" ->
@@ -843,6 +837,11 @@ defmodule Runlight.Accounts.Web do
 
       path == "/api/account" and method == "GET" ->
         reply(JS.obj(account: person(user)))
+
+      # Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+      path == "/api/account/sign-out-everywhere" and method == "POST" ->
+        Accounts.end_sessions(acc, user["id"])
+        reply(JS.obj(ok: true), 200, [{"set-cookie", session_cookie(web, request, "", 0)}])
 
       path == "/api/account/password" and method == "POST" ->
         case body(request) do

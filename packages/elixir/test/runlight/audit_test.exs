@@ -645,19 +645,30 @@ defmodule Runlight.AuditTest do
     assert json.(owner, "POST", "/api/observe-key/new?site=default", %{}).status == 200
   end
 
-  test "audit 2026-10-23: signing out ends the account's sessions everywhere, and only from the dashboard's own pages" do
+  test "audit 2026-10-23: signing out ends this browser's session, signing out everywhere ends them all, and only from the dashboard's own pages" do
     %{handler: handler, json: json, member: member} = with_member()
+
+    set_cookie = fn r ->
+      Enum.find_value(r.headers, "", fn {k, v} -> if String.downcase(k) == "set-cookie", do: v end)
+    end
+
     other = cookie_from(sign_in(handler))
-    assert json.(other, "GET", "/api/account", nil).status == 200
 
     cross_site = handler.(account_req("/logout", headers: [{"cookie", member}, {"sec-fetch-site", "cross-site"}]))
     assert cross_site.status == 403, "another site cannot sign anyone out"
-    assert json.(other, "GET", "/api/account", nil).status == 200
 
     out = handler.(account_req("/logout", headers: [{"cookie", member}, {"sec-fetch-site", "same-origin"}]))
     assert out.status == 303
-    assert json.(member, "GET", "/api/account", nil).status == 401, "the cookie copied before stops working"
-    assert json.(other, "GET", "/api/account", nil).status == 401, "and so does the one in the other browser"
+    assert set_cookie.(out) =~ ~r/Max-Age=0/i, "this browser's cookie goes"
+    assert json.(other, "GET", "/api/account", nil).status == 200, "the other browser stays signed in"
+
+    third = cookie_from(sign_in(handler))
+    ended = json.(other, "POST", "/api/account/sign-out-everywhere", %{})
+    assert ended.status == 200
+    assert set_cookie.(ended) =~ ~r/Max-Age=0/i
+    assert json.(other, "GET", "/api/account", nil).status == 401, "the browser that asked is signed out"
+    assert json.(third, "GET", "/api/account", nil).status == 401, "and so is every other"
+    assert json.(member, "GET", "/api/account", nil).status == 401, "and a cookie copied before"
 
     back = cookie_from(sign_in(handler))
     assert json.(back, "GET", "/api/account", nil).status == 200, "signing in again works"
