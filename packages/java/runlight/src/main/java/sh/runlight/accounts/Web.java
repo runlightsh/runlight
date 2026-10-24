@@ -720,13 +720,8 @@ public final class Web {
       return signedInTo(request, user, next);
     }
 
-    // Signing out ends the account's sessions in every browser, not just this one, so a cookie
-    // copied before still stops working.
+    // Signing out ends this browser's session; the account page can end them everywhere.
     if (path.equals("/logout")) {
-      Map<String, Object> user = signedIn(request);
-      if (user != null) {
-        accounts.endSessions((String) user.get("id"));
-      }
       return redirect(base + "/login", "set-cookie", sessionCookie(request, "", 0));
     }
 
@@ -976,6 +971,12 @@ public final class Web {
     }
     if (path.equals("/api/account") && method.equals("GET")) {
       return reply(Json.object("account", person(user)));
+    }
+    // Ends the account's sessions in every browser, this one too, so a cookie copied before stops
+    // working.
+    if (path.equals("/api/account/sign-out-everywhere") && method.equals("POST")) {
+      accounts.endSessions(userId);
+      return reply(Json.object("ok", true), 200, "set-cookie", sessionCookie(request, "", 0));
     }
     if (path.equals("/api/account/password") && method.equals("POST")) {
       Map<String, Object> input = body(request);

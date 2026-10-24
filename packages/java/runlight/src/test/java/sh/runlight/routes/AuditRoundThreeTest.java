@@ -3,6 +3,7 @@ package sh.runlight.routes;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static sh.runlight.routes.Make.body;
 import static sh.runlight.routes.Make.owner;
 
@@ -11,6 +12,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -61,6 +63,11 @@ class AuditRoundThreeTest {
   private static String cookieFrom(Response response) {
     String cookie = response.headers().get("set-cookie");
     return (cookie == null ? "" : cookie).split(";")[0];
+  }
+
+  private static boolean clearsCookie(Response response) {
+    String cookie = response.headers().get("set-cookie");
+    return cookie != null && cookie.toLowerCase(Locale.ROOT).contains("max-age=0");
   }
 
   /** An install with accounts: its owner, and a member who joined by invite. */
@@ -177,10 +184,10 @@ class AuditRoundThreeTest {
   }
 
   @Test
-  void signingOutEndsTheAccountsSessionsEverywhereAndOnlyFromTheDashboardsOwnPages() {
+  void
+      signingOutEndsThisBrowsersSessionSigningOutEverywhereEndsThemAllAndOnlyFromTheDashboardsOwnPages() {
     WithMember t = new WithMember();
     String other = cookieFrom(t.signIn(Map.of()));
-    assertEquals(200, t.json(other, "GET", "/api/account", null).status());
     Response crossSite =
         t.routes.handle(
             accountReq(
@@ -189,7 +196,6 @@ class AuditRoundThreeTest {
                 Headers.of("cookie", t.member, "sec-fetch-site", "cross-site"),
                 ""));
     assertEquals(403, crossSite.status(), "another site cannot sign anyone out");
-    assertEquals(200, t.json(other, "GET", "/api/account", null).status());
     Response out =
         t.routes.handle(
             accountReq(
@@ -198,14 +204,23 @@ class AuditRoundThreeTest {
                 Headers.of("cookie", t.member, "sec-fetch-site", "same-origin"),
                 ""));
     assertEquals(303, out.status());
+    assertTrue(clearsCookie(out), "this browser's cookie goes");
     assertEquals(
-        401,
-        t.json(t.member, "GET", "/api/account", null).status(),
-        "the cookie copied before stops working");
+        200,
+        t.json(other, "GET", "/api/account", null).status(),
+        "the other browser stays signed in");
+
+    String third = cookieFrom(t.signIn(Map.of()));
+    Response ended = t.json(other, "POST", "/api/account/sign-out-everywhere", Json.object());
+    assertEquals(200, ended.status());
+    assertTrue(clearsCookie(ended));
     assertEquals(
         401,
         t.json(other, "GET", "/api/account", null).status(),
-        "and so does the one in the other browser");
+        "the browser that asked is signed out");
+    assertEquals(401, t.json(third, "GET", "/api/account", null).status(), "and so is every other");
+    assertEquals(
+        401, t.json(t.member, "GET", "/api/account", null).status(), "and a cookie copied before");
     String back = cookieFrom(t.signIn(Map.of()));
     assertEquals(200, t.json(back, "GET", "/api/account", null).status(), "signing in again works");
   }
