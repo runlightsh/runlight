@@ -59,20 +59,26 @@ class CoreAudit20261023Test < CoreTestCase
     assert_equal 200, json.call(owner, "POST", "/api/observe-key/new?site=default", {}).status
   end
 
-  def test_signing_out_ends_the_accounts_sessions_everywhere_and_only_from_the_dashboards_own_pages
+  def test_signing_out_ends_this_browsers_session_signing_out_everywhere_ends_them_all_and_only_from_the_dashboards_own_pages
     app = with_member
     handler = app["handler"]
     json = app["json"]
     member = app["member"]
     other = cookie_of(sign_in(handler))
-    assert_equal 200, json.call(other, "GET", "/api/account").status
     cross_site = handler.call(account_req("/logout", "GET", { "cookie" => member, "sec-fetch-site" => "cross-site" }))
     assert_equal 403, cross_site.status, "another site cannot sign anyone out"
-    assert_equal 200, json.call(other, "GET", "/api/account").status
     out = handler.call(account_req("/logout", "GET", { "cookie" => member, "sec-fetch-site" => "same-origin" }))
     assert_equal 303, out.status
-    assert_equal 401, json.call(member, "GET", "/api/account").status, "the cookie copied before stops working"
-    assert_equal 401, json.call(other, "GET", "/api/account").status, "and so does the one in the other browser"
+    assert_match(/Max-Age=0/i, out.headers.get("set-cookie").to_s, "this browser's cookie goes")
+    assert_equal 200, json.call(other, "GET", "/api/account").status, "the other browser stays signed in"
+
+    third = cookie_of(sign_in(handler))
+    ended = json.call(other, "POST", "/api/account/sign-out-everywhere", {})
+    assert_equal 200, ended.status
+    assert_match(/Max-Age=0/i, ended.headers.get("set-cookie").to_s)
+    assert_equal 401, json.call(other, "GET", "/api/account").status, "the browser that asked is signed out"
+    assert_equal 401, json.call(third, "GET", "/api/account").status, "and so is every other"
+    assert_equal 401, json.call(member, "GET", "/api/account").status, "and a cookie copied before"
     back = cookie_of(sign_in(handler))
     assert_equal 200, json.call(back, "GET", "/api/account").status, "signing in again works"
   end
