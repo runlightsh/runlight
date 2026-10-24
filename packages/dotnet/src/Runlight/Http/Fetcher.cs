@@ -27,7 +27,10 @@ public sealed class FetchInit
     /// <summary>The whole request's limit.</summary>
     public int TimeoutMs { get; set; } = 30_000;
 
-    /// <summary>Stop reading past this and throw <see cref="BodyTooLongException"/>.</summary>
+    /// <summary>
+    /// Stop reading past this and throw <see cref="BodyTooLongException"/>. Unset, a fetcher may still hold an
+    /// answer to a limit of its own, as <see cref="HttpClientFetcher.DefaultMaxBytes"/> does.
+    /// </summary>
     public long? MaxBytes { get; set; }
 
     /// <summary>With MaxBytes, hand back the first MaxBytes instead of throwing (the start of a page).</summary>
@@ -39,6 +42,13 @@ public sealed class FetchInit
     /// <see cref="FetchException"/>) when it cannot.
     /// </summary>
     public List<string> Resolve { get; set; } = [];
+
+    /// <summary>
+    /// A fetch checked against private addresses, as <see cref="Safefetch.PublicFetchAsync"/> makes it. A fetcher
+    /// keeps its connections apart from those of other fetches, so one opened for a service, which may be on a
+    /// private network, is never used again for a public fetch to the same name.
+    /// </summary>
+    public bool Public { get; set; }
 }
 
 /// <summary>

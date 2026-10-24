@@ -152,7 +152,8 @@ public static class Crypto
         double p = Js.Number(parts[3]);
         static bool Whole(double v, double max) => Js.IsInteger(v) && v >= 1 && v <= max;
         // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
-        if (!Whole(n, 1 << 20) || n < 2 || (((int)n) & ((int)n - 1)) != 0 || !Whole(r, 32) || !Whole(p, 16))
+        // N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than throws.
+        if (!Whole(n, 1 << 20) || n < 2 || (((int)n) & ((int)n - 1)) != 0 || !Whole(r, 32) || !Whole(p, 16) || Math.Log2(n) >= 16 * r)
         {
             return null;
         }

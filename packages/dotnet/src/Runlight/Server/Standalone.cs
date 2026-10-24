@@ -31,7 +31,7 @@ public sealed class StandaloneOptions
     /// </summary>
     public string? Url { get; init; }
 
-    /// <summary>Left unset, Runlight's own default applies, and it can warn when nothing sits in front.</summary>
+    /// <summary>Left unset, Runlight's own default applies: forwarding headers count only from a private address.</summary>
     public ProxyTrust? TrustProxy { get; init; }
 
     public Func<string, JsObject?>? Geo { get; init; }

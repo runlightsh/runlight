@@ -27,6 +27,9 @@ public sealed partial class SqlStore
     public const string MysqlCollation = Sql.MysqlCollation;
     public const int LockWaitMs = Sql.LockWaitMs;
 
+    /// <summary>The most visits a funnel is counted over; smaller in tests, to try the cap.</summary>
+    public int FunnelVisits { get; set; } = Sql.FunnelVisits;
+
     private bool _ready;
     private bool _checkedAll;
     private readonly SemaphoreSlim _migrating = new(1, 1);

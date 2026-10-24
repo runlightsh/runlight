@@ -110,10 +110,10 @@ public sealed class RunlightOptions
     /// <summary>
     /// Read the client IP from forwarding headers: the last X-Forwarded-For entry, which the nearest proxy
     /// wrote, then X-Real-IP, then CF-Connecting-IP. Name one of them to read only that header, such as
-    /// "cf-connecting-ip" behind Cloudflare and another proxy. Default true: analytics needs the visitor's
-    /// address, and most apps sit behind a proxy. False reads only the connection's address, for an app
-    /// nothing sits in front of. Left unset, it is true, and Runlight warns once if a request then comes
-    /// straight from a public address with no forwarding header.
+    /// "cf-connecting-ip" behind Cloudflare and another proxy. Left unset, the headers count only on a
+    /// connection from this computer or a private network, where proxies and load balancers connect from, so a
+    /// client that reaches the app straight from the internet cannot choose its own address. True reads them
+    /// from anywhere, for a CDN that connects from public addresses. False reads only the connection's address.
     /// </summary>
     public ProxyTrust? TrustProxy { get; init; }
 

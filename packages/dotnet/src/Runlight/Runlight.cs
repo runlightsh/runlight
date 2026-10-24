@@ -63,7 +63,10 @@ public sealed partial class Runlight
     private readonly Func<string, JsObject?>? _geo;
     private readonly ProxyTrust _trustProxy;
 
-    /// <summary>1 until TrustProxy left at its default has been seen answering a public address directly, and warned about once.</summary>
+    /// <summary>True when TrustProxy was left at its default, which believes forwarding headers only from a private address.</summary>
+    private readonly bool _trustPrivate;
+
+    /// <summary>1 until a public address has sent forwarding headers that the default did not believe, and been warned about once.</summary>
     private int _warnDirect;
 
     private readonly RateLimit? _limit;
@@ -125,7 +128,8 @@ public sealed partial class Runlight
         }
         _geo = options.Geo;
         _trustProxy = options.TrustProxy ?? true;
-        _warnDirect = options.TrustProxy == null ? 1 : 0;
+        _trustPrivate = options.TrustProxy == null;
+        _warnDirect = _trustPrivate ? 1 : 0;
         // null, 0, or anything that is not a positive number means no limit, never a limit of nothing.
         double perMinute = options.RateLimit ?? double.NaN;
         _limit = !(perMinute > 0) ? null : new RateLimit(perMinute >= long.MaxValue ? long.MaxValue : (long)Math.Floor(perMinute), () => Now());
@@ -1435,7 +1439,8 @@ public sealed partial class Runlight
     public string ClientIp(Request request, string? ip = null)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (_trustProxy.On)
+        string address = ip ?? request.RemoteAddress;
+        if (Trusts(request, address))
         {
             var h = request.Headers;
             string? Last(string name)
@@ -1456,14 +1461,32 @@ public sealed partial class Runlight
                 return Js.Trim(forwarded);
             }
         }
-        string address = ip ?? request.RemoteAddress;
-        // A public address with no forwarding header means nothing sits in front, and then any client
-        // could name its own address in one. Said once, only when TrustProxy was left at its default.
-        if (Volatile.Read(ref _warnDirect) == 1 && Safefetch.PublicAddress(address) && Interlocked.Exchange(ref _warnDirect, 0) == 1)
-        {
-            Console.Error.WriteLine("Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set TrustProxy = false when nothing sits in front of this server, or put a proxy in front that sets the header.");
-        }
         return address;
+    }
+
+    /// <summary>
+    /// Whether a request's forwarding headers count. Left at its default, TrustProxy believes them only on a
+    /// connection from this computer or a private network, or one whose address the app did not pass on (a
+    /// hosting platform's function), since a client reaching the server straight from the internet could write
+    /// them itself.
+    /// </summary>
+    private bool Trusts(Request request, string? address)
+    {
+        if (!_trustProxy.On)
+        {
+            return false;
+        }
+        if (!_trustPrivate || string.IsNullOrEmpty(address) || !Safefetch.PublicAddress(address))
+        {
+            return true;
+        }
+        // Said once: a CDN that connects from public addresses needs TrustProxy set, or its visitors all look alike.
+        var h = request.Headers;
+        if (Volatile.Read(ref _warnDirect) == 1 && (h.Has("x-forwarded-for") || h.Has("x-real-ip") || h.Has("cf-connecting-ip")) && Interlocked.Exchange(ref _warnDirect, 0) == 1)
+        {
+            Console.Error.WriteLine("Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set TrustProxy to the header it sets (cf-connecting-ip) or to true.");
+        }
+        return false;
     }
 
     /// <summary>
@@ -1480,10 +1503,18 @@ public sealed partial class Runlight
         }
         string today = await Store.SaltAsync(day, Hash.RandomSalt(), cancellationToken).ConfigureAwait(false);
         string? yesterday = await Store.SaltIfExistsAsync(Time.AddDays(day, -1), cancellationToken).ConfigureAwait(false);
-        await DropOldSaltsAsync(now, cancellationToken).ConfigureAwait(false);
-        var salts = (day, today, yesterday);
-        _salts[timezone] = salts;
-        return salts;
+        // Kept before old salts go, so dropping yesterday's from the store drops it from here too.
+        _salts[timezone] = (day, today, yesterday);
+        try
+        {
+            await DropOldSaltsAsync(now, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            _salts.TryRemove(timezone, out _);
+            throw;
+        }
+        return _salts.TryGetValue(timezone, out var kept) ? kept : (day, today, yesterday);
     }
 
     /// <summary>
@@ -1527,7 +1558,7 @@ public sealed partial class Runlight
     }
 
     /// <summary>The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.</summary>
-    private string? ForwardedHost(Request request) => _trustProxy.On ? request.Headers.Get("x-forwarded-host") : null;
+    private string? ForwardedHost(Request request, string? ip = null) => Trusts(request, ip ?? request.RemoteAddress) ? request.Headers.Get("x-forwarded-host") : null;
 
     /// <summary>
     /// Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing throws.
@@ -1575,11 +1606,12 @@ public sealed partial class Runlight
         // A database too busy to take the hit right now (every pooled connection held by long reports, or
         // another process writing the SQLite file) gets it a little later, at the time it arrived.
         long now = Now();
+        var done = new Progress();
         for (int attempt = 1; ; attempt++)
         {
             try
             {
-                await RecordAsync(payload, request, ip, now, cancellationToken).ConfigureAwait(false);
+                await RecordAsync(payload, request, ip, now, done, cancellationToken).ConfigureAwait(false);
                 return;
             }
             catch (Exception error) when (attempt < 3 && Busy(error))
@@ -1589,7 +1621,20 @@ public sealed partial class Runlight
         }
     }
 
-    private async Task RecordAsync(Payload payload, Request request, string? ip, long now, CancellationToken cancellationToken)
+    /// <summary>
+    /// How far recording a hit got: its visit, and which of its writes went in. A hit tried again after a write
+    /// failed skips the ones before it, so a visit's counts never take the same hit twice.
+    /// </summary>
+    private sealed class Progress
+    {
+        public (string Id, string Visitor)? Session { get; set; }
+
+        public bool Touched { get; set; }
+
+        public bool Engaged { get; set; }
+    }
+
+    private async Task RecordAsync(Payload payload, Request request, string? ip, long now, Progress done, CancellationToken cancellationToken)
     {
         // Managed sites load from the database in init, so it must come first.
         await InitAsync(cancellationToken).ConfigureAwait(false);
@@ -1602,12 +1647,12 @@ public sealed partial class Runlight
 
         if (payload.Kind == "engagement")
         {
-            await EngagementAsync(site, payload, now, cancellationToken).ConfigureAwait(false);
+            await EngagementAsync(site, payload, now, done, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         var page = Sources.ParsePage(url);
-        (string Id, string Visitor)? session = null;
+        (string Id, string Visitor)? session = done.Session;
         bool reopen = true;
         if (payload.Kind == "event" && payload.PageviewId.Length > 0)
         {
@@ -1616,7 +1661,7 @@ public sealed partial class Runlight
             // (a tab left open for days); it then starts a visit of its own, as any later activity would.
             if (pageview != null && now - pageview.Num("startedAt") < SqlStore.EventTailMs)
             {
-                session = (pageview.Str("session")!, pageview.Str("visitor")!);
+                session ??= (pageview.Str("session")!, pageview.Str("visitor")!);
                 // A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
                 reopen = now - pageview.Num("lastAt") <= SessionIdleMs;
                 if (now - pageview.Num("startedAt") > 3_600_000)
@@ -1637,8 +1682,14 @@ public sealed partial class Runlight
             payload.Language,
             cancellationToken).ConfigureAwait(false);
 
+        done.Session = session;
+
         string path = page.Str("path")!;
-        await Store.TouchSessionAsync(session.Value.Id, now, payload.Kind, path, reopen, cancellationToken).ConfigureAwait(false);
+        if (!done.Touched)
+        {
+            await Store.TouchSessionAsync(session.Value.Id, now, payload.Kind, path, reopen, cancellationToken).ConfigureAwait(false);
+            done.Touched = true;
+        }
         await Store.InsertEventAsync(new JsObject
         {
             ["site"] = Id(site),
@@ -1705,7 +1756,7 @@ public sealed partial class Runlight
                     ["platform"] = request.Headers.Get("sec-ch-ua-platform"),
                 },
                 screenWidth);
-            var location = Geo.Locate(request.Headers, address, _geo, _trustProxy.On);
+            var location = Geo.Locate(request.Headers, address, _geo, Trusts(request, ip ?? request.RemoteAddress));
             var utm = page.Obj("utm")!;
             var row = new JsObject
             {
@@ -1762,7 +1813,7 @@ public sealed partial class Runlight
         }
     }
 
-    private async Task EngagementAsync(JsObject site, Payload payload, long now, CancellationToken cancellationToken)
+    private async Task EngagementAsync(JsObject site, Payload payload, long now, Progress done, CancellationToken cancellationToken)
     {
         if (payload.EngagedMs <= 0)
         {
@@ -1774,7 +1825,11 @@ public sealed partial class Runlight
         {
             return;
         }
-        await Store.AddEngagementAsync(pageview.Str("session")!, payload.EngagedMs, cancellationToken).ConfigureAwait(false);
+        if (!done.Engaged)
+        {
+            await Store.AddEngagementAsync(pageview.Str("session")!, payload.EngagedMs, cancellationToken).ConfigureAwait(false);
+            done.Engaged = true;
+        }
         // Only a visit that began more than an hour ago can belong to a day that is already added up.
         if (now - pageview.Num("startedAt") > 3_600_000)
         {
@@ -1921,7 +1976,7 @@ public sealed partial class Runlight
         ArgumentNullException.ThrowIfNull(request);
         var url = new Url(request.Url);
         // A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
-        string given = ForwardedHost(request) ?? request.Headers.Get("host") ?? url.Host;
+        string given = ForwardedHost(request, ip) ?? request.Headers.Get("host") ?? url.Host;
         string host = Sources.StripWww(Js.Trim(given.Split(',')[0]).Split(':')[0]);
         if (!(await LinkDomainSetAsync(cancellationToken).ConfigureAwait(false)).Contains(host))
         {
@@ -1958,7 +2013,7 @@ public sealed partial class Runlight
         ArgumentNullException.ThrowIfNull(request);
         await InitAsync(cancellationToken).ConfigureAwait(false);
         var url = new Url(request.Url);
-        string host = Sources.StripWww((ForwardedHost(request) ?? request.Headers.Get("host") ?? url.Host).Split(':')[0]);
+        string host = Sources.StripWww((ForwardedHost(request, ip) ?? request.Headers.Get("host") ?? url.Host).Split(':')[0]);
         var link = await Store.LinkBySlugAsync(slug, cancellationToken).ConfigureAwait(false);
         // The app's own link path answers for every link, so a link whose domain
         // was removed keeps working; a link domain answers only for its own links.

@@ -35,8 +35,21 @@ public sealed partial class SqlStore
     /// matching row in the range; each later step must come after the step before it. Filters choose
     /// which visits enter the funnel.
     /// </summary>
-    public async Task<List<double>> FunnelCountsAsync(JsObject query, JsObject funnel, CancellationToken cancellationToken = default)
+    public async Task<(List<double> Counts, bool Sampled)> FunnelCountsAsync(JsObject query, JsObject funnel, CancellationToken cancellationToken = default)
     {
+        // Past FunnelVisits visits in the range, only the newest are counted: the range starts where the oldest
+        // of them began.
+        var scope = Sql.VisitScope(Sql.Filters(query), query.Str("site")!, query.Long("from"), query.Long("to"), Dialect);
+        var first = await Db.FirstAsync(
+            "SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND " + Sql.IsVisit + scope.Sql
+                + "\n         ORDER BY s.started_at DESC, s.id LIMIT " + Js.Str(FunnelVisits + 1) + ") x",
+            [query.Str("site"), query.Long("from"), query.Long("to"), .. scope.Params],
+            cancellationToken).ConfigureAwait(false);
+        bool sampled = Sql.Num(first?.Get("n")) > FunnelVisits;
+        if (sampled)
+        {
+            query = query.With(new JsObject { ["from"] = Math.Max(query.Long("from"), Js.ToLong(Sql.Num(first?.Get("t"))) + 1) });
+        }
         // The rows of the picked visits that match any step, in order, read once and walked here: a
         // join from each step to the next is planned badly by Postgres, which cannot guess how many
         // visits go on.
@@ -84,7 +97,7 @@ public sealed partial class SqlStore
             }
         }
         Close();
-        return [.. counts];
+        return ([.. counts], sampled);
     }
 
     /// <summary>

@@ -152,6 +152,7 @@ public sealed class Routes
     private readonly string? _signOut;
     private readonly Func<Request, CancellationToken, Task<string?>>? _accountOf;
     private readonly Func<JsObject, string, CancellationToken, Task<bool>>? _tokenMade;
+    private readonly Func<string, CancellationToken, Task<HashSet<string>>>? _tokensOf;
     private readonly OAuthContext _oauth;
 
     /// <summary>Requests from a manage token, already checked against its one site, act as the owner's.</summary>
@@ -224,6 +225,7 @@ public sealed class Routes
         _signOut = options.SignOut ?? (web != null ? _base + "/logout" : null);
         _accountOf = options.AccountOf ?? (web != null ? (r, ct) => web.AccountOfAsync(r, ct) : null);
         _tokenMade = options.TokenMade ?? (web != null ? (row, by, ct) => web.TokenMadeAsync(row, by, ct) : null);
+        _tokensOf = options.TokensOf ?? (web != null ? (by, ct) => web.TokensOfAsync(by, ct) : null);
         var authorize = options.Authorize;
         _oauth = new OAuthContext
         {
@@ -807,12 +809,13 @@ public sealed class Routes
 
     private bool IsMember(Request request) => _members.TryGetValue(request, out _);
 
-    /// <summary>The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site.</summary>
+    /// <summary>The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key, and deleting a site.</summary>
     private static bool AdminOnly(string path, string method) =>
         (path == "/api/mail" && (method == "PUT" || method == "DELETE"))
         || (path == "/api/assistant" && (method == "PUT" || method == "DELETE"))
         || (path == "/api/assistant/limits" && method == "PUT")
         || (path == "/api/assistant/models" && method == "POST")
+        || (path == "/api/observe-key/new" && method == "POST")
         || (SitePath.IsMatch(path) && method == "DELETE");
 
     /// <summary>An API token from the bearer header: read-only, and maybe limited to one site.</summary>
@@ -1947,6 +1950,13 @@ public sealed class Routes
         return Coded("Viewers can ask " + said + " questions a day. Ask again tomorrow.", "assistant_daily", 429, new JsObject { ["limit"] = said });
     }
 
+    /// <summary>The tokens the account behind a request made: none when nothing notes who made what.</summary>
+    private async Task<HashSet<string>> OwnTokensAsync(Request request, CancellationToken cancellationToken)
+    {
+        string? by = _accountOf != null ? await _accountOf(request, cancellationToken).ConfigureAwait(false) : null;
+        return !string.IsNullOrEmpty(by) && _tokensOf != null ? await _tokensOf(by, cancellationToken).ConfigureAwait(false) : [];
+    }
+
     private async Task<Response> TokensApiAsync(Request request, string path, CancellationToken cancellationToken)
     {
         await _rl.InitAsync(cancellationToken).ConfigureAwait(false);
@@ -1960,9 +1970,11 @@ public sealed class Routes
             ["createdAt"] = t.Get("createdAt"),
             ["lastUsedAt"] = t.Get("lastUsedAt"),
         };
+        // A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+        var mine = IsMember(request) ? await OwnTokensAsync(request, cancellationToken).ConfigureAwait(false) : null;
         if (path == "/api/tokens" && request.Method == "GET")
         {
-            return JsonResponse(new JsObject { ["tokens"] = ToList((await Store.TokensAsync(cancellationToken).ConfigureAwait(false)).Select(View)) });
+            return JsonResponse(new JsObject { ["tokens"] = ToList((await Store.TokensAsync(cancellationToken).ConfigureAwait(false)).Where(t => mine == null || mine.Contains(t.Str("id") ?? "")).Select(View)) });
         }
         if (path == "/api/tokens" && request.Method == "POST")
         {
@@ -2020,6 +2032,10 @@ public sealed class Routes
         var match = TokenPath.Match(path);
         if (match.Success && request.Method == "DELETE")
         {
+            if (mine != null && !mine.Contains(match.Groups[1].Value))
+            {
+                return Coded("Unknown token", "unknown_token", 404);
+            }
             return await Store.DeleteTokenAsync(match.Groups[1].Value, cancellationToken).ConfigureAwait(false)
                 ? JsonResponse(new JsObject { ["ok"] = true })
                 : Coded("Unknown token", "unknown_token", 404);
@@ -2551,7 +2567,7 @@ public sealed class Routes
             return await ChatAsync(request, url, cancellationToken).ConfigureAwait(false);
         }
 
-        // Only the owner manages tokens: an API token cannot make or revoke one.
+        // Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
         if (path == "/api/tokens" || path.StartsWith("/api/tokens/", StringComparison.Ordinal))
         {
             object access = await CanReadAsync(request, cancellationToken).ConfigureAwait(false);
@@ -3356,7 +3372,7 @@ public sealed class Routes
             var rows = new List<object?>();
             foreach (var funnel in await store.FunnelsAsync(siteId, cancellationToken).ConfigureAwait(false))
             {
-                var counts = await store.FunnelCountsAsync(query, funnel, cancellationToken).ConfigureAwait(false);
+                var (counts, sampled) = await store.FunnelCountsAsync(query, funnel, cancellationToken).ConfigureAwait(false);
                 var steps = funnel.Arr("steps") ?? [];
                 var withVisits = new List<object?>();
                 for (int i = 0; i < steps.Count; i++)
@@ -3365,6 +3381,10 @@ public sealed class Routes
                 }
                 var copy = funnel.Clone();
                 copy["steps"] = withVisits;
+                if (sampled)
+                {
+                    copy["sampled"] = (long)store.FunnelVisits;
+                }
                 rows.Add(copy);
             }
             return JsonResponse(new JsObject { ["site"] = siteId, ["range"] = rangeOut, ["funnels"] = rows });

@@ -503,6 +503,14 @@ public sealed class Web
         {
             return new Response(Pages.AuthJs(query.Get("lang") ?? "en"), 200, new Headers { ["content-type"] = "application/javascript; charset=utf-8", ["cache-control"] = "public, max-age=3600" });
         }
+        // A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+        // plant a session, so these pages take forms only from their own. The browser says where a request came from.
+        string fetchSite = request.Headers.Get("sec-fetch-site") ?? "";
+        bool crossSite = fetchSite == "cross-site" || fetchSite == "same-site";
+        if (crossSite && (method == "POST" || path == "/logout") && path is "/setup" or "/login" or "/login/code" or "/invite" or "/logout")
+        {
+            return Html(Pages.LoginPage(b, _o.Forgot, t.T("oauth.anotherSiteTitle"), next: _homePath, lang: lang), 403);
+        }
 
         if (path == "/setup")
         {
@@ -615,8 +623,14 @@ public sealed class Web
             return SignedInTo(request, user, next);
         }
 
+        // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
         if (path == "/logout")
         {
+            var user = await SignedInAsync(request, cancellationToken).ConfigureAwait(false);
+            if (user != null)
+            {
+                await Accounts.EndSessionsAsync(user.Str("id")!, cancellationToken).ConfigureAwait(false);
+            }
             return Redirect(b + "/login", SessionCookie(request, "", 0));
         }
 
@@ -820,6 +834,11 @@ public sealed class Web
             try
             {
                 var updated = await Accounts.SetPasswordAsync(user.Str("email")!, Field(input, "next"), now, null, cancellationToken).ConfigureAwait(false);
+                // Asked for after a password got out: the tokens and apps the account made could still read on.
+                if (input.Get("revokeTokens") is true)
+                {
+                    await DropTokensOfAsync(user.Str("id")!, cancellationToken).ConfigureAwait(false);
+                }
                 // The new password ends every other sign-in; this browser gets a fresh one.
                 return Reply(new JsObject { ["ok"] = true }, 200, Fresh(updated));
             }
@@ -1091,6 +1110,20 @@ public sealed class Web
         }
         await _store.SetSettingAsync(MadeBy + token.Str("id"), by, cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    /// <summary>The ids of the tokens an account made.</summary>
+    public async Task<HashSet<string>> TokensOfAsync(string by, CancellationToken cancellationToken = default)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in await _store.SettingsStartingWithAsync(MadeBy, cancellationToken).ConfigureAwait(false))
+        {
+            if (row.Str("value") == by)
+            {
+                ids.Add(row.Str("key")![MadeBy.Length..]);
+            }
+        }
+        return ids;
     }
 
     /// <summary>

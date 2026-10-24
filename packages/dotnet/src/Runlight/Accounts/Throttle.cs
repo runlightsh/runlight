@@ -265,47 +265,34 @@ public sealed class Throttle
     }
 
     /// <summary>
-    /// Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
-    /// have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when a new entry is
-    /// made and the count may have passed the ceiling, since reading every count back is the costly part.
+    /// Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+    /// ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+    /// or the count of a name someone is close to blocking. Run when a new entry is made and the count may have
+    /// passed the ceiling, since reading every count back is the costly part.
     /// </summary>
     private async Task PruneAsync(long now, CancellationToken cancellationToken)
     {
-        var entries = new List<(string Key, long Until, bool Blocked)>();
+        var entries = new List<(string Key, long Count, long Until)>();
         foreach (var row in await _store.SettingsStartingWithAsync(Prefix, cancellationToken).ConfigureAwait(false))
         {
             string key = row.Str("key")!;
-            object? entry = Json.TryParse(row.Str("value") ?? "");
-            var (count, until) = Read(entry);
+            var (count, until) = Read(Json.TryParse(row.Str("value") ?? ""));
             if (until <= now)
             {
                 await _store.SetSettingAsync(key, null, cancellationToken).ConfigureAwait(false);
                 continue;
             }
-            entries.Add((key, until, entry is JsObject && count >= _limit));
+            entries.Add((key, count, until));
         }
         int size = entries.Count;
-        if (size <= Accounts.MaxThrottled)
+        if (size > Accounts.MaxThrottled)
         {
-            Interlocked.Exchange(ref _rows, size);
-            return;
-        }
-        // Oldest first: each entry's window started windowMs before its end.
-        var oldest = entries.OrderBy(e => e.Until).ToList();
-        foreach (bool blocked in new[] { false, true })
-        {
-            foreach (var entry in oldest)
+            // Oldest first among equals: each entry's window started windowMs before its end.
+            var fewest = entries.OrderBy(e => e.Count).ThenBy(e => e.Until).Take(size - (int)Math.Floor(Accounts.MaxThrottled * 0.9)).ToList();
+            foreach (var entry in fewest)
             {
-                if (size <= Accounts.MaxThrottled)
-                {
-                    Interlocked.Exchange(ref _rows, size);
-                    return;
-                }
-                if (entry.Blocked == blocked)
-                {
-                    await _store.SetSettingAsync(entry.Key, null, cancellationToken).ConfigureAwait(false);
-                    size--;
-                }
+                await _store.SetSettingAsync(entry.Key, null, cancellationToken).ConfigureAwait(false);
+                size--;
             }
         }
         Interlocked.Exchange(ref _rows, size);
