@@ -538,17 +538,8 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 		return w.signedInTo(request, *user, next)
 	}
 
-	// Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+	// Signing out ends this browser's session; the account page can end them everywhere.
 	if path == "/logout" {
-		user, err := w.SignedIn(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		if user != nil {
-			if err := w.Accounts.EndSessions(ctx, user.ID); err != nil {
-				return nil, err
-			}
-		}
 		return redirect(base+"/login", "set-cookie", w.sessionCookie(request, "", 0)), nil
 	}
 
@@ -771,6 +762,13 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 	}
 	if path == "/api/account" && request.Method == "GET" {
 		return reply(js.NewObject("account", person(*user)), 200), nil
+	}
+	// Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+	if path == "/api/account/sign-out-everywhere" && request.Method == "POST" {
+		if err := w.Accounts.EndSessions(ctx, user.ID); err != nil {
+			return nil, err
+		}
+		return reply(js.NewObject("ok", true), 200, "set-cookie", w.sessionCookie(request, "", 0)), nil
 	}
 	if path == "/api/account/password" && request.Method == "POST" {
 		input := jsonBody(request)
