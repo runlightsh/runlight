@@ -65,16 +65,19 @@ type Options struct {
 	// Geo looks up a location for an IP when the platform sends no location headers.
 	Geo GeoLookup
 	// IgnoreProxy reads only the connection's address, for an app nothing
-	// sits in front of. By default the client IP comes from forwarding
+	// sits in front of. Otherwise the client IP comes from forwarding
 	// headers: the last X-Forwarded-For entry, which the nearest proxy
-	// wrote, then X-Real-IP, then CF-Connecting-IP.
+	// wrote, then X-Real-IP, then CF-Connecting-IP. Left at the default,
+	// the headers count only on a connection from this computer or a
+	// private network, where proxies and load balancers connect from, so a
+	// client that reaches the app straight from the internet cannot choose
+	// its own address.
 	IgnoreProxy bool
-	// ProxyHeader names the one forwarding header to read, such as
-	// "cf-connecting-ip" behind Cloudflare and another proxy.
+	// ProxyHeader names the one forwarding header to read, from anywhere,
+	// such as "cf-connecting-ip" behind Cloudflare and another proxy.
 	ProxyHeader string
-	// TrustProxy reads the default forwarding headers on purpose. It changes
-	// nothing but the warning given when, left unset, a request arrives
-	// straight from a public address with none of them.
+	// TrustProxy reads the default forwarding headers from anywhere, for a
+	// CDN that connects from public addresses.
 	TrustProxy bool
 	// LinkPath is where short links on the app's own domain live, as
 	// {LinkPath}/{slug}. "" is "/go".
@@ -260,8 +263,11 @@ type Runlight struct {
 	freshenMu   sync.Mutex
 	// mailServices are the mail services Settings offers and saves, in the order of mail.Services.
 	mailServices []mail.Service
-	// warnDirect is true until the default trust, never chosen, has been seen
-	// answering a public address directly, and warned about once.
+	// trustPrivate is true when the trust was left at its default, which believes forwarding headers only
+	// from a private address.
+	trustPrivate bool
+	// warnDirect is true until a public address has sent forwarding headers
+	// that the default trust did not believe, and been warned about once.
 	warnDirect atomic.Bool
 	// observing counts AI agent fetches the Observer is still recording.
 	observing atomic.Int32
@@ -379,7 +385,8 @@ func New(options Options) (*Runlight, error) {
 		r.trust = strings.ToLower(options.ProxyHeader)
 	default:
 		r.trust = "*"
-		r.warnDirect.Store(!options.TrustProxy)
+		r.trustPrivate = !options.TrustProxy
+		r.warnDirect.Store(r.trustPrivate)
 	}
 	perMinute := 120
 	if options.RateLimit != nil {
@@ -1579,7 +1586,7 @@ func lastEntry(value string) (string, bool) {
 // X-Forwarded-For entry, which the nearest proxy wrote and a client cannot
 // choose, then X-Real-IP and CF-Connecting-IP.
 func (r *Runlight) ClientIP(request *Request) string {
-	if r.trust != "" {
+	if r.trusts(request) {
 		h := request.Header
 		var forwarded string
 		var ok bool
@@ -1604,13 +1611,26 @@ func (r *Runlight) ClientIP(request *Request) string {
 		if ok && strings.TrimSpace(forwarded) != "" {
 			return strings.TrimSpace(forwarded)
 		}
-		// A public address with no forwarding header means nothing sits in front, and then any client
-		// could name its own address in one. Said once, only when the trust was left at its default.
-		if r.warnDirect.Load() && web.PublicAddress(request.RemoteAddress) && r.warnDirect.CompareAndSwap(true, false) {
-			r.logf("Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set IgnoreProxy: true when nothing sits in front of this server, or put a proxy in front that sets the header.")
-		}
 	}
 	return request.RemoteAddress
+}
+
+// trusts is whether a request's forwarding headers count. Left at its default, the trust believes them only on
+// a connection from this computer or a private network, or one whose address the app did not pass on, since a
+// client reaching the server straight from the internet could write them itself.
+func (r *Runlight) trusts(request *Request) bool {
+	if r.trust == "" {
+		return false
+	}
+	if !r.trustPrivate || request.RemoteAddress == "" || !web.PublicAddress(request.RemoteAddress) {
+		return true
+	}
+	// Said once: a CDN that connects from public addresses needs the trust set, or its visitors all look alike.
+	h := request.Header
+	if r.warnDirect.Load() && (h.Has("x-forwarded-for") || h.Has("x-real-ip") || h.Has("cf-connecting-ip")) && r.warnDirect.CompareAndSwap(true, false) {
+		r.logf("Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set ProxyHeader to the header it sets (cf-connecting-ip) or TrustProxy to true.")
+	}
+	return false
 }
 
 // currentSalts are today's salt in a site's timezone and, if it still
@@ -1632,12 +1652,22 @@ func (r *Runlight) currentSalts(ctx context.Context, now int64, timezone string)
 	if err != nil {
 		return salts{}, err
 	}
-	if err := r.dropOldSalts(ctx, now); err != nil {
-		return salts{}, err
-	}
+	// Kept before old salts go, so dropping yesterday's from the store drops it from here too.
 	s := salts{day: day, today: today, yesterday: yesterday, hasYest: has}
 	r.mu.Lock()
 	r.salts[timezone] = s
+	r.mu.Unlock()
+	if err := r.dropOldSalts(ctx, now); err != nil {
+		r.mu.Lock()
+		delete(r.salts, timezone)
+		r.mu.Unlock()
+		return salts{}, err
+	}
+	// As the drop step left it, with yesterday's gone when the store let it go.
+	r.mu.Lock()
+	if cached, ok := r.salts[timezone]; ok && cached.day == day {
+		s = cached
+	}
 	r.mu.Unlock()
 	return s, nil
 }
@@ -1689,7 +1719,7 @@ func (r *Runlight) dropOldSalts(ctx context.Context, now int64) error {
 // forwardedHost is the host a proxy says the request was for, read only
 // when proxy headers are trusted, as the client's address is.
 func (r *Runlight) forwardedHost(request *Request) (string, bool) {
-	if r.trust == "" {
+	if !r.trusts(request) {
 		return "", false
 	}
 	return request.Header.Lookup("x-forwarded-host")
@@ -1725,8 +1755,9 @@ func (r *Runlight) Collect(ctx context.Context, request *Request) error {
 	// A database too busy to take the hit right now (every pooled connection held by long reports, or
 	// another process writing the SQLite file) gets it a little later, at the time it arrived.
 	now := r.now()
+	done := &progress{}
 	for attempt := 1; ; attempt++ {
-		err := r.record(ctx, payload, request, now)
+		err := r.record(ctx, payload, request, now, done)
 		if err == nil || attempt >= 3 || !busyError.MatchString(err.Error()) {
 			return err
 		}
@@ -1738,7 +1769,15 @@ func (r *Runlight) Collect(ctx context.Context, request *Request) error {
 	}
 }
 
-func (r *Runlight) record(ctx context.Context, payload *Payload, request *Request, now int64) error {
+// progress is how far recording a hit got: its visit, and which of its writes went in. A hit tried again after
+// a write failed skips the ones before it, so a visit's counts never take the same hit twice.
+type progress struct {
+	session *OpenSession
+	touched bool
+	engaged bool
+}
+
+func (r *Runlight) record(ctx context.Context, payload *Payload, request *Request, now int64, done *progress) error {
 	// Managed sites load from the database in init(), so it must come first.
 	if err := r.Init(ctx); err != nil {
 		return err
@@ -1752,10 +1791,10 @@ func (r *Runlight) record(ctx context.Context, payload *Payload, request *Reques
 		}
 	}
 	if payload.Kind == "engagement" {
-		return r.engagement(ctx, site, payload, now)
+		return r.engagement(ctx, site, payload, now, done)
 	}
 	page := ParsePage(payload.URL)
-	var session *OpenSession
+	session := done.session
 	reopen := true
 	if payload.Kind == "event" && payload.PageviewID != "" {
 		pageview, err := r.Store.Pageview(ctx, site.ID, payload.PageviewID)
@@ -1765,7 +1804,9 @@ func (r *Runlight) record(ctx context.Context, payload *Payload, request *Reques
 		// An event joins its page's visit unless that visit began longer ago than reports look for its rows
 		// (a tab left open for days); it then starts a visit of its own, as any later activity would.
 		if pageview != nil && now-pageview.StartedAt < EventTailMs {
-			session = &OpenSession{ID: pageview.Session, Visitor: pageview.Visitor}
+			if session == nil {
+				session = &OpenSession{ID: pageview.Session, Visitor: pageview.Visitor}
+			}
 			// A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
 			reopen = now-pageview.LastAt <= SessionIdleMs
 			if now-pageview.StartedAt > 3_600_000 {
@@ -1786,8 +1827,12 @@ func (r *Runlight) record(ctx context.Context, payload *Payload, request *Reques
 			return err
 		}
 	}
-	if err := r.Store.TouchSession(ctx, session.ID, now, payload.Kind, page.Path, reopen); err != nil {
-		return err
+	done.session = session
+	if !done.touched {
+		if err := r.Store.TouchSession(ctx, session.ID, now, payload.Kind, page.Path, reopen); err != nil {
+			return err
+		}
+		done.touched = true
 	}
 	title, name := "", ""
 	if payload.Kind == "pageview" {
@@ -1835,7 +1880,7 @@ func (r *Runlight) sessionFor(ctx context.Context, site SiteRow, request *Reques
 		hints.Platform = &v
 	}
 	parsed := ParseClient(ua, hints, screenWidth)
-	location := LocateTrusting(request.Header, ip, r.geo, r.trust != "")
+	location := LocateTrusting(request.Header, ip, r.geo, r.trusts(request))
 	err = r.Store.InsertSession(ctx, SessionRow{
 		ID: session.ID, Site: site.ID, Visitor: session.Visitor, StartedAt: now, Hostname: page.Hostname,
 		ReferrerHost: attribution.ReferrerHost, ReferrerPath: attribution.ReferrerPath, Source: attribution.Source, Channel: attribution.Channel,
@@ -2054,7 +2099,7 @@ func (r *Runlight) recordClick(ctx context.Context, request *Request, u *whatwg.
 		Path: head16(u.Pathname, 1000), Hostname: host, Name: link.Slug, Link: link.ID})
 }
 
-func (r *Runlight) engagement(ctx context.Context, site SiteRow, payload *Payload, now int64) error {
+func (r *Runlight) engagement(ctx context.Context, site SiteRow, payload *Payload, now int64, done *progress) error {
 	if payload.EngagedMs <= 0 {
 		return nil
 	}
@@ -2066,8 +2111,11 @@ func (r *Runlight) engagement(ctx context.Context, site SiteRow, payload *Payloa
 	if pageview == nil || now-pageview.StartedAt >= EventTailMs {
 		return nil
 	}
-	if err := r.Store.AddEngagement(ctx, pageview.Session, payload.EngagedMs); err != nil {
-		return err
+	if !done.engaged {
+		if err := r.Store.AddEngagement(ctx, pageview.Session, payload.EngagedMs); err != nil {
+			return err
+		}
+		done.engaged = true
 	}
 	// Only a visit that began more than an hour ago can belong to a day that is already added up.
 	if now-pageview.StartedAt > 3_600_000 {

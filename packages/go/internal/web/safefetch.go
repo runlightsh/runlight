@@ -123,6 +123,35 @@ func PublicAddress(ip string) bool {
 		return false
 	}
 	embedded := func(hi, lo int) []int { return []int{hi >> 8, hi & 255, lo >> 8, lo & 255} }
+	// IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), translated (::ffff:0:0:0/96),
+	// and NAT64 (64:ff9b::/96).
+	if inside := embeddedV4(g); inside != nil {
+		if g[5] == 0 && g[4] == 0 && g[6] == 0 && g[7] <= 1 {
+			return false
+		}
+		return publicV4(inside)
+	}
+	// 6to4 carries an IPv4 address in its second and third groups.
+	if g[0] == 0x2002 {
+		return publicV4(embedded(g[1], g[2]))
+	}
+	// Only global unicast (2000::/3) is public, which leaves out unique local, link-local, the old site-local,
+	// multicast, discard, and local-use NAT64 (64:ff9b:1::/48), which may carry any address.
+	if g[0]&0xe000 != 0x2000 {
+		return false
+	}
+	// The protocol assignments (2001::/23, with Teredo and ORCHID) and the documentation prefixes.
+	if g[0] == 0x2001 && (g[1] < 0x200 || g[1] == 0xdb8) {
+		return false
+	}
+	if g[0]&0xfff0 == 0x3ff0 {
+		return false
+	}
+	return true
+}
+
+// embeddedV4 is the IPv4 address inside a mapped, compatible, translated, or NAT64 IPv6 address, or nil.
+func embeddedV4(g []int) []int {
 	zero := func(from, to int) bool {
 		for i := from; i < to; i++ {
 			if g[i] != 0 {
@@ -131,31 +160,13 @@ func PublicAddress(ip string) bool {
 		}
 		return true
 	}
-	// IPv4 inside IPv6: mapped (::ffff:0:0/96), the old compatible form (::/96), and NAT64 (64:ff9b::/96).
-	if zero(0, 5) && (g[5] == 0xffff || g[5] == 0) {
-		if g[5] == 0 && g[6] == 0 && g[7] <= 1 {
-			return false
-		}
-		return publicV4(embedded(g[6], g[7]))
+	inside := (zero(0, 5) && (g[5] == 0xffff || g[5] == 0)) ||
+		(zero(0, 4) && g[4] == 0xffff && g[5] == 0) ||
+		(g[0] == 0x64 && g[1] == 0xff9b && zero(2, 6))
+	if !inside {
+		return nil
 	}
-	if g[0] == 0x64 && g[1] == 0xff9b && zero(2, 6) {
-		return publicV4(embedded(g[6], g[7]))
-	}
-	// 6to4 carries an IPv4 address in its second and third groups.
-	if g[0] == 0x2002 {
-		return publicV4(embedded(g[1], g[2]))
-	}
-	if g[0]&0xfe00 == 0xfc00 || g[0]&0xffc0 == 0xfe80 || g[0]&0xff00 == 0xff00 {
-		return false
-	}
-	// Teredo, documentation, and discard prefixes.
-	if g[0] == 0x2001 && (g[1] == 0 || g[1] == 0xdb8) {
-		return false
-	}
-	if g[0] == 0x100 && zero(1, 4) {
-		return false
-	}
-	return true
+	return []int{g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255}
 }
 
 // metadataNames are names clouds give their metadata services.
@@ -179,9 +190,9 @@ func MetadataAddress(ip string) bool {
 		}
 		return true
 	}
-	// IPv4 inside IPv6, mapped (::ffff:0:0/96), compatible (::/96), or NAT64 (64:ff9b::/96), is read as IPv4.
-	if g != nil && ((zero(0, 5) && (g[5] == 0xffff || g[5] == 0)) || (g[0] == 0x64 && g[1] == 0xff9b && zero(2, 6))) {
-		inner = []int{g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255}
+	// IPv4 inside IPv6, mapped, compatible, translated, or NAT64, is read as IPv4.
+	if g != nil {
+		inner = embeddedV4(g)
 	}
 	if inner != nil {
 		return (inner[0] == 169 && inner[1] == 254) || (inner[0] == 100 && inner[1] == 100 && inner[2] == 100 && inner[3] == 200)

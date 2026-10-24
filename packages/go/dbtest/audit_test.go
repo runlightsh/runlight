@@ -2,10 +2,12 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	runlight "runlight.sh/go"
@@ -718,6 +720,306 @@ func TestHostnameSuggestionsStepThroughHostnamesInTheOrderTheyAreSortedIn(t *tes
 			}
 			if got := strings.Join(out, " "); got != "blog-staging.example.com blog.example.com shop.example.com" {
 				t.Errorf("suggestions: %s", got)
+			}
+		})
+	}
+}
+
+// The audit of 2026-10-23.
+
+// withMember is an install with accounts: its owner, and a member who joined by invite.
+type withMember struct {
+	t      *testing.T
+	ctx    context.Context
+	rl     *runlight.Runlight
+	routes *runlight.Routes
+	owner  string
+	member string
+}
+
+func newWithMember(t *testing.T, kind Kind) *withMember {
+	t.Helper()
+	m := &withMember{t: t, ctx: context.Background()}
+	rl, err := runlight.New(runlight.Options{Store: Store(t, kind), Site: &runlight.SiteOptions{Hostnames: []string{"example.com"}}, Logf: func(string, ...any) {}, Secret: ptr(strings.Repeat("k", 64))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.rl = rl
+	token := "app-token"
+	if m.routes, err = rl.Routes(runlight.RoutesOptions{Token: &token, Accounts: true}); err != nil {
+		t.Fatal(err)
+	}
+	m.owner = cookieOf(m.form("/setup", "", "code", "app-token", "email", "jon@example.com", "password", "a long password", "again", "a long password"))
+	v, _ := m.json(m.owner, "POST", "/api/people", `{"allSites":true,"email":"mo@example.com","role":"member"}`).JSON()
+	link, err := url.Parse(js.Str(js.Dig(v, "link")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.member = cookieOf(m.form("/invite", "", "code", link.Query().Get("code"), "password", "a long password", "again", "a long password"))
+	if m.owner == "" || m.member == "" {
+		t.Fatal("no sessions")
+	}
+	return m
+}
+
+func (m *withMember) do(method, path, body string, headers ...string) *runlight.Response {
+	m.t.Helper()
+	var b []byte
+	if body != "" {
+		b = []byte(body)
+	}
+	return m.routes.Handle(m.ctx, web.NewRequest(method, "https://example.com/runlight"+path, web.NewHeaders(headers...), b))
+}
+
+// form posts a form, from another site when site names one.
+func (m *withMember) form(path, site string, fields ...string) *runlight.Response {
+	m.t.Helper()
+	headers := []string{"content-type", formType}
+	if site != "" {
+		headers = append(headers, "sec-fetch-site", site)
+	}
+	return m.do("POST", path, form(fields...), headers...)
+}
+
+func (m *withMember) json(cookie, method, path, body string) *runlight.Response {
+	m.t.Helper()
+	return m.do(method, path, body, "cookie", cookie, "content-type", "application/json")
+}
+
+func (m *withMember) signIn(site string) *runlight.Response {
+	m.t.Helper()
+	return m.form("/login", site, "email", "mo@example.com", "password", "a long password", "next", "/runlight/")
+}
+
+func (m *withMember) tokens(cookie string) []string {
+	m.t.Helper()
+	r := m.json(cookie, "GET", "/api/tokens", "")
+	if r.Status != 200 {
+		m.t.Fatalf("tokens: %d %s", r.Status, r.Body)
+	}
+	v, _ := r.JSON()
+	out := []string{}
+	for _, token := range js.Arr(js.Dig(v, "tokens")) {
+		out = append(out, js.Str(js.Dig(token, "id")))
+	}
+	sortStrings(out)
+	return out
+}
+
+func (m *withMember) makeToken(cookie, name string) string {
+	m.t.Helper()
+	r := m.json(cookie, "POST", "/api/tokens", `{"name":"`+name+`"}`)
+	if r.Status != 201 {
+		m.t.Fatalf("making a token: %d %s", r.Status, r.Body)
+	}
+	v, _ := r.JSON()
+	return js.Str(js.Dig(v, "token", "id"))
+}
+
+func TestAMemberSeesAndRevokesOnlyTheTokensTheyMadeAndCannotReplaceASitesAgentsKey(t *testing.T) {
+	for _, kind := range Kinds() {
+		t.Run(kind.Name, func(t *testing.T) {
+			m := newWithMember(t, kind)
+			owners := m.makeToken(m.owner, "Owner's")
+			mine := m.makeToken(m.member, "Member's")
+			both := []string{owners, mine}
+			sortStrings(both)
+			if got := m.tokens(m.member); strings.Join(got, " ") != mine {
+				t.Errorf("the member sees %v", got)
+			}
+			if got := m.tokens(m.owner); strings.Join(got, " ") != strings.Join(both, " ") {
+				t.Errorf("the owner sees every token, not %v", got)
+			}
+			if r := m.json(m.member, "DELETE", "/api/tokens/"+owners, ""); r.Status != 404 || !strings.Contains(r.Text(), "unknown_token") {
+				t.Errorf("the owner's token is not the member's to revoke: %d %s", r.Status, r.Body)
+			}
+			if got := m.tokens(m.owner); strings.Join(got, " ") != strings.Join(both, " ") {
+				t.Errorf("still both: %v", got)
+			}
+			if r := m.json(m.member, "DELETE", "/api/tokens/"+mine, ""); r.Status != 200 {
+				t.Errorf("the member's own: %d %s", r.Status, r.Body)
+			}
+			if r := m.json(m.member, "POST", "/api/observe-key/new?site=default", "{}"); r.Status != 403 {
+				t.Errorf("a member replacing the agents key: %d %s", r.Status, r.Body)
+			}
+			if r := m.json(m.owner, "POST", "/api/observe-key/new?site=default", "{}"); r.Status != 200 {
+				t.Errorf("the owner replacing it: %d %s", r.Status, r.Body)
+			}
+		})
+	}
+}
+
+func TestSigningOutEndsTheAccountsSessionsEverywhereAndOnlyFromTheDashboardsOwnPages(t *testing.T) {
+	for _, kind := range Kinds() {
+		t.Run(kind.Name, func(t *testing.T) {
+			m := newWithMember(t, kind)
+			account := func(cookie string) int { return m.json(cookie, "GET", "/api/account", "").Status }
+			other := cookieOf(m.signIn(""))
+			if got := account(other); got != 200 {
+				t.Fatalf("another browser: %d", got)
+			}
+			if r := m.do("GET", "/logout", "", "cookie", m.member, "sec-fetch-site", "cross-site"); r.Status != 403 {
+				t.Errorf("another site cannot sign anyone out: %d", r.Status)
+			}
+			if got := account(other); got != 200 {
+				t.Errorf("still signed in: %d", got)
+			}
+			if r := m.do("GET", "/logout", "", "cookie", m.member, "sec-fetch-site", "same-origin"); r.Status != 303 {
+				t.Errorf("signing out: %d", r.Status)
+			}
+			if got := account(m.member); got != 401 {
+				t.Errorf("the cookie copied before stops working: %d", got)
+			}
+			if got := account(other); got != 401 {
+				t.Errorf("and so does the one in the other browser: %d", got)
+			}
+			if got := account(cookieOf(m.signIn(""))); got != 200 {
+				t.Errorf("signing in again works: %d", got)
+			}
+		})
+	}
+}
+
+func TestTheSignInFormsTakeAPostOnlyFromTheirOwnPages(t *testing.T) {
+	for _, kind := range Kinds() {
+		t.Run(kind.Name, func(t *testing.T) {
+			m := newWithMember(t, kind)
+			for _, site := range []string{"cross-site", "same-site"} {
+				refused := m.signIn(site)
+				if refused.Status != 403 {
+					t.Errorf("%s: %d", site, refused.Status)
+				}
+				if refused.Header.Has("set-cookie") {
+					t.Errorf("%s: a session is planted", site)
+				}
+			}
+			if own := m.signIn("same-origin"); own.Status != 303 {
+				t.Errorf("its own page: %d", own.Status)
+			}
+		})
+	}
+}
+
+func TestANewPasswordCanTakeBackTheTokensTheAccountMade(t *testing.T) {
+	for _, kind := range Kinds() {
+		t.Run(kind.Name, func(t *testing.T) {
+			m := newWithMember(t, kind)
+			m.makeToken(m.member, "Kept")
+			changed := m.json(m.member, "POST", "/api/account/password", `{"current":"a long password","next":"another long password"}`)
+			fresh := cookieOf(changed)
+			if got := m.tokens(fresh); len(got) != 1 {
+				t.Errorf("kept unless asked: %v", got)
+			}
+			latest := cookieOf(m.json(fresh, "POST", "/api/account/password", `{"current":"another long password","next":"a third long password","revokeTokens":true}`))
+			if got := m.tokens(latest); len(got) != 0 {
+				t.Errorf("taken back: %v", got)
+			}
+		})
+	}
+}
+
+// busyEvents is a database that says it is busy for the next few event inserts.
+type busyEvents struct {
+	runlight.Db
+	fail atomic.Int32
+}
+
+func (b *busyEvents) Run(ctx context.Context, sql string, params ...any) error {
+	if strings.Contains(sql, "INSERT INTO rl_events") && b.fail.Add(-1) >= 0 {
+		return errors.New("SQLITE_BUSY: database is locked")
+	}
+	return b.Db.Run(ctx, sql, params...)
+}
+
+func TestAHitTriedAgainAfterTheStoreWasBusyCountsOnce(t *testing.T) {
+	ctx := context.Background()
+	db := &busyEvents{Db: Open(t, Kind{Name: "sqlite"})}
+	store := runlight.NewStore(db)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := october6
+	rl, err := runlight.New(runlight.Options{Store: store, Site: &runlight.SiteOptions{Hostnames: []string{"example.com"}, Timezone: "UTC"}, Logf: func(string, ...any) {}, Now: func() int64 { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "secret"
+	routes, err := rl.Routes(runlight.RoutesOptions{Token: &token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(body string) {
+		t.Helper()
+		r := routes.Handle(ctx, web.NewRequest("POST", "https://example.com/runlight/e", web.NewHeaders("user-agent", chromeMac, "x-forwarded-for", "203.0.113.9"), []byte(body)))
+		if r.Status != 202 {
+			t.Fatalf("collect answered %d %s", r.Status, r.Body)
+		}
+		rl.Idle()
+	}
+	db.fail.Store(2)
+	send(pageview("example.com", "/", "p1"))
+	db.fail.Store(1)
+	send(`{"k":"engagement","u":"https://example.com/","i":"p1","e":5000}`)
+	rows, err := db.All(ctx, `SELECT pageviews, engaged_ms FROM rl_sessions`)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	if fmt.Sprint(rows[0]["pageviews"]) != "1" || fmt.Sprint(rows[0]["engaged_ms"]) != "5000" {
+		t.Errorf("the visit counted %v pageviews and %v ms", rows[0]["pageviews"], rows[0]["engaged_ms"])
+	}
+	if events, _ := db.All(ctx, `SELECT id FROM rl_events WHERE kind = 'pageview'`); len(events) != 1 {
+		t.Errorf("%d pageview rows", len(events))
+	}
+}
+
+func TestAFunnelOverMoreVisitsThanTheCapCountsTheNewestAndSaysSo(t *testing.T) {
+	for _, kind := range Kinds() {
+		t.Run(kind.Name, func(t *testing.T) {
+			h := newAudit(t, kind)
+			h.store.FunnelVisits = 2
+			for _, ip := range []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"} {
+				h.send(`{"k":"pageview","u":"https://example.com/pricing"}`, ip)
+				h.now += minute
+			}
+			made := h.routes.Handle(h.ctx, web.NewRequest("POST", "https://example.com/runlight/api/funnels?site=default", web.NewHeaders("authorization", "Bearer secret", "content-type", "application/json"),
+				[]byte(`{"name":"F","steps":[{"kind":"page","match":"/pricing"},{"kind":"page","match":"/thanks"}]}`)))
+			if made.Status != 201 && made.Status != 200 {
+				t.Fatalf("making the funnel: %d %s", made.Status, made.Body)
+			}
+			funnel := js.Dig(h.get("/api/funnels?period=today"), "funnels", 0)
+			if got := js.Dig(funnel, "sampled"); fmt.Sprint(got) != "2" {
+				t.Errorf("sampled %v", got)
+			}
+			if got := js.Dig(funnel, "steps", 0, "visits"); fmt.Sprint(got) != "2" {
+				t.Errorf("the first step counted %v visits", got)
+			}
+			h.store.FunnelVisits = 10
+			if funnel := js.Dig(h.get("/api/funnels?period=today"), "funnels", 0); funnel.(*js.Object).Has("sampled") {
+				t.Errorf("sampled under the cap: %s", js.Stringify(funnel))
+			}
+		})
+	}
+}
+
+func TestAnAutomaticLinkEventKeepsItsLinkWithoutTheQueryStringOrFragment(t *testing.T) {
+	for _, kind := range Kinds() {
+		t.Run(kind.Name, func(t *testing.T) {
+			h := newAudit(t, kind)
+			h.send(`{"k":"event","u":"https://example.com/","n":"Outbound link","p":{"url":"https://other.example/reset?token=abc&email=a@b.example#top"}}`, "203.0.113.9")
+			h.send(`{"k":"event","u":"https://example.com/","n":"File download","p":{"url":"https://example.com/a.pdf?sig=x"}}`, "203.0.113.9")
+			h.send(`{"k":"event","u":"https://example.com/","n":"Signup","p":{"url":"https://example.com/?plan=pro"}}`, "203.0.113.9")
+			h.rl.Idle()
+			rows, err := h.db.All(h.ctx, `SELECT name, props FROM rl_events ORDER BY name`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := []string{}
+			for _, row := range rows {
+				props, _ := js.Parse(fmt.Sprint(row["props"]))
+				got = append(got, fmt.Sprint(row["name"])+" "+js.Str(js.Dig(props, "url")))
+			}
+			if want := "File download https://example.com/a.pdf|Outbound link https://other.example/reset|Signup https://example.com/?plan=pro"; strings.Join(got, "|") != want {
+				t.Errorf("%v", got)
 			}
 		})
 	}

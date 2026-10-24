@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"hash"
+	"math/bits"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -165,7 +166,8 @@ func costOf(parts []string) (scryptCost, bool) {
 		cost[i] = int(n)
 	}
 	n, r, p := cost[0], cost[1], cost[2]
-	if n < 2 || n&(n-1) != 0 || r > 32 || p > 16 {
+	// N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than errs.
+	if n < 2 || n&(n-1) != 0 || r > 32 || p > 16 || bits.TrailingZeros(uint(n)) >= 16*r {
 		return scryptCost{}, false
 	}
 	return scryptCost{n, r, p}, true

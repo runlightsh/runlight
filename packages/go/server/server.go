@@ -35,12 +35,13 @@ type Options struct {
 	// emails link to it whatever Host header a request carries.
 	URL string
 	// IgnoreProxy reads only the connection's address, for a server nothing
-	// sits in front of. By default forwarded headers are trusted.
+	// sits in front of. By default forwarded addresses count only from a
+	// proxy on this computer or a private network.
 	IgnoreProxy bool
-	// ProxyHeader names the one forwarding header to read, such as cf-connecting-ip.
+	// ProxyHeader names the one forwarding header to read, from anywhere, such as cf-connecting-ip.
 	ProxyHeader string
-	// TrustProxy trusts forwarded headers on purpose. Left false, they are
-	// still trusted, with a warning when nothing seems to sit in front.
+	// TrustProxy trusts forwarded headers from anywhere, for a CDN that
+	// connects from public addresses.
 	TrustProxy bool
 	Geo        runlight.GeoLookup
 	// GeoCredit credits DB-IP in the dashboard, when its free data supplies locations.

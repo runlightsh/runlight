@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,8 @@ type User struct {
 	TwoFactor bool `json:"twoFactor"`
 	// RecoveryLeft is recovery codes not yet used.
 	RecoveryLeft int `json:"recoveryLeft"`
+	// SignedOut is a mark signing out replaces, which every session is signed with.
+	SignedOut string `json:"signedOut,omitempty"`
 }
 
 // InviteMs is how long an invite link works.
@@ -218,7 +221,8 @@ func (a *AccountStore) init(ctx context.Context) error {
 			}
 		}
 		// Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's step.
-		for _, col := range [][2]string{{"totp_secret", "TEXT"}, {"totp_pending", "TEXT"}, {"totp_recovery", "TEXT"}, {"totp_step", "BIGINT"}} {
+		// And the mark signing out replaces, later again.
+		for _, col := range [][2]string{{"totp_secret", "TEXT"}, {"totp_pending", "TEXT"}, {"totp_recovery", "TEXT"}, {"totp_step", "BIGINT"}, {"signed_out", "TEXT"}} {
 			if !has(col[0]) {
 				if err := db.Run(ctx, `ALTER TABLE rl_users ADD COLUMN `+col[0]+` `+col[1]); err != nil {
 					return err
@@ -302,8 +306,12 @@ func (a *AccountStore) row(r Row) User {
 	if r["site"] != nil {
 		site = str(r["site"])
 	}
+	signedOut := ""
+	if r["signed_out"] != nil {
+		signedOut = str(r["signed_out"])
+	}
 	return User{Site: site, ID: str(r["id"]), Email: str(r["email"]), Hash: str(r["hash"]), Role: roleFrom(r["role"]), CreatedAt: numInt(r["created_at"]),
-		TwoFactor: r["totp_secret"] != nil && str(r["totp_secret"]) != "", RecoveryLeft: len(recoveryList(r["totp_recovery"]))}
+		TwoFactor: r["totp_secret"] != nil && str(r["totp_secret"]) != "", RecoveryLeft: len(recoveryList(r["totp_recovery"])), SignedOut: signedOut}
 }
 
 // seal seals a two-factor secret with the install's secret, so the database alone cannot make codes.
@@ -963,13 +971,26 @@ func (a *AccountStore) FromSession(ctx context.Context, value string, now int64)
 	return nil, nil
 }
 
-// sessionKey is what a session is signed with: the password hash, and
-// whether two-factor is on, so changing either ends other sessions.
-func sessionKey(user User) string {
-	if user.TwoFactor {
-		return user.Hash + ".2fa"
+// EndSessions ends every session an account has, in every browser, as signing out does.
+func (a *AccountStore) EndSessions(ctx context.Context, id string) error {
+	if err := a.init(ctx); err != nil {
+		return err
 	}
-	return user.Hash
+	return a.store.db.Run(ctx, `UPDATE rl_users SET signed_out = ? WHERE id = ?`, accounts.Hex(accounts.RandomBytes(8)), id)
+}
+
+// sessionKey is what a session is signed with: the password hash, whether
+// two-factor is on, and a mark that signing out replaces, so changing any of
+// them ends other sessions.
+func sessionKey(user User) string {
+	key := user.Hash
+	if user.TwoFactor {
+		key += ".2fa"
+	}
+	if user.SignedOut != "" {
+		key += "." + user.SignedOut
+	}
+	return key
 }
 
 // DeviceFor is a long-lived mark for a browser that signed in to an
@@ -1083,27 +1104,28 @@ func (t *Throttle) count(id string, now int64) {
 	} else {
 		entry.count++
 	}
-	// Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the map
-	// has a hard ceiling and a flood of made-up names cannot wipe out a real block.
+	// Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+	// ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+	// or the count of a name someone is close to blocking.
 	if len(t.failures) > maxThrottled {
-		for _, k := range append([]string(nil), t.order...) {
+		kept := t.order[:0]
+		for _, k := range t.order {
 			if t.failures[k].until <= now {
-				t.delete(k)
+				delete(t.failures, k)
+			} else {
+				kept = append(kept, k)
 			}
 		}
-		for _, k := range append([]string(nil), t.order...) {
-			if len(t.failures) <= maxThrottled {
-				break
+		t.order = kept
+		if len(t.failures) > maxThrottled {
+			fewest := slices.Clone(t.order)
+			slices.SortStableFunc(fewest, func(a, b string) int { return t.failures[a].count - t.failures[b].count })
+			drop := map[string]bool{}
+			for _, k := range fewest[:len(t.failures)-maxThrottled*9/10] {
+				drop[k] = true
+				delete(t.failures, k)
 			}
-			if t.failures[k].count < t.limit {
-				t.delete(k)
-			}
-		}
-		for _, k := range append([]string(nil), t.order...) {
-			if len(t.failures) <= maxThrottled {
-				break
-			}
-			t.delete(k)
+			t.order = slices.DeleteFunc(t.order, func(k string) bool { return drop[k] })
 		}
 	}
 }

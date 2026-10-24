@@ -113,7 +113,7 @@ func TestHashesOfEveryCostCheckOutAndOnlyOldOnesAreWeaker(t *testing.T) {
 
 func TestACostOutOfBoundsIsRefusedNotRun(t *testing.T) {
 	const salt, key = "Xn_mYpTI3PoQhj0lEUmHtw", "k9Up30YE3NUBBXr8_Tt4n-QfFHzNEZN6RyF8qJK-Dz8"
-	for _, cost := range []string{"2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1"} {
+	for _, cost := range []string{"2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1", "1048576$1$1", "65536$1$1"} {
 		if CheckPassword("a long password", "scrypt$"+cost+"$"+salt+"$"+key) {
 			t.Errorf("%s checked out", cost)
 		}
