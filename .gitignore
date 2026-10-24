@@ -20,3 +20,5 @@ dist/
 
 # What the Go workspace (packages/go/go.work) records as it builds
 packages/go/go.work.sum
+# The server binary `go build` leaves in its own folder
+packages/go/cmd/runlight/runlight
