@@ -205,9 +205,10 @@ final class Throttle
     }
 
     /**
-     * Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the counts
-     * have a hard ceiling and a flood of made-up names cannot wipe out a real block. Run when a new entry is
-     * made, since only then can there be more.
+     * Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+     * ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+     * or the count of a name someone is close to blocking. Run when a new entry is made, since only then can
+     * there be more.
      */
     private function prune(int $now): void
     {
@@ -219,24 +220,15 @@ final class Throttle
                 $this->store->setSetting($key, null);
                 continue;
             }
-            $entries[] = ['key' => $key, 'until' => $until, 'blocked' => is_array($entry) && (int) ($entry['count'] ?? 0) >= $this->limit];
+            $entries[] = ['key' => $key, 'until' => $until, 'count' => (int) ($entry['count'] ?? 0)];
         }
-        $size = count($entries);
-        if ($size <= Accounts::MAX_THROTTLED) {
+        if (count($entries) <= Accounts::MAX_THROTTLED) {
             return;
         }
-        // Oldest first: each entry's window started windowMs before its end.
-        usort($entries, static fn (array $a, array $b): int => $a['until'] <=> $b['until']);
-        foreach ([false, true] as $blocked) {
-            foreach ($entries as $entry) {
-                if ($size <= Accounts::MAX_THROTTLED) {
-                    return;
-                }
-                if ($entry['blocked'] === $blocked) {
-                    $this->store->setSetting($entry['key'], null);
-                    $size--;
-                }
-            }
+        // Each entry's window started windowMs before its end, so the earliest end is the oldest.
+        usort($entries, static fn (array $a, array $b): int => [$a['count'], $a['until']] <=> [$b['count'], $b['until']]);
+        foreach (array_slice($entries, 0, count($entries) - intdiv(Accounts::MAX_THROTTLED * 9, 10)) as $entry) {
+            $this->store->setSetting($entry['key'], null);
         }
     }
 

@@ -113,7 +113,8 @@ final class Crypto
                 return null;
             }
         }
-        if ($n < 2 || ($n & ($n - 1)) !== 0) {
+        // N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than throws.
+        if ($n < 2 || ($n & ($n - 1)) !== 0 || strlen(decbin($n)) - 1 >= 16 * $r) {
             return null;
         }
         return [$n, $r, $p];

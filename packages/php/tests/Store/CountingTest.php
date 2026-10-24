@@ -47,7 +47,7 @@ final class CountingTest extends StoreTestCase
                 $totals = $store->goalTotals($query, $goal);
                 $visitors = $store->visitors($query);
                 $events = array_map(static fn (array $r): string => "{$r['value']}:{$r['events']}", $store->breakdown($query, 'event', 10, 0));
-                return [$totals['conversions'], $visitors > 0 ? $totals['visitors'] / $visitors : 0, $store->funnelCounts($query, $funnel), count($store->eventPropKeys($query, 'Signup')), $events];
+                return [$totals['conversions'], $visitors > 0 ? $totals['visitors'] / $visitors : 0, $store->funnelCounts($query, $funnel)['counts'], count($store->eventPropKeys($query, 'Signup')), $events];
             };
             $label = json_encode($filters);
             $this->assertEquals([2, 1, [2, 2], 1, ['Signup:2']], $read($day5), "the visits that started on the 5th $label");
@@ -148,7 +148,7 @@ final class CountingTest extends StoreTestCase
         $totals = $store->goalTotals(self::today(), $goal);
         $this->assertSame(['/#/thanks', 2, 2], [$goal['match'], $totals['conversions'], $totals['visitors']]);
         $this->assertSame(['/#/cart', '/#/thanks'], array_column($funnel['steps'], 'match'));
-        $this->assertSame([2, 2], $store->funnelCounts(self::today(), $funnel));
+        $this->assertSame([2, 2], $store->funnelCounts(self::today(), $funnel)['counts']);
     }
 
     #[DataProvider('kinds')]
@@ -287,8 +287,8 @@ final class CountingTest extends StoreTestCase
         Seed::visit($store, 'a', 'v1', $t, [], [['pageview', '/pricing', $t, 'a1'], ['event', 'Signup', $t, null]]);
         $same = Funnels::funnelFrom(['name' => 'Same moment', 'steps' => [['kind' => 'page', 'match' => '/pricing'], ['kind' => 'event', 'match' => 'Signup']]], 'default', [], self::NOW);
         $twice = Funnels::funnelFrom(['name' => 'Twice', 'steps' => [['kind' => 'page', 'match' => '/pricing'], ['kind' => 'page', 'match' => '/pricing']]], 'default', [$same], self::NOW);
-        $this->assertSame([1, 1], $store->funnelCounts(self::today(), $same));
-        $this->assertSame([1, 0], $store->funnelCounts(self::today(), $twice), 'one pageview is not two steps');
+        $this->assertSame([1, 1], $store->funnelCounts(self::today(), $same)['counts']);
+        $this->assertSame([1, 0], $store->funnelCounts(self::today(), $twice)['counts'], 'one pageview is not two steps');
     }
 
     #[DataProvider('kinds')]
@@ -320,13 +320,13 @@ final class CountingTest extends StoreTestCase
         $funnel = Funnels::funnelFrom(['name' => 'Signup', 'steps' => [['kind' => 'page', 'match' => 'https://example.com/pricing*'], ['kind' => 'event', 'match' => 'Signup'], ['kind' => 'page', 'match' => 'welcome']]], 'default', [], self::NOW);
         $this->assertSame(['/pricing*', 'Signup', '/welcome'], array_column($funnel['steps'], 'match'), 'a pasted URL keeps its path; a bare path gains its slash');
         $store->saveFunnel($funnel);
-        $this->assertSame([3, 2, 1], $store->funnelCounts(self::today(), $store->funnels('default')[0]));
+        $this->assertSame([3, 2, 1], $store->funnelCounts(self::today(), $store->funnels('default')[0])['counts']);
         // Filters choose which visits enter. The Signup events were sent from /signup, so a page filter finds them.
-        $this->assertSame([2, 2, 1], $store->funnelCounts(self::today(['page', 'is', '/signup']), $funnel));
+        $this->assertSame([2, 2, 1], $store->funnelCounts(self::today(['page', 'is', '/signup']), $funnel)['counts']);
         $changed = Funnels::funnelFrom(['name' => 'Signup flow', 'steps' => [['kind' => 'page', 'match' => '/pricing'], ['kind' => 'page', 'match' => '/welcome']]], 'default', [$funnel], self::NOW + 1, $funnel['id']);
         $this->assertSame($funnel['createdAt'], $changed['createdAt']);
         $store->saveFunnel($changed);
-        $this->assertSame([3, 1], $store->funnelCounts(self::today(), $store->funnels('default')[0]));
+        $this->assertSame([3, 1], $store->funnelCounts(self::today(), $store->funnels('default')[0])['counts']);
         $store->deleteFunnel($funnel['id']);
         $this->assertSame([], $store->funnels('default'));
     }

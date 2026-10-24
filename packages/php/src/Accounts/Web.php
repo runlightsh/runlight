@@ -407,6 +407,12 @@ final class Web
         if ($path === '/auth.js') {
             return new Response(Pages::authJs($query->get('lang') ?? 'en'), 200, ['content-type' => 'application/javascript; charset=utf-8', 'cache-control' => 'public, max-age=3600']);
         }
+        // A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+        // plant a session, so these pages take forms only from their own. The browser says where a request came from.
+        $crossSite = in_array($request->headers->get('sec-fetch-site') ?? '', ['cross-site', 'same-site'], true);
+        if ($crossSite && ($method === 'POST' || $path === '/logout') && in_array($path, ['/setup', '/login', '/login/code', '/invite', '/logout'], true)) {
+            return self::html(Pages::loginPage($base, ['error' => $t('oauth.anotherSiteTitle'), 'next' => $this->homePath, 'forgot' => $this->forgot], $lang), 403);
+        }
 
         if ($path === '/setup') {
             if ($this->hasAccount()) {
@@ -493,7 +499,12 @@ final class Web
             return $this->signedInTo($request, $user, $next);
         }
 
+        // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
         if ($path === '/logout') {
+            $user = $this->signedIn($request);
+            if ($user !== null) {
+                $this->accounts->endSessions($user['id']);
+            }
             return self::redirect("$base/login", ['set-cookie' => $this->sessionCookie($request, '', 0)]);
         }
 
@@ -672,6 +683,10 @@ final class Web
             }
             try {
                 $updated = $this->accounts->setPassword($user['email'], self::field($input, 'next'), $now);
+                // Asked for after a password got out: the tokens and apps the account made could still read on.
+                if (Js::get($input, 'revokeTokens') === true) {
+                    $this->dropTokensOf($user['id']);
+                }
                 // The new password ends every other sign-in; this browser gets a fresh one.
                 return self::reply(['ok' => true], 200, $fresh($updated));
             } catch (AccountError $error) {
@@ -887,6 +902,22 @@ final class Web
         }
         $this->store->setSetting(self::MADE_BY . $token['id'], $by);
         return true;
+    }
+
+    /**
+     * The ids of the tokens an account made.
+     *
+     * @return array<string, true>
+     */
+    public function tokensOf(string $by): array
+    {
+        $ids = [];
+        foreach ($this->store->settingsStartingWith(self::MADE_BY) as ['key' => $key, 'value' => $value]) {
+            if ($value === $by) {
+                $ids[substr($key, strlen(self::MADE_BY))] = true;
+            }
+        }
+        return $ids;
     }
 
     /**

@@ -21,8 +21,9 @@ return [
     // A bearer token for scripts. When set, the first account is made with it instead of the setup link.
     // 'RUNLIGHT_TOKEN' => '',
 
-    // "false" when nothing sits in front of the web server, or the one header your proxy sets.
-    // 'TRUST_PROXY' => 'false',
+    // Left unset, forwarded addresses count only from a proxy on this computer or a private network.
+    // "false" never reads them; behind a CDN that connects from public addresses, "true" or the one header it sets.
+    // 'TRUST_PROXY' => 'cf-connecting-ip',
 
     // city (the default), country, off, or the path to an MMDB file of your own.
     // 'RUNLIGHT_GEO' => 'country',

@@ -36,12 +36,15 @@ final class SqlStore
 {
     public const BOUNCE_MS = Sql::BOUNCE_MS;
     public const JOURNEY_VISITS = Sql::JOURNEY_VISITS;
+    public const FUNNEL_VISITS = Sql::FUNNEL_VISITS;
     public const EVENT_TAIL_MS = Sql::EVENT_TAIL_MS;
     public const MYSQL_COLLATION = Sql::MYSQL_COLLATION;
 
     public readonly Db $db;
     /** What the store's table and index names start with: `rl_` unless it was given another. */
     public readonly string $prefix;
+    /** The most visits a funnel is counted over; smaller in tests, to try the cap. */
+    public int $funnelVisits = Sql::FUNNEL_VISITS;
     private bool $ready = false;
     private bool $checkedAll = false;
 
@@ -1016,10 +1019,22 @@ final class SqlStore
      * one is the first matching row in the range; each later step must come
      * after the step before it. Filters choose which visits enter the funnel.
      *
-     * @return list<int>
+     * @return array{counts: list<int>, sampled: bool}
      */
     public function funnelCounts(array $query, array $funnel): array
     {
+        // Past FUNNEL_VISITS visits in the range, only the newest are counted: the range starts where the oldest
+        // of them began.
+        $scope = Sql::visitScope($query['filters'], $query['site'], $query['from'], $query['to'], $this->db->dialect());
+        $first = $this->db->all(
+            'SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND ' . Sql::IS_VISIT . "{$scope['sql']}
+         ORDER BY s.started_at DESC, s.id LIMIT " . ($this->funnelVisits + 1) . ') x',
+            [$query['site'], $query['from'], $query['to'], ...$scope['params']],
+        )[0] ?? null;
+        $sampled = Sql::num($first['n'] ?? null) > $this->funnelVisits;
+        if ($sampled) {
+            $query['from'] = max($query['from'], (int) Sql::num($first['t'] ?? null) + 1);
+        }
         // The rows of the picked visits that match any step, in order, read once and walked here: a join from
         // each step to the next is planned badly by Postgres, which cannot guess how many visits go on.
         $v = Sql::visitRows($query['filters'], $query['site'], $query['from'], $query['to'], $this->db->dialect());
@@ -1061,7 +1076,7 @@ final class SqlStore
             }
         }
         $close();
-        return $counts;
+        return ['counts' => $counts, 'sampled' => $sampled];
     }
 
     /**

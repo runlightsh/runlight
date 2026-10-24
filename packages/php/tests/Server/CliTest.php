@@ -62,6 +62,19 @@ final class CliTest extends TestCase
         $config = new Config($this->root);
         $this->assertSame('https://stats.example.com', $config->url());
         $this->assertSame('cf-connecting-ip', $config->trustProxy());
+        // Anything but true, false, or a header is a mistake, said so rather than read as on.
+        foreach (['' => null, 'off' => false, ' 0 ' => false, 'TRUE' => true, 'yes' => true] as $given => $read) {
+            $this->configure(['TRUST_PROXY' => (string) $given]);
+            $this->assertSame($read, (new Config($this->root))->trustProxy(), "TRUST_PROXY=$given");
+        }
+        $this->configure(['TRUST_PROXY' => 'maybe']);
+        try {
+            (new Config($this->root))->trustProxy();
+            $this->fail('TRUST_PROXY=maybe is refused');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('not "maybe"', $error->getMessage());
+        }
+        $this->configure(['RUNLIGHT_URL' => 'https://stats.example.com', 'TRUST_PROXY' => 'cf-connecting-ip', 'RUNLIGHT_GEO' => 'off']);
         $this->assertSame("{$this->root}/runlight-data", $config->dataDir());
         $this->assertSame(0700, fileperms($config->dataDir()) & 0777, 'the data folder is private');
         $this->assertSame("Require all denied\n", file_get_contents("{$this->root}/runlight-data/.htaccess"), 'Apache turns it away without mod_rewrite');
