@@ -1,5 +1,16 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Updated the Runlight library to 0.3.0. Outbound link and File download events keep the link without its query string or fragment, and a funnel over more than 100,000 visits counts the newest 100,000.
+
+### Fixed
+- A hit tried again after the database was busy no longer counts twice in its visit.
+
+### Security
+- Fetches that must reach the public internet refuse more IPv6 forms of private addresses.
+
 ## 0.2.0 - 2026-10-18
 
 ### Changed

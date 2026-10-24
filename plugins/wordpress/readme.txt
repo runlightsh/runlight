@@ -121,6 +121,11 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Updated the bundled Runlight library to 0.3.0. Outbound link and File download events keep the link without its query string or fragment, and a funnel over more than 100,000 visits counts the newest 100,000.
+* Fixed a hit tried again after the database was busy counting twice in its visit.
+* Refused more IPv6 forms of private addresses where a fetch must reach the public internet.
+
 = 0.2.0 =
 * Released with Runlight 0.2.0, whose new ClickHouse support is for the standalone server. Nothing in the plugin changed.
 
