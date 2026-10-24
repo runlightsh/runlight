@@ -732,11 +732,8 @@ impl AccountsWeb {
             return self.signed_in_to(request, &user, &next).map(Some);
         }
 
-        // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+        // Signing out ends this browser's session; the account page can end them everywhere.
         if path == "/logout" {
-            if let Some(user) = self.signed_in(request).await? {
-                self.0.accounts.end_sessions(&user.id).await?;
-            }
             return Ok(Some(redirect(
                 &format!("{base}/login"),
                 &[("set-cookie", &self.session_cookie(request, "", 0))],
@@ -927,6 +924,11 @@ impl AccountsWeb {
         }
         if path == "/api/account" && method == "GET" {
             return Ok(reply(&obj! { "account" => person(&user) }, 200, &[]));
+        }
+        // Ends the account's sessions in every browser, this one too, so a cookie copied before stops working.
+        if path == "/api/account/sign-out-everywhere" && method == "POST" {
+            self.0.accounts.end_sessions(&user.id).await?;
+            return Ok(reply(&obj! { "ok" => true }, 200, &[("set-cookie", &self.session_cookie(request, "", 0))]));
         }
         let password_wrong = ("Your password is not right", "password_wrong");
         if path == "/api/account/password" && method == "POST" {
