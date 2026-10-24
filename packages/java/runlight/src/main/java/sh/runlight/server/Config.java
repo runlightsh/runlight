@@ -40,7 +40,8 @@ import sh.runlight.store.Stores;
  *   RUNLIGHT_SECRET       signs sessions and encrypts saved keys (made and kept in DATA_DIR if unset)
  *   RUNLIGHT_TOKEN        also accepted as a bearer token on the API, and makes the first account
  *   RUNLIGHT_URL          the dashboard's public address, which can never become a link domain
- *   TRUST_PROXY           "false" when no proxy sits in front, so forwarded addresses are ignored
+ *   TRUST_PROXY           unset believes forwarded addresses only from a private network; "false" never,
+ *                         "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
  *   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
  *   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
  *   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
@@ -336,24 +337,34 @@ public final class Config implements AutoCloseable {
   }
 
   /**
-   * False with nothing in front, the one header the proxy sets, such as cf-connecting-ip behind
-   * Cloudflare, or true. Null when unset, so the library's default applies and it can warn when
-   * nothing sits in front.
+   * TRUST_PROXY: false with nothing in front, true for a CDN that connects from public addresses,
+   * or the one header the proxy sets, such as cf-connecting-ip behind Cloudflare. Null when unset,
+   * so the library's default applies: forwarding headers count only from a private address.
+   * Anything else is a mistake, said so rather than guessed at, since "0" or "off" read as on would
+   * let any client choose its address.
    */
   public Object trustProxy() {
-    String value = get("TRUST_PROXY");
-    value = value == null ? "" : value.toLowerCase(Locale.ROOT);
+    String given = get("TRUST_PROXY");
+    String value = given == null ? "" : Js.trim(given).toLowerCase(Locale.ROOT);
     if (value.isEmpty()) {
       return null;
     }
-    if (value.equals("false")) {
+    if (Set.of("true", "1", "yes", "on").contains(value)) {
+      return true;
+    }
+    if (Set.of("false", "0", "no", "off").contains(value)) {
       return false;
     }
-    return value.equals("x-forwarded-for")
-            || value.equals("x-real-ip")
-            || value.equals("cf-connecting-ip")
-        ? value
-        : true;
+    if (value.equals("x-forwarded-for")
+        || value.equals("x-real-ip")
+        || value.equals("cf-connecting-ip")) {
+      return value;
+    }
+    throw new IllegalStateException(
+        "Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for,"
+            + " x-real-ip, or cf-connecting-ip), not \""
+            + given
+            + "\"");
   }
 
   /** DB-IP's monthly download, for RUNLIGHT_GEO city (the default) or country, or null. */

@@ -33,13 +33,21 @@ import javax.net.ssl.SSLSocketFactory;
  *
  * <p>It honours everything in FetchInit: the method, headers, and body; redirects followed as
  * fetch() follows them (a 303, and a 301 or 302 answering a POST, become a GET) or, with "manual",
- * handed back; one timeout for the whole request, redirects included; and maxBytes, past which it
- * stops reading and throws {@link BodyTooLong} or, with truncate, hands back the start. Bodies come
- * chunked, with a Content-Length, or until the connection closes, and gzip or deflate ones are
- * decoded. Throws {@link FetchError} when no answer comes back.
+ * handed back; one timeout for the whole request, redirects included; and maxBytes ({@link
+ * #DEFAULT_MAX_BYTES} when not given), past which it stops reading and throws {@link BodyTooLong}
+ * or, with truncate, hands back the start. Bodies come chunked, with a Content-Length, or until the
+ * connection closes, and gzip or deflate ones are decoded. Throws {@link FetchError} when no answer
+ * comes back.
  */
 public final class JdkFetcher implements Fetcher {
   private static final int MAX_REDIRECTS = 20;
+
+  /**
+   * The most an answer may weigh when the request names no limit, enough for a connected install's
+   * largest export, so no server can stream an answer into memory without end.
+   */
+  public static final long DEFAULT_MAX_BYTES = 100L * 1024 * 1024;
+
   private static final long CONNECT_TIMEOUT_MS = 15_000;
 
   /** host:port:addresses, the host before the first colon, since a v6 address has colons too. */
@@ -325,8 +333,17 @@ public final class JdkFetcher implements Fetcher {
         return null;
       }
       boolean empty = method.equals("HEAD") || status == 204 || status == 304 || status < 200;
-      Long max = init.maxBytes;
+      long max = init.maxBytes != null ? init.maxBytes : DEFAULT_MAX_BYTES;
       Capped body = new Capped(max);
+      // An answer that says it is longer than the cap is refused before any of it is read.
+      String declared = headers.get("content-length");
+      if (!empty
+          && !init.truncate
+          && declared != null
+          && declared.trim().matches("^\\d{1,18}\\z")
+          && Long.parseLong(declared.trim()) > max) {
+        throw new BodyTooLong("Body over " + max + " bytes");
+      }
       if (!empty) {
         InputStream raw = bodyStream(headers);
         InputStream decoded = decoder(raw, headers.get("content-encoding"));
@@ -455,17 +472,17 @@ public final class JdkFetcher implements Fetcher {
 
   /** Bytes up to a cap, noting whether more came. */
   private static final class Capped {
-    private final Long max;
+    private final long max;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     boolean tooLong;
 
-    Capped(Long max) {
+    Capped(long max) {
       this.max = max;
     }
 
     /** Adds bytes; false once the cap is passed, so reading stops. */
     boolean add(byte[] buffer, int n) {
-      if (max != null && out.size() + (long) n > max) {
+      if (out.size() + (long) n > max) {
         out.write(buffer, 0, (int) (max - out.size()));
         tooLong = true;
         return false;

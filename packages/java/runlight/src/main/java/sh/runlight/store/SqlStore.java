@@ -39,6 +39,13 @@ import sh.runlight.db.Prefixed;
 public final class SqlStore implements AutoCloseable {
   public static final long BOUNCE_MS = Sql.BOUNCE_MS;
   public static final int JOURNEY_VISITS = Sql.JOURNEY_VISITS;
+
+  /**
+   * The most visits a funnel is counted over: the newest in the range, so its rows fit in memory
+   * over any range.
+   */
+  public static final int FUNNEL_VISITS = 100_000;
+
   public static final long EVENT_TAIL_MS = Sql.EVENT_TAIL_MS;
   public static final String MYSQL_COLLATION = Sql.MYSQL_COLLATION;
 
@@ -71,6 +78,10 @@ public final class SqlStore implements AutoCloseable {
 
   private final Db db;
   private final String prefix;
+
+  /** The most visits a funnel is counted over; smaller in tests, to try the cap. */
+  public volatile int funnelVisits = FUNNEL_VISITS;
+
   private volatile boolean ready;
   private volatile boolean checkedAll;
 
@@ -1438,9 +1449,30 @@ public final class SqlStore implements AutoCloseable {
   /**
    * How many visits reached each step, in order, within the same visit. Step one is the first
    * matching row in the range; each later step must come after the step before it. Filters choose
-   * which visits enter the funnel.
+   * which visits enter the funnel. Sampled is true when the range held more than {@link
+   * #funnelVisits} visits and only the newest were counted.
    */
-  public List<Object> funnelCounts(Map<String, Object> query, Map<String, Object> funnel) {
+  public FunnelCounts funnelCounts(Map<String, Object> query, Map<String, Object> funnel) {
+    // Past funnelVisits visits in the range, only the newest are counted: the range starts where
+    // the oldest of them began.
+    int cap = funnelVisits;
+    Sql.Piece visitScope =
+        Sql.visitScope(filters(query), site(query), from(query), to(query), db.dialect());
+    Map<String, Object> firstRow =
+        first(
+            db.all(
+                "SELECT COUNT(*) AS n, MIN(started_at) AS t FROM (SELECT s.started_at AS started_at FROM rl_sessions s WHERE s.site = ? AND s.started_at >= ? AND s.started_at < ? AND "
+                    + Sql.IS_VISIT
+                    + visitScope.sql()
+                    + "\n         ORDER BY s.started_at DESC, s.id LIMIT "
+                    + (cap + 1)
+                    + ") x",
+                concat(list(site(query), from(query), to(query)), visitScope.params())));
+    boolean sampled = dnum(at(firstRow, "n")) > cap;
+    if (sampled) {
+      query = new LinkedHashMap<>(query);
+      query.put("from", Math.max(from(query), (long) dnum(at(firstRow, "t")) + 1));
+    }
     // The rows of the picked visits that match any step, in order, read once and walked here.
     Sql.VisitRows v =
         Sql.visitRows(filters(query), site(query), from(query), to(query), db.dialect());
@@ -1496,8 +1528,11 @@ public final class SqlStore implements AutoCloseable {
     for (long c : counts) {
       out.add(c);
     }
-    return out;
+    return new FunnelCounts(out, sampled);
   }
+
+  /** A funnel's count of visits at each step, and whether only the newest visits were counted. */
+  public record FunnelCounts(List<Object> counts, boolean sampled) {}
 
   /**
    * Each visit's pageviews in order, at most {@code perVisit} of them, for journeys: rows of

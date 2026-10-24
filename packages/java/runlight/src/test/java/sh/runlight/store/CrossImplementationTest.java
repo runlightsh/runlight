@@ -83,7 +83,10 @@ class CrossImplementationTest {
           store.goalBreakdown(
               Js.map(a.get(0)), Js.map(a.get(1)), s(a.get(2)), a.size() > 3 ? i(a.get(3)) : 10);
       case "goalSeries" -> store.goalSeries(Js.map(a.get(0)), Js.map(a.get(1)), maps(a.get(2)));
-      case "funnelCounts" -> store.funnelCounts(Js.map(a.get(0)), Js.map(a.get(1)));
+      case "funnelCounts" -> {
+        SqlStore.FunnelCounts counted = store.funnelCounts(Js.map(a.get(0)), Js.map(a.get(1)));
+        yield Json.object("counts", counted.counts(), "sampled", counted.sampled());
+      }
       case "journeyPages" -> store.journeyPages(Js.map(a.get(0)), i(a.get(1)));
       case "eventPropKeys" -> store.eventPropKeys(Js.map(a.get(0)), s(a.get(1)));
       case "eventPropValues" ->

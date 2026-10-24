@@ -107,7 +107,7 @@ class CountingTest extends StoreTestCase {
             return List.of(
                 totals.get("conversions"),
                 visitors > 0 ? Js.num(Js.toNumber(totals.get("visitors")) / visitors) : 0L,
-                store.funnelCounts(query, funnel),
+                store.funnelCounts(query, funnel).counts(),
                 store.eventPropKeys(query, "Signup").size(),
                 events);
           };
@@ -303,7 +303,7 @@ class CountingTest extends StoreTestCase {
         List.of("/#/thanks", 2, 2),
         List.of(goal.get("match"), totals.get("conversions"), totals.get("visitors")));
     assertJson(List.of("/#/cart", "/#/thanks"), column(rowsOf(funnel.get("steps")), "match"));
-    assertJson(List.of(2, 2), store.funnelCounts(today(), funnel));
+    assertJson(List.of(2, 2), store.funnelCounts(today(), funnel).counts());
   }
 
   @ParameterizedTest
@@ -655,8 +655,11 @@ class CountingTest extends StoreTestCase {
             List.of(same),
             NOW,
             null);
-    assertJson(List.of(1, 1), store.funnelCounts(today(), same));
-    assertJson(List.of(1, 0), store.funnelCounts(today(), twice), "one pageview is not two steps");
+    assertJson(List.of(1, 1), store.funnelCounts(today(), same).counts());
+    assertJson(
+        List.of(1, 0),
+        store.funnelCounts(today(), twice).counts(),
+        "one pageview is not two steps");
   }
 
   @ParameterizedTest
@@ -720,10 +723,12 @@ class CountingTest extends StoreTestCase {
         column(rowsOf(funnel.get("steps")), "match"),
         "a pasted URL keeps its path; a bare path gains its slash");
     store.saveFunnel(funnel);
-    assertJson(List.of(3, 2, 1), store.funnelCounts(today(), store.funnels("default").get(0)));
+    assertJson(
+        List.of(3, 2, 1), store.funnelCounts(today(), store.funnels("default").get(0)).counts());
     // Filters choose which visits enter. The Signup events were sent from /signup, so a page
     // filter finds them.
-    assertJson(List.of(2, 2, 1), store.funnelCounts(today(w("page", "is", "/signup")), funnel));
+    assertJson(
+        List.of(2, 2, 1), store.funnelCounts(today(w("page", "is", "/signup")), funnel).counts());
     Map<String, Object> changed =
         Funnels.funnelFrom(
             Json.object(
@@ -739,7 +744,8 @@ class CountingTest extends StoreTestCase {
             (String) funnel.get("id"));
     assertJson(funnel.get("createdAt"), changed.get("createdAt"));
     store.saveFunnel(changed);
-    assertJson(List.of(3, 1), store.funnelCounts(today(), store.funnels("default").get(0)));
+    assertJson(
+        List.of(3, 1), store.funnelCounts(today(), store.funnels("default").get(0)).counts());
     store.deleteFunnel((String) funnel.get("id"));
     assertJson(List.of(), store.funnels("default"));
   }

@@ -462,6 +462,22 @@ class AccountsTest {
   }
 
   @Test
+  void aFloodOfMadeUpNamesCannotResetTheCountOfOneCloseToItsLimit() {
+    // The audit of 2026-10-23.
+    SqlStore store = store("sqlite");
+    Throttle throttle = new Throttle(store, "flood", 3);
+    assertTrue(throttle.take("target", NOW));
+    assertTrue(throttle.take("target", NOW));
+    for (int i = 0; i < Accounts.MAX_THROTTLED + 50; i++) {
+      throttle.take("made-up-" + i, NOW);
+    }
+    assertTrue(throttle.take("target", NOW));
+    assertFalse(throttle.take("target", NOW), "the target's earlier tries still count");
+    assertTrue(
+        keys(store, "throttle:flood:").size() <= Accounts.MAX_THROTTLED, "the ceiling still holds");
+  }
+
+  @Test
   void theThrottleCountsBeforeTheCheckAndForgivesARightTry() {
     SqlStore store = store("sqlite");
     Throttle throttle = new Throttle(store, "test", 3, 1000);

@@ -2,6 +2,7 @@ package sh.runlight;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import sh.runlight.http.Url;
 
@@ -61,13 +62,32 @@ public final class Payload {
       } else {
         continue;
       }
-      // Assigning a string to __proto__ changes nothing in JavaScript, though it counts.
-      if (!k.equals("__proto__")) {
-        out.put(k, text);
-      }
+      // A prop named __proto__ is kept like any other rather than lost.
+      out.put(k, text);
       count++;
     }
     return count > 0 ? out : null;
+  }
+
+  /**
+   * The events the tracker sends on its own for a link that was followed, each with the link as
+   * url.
+   */
+  private static final Set<String> LINK_EVENTS = Set.of("Outbound link", "File download");
+
+  private static final Pattern QUERY_OR_FRAGMENT = Pattern.compile("[?#].*\\z", Pattern.DOTALL);
+
+  /**
+   * An automatic link event's url without its query string or fragment, as page paths are kept,
+   * since tokens and email addresses ride in them. Done here rather than in the tracker, which has
+   * no bytes to spare, and so a tracker cached from before is held to it too.
+   */
+  private static Map<String, Object> linkProps(String name, Map<String, Object> given) {
+    if (given == null || !LINK_EVENTS.contains(name) || !(given.get("url") instanceof String url)) {
+      return given;
+    }
+    given.put("url", QUERY_OR_FRAGMENT.matcher(url).replaceFirst(""));
+    return given;
   }
 
   /** The tracker's body read, or null when anything about it is malformed. */
@@ -118,7 +138,7 @@ public final class Payload {
         "screenHeight", integer(body.get("h"), 0, 20000),
         "language", str(body.get("l"), 35),
         "name", name,
-        "props", kind.equals("event") ? props(body.get("p")) : null,
+        "props", kind.equals("event") ? linkProps(name, props(body.get("p"))) : null,
         "pageviewId", pageviewId,
         "engagedMs", engaged == null ? 0L : engaged,
         "scroll", integer(body.get("d"), 0, 100));
