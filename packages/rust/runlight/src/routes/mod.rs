@@ -1236,12 +1236,14 @@ impl Routes {
     }
 }
 
-/// The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site.
+/// The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key,
+/// and deleting a site.
 fn admin_only(path: &str, method: &str) -> bool {
     (path == "/api/mail" && (method == "PUT" || method == "DELETE"))
         || (path == "/api/assistant" && (method == "PUT" || method == "DELETE"))
         || (path == "/api/assistant/limits" && method == "PUT")
         || (path == "/api/assistant/models" && method == "POST")
+        || (path == "/api/observe-key/new" && method == "POST")
         || (test(js_re!(r"^/api/sites/[^/]+$"), path) && method == "DELETE")
 }
 

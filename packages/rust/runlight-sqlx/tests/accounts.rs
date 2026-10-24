@@ -475,7 +475,17 @@ async fn new_password_hashes_record_their_scrypt_cost_and_a_cost_out_of_bounds_i
     let salt = from_base64url(parts[4]).unwrap();
     let again = scrypt_derive(b"a long password", &salt, 32768, 8, 3, 32).unwrap();
     assert_eq!(base64url(&again), parts[5]);
-    for cost in ["2097152$8$1", "30000$8$1", "1$8$1", "16384$33$1", "16384$8$17", "16384$0$1", "x$8$1"] {
+    for cost in [
+        "2097152$8$1",
+        "30000$8$1",
+        "1$8$1",
+        "16384$33$1",
+        "16384$8$17",
+        "16384$0$1",
+        "x$8$1",
+        "1048576$1$1",
+        "65536$1$1",
+    ] {
         assert!(!check_password("a long password", &format!("scrypt${cost}${}${}", parts[4], parts[5])), "{cost}");
     }
     // A hash made before costs were recorded still checks, at the old cost.

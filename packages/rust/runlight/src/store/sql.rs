@@ -29,6 +29,8 @@ pub(crate) const MAX_PARAMS: usize = 96;
 pub(crate) const BUILT_DAYS: &str = "SELECT day FROM rl_rollup_days WHERE site = ? AND start_at >= ? AND end_at <= ?";
 /// The most visits journeys reads, newest first.
 pub const JOURNEY_VISITS: i64 = 20_000;
+/// The most visits a funnel is counted over: the newest in the range, so its rows fit in memory over any range.
+pub const FUNNEL_VISITS: i64 = 100_000;
 /// How long after a visit starts its events are looked for: far past any real visit.
 pub const EVENT_TAIL_MS: i64 = 2 * 86_400_000;
 pub(crate) const PIECE_MS: i64 = 86_400_000;

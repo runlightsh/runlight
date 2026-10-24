@@ -154,6 +154,8 @@ pub struct User {
     pub two_factor: bool,
     /// Recovery codes not yet used.
     pub recovery_left: usize,
+    /// A mark signing out replaces, which every session is signed with.
+    pub signed_out: Option<String>,
 }
 
 impl User {
@@ -168,6 +170,9 @@ impl User {
             "twoFactor" => self.two_factor,
             "recoveryLeft" => self.recovery_left,
         };
+        if let (Some(signed_out), Value::Object(object)) = (&self.signed_out, &mut value) {
+            object.set("signedOut", signed_out.as_str());
+        }
         if let (Some(site), Value::Object(object)) = (&self.site, &mut value) {
             object.set("site", site.as_str());
         }
@@ -504,9 +509,14 @@ impl Accounts {
                 .await?;
         }
         // Two-factor came later still: the secret (sealed), one being set up, recovery code hashes, and the last code's step.
-        for (name, kind) in
-            [("totp_secret", "TEXT"), ("totp_pending", "TEXT"), ("totp_recovery", "TEXT"), ("totp_step", "BIGINT")]
-        {
+        // And the mark signing out replaces, later again.
+        for (name, kind) in [
+            ("totp_secret", "TEXT"),
+            ("totp_pending", "TEXT"),
+            ("totp_recovery", "TEXT"),
+            ("totp_step", "BIGINT"),
+            ("signed_out", "TEXT"),
+        ] {
             if !has(name) {
                 db.run(&format!("ALTER TABLE rl_users ADD COLUMN {name} {kind}"), params![]).await?;
             }
@@ -563,6 +573,7 @@ impl Accounts {
             created_at: r.int("created_at"),
             two_factor: js::truthy(&r.get("totp_secret").to_value()),
             recovery_left: Self::recovery_of(r)?.len(),
+            signed_out: if js::truthy(&r.get("signed_out").to_value()) { Some(r.text("signed_out")) } else { None },
         })
     }
 
@@ -926,6 +937,7 @@ impl Accounts {
             created_at: now,
             two_factor: false,
             recovery_left: 0,
+            signed_out: None,
         };
         self.store
             .db()
@@ -1131,9 +1143,25 @@ impl Accounts {
         })
     }
 
-    /// What a session is signed with: the password hash, and whether two-factor is on, so changing either ends other sessions.
+    /// Ends every session an account has, in every browser, as signing out does.
+    pub async fn end_sessions(&self, id: &str) -> R<()> {
+        self.init().await?;
+        self.store
+            .db()
+            .run("UPDATE rl_users SET signed_out = ? WHERE id = ?", params![hex(&random_bytes(8)), id])
+            .await?;
+        Ok(())
+    }
+
+    /// What a session is signed with: the password hash, whether two-factor is on, and a mark that signing out
+    /// replaces, so changing any of them ends other sessions.
     fn session_key(user: &User) -> String {
-        format!("{}{}", user.hash, if user.two_factor { ".2fa" } else { "" })
+        format!(
+            "{}{}{}",
+            user.hash,
+            if user.two_factor { ".2fa" } else { "" },
+            user.signed_out.as_ref().map(|mark| format!(".{mark}")).unwrap_or_default()
+        )
     }
 
     /// A long-lived mark for a browser that signed in to an account. With it, failed tries by others
@@ -1276,29 +1304,23 @@ impl Throttle {
                 state.insert(id, 1, now + self.window_ms);
             }
         }
-        // Expired entries go first, then the oldest that are not blocked, and blocked ones last, so the map
-        // has a hard ceiling and a flood of made-up names cannot wipe out a real block.
+        // Expired entries go first, then those with the fewest tries, oldest first, down to nine tenths of the
+        // ceiling so this runs seldom. A flood of made-up names has one try each, so it cannot wipe out a block,
+        // or the count of a name someone is close to blocking.
         if state.failures.len() > MAX_THROTTLED {
             let expired: Vec<String> =
                 state.failures.iter().filter(|(_, v)| v.until <= now).map(|(k, _)| k.clone()).collect();
             for k in expired {
                 state.delete(&k);
             }
-            let ordered: Vec<String> = state.order.values().cloned().collect();
-            for k in &ordered {
-                if state.failures.len() <= MAX_THROTTLED {
-                    break;
+            if state.failures.len() > MAX_THROTTLED {
+                let mut fewest: Vec<(u32, u64, String)> =
+                    state.failures.iter().map(|(k, v)| (v.count, v.order, k.clone())).collect();
+                fewest.sort_unstable_by_key(|(count, order, _)| (*count, *order));
+                let drop = state.failures.len() - MAX_THROTTLED * 9 / 10;
+                for (_, _, k) in fewest.into_iter().take(drop) {
+                    state.delete(&k);
                 }
-                if state.failures.get(k).is_some_and(|v| v.count < self.limit) {
-                    state.delete(k);
-                }
-            }
-            let ordered: Vec<String> = state.order.values().cloned().collect();
-            for k in &ordered {
-                if state.failures.len() <= MAX_THROTTLED {
-                    break;
-                }
-                state.delete(k);
             }
         }
     }

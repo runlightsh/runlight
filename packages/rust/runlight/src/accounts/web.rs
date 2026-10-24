@@ -1,7 +1,7 @@
 //! Accounts on the web: sign-in, the code step, invites, first-run setup, and the Account and People APIs, under
 //! the base path the routes answer at. The standalone server and an app with routes' accounts option share it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -167,6 +167,7 @@ fn reply(body: &Value, status: u16, extra: &[(&str, &str)]) -> Response {
 fn person(u: &User) -> Value {
     let Value::Object(mut value) = u.to_value() else { unreachable!() };
     value.remove("hash");
+    value.remove("signedOut");
     Value::Object(value)
 }
 
@@ -370,6 +371,19 @@ impl AccountsWeb {
         }
     }
 
+    /// The ids of the tokens an account made.
+    pub async fn tokens_of(&self, by: &str) -> R<HashSet<String>> {
+        Ok(self
+            .0
+            .store
+            .settings_starting_with(MADE_BY)
+            .await?
+            .into_iter()
+            .filter(|(_, value)| value == by)
+            .map(|(key, _)| key[MADE_BY.len()..].to_string())
+            .collect())
+    }
+
     async fn drop_tokens_of(&self, id: &str) -> R<()> {
         for (key, value) in self.0.store.settings_starting_with(MADE_BY).await? {
             if value != id {
@@ -563,6 +577,23 @@ impl AccountsWeb {
             )));
         }
 
+        // A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+        // plant a session, so these pages take forms only from their own. The browser says where a request came from.
+        let cross_site = matches!(request.headers.get("sec-fetch-site").as_deref(), Some("cross-site" | "same-site"));
+        if cross_site
+            && (method == "POST" || path == "/logout")
+            && ["/setup", "/login", "/login/code", "/invite", "/logout"].contains(&path)
+        {
+            let error = t("oauth.anotherSiteTitle");
+            let page = LoginPage {
+                error: Some(&error),
+                next: Some(&self.0.home_path),
+                forgot: &self.0.forgot,
+                ..LoginPage::default()
+            };
+            return Ok(Some(html(login_page(base, &page, &lang), 403)));
+        }
+
         if path == "/setup" {
             if self.has_account().await? {
                 return Ok(Some(redirect(&format!("{base}/login"), &[])));
@@ -701,7 +732,11 @@ impl AccountsWeb {
             return self.signed_in_to(request, &user, &next).map(Some);
         }
 
+        // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
         if path == "/logout" {
+            if let Some(user) = self.signed_in(request).await? {
+                self.0.accounts.end_sessions(&user.id).await?;
+            }
             return Ok(Some(redirect(
                 &format!("{base}/login"),
                 &[("set-cookie", &self.session_cookie(request, "", 0))],
@@ -903,8 +938,12 @@ impl AccountsWeb {
                 return Ok(refused);
             }
             return match self.0.accounts.set_password(&user.email, &field(&input, "next"), self.now(), None).await {
-                // The new password ends every other sign-in; this browser gets a fresh one.
                 Ok(updated) => {
+                    // Asked for after a password got out: the tokens and apps the account made could still read on.
+                    if input.get("revokeTokens") == Some(&Value::Bool(true)) {
+                        self.drop_tokens_of(&user.id).await?;
+                    }
+                    // The new password ends every other sign-in; this browser gets a fresh one.
                     Ok(reply(&obj! { "ok" => true }, 200, &[("set-cookie", &self.fresh_session(request, &updated)?)]))
                 }
                 Err(AuthError::Account(error)) => Ok(refused(&error, 400)),

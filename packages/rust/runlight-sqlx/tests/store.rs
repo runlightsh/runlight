@@ -124,7 +124,10 @@ async fn answer(store: &SqlStore, method: &str, args: &[Value]) -> Result<Value,
             }
             Value::Object(o)
         }
-        "funnelCounts" => Value::Array(store.funnel_counts(&query_of(&args[0]), &funnel_of(&args[1])).await.map_err(e)?.into_iter().map(Value::from).collect()),
+        "funnelCounts" => {
+            let (counts, sampled) = store.funnel_counts(&query_of(&args[0]), &funnel_of(&args[1])).await.map_err(e)?;
+            obj! { "counts" => Value::Array(counts.into_iter().map(Value::from).collect()), "sampled" => sampled }
+        }
         "journeyPages" => {
             let (rows, sampled) = store.journey_pages(&query_of(&args[0]), num(&args[1])).await.map_err(e)?;
             obj! {

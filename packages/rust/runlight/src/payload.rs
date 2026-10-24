@@ -52,6 +52,23 @@ fn int(value: Option<&Value>, min: i64, max: i64) -> Option<i64> {
     Some((js::round(n) as i64).clamp(min, max).min(max).max(min))
 }
 
+/// The events the tracker sends on its own for a link that was followed, each with the link as `url`.
+const LINK_EVENTS: [&str; 2] = ["Outbound link", "File download"];
+
+/// An automatic link event's `url` without its query string or fragment, as page paths are kept, since tokens and
+/// email addresses ride in them. Done here rather than in the tracker, which has no bytes to spare, and so a
+/// tracker cached from before is held to it too.
+fn link_props(name: &str, given: Option<Object>) -> Option<Object> {
+    let mut given = given?;
+    if LINK_EVENTS.contains(&name)
+        && let Some(Value::String(url)) = given.get("url")
+    {
+        let cut = url.split(['?', '#']).next().unwrap_or("").to_string();
+        given.set("url", cut);
+    }
+    Some(given)
+}
+
 fn props(value: Option<&Value>) -> Option<Object> {
     let Some(Value::Object(o)) = value else { return None };
     let mut out = Object::new();
@@ -70,10 +87,8 @@ fn props(value: Option<&Value>) -> Option<Object> {
             Value::Bool(b) => b.to_string(),
             _ => continue,
         };
-        // `out["__proto__"] = text` sets no property of its own in JavaScript, and still counts.
-        if k != "__proto__" {
-            out.set(k, text);
-        }
+        // A prop named __proto__ is kept like any other, as the SDK's object with no prototype keeps it.
+        out.set(k, text);
         count += 1;
     }
     (count > 0).then_some(out)
@@ -110,6 +125,7 @@ pub fn parse_payload(text: &str) -> Option<Payload> {
     if kind == "engagement" && pageview_id.is_empty() {
         return None;
     }
+    let props = if kind == "event" { link_props(&name, props(body.get("p"))) } else { None };
     Some(Payload {
         kind,
         site: str_(body.get("s"), 64),
@@ -120,7 +136,7 @@ pub fn parse_payload(text: &str) -> Option<Payload> {
         screen_height: int(body.get("h"), 0, 20000),
         language: str_(body.get("l"), 35),
         name,
-        props: if kind == "event" { props(body.get("p")) } else { None },
+        props,
         pageview_id,
         engaged_ms: if kind == "engagement" { int(body.get("e"), 0, MAX_ENGAGED_MS).unwrap_or(0) } else { 0 },
         scroll: int(body.get("d"), 0, 100),

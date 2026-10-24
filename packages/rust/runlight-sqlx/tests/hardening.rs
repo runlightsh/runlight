@@ -1,4 +1,5 @@
-//! Hardening as hardening.test.ts tests it: trust_proxy left at its default with nothing in front.
+//! Hardening as hardening.test.ts tests it: trust_proxy left at its default believes forwarding headers only
+//! from a private address.
 
 use runlight::http::Request;
 use runlight::{Runlight, RunlightOptions, SiteOptions, TrustProxy};
@@ -16,18 +17,31 @@ fn from(ip: &str) -> Request {
     request
 }
 
+fn forwarded(ip: &str) -> Request {
+    from(ip).header("x-forwarded-for", "8.8.4.4")
+}
+
 #[tokio::test]
-async fn with_trust_proxy_left_at_its_default_a_public_address_with_no_proxy_header_is_warned_about_once() {
+async fn with_trust_proxy_left_at_its_default_forwarding_headers_count_only_from_a_private_address() {
     let quiet = runlight(Some(TrustProxy::On)).await;
-    assert_eq!(quiet.client_ip(&from("8.8.8.8")), "8.8.8.8");
-    assert_eq!(quiet.direct_warnings(), 0, "trust_proxy set on purpose is never second-guessed");
+    assert_eq!(
+        quiet.client_ip(&forwarded("8.8.8.8")),
+        "8.8.4.4",
+        "trust_proxy set on purpose believes a public address"
+    );
+    assert_eq!(quiet.direct_warnings(), 0, "and is never second-guessed");
 
     let rl = runlight(None).await;
-    rl.client_ip(&from("10.0.0.2").header("x-forwarded-for", "8.8.4.4"));
-    rl.client_ip(&from("127.0.0.1"));
-    rl.client_ip(&from("192.168.1.5"));
-    assert_eq!(rl.direct_warnings(), 0, "a proxy's header, or a private or loopback address, says nothing");
+    assert_eq!(rl.client_ip(&forwarded("10.0.0.2")), "8.8.4.4", "a proxy on a private network is believed");
+    assert_eq!(rl.client_ip(&forwarded("::ffff:127.0.0.1")), "8.8.4.4", "and one on this computer");
+    assert_eq!(rl.client_ip(&forwarded("")), "8.8.4.4", "and a platform that passes no address on");
     assert_eq!(rl.client_ip(&from("8.8.8.8")), "8.8.8.8");
-    rl.client_ip(&from("1.1.1.1"));
+    assert_eq!(rl.direct_warnings(), 0, "a public address without forwarding headers says nothing");
+    assert_eq!(
+        rl.client_ip(&forwarded("1.1.1.1")),
+        "1.1.1.1",
+        "a client straight from the internet cannot choose its address"
+    );
+    rl.client_ip(&forwarded("1.0.0.1"));
     assert_eq!(rl.direct_warnings(), 1, "said once");
 }

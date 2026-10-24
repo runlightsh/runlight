@@ -59,7 +59,8 @@ pub struct SiteOptions {
 /// Where the client's address is read from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TrustProxy {
-    /// The last X-Forwarded-For entry, then X-Real-IP, then CF-Connecting-IP (the default).
+    /// The last X-Forwarded-For entry, then X-Real-IP, then CF-Connecting-IP, from any address. Left unset,
+    /// trust_proxy reads these too, but only from this computer or a private network.
     #[default]
     On,
     /// Only the connection's address.
@@ -111,8 +112,10 @@ pub struct RunlightOptions {
     pub managed_sites: bool,
     /// Looks up a location for an IP when the platform sends no location headers.
     pub geo: Option<SharedGeo>,
-    /// Where the client's address is read from. `None` is the default, [`TrustProxy::On`], and warns
-    /// once if requests then arrive straight from public addresses with no proxy header.
+    /// Where the client's address is read from. `None`, the default, reads the headers [`TrustProxy::On`] reads,
+    /// but only on a connection from this computer or a private network, where proxies and load balancers
+    /// connect from, so a client that reaches the app straight from the internet cannot choose its own address.
+    /// [`TrustProxy::On`] reads them from anywhere, for a CDN that connects from public addresses.
     pub trust_proxy: Option<TrustProxy>,
     /// Where short links on the app's own domain live. Default "/go".
     pub link_path: Option<String>,
@@ -264,12 +267,23 @@ struct State {
     freshened_at: i64,
 }
 
+/// How far recording a hit got: its visit, and which of its writes went in. A hit tried again after a write
+/// failed skips the ones before it, so a visit's counts never take the same hit twice.
+#[derive(Default)]
+struct Progress {
+    session: Option<(String, String)>,
+    touched: bool,
+    engaged: bool,
+}
+
 pub(crate) struct Inner {
     pub(crate) store: SqlStore,
     pub(crate) managed_sites: bool,
     geo: Option<SharedGeo>,
     trust_proxy: TrustProxy,
-    /// True until trust_proxy left at its default has been seen answering a public address directly, and warned about once.
+    /// True when trust_proxy was left at its default, which believes forwarding headers only from a private address.
+    trust_private: bool,
+    /// True until a public address has sent forwarding headers that the default did not believe, and been warned about once.
     warn_direct: AtomicBool,
     direct_warnings: AtomicU32,
     limit: Option<RateLimit>,
@@ -352,6 +366,7 @@ impl Runlight {
             store: options.store,
             managed_sites: options.managed_sites,
             geo: options.geo,
+            trust_private: options.trust_proxy.is_none(),
             warn_direct: AtomicBool::new(options.trust_proxy.is_none()),
             direct_warnings: AtomicU32::new(0),
             trust_proxy: options.trust_proxy.unwrap_or_default(),
@@ -1185,6 +1200,9 @@ impl Runlight {
 
     /// The visitor's address, for the daily visitor hash and the rate limit.
     pub fn client_ip(&self, request: &Request) -> String {
+        if !self.trusts(request) {
+            return request.remote_address.clone();
+        }
         let h = &request.headers;
         let last = |name: &str| -> Option<String> {
             let value = h.get(name)?;
@@ -1203,24 +1221,44 @@ impl Runlight {
         {
             return js::trim(&f).to_string();
         }
-        // A public address with no forwarding header means nothing sits in front, and then any client
-        // could name its own address in one. Said once, only when trust_proxy was left at its default.
+        request.remote_address.clone()
+    }
+
+    /// Whether a request's forwarding headers count. Left at its default, trust_proxy believes them only on a
+    /// connection from this computer or a private network, or one whose address the app did not pass on (a
+    /// hosting platform's function), since a client reaching the server straight from the internet could write
+    /// them itself.
+    fn trusts(&self, request: &Request) -> bool {
+        if self.0.trust_proxy == TrustProxy::Off {
+            return false;
+        }
+        if !self.0.trust_private || request.remote_address.is_empty() || !public_address(&request.remote_address) {
+            return true;
+        }
+        // Said once: a CDN that connects from public addresses needs trust_proxy set, or its visitors all look alike.
+        let h = &request.headers;
         if self.0.warn_direct.load(Ordering::Relaxed)
-            && public_address(&request.remote_address)
+            && (h.has("x-forwarded-for") || h.has("x-real-ip") || h.has("cf-connecting-ip"))
             && self.0.warn_direct.swap(false, Ordering::Relaxed)
         {
             self.0.direct_warnings.fetch_add(1, Ordering::Relaxed);
             eprintln!(
-                "Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set trust_proxy: Some(TrustProxy::Off) when nothing sits in front of this server, or put a proxy in front that sets the header."
+                "Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set trust_proxy to the header it sets (Some(TrustProxy::Header(\"cf-connecting-ip\".into()))) or to Some(TrustProxy::On)."
             );
         }
-        request.remote_address.clone()
+        false
     }
 
-    /// How many times the warning about a default trust_proxy with nothing in front was given, for tests.
+    /// How many times the warning about forwarding headers from a public address went unbelieved was given, for tests.
     #[doc(hidden)]
     pub fn direct_warnings(&self) -> u32 {
         self.0.direct_warnings.load(Ordering::Relaxed)
+    }
+
+    /// The day and yesterday's salt kept in memory for a timezone, for tests.
+    #[doc(hidden)]
+    pub fn cached_salts(&self, timezone: &str) -> Option<(String, Option<String>)> {
+        self.state().salts.get(timezone).map(|(day, _, yesterday)| (day.clone(), yesterday.clone()))
     }
 
     /// Today's salt in a site's timezone and, if it still exists, yesterday's.
@@ -1233,9 +1271,14 @@ impl Runlight {
         }
         let today = self.0.store.salt(&day, &random_salt()).await?;
         let yesterday = self.0.store.salt_if_exists(&add_days(&day, -1)).await?;
-        self.drop_old_salts(now).await?;
+        // Kept before old salts go, so dropping yesterday's from the store drops it from here too.
         self.state().salts.insert(timezone.to_string(), (day, today.clone(), yesterday.clone()));
-        Ok((today, yesterday))
+        if let Err(error) = self.drop_old_salts(now).await {
+            self.state().salts.remove(timezone);
+            return Err(error);
+        }
+        // What is cached now, without yesterday's when that went.
+        Ok(self.state().salts.get(timezone).map(|(_, t, y)| (t.clone(), y.clone())).unwrap_or((today, yesterday)))
     }
 
     /// Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a
@@ -1286,7 +1329,7 @@ impl Runlight {
 
     /// The host a proxy says the request was for, read only when proxy headers are trusted.
     pub(crate) fn forwarded_host(&self, request: &Request) -> Option<String> {
-        if self.0.trust_proxy == TrustProxy::Off { None } else { request.headers.get("x-forwarded-host") }
+        if self.trusts(request) { request.headers.get("x-forwarded-host") } else { None }
     }
 
     /// Handles one tracker request. Always succeeds unless the database fails; bad input is dropped quietly.
@@ -1318,8 +1361,9 @@ impl Runlight {
         // A database too busy to take the hit right now gets it a little later, at the time it arrived.
         let now = self.now();
         let mut attempt = 1;
+        let mut done = Progress::default();
         loop {
-            match self.record(&payload, request, now).await {
+            match self.record(&payload, request, now, &mut done).await {
                 Err(error) if attempt < 3 && busy(&error) => {
                     tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
                     attempt += 1;
@@ -1329,7 +1373,7 @@ impl Runlight {
         }
     }
 
-    async fn record(&self, payload: &Payload, request: &Request, now: i64) -> Result<(), Error> {
+    async fn record(&self, payload: &Payload, request: &Request, now: i64, done: &mut Progress) -> Result<(), Error> {
         // Managed sites load from the database in init(), so it must come first.
         self.init().await?;
         let hostname = payload.url.hostname();
@@ -1341,11 +1385,11 @@ impl Runlight {
             },
         };
         if payload.kind == "engagement" {
-            return self.engagement(&site, payload, now).await;
+            return self.engagement(&site, payload, now, done).await;
         }
         let store = &self.0.store;
         let page = parse_page(&payload.url);
-        let mut session: Option<(String, String)> = None;
+        let mut session: Option<(String, String)> = done.session.clone();
         let mut reopen = true;
         if payload.kind == "event"
             && !payload.pageview_id.is_empty()
@@ -1353,7 +1397,7 @@ impl Runlight {
             && now - pageview.started_at < EVENT_TAIL_MS
         {
             // An event joins its page's visit unless that visit began longer ago than reports look for its rows.
-            session = Some((pageview.session.clone(), pageview.visitor.clone()));
+            session.get_or_insert_with(|| (pageview.session.clone(), pageview.visitor.clone()));
             // A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
             reopen = now - pageview.last_at <= SESSION_IDLE_MS;
             if now - pageview.started_at > 3_600_000 {
@@ -1380,7 +1424,11 @@ impl Runlight {
                 .await?
             }
         };
-        store.touch_session(&id, now, payload.kind, &page.path, reopen).await?;
+        done.session = Some((id.clone(), visitor.clone()));
+        if !done.touched {
+            store.touch_session(&id, now, payload.kind, &page.path, reopen).await?;
+            done.touched = true;
+        }
         store
             .insert_event(&EventRow {
                 site: site.id.clone(),
@@ -1443,8 +1491,7 @@ impl Runlight {
                 },
                 screen_width,
             );
-            let location =
-                locate(&request.headers, &ip, self.0.geo.as_ref(), self.0.trust_proxy != TrustProxy::Off).await;
+            let location = locate(&request.headers, &ip, self.0.geo.as_ref(), self.trusts(request)).await;
             store
                 .insert_session(&SessionRow {
                     id: id.clone(),
@@ -1616,7 +1663,7 @@ impl Runlight {
         )))
     }
 
-    async fn engagement(&self, site: &SiteRow, payload: &Payload, now: i64) -> Result<(), Error> {
+    async fn engagement(&self, site: &SiteRow, payload: &Payload, now: i64, done: &mut Progress) -> Result<(), Error> {
         if payload.engaged_ms <= 0 {
             return Ok(());
         }
@@ -1626,7 +1673,10 @@ impl Runlight {
         if now - pageview.started_at >= EVENT_TAIL_MS {
             return Ok(());
         }
-        store.add_engagement(&pageview.session, payload.engaged_ms).await?;
+        if !done.engaged {
+            store.add_engagement(&pageview.session, payload.engaged_ms).await?;
+            done.engaged = true;
+        }
         // Only a visit that began more than an hour ago can belong to a day that is already added up.
         if now - pageview.started_at > 3_600_000 {
             store.touched_old_visit(&site.id, pageview.started_at, now - ROLLUP_DELAY_MS + 3_600_000).await?;
