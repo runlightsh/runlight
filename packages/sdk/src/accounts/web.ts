@@ -34,6 +34,8 @@ export interface AccountsWeb {
   access(request: Request): Promise<boolean | "member" | "read">;
   accountOf(request: Request): Promise<string | null>;
   tokenMade(token: TokenRow, by: string): Promise<boolean>;
+  /** The ids of the tokens an account made. */
+  tokensOf(by: string): Promise<Set<string>>;
   hasAccount(): Promise<boolean>;
   confirmPassword(request: Request): Promise<Response | null>;
   /** Answers an account page or API request at a path under the base, or null for anything else. */
@@ -229,6 +231,12 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     };
     if (path === "/auth.css") return new Response(AUTH_CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
     if (path === "/auth.js") return new Response(authJs(url.searchParams.get("lang") ?? "en"), { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600" } });
+    // A form posted from another site, or a sibling one, could sign someone in to an account that is not theirs or
+    // plant a session, so these pages take forms only from their own. The browser says where a request came from.
+    const crossSite = ["cross-site", "same-site"].includes(request.headers.get("sec-fetch-site") ?? "");
+    if (crossSite && (method === "POST" || path === "/logout") && ["/setup", "/login", "/login/code", "/invite", "/logout"].includes(path)) {
+      return html(loginPage(base, { error: t("oauth.anotherSiteTitle"), next: home, forgot: options.forgot }, lang), 403);
+    }
 
     if (path === "/setup") {
       if (await hasAccount()) return redirect(`${base}/login`);
@@ -330,7 +338,12 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       return signedInTo(request, user, next);
     }
 
-    if (path === "/logout") return redirect(`${base}/login`, { "set-cookie": sessionCookie(request, "", 0) });
+    // Signing out ends the account's sessions in every browser, not just this one, so a cookie copied before still stops working.
+    if (path === "/logout") {
+      const user = await signedIn(request);
+      if (user) await accounts.endSessions(user.id);
+      return redirect(`${base}/login`, { "set-cookie": sessionCookie(request, "", 0) });
+    }
 
     if (path === "/invite") {
       if (method === "GET") {
@@ -386,6 +399,8 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (refused) return refused;
       try {
         const updated = await accounts.setPassword(user.email, String(input.next ?? ""), now());
+        // Asked for after a password got out: the tokens and apps the account made could still read on.
+        if (input.revokeTokens === true) await dropTokensOf(user.id);
         // The new password ends every other sign-in; this browser gets a fresh one.
         return reply({ ok: true }, 200, { "set-cookie": sessionCookie(request, await accounts.sessionFor(updated, now()), SESSION_MS / 1000) });
       } catch (error) {
@@ -549,6 +564,9 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (!user || user.site !== undefined || user.role === "viewer") return false;
       await store.setSetting(`${MADE_BY}${token.id}`, by);
       return true;
+    },
+    async tokensOf(by) {
+      return new Set((await store.settingsStartingWith(MADE_BY)).filter(({ value }) => value === by).map(({ key }) => key.slice(MADE_BY.length)));
     },
     async handle(request, path, context = {}) {
       if (path === "/api/account" || path.startsWith("/api/account/") || path === "/api/people" || path.startsWith("/api/people/") || path.startsWith("/api/invites/")) {

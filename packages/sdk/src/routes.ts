@@ -19,7 +19,7 @@ import { MailError, SERVICES } from "./mail/transports.js";
 import { acceptedLanguage, languages, translator } from "./messages.js";
 import { fetchIcon } from "./icon.js";
 import { installFetch, publicAddresses, publicFetch, resolvesPrivately } from "./safefetch.js";
-import { readJsonCapped, readTextCapped } from "./body.js";
+import { BodyTooLong, readJsonCapped, readTextCapped } from "./body.js";
 import { ImportError, importStep } from "./importers/index.js";
 import { importCsvVisits, importUmamiVisits, umamiWebsites } from "./importers/visits.js";
 import { LinkError } from "./links.js";
@@ -101,6 +101,8 @@ export interface RoutesOptions {
   accountOf?: (request: Request) => Promise<string | null>;
   /** @internal Notes who made a token. False when they can no longer make one, which takes it back. */
   tokenMade?: (token: TokenRow, by: string) => Promise<boolean>;
+  /** @internal The ids of the tokens an account made, so a member sees and revokes only their own. */
+  tokensOf?: (by: string) => Promise<Set<string>>;
 }
 
 export type FetchHandler = (request: Request, context?: RequestContext) => Promise<Response>;
@@ -407,6 +409,8 @@ export function managePath(method: string, path: string): boolean {
   if (/^\/api\/sites\/[^/]+$/.test(path)) return method === "PATCH";
   return false;
 }
+/** The most a request body may be, as the Node adapter and the other languages cap every body. */
+const MAX_JSON_BYTES = 10 * 1024 * 1024;
 /** Where the tracker's click rules go; the script ships with this string in their place. */
 const RULES_PLACEHOLDER = '"__RUNLIGHT_RULES__"';
 /** Where the picker's one allowed receiver goes, the dashboard origin its ticket names. */
@@ -476,12 +480,13 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   const sessionScope = async (request: Request) => web ? web.signedIn(request) : null;
   // Requests from a member: full access apart from the install-wide controls.
   const members = new WeakSet<Request>();
-  /** The controls a member cannot change: the mail service and its keys, the assistant's settings, and deleting a site. */
+  /** The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key, and deleting a site. */
   const adminOnly = (path: string, method: string) =>
     (path === "/api/mail" && (method === "PUT" || method === "DELETE")) ||
     (path === "/api/assistant" && (method === "PUT" || method === "DELETE")) ||
     (path === "/api/assistant/limits" && method === "PUT") ||
     (path === "/api/assistant/models" && method === "POST") ||
+    (path === "/api/observe-key/new" && method === "POST") ||
     (/^\/api\/sites\/[^/]+$/.test(path) && method === "DELETE");
   // When each report's last sample went out, and the last test email.
   const sampleSent = new Map<string, number>();
@@ -601,7 +606,13 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   async function readJson(request: Request): Promise<Record<string, unknown> | Response> {
     // A form posted from another site cannot carry this content type without CORS.
     if (!isJson(request)) return coded("Send JSON", "send_json", 415);
-    const body = (await request.json().catch(() => null)) as unknown;
+    let body: unknown = null;
+    try {
+      body = await readJsonCapped(request, MAX_JSON_BYTES);
+    } catch (error) {
+      // Capped here too, since not every host caps a request body before it reaches the app.
+      if (error instanceof BodyTooLong) return coded("Send a smaller body", "body_too_large", 413);
+    }
     return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : coded("Send a JSON object", "send_object", 400);
   }
 
@@ -1177,10 +1188,18 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     return null;
   }
 
+  /** The tokens the account behind a request made: none when nothing notes who made what. */
+  async function ownTokens(request: Request): Promise<Set<string>> {
+    const by = (await accountOf?.(request)) ?? null;
+    return by && tokensOf ? tokensOf(by) : new Set();
+  }
+
   async function tokensApi(request: Request, path: string): Promise<Response> {
     await runlight.init();
     const view = (t: TokenRow) => ({ id: t.id, name: t.name, site: t.site, scope: t.scope, hint: t.hint, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt });
-    if (path === "/api/tokens" && request.method === "GET") return json({ tokens: (await runlight.store.tokens()).map(view) });
+    // A member makes tokens like anyone who manages sites, but sees and revokes only the ones they made.
+    const mine = members.has(request) ? await ownTokens(request) : null;
+    if (path === "/api/tokens" && request.method === "GET") return json({ tokens: (await runlight.store.tokens()).filter((t) => !mine || mine.has(t.id)).map(view) });
     if (path === "/api/tokens" && request.method === "POST") {
       const body = await readJson(request);
       if (body instanceof Response) return body;
@@ -1204,6 +1223,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     }
     const match = /^\/api\/tokens\/([a-f0-9]{24})$/.exec(path);
     if (match && request.method === "DELETE") {
+      if (mine && !mine.has(match[1]!)) return coded("Unknown token", "unknown_token", 404);
       return (await runlight.store.deleteToken(match[1]!)) ? json({ ok: true }) : coded("Unknown token", "unknown_token", 404);
     }
     return coded("Not found", "not_found", 404);
@@ -1620,7 +1640,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       }
     }
 
-    // Only the owner manages tokens: an API token cannot make or revoke one.
+    // Only people at the dashboard manage tokens, a member only their own: an API token cannot make or revoke one.
     if (path === "/api/tokens" || path.startsWith("/api/tokens/")) {
       const access = await canRead(request);
       if (access !== true) return denied(access);
@@ -1985,8 +2005,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       // One funnel at a time, so a page of funnels never takes every database connection at once.
       const rows = [];
       for (const funnel of funnels) {
-        const counts = await runlight.store.funnelCounts(query, funnel);
-        rows.push({ ...funnel, steps: funnel.steps.map((step, i) => ({ ...step, visits: counts[i]! })) });
+        const { counts, sampled } = await runlight.store.funnelCounts(query, funnel);
+        rows.push({ ...funnel, steps: funnel.steps.map((step, i) => ({ ...step, visits: counts[i]! })), ...(sampled ? { sampled: runlight.store.funnelVisits } : {}) });
       }
       return json({ site: site.id, range: rangeOut, funnels: rows });
     }
@@ -2055,6 +2075,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   const signOut = options.signOut ?? (web ? `${base}/logout` : undefined);
   const accountOf = options.accountOf ?? web?.accountOf;
   const tokenMade = options.tokenMade ?? (web ? (row: TokenRow, by: string) => web.tokenMade(row, by) : undefined);
+  const tokensOf = options.tokensOf ?? (web ? (by: string) => web.tokensOf(by) : undefined);
 
   const oauth = {
     runlight,
@@ -2073,6 +2094,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     if (base && url.pathname !== base && !url.pathname.startsWith(`${base}/`)) return coded("Not found", "not_found", 404);
     const path = url.pathname.slice(base.length) || "/";
 
+    // A body declared past the cap is refused before anything reads it, on hosts that do not cap bodies themselves.
+    if (Number(request.headers.get("content-length")) > MAX_JSON_BYTES) return coded("Send a smaller body", "body_too_large", 413);
     try {
       // Checked before any route, so a connected site's pass-through to its install is held to it too.
       if (adminOnly(path, request.method) && (await canRead(request)) === true && members.has(request)) {

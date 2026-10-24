@@ -101,6 +101,7 @@ export function ConversionsPanel({ view, funnelView, readOnly, onAdd }: { view: 
           <div class="funnel-block">
             <h3 class="funnel-name">{f.name}</h3>
             <FunnelBars funnel={f} />
+            {f.sampled ? <p class="field-hint">{t("funnels.sampled", { n: count(f.sampled) })}</p> : null}
           </div>
         ))}
       </section>

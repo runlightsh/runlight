@@ -16,6 +16,7 @@ export function AccountSheet({ me, onClose }: { me: Person; onClose: () => void 
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [again, setAgain] = useState("");
+  const [revoke, setRevoke] = useState(false);
   const score = strength(next, [me.email.split("@")[0]!, me.email]);
   const mismatch = again.length > 0 && again !== next;
   const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
@@ -25,12 +26,13 @@ export function AccountSheet({ me, onClose }: { me: Person; onClose: () => void 
     setState("saving");
     setError("");
     api
-      .changePassword(current, next)
+      .changePassword(current, next, revoke)
       .then(() => {
         setState("saved");
         setCurrent("");
         setNext("");
         setAgain("");
+        setRevoke(false);
       })
       .catch((err: Error) => {
         setError(err.message);
@@ -71,6 +73,7 @@ export function AccountSheet({ me, onClose }: { me: Person; onClose: () => void 
             <Secret class="value" autoComplete="new-password" required value={again} aria-invalid={mismatch} onInput={(e) => edit(setAgain, e)} />
             {mismatch ? <span class="field-hint field-bad">{t("account.mismatch")}</span> : null}
           </label>
+          {me.site ? null : <label class="invite-scope"><input type="checkbox" checked={revoke} onChange={(e) => setRevoke(e.currentTarget.checked)} />{t("account.revokeTokens")}</label>}
           <div class="settings-actions start">
             <button type="submit" class="solid" disabled={state === "saving" || !current || next.length < 10 || again !== next}>
               <Icon name="save" />

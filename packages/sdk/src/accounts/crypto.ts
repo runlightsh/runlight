@@ -87,7 +87,8 @@ function scryptCost(parts: string[]): ScryptCost | null {
   const [N, r, p] = parts.slice(1, 4).map(Number) as [number, number, number];
   const whole = (n: number, max: number) => Number.isInteger(n) && n >= 1 && n <= max;
   // N a power of two up to 2^20, and r and p small, so a stored hash cannot ask for a huge amount of memory or time.
-  if (!whole(N, 1 << 20) || N < 2 || (N & (N - 1)) !== 0 || !whole(r, 32) || !whole(p, 16)) return null;
+  // N must also be below 2^(16r), as scrypt itself requires, so a stored hash past that fails to match rather than throws.
+  if (!whole(N, 1 << 20) || N < 2 || (N & (N - 1)) !== 0 || !whole(r, 32) || !whole(p, 16) || Math.log2(N) >= 16 * r) return null;
   return { N, r, p };
 }
 

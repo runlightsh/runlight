@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { runlight } from "../src/index.js";
 import { sqlite } from "../src/stores/sqlite.js";
+import { Throttle } from "../src/accounts/auth.js";
 import { STORES, cleanup, freshStore, setup, type StoreKind } from "./helpers.js";
 
 after(cleanup);
@@ -349,4 +350,153 @@ test("audit 2026-10-16: N months back from a month's last days stays in that mon
 test("audit 2026-10-16: a CSV value with a semicolon or a tab is quoted, so no locale splits a formula out of it", async () => {
   const { csvRow } = await import("../src/zip.js");
   assert.equal(csvRow(["x;=1+1", "a\tb", "=1+1", "plain"]), `"x;=1+1","a\tb",'=1+1,plain`);
+});
+
+// The audit of 2026-10-23.
+const accountReq = (path: string, init: RequestInit = {}) => new Request(`https://example.com/runlight${path}`, init);
+const formPost = (fields: Record<string, string>, headers: Record<string, string> = {}) => ({
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+  body: new URLSearchParams(fields).toString(),
+});
+const cookieFrom = (response: Response) => (response.headers.get("set-cookie") ?? "").split(";")[0]!;
+
+/** An install with accounts: its owner, and a member who joined by invite. */
+async function withMember() {
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), secret: "k".repeat(64) });
+  const { handler } = rl.routes({ token: "app-token", accounts: true });
+  const json = (cookie: string, method: string, path: string, body?: unknown) =>
+    handler(accountReq(path, { method, headers: { cookie, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+  const owner = cookieFrom(await handler(accountReq("/setup", formPost({ code: "app-token", email: "jon@example.com", password: "a long password", again: "a long password" }))));
+  const invite = new URL(((await (await json(owner, "POST", "/api/people", { allSites: true, email: "mo@example.com", role: "member" })).json()) as any).link);
+  const member = cookieFrom(await handler(accountReq("/invite", formPost({ code: invite.searchParams.get("code")!, password: "a long password", again: "a long password" }))));
+  return { rl, handler, json, owner, member };
+}
+
+test("audit 2026-10-23: a member sees and revokes only the tokens they made, and cannot replace a site's agents key", async () => {
+  const { json, owner, member } = await withMember();
+  const make = async (cookie: string, name: string) => ((await (await json(cookie, "POST", "/api/tokens", { name })).json()) as any).token.id as string;
+  const owners = await make(owner, "Owner's");
+  const mine = await make(member, "Member's");
+  const listed = async (cookie: string) => (((await (await json(cookie, "GET", "/api/tokens")).json()) as any).tokens as Array<{ id: string }>).map((t) => t.id).sort();
+  assert.deepEqual(await listed(member), [mine]);
+  assert.deepEqual(await listed(owner), [owners, mine].sort(), "the owner sees every token");
+  assert.equal((await json(member, "DELETE", `/api/tokens/${owners}`)).status, 404, "the owner's token is not the member's to revoke");
+  assert.deepEqual(await listed(owner), [owners, mine].sort());
+  assert.equal((await json(member, "DELETE", `/api/tokens/${mine}`)).status, 200);
+  assert.equal((await json(member, "POST", "/api/observe-key/new?site=default", {})).status, 403);
+  assert.equal((await json(owner, "POST", "/api/observe-key/new?site=default", {})).status, 200);
+});
+
+test("audit 2026-10-23: signing out ends the account's sessions everywhere, and only from the dashboard's own pages", async () => {
+  const { handler, json, member } = await withMember();
+  const other = cookieFrom(await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }))));
+  assert.equal((await json(other, "GET", "/api/account")).status, 200);
+  const crossSite = await handler(accountReq("/logout", { headers: { cookie: member, "sec-fetch-site": "cross-site" } }));
+  assert.equal(crossSite.status, 403, "another site cannot sign anyone out");
+  assert.equal((await json(other, "GET", "/api/account")).status, 200);
+  const out = await handler(accountReq("/logout", { headers: { cookie: member, "sec-fetch-site": "same-origin" } }));
+  assert.equal(out.status, 303);
+  assert.equal((await json(member, "GET", "/api/account")).status, 401, "the cookie copied before stops working");
+  assert.equal((await json(other, "GET", "/api/account")).status, 401, "and so does the one in the other browser");
+  const back = cookieFrom(await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }))));
+  assert.equal((await json(back, "GET", "/api/account")).status, 200, "signing in again works");
+});
+
+test("audit 2026-10-23: the sign-in forms take a post only from their own pages", async () => {
+  const { handler } = await withMember();
+  for (const site of ["cross-site", "same-site"]) {
+    const refused = await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }, { "sec-fetch-site": site })));
+    assert.equal(refused.status, 403, site);
+    assert.equal(refused.headers.get("set-cookie"), null, `${site}: no session is planted`);
+  }
+  const own = await handler(accountReq("/login", formPost({ email: "mo@example.com", password: "a long password", next: "/runlight/" }, { "sec-fetch-site": "same-origin" })));
+  assert.equal(own.status, 303);
+});
+
+test("audit 2026-10-23: a new password can take back the tokens the account made", async () => {
+  const { json, member } = await withMember();
+  await json(member, "POST", "/api/tokens", { name: "Kept" });
+  const changed = await json(member, "POST", "/api/account/password", { current: "a long password", next: "another long password" });
+  const fresh = cookieFrom(changed);
+  const kept = await json(fresh, "GET", "/api/tokens");
+  assert.equal(kept.status, 200, await kept.clone().text());
+  assert.equal(((await kept.json()) as any).tokens.length, 1, "kept unless asked");
+  const latest = cookieFrom(await json(fresh, "POST", "/api/account/password", { current: "another long password", next: "a third long password", revokeTokens: true }));
+  assert.equal(((await (await json(latest, "GET", "/api/tokens")).json()) as any).tokens.length, 0);
+});
+
+test("audit 2026-10-23: a flood of made-up names cannot reset the count of one close to its limit", async () => {
+  const throttle = new Throttle(3);
+  const now = Date.now();
+  assert.equal(await throttle.take("target", now), true);
+  assert.equal(await throttle.take("target", now), true);
+  for (let i = 0; i < 10_050; i++) await throttle.take(`made-up-${i}`, now);
+  assert.equal(await throttle.take("target", now), true);
+  assert.equal(await throttle.take("target", now), false, "the target's earlier tries still count");
+});
+
+test("audit 2026-10-23: yesterday's salt leaves memory when it leaves the store, on the first hit after midnight", async () => {
+  const t = setup("sqlite");
+  await t.send({ k: "pageview", u: "https://example.com/" });
+  t.advance(13 * 3_600_000);
+  await t.send({ k: "pageview", u: "https://example.com/" }, { ip: "203.0.113.9" });
+  const cached = (t.rl as any).salts.get("UTC") as { day: string; yesterday: string | null };
+  assert.equal(cached.day, "2026-10-07");
+  assert.equal(cached.yesterday, null, "no visit was left open, so yesterday's salt is gone from here too");
+});
+
+test("audit 2026-10-23: a hit tried again after the store was busy counts once", async () => {
+  const t = setup("sqlite");
+  const store = t.rl.store;
+  const insert = store.insertEvent.bind(store);
+  let fail = 2;
+  store.insertEvent = async (row) => {
+    if (fail-- > 0) throw new Error("SQLITE_BUSY: database is locked");
+    return insert(row);
+  };
+  await t.send({ k: "pageview", u: "https://example.com/", i: "p1" });
+  fail = 1;
+  await t.send({ k: "engagement", u: "https://example.com/", i: "p1", e: 5000 });
+  const [visit] = await store.db.all<{ pageviews: number; engaged_ms: number }>(`SELECT pageviews, engaged_ms FROM rl_sessions`);
+  assert.equal(Number(visit!.pageviews), 1);
+  assert.equal(Number(visit!.engaged_ms), 5000);
+  assert.equal((await store.db.all(`SELECT id FROM rl_events WHERE kind = 'pageview'`)).length, 1);
+});
+
+test("audit 2026-10-23: a funnel over more visits than the cap counts the newest and says so", async () => {
+  const t = setup("sqlite");
+  t.rl.store.funnelVisits = 2;
+  for (const ip of ["203.0.113.1", "203.0.113.2", "203.0.113.3"]) {
+    await t.send({ k: "pageview", u: "https://example.com/pricing" }, { ip });
+    t.advance(60_000);
+  }
+  await t.routes.handler(new Request("https://example.com/runlight/api/funnels?site=default", { method: "POST", headers: auth, body: JSON.stringify({ name: "F", steps: [{ kind: "page", match: "/pricing" }, { kind: "page", match: "/thanks" }] }) }));
+  const [funnel] = (await t.get("/api/funnels?period=today")).funnels;
+  assert.equal(funnel.sampled, 2);
+  assert.equal(funnel.steps[0].visits, 2);
+  t.rl.store.funnelVisits = 10;
+  assert.equal((await t.get("/api/funnels?period=today")).funnels[0].sampled, undefined);
+});
+
+test("audit 2026-10-23: a prop named __proto__ is kept, and a body past the cap is refused before it is read", async () => {
+  const t = setup("sqlite");
+  await t.send({ k: "event", u: "https://example.com/", n: "Odd", p: JSON.parse('{"__proto__":"x","plain":"y"}') });
+  const [row] = await t.rl.store.db.all<{ props: string }>(`SELECT props FROM rl_events WHERE name = 'Odd'`);
+  assert.deepEqual(JSON.parse(row!.props), JSON.parse('{"__proto__":"x","plain":"y"}'));
+  const big = await t.routes.handler(new Request("https://example.com/runlight/api/goals?site=default", { method: "POST", headers: { ...auth, "content-length": String(11 * 1024 * 1024) }, body: "{}" }));
+  assert.equal(big.status, 413);
+});
+
+test("audit 2026-10-23: an automatic link event keeps its link without the query string or fragment", async () => {
+  const t = setup("sqlite");
+  await t.send({ k: "event", u: "https://example.com/", n: "Outbound link", p: { url: "https://other.example/reset?token=abc&email=a@b.example#top" } });
+  await t.send({ k: "event", u: "https://example.com/", n: "File download", p: { url: "https://example.com/a.pdf?sig=x" } });
+  await t.send({ k: "event", u: "https://example.com/", n: "Signup", p: { url: "https://example.com/?plan=pro" } });
+  const rows = await t.rl.store.db.all<{ name: string; props: string }>(`SELECT name, props FROM rl_events ORDER BY name`);
+  assert.deepEqual(rows.map((r) => [r.name, JSON.parse(r.props).url]), [
+    ["File download", "https://example.com/a.pdf"],
+    ["Outbound link", "https://other.example/reset"],
+    ["Signup", "https://example.com/?plan=pro"],
+  ]);
 });

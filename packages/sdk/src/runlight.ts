@@ -6,7 +6,7 @@ import { buildReport, lastPeriod } from "./reports.js";
 import { parsePayload, MAX_BODY, type Payload } from "./payload.js";
 import { Links } from "./links.js";
 import { PROVIDERS, type AssistantSettings } from "./assistant.js";
-import { readJsonCapped } from "./body.js";
+import { readJsonCapped, readTextCapped } from "./body.js";
 import { installAddress, installFetch, metadataHost, publicAddress } from "./safefetch.js";
 import { RateLimit } from "./limit.js";
 import { decodePart } from "./path.js";
@@ -47,9 +47,12 @@ export interface RunlightOptions {
    * Read the client IP from forwarding headers: the last X-Forwarded-For
    * entry, which the nearest proxy wrote, then X-Real-IP, then
    * CF-Connecting-IP. Name one of them to read only that header, such as
-   * "cf-connecting-ip" behind Cloudflare and another proxy. Default true:
-   * analytics needs the visitor's address, and most apps sit behind a proxy.
-   * False reads only the socket's address, for an app nothing sits in front of.
+   * "cf-connecting-ip" behind Cloudflare and another proxy. Left out, the
+   * headers count only on a connection from this computer or a private
+   * network, where proxies and load balancers connect from, so a client that
+   * reaches the app straight from the internet cannot choose its own address.
+   * True reads them from anywhere, for a CDN that connects from public
+   * addresses. False reads only the socket's address.
    */
   trustProxy?: boolean | "x-forwarded-for" | "x-real-ip" | "cf-connecting-ip";
   /** Where short links on the app's own domain live, as `{linkPath}/{slug}`. Default "/go". */
@@ -217,6 +220,17 @@ interface WaitingHit {
   hit: Hit;
   visitors: string[];
   visit: VisitColumns | null;
+  done?: Progress;
+}
+
+/**
+ * How far recording a hit got: its visit, and which of its writes went in. A hit tried again after a write
+ * failed skips the ones before it, so a visit's counts never take the same hit twice.
+ */
+interface Progress {
+  session?: { id: string; visitor: string };
+  touched?: true;
+  engaged?: true;
 }
 
 /** Runs `fn` when first asked and gives every caller its answer, or runs it again after it failed. */
@@ -241,7 +255,9 @@ export class Runlight {
   private overrides = new Map<string, SiteOverrides>();
   private readonly geo: GeoLookup | undefined;
   private readonly trustProxy: boolean | "x-forwarded-for" | "x-real-ip" | "cf-connecting-ip";
-  /** True until trustProxy left at its default has been seen answering a public address directly, and warned about once. */
+  /** True when trustProxy was left at its default, which believes forwarding headers only from a private address. */
+  private readonly trustPrivate: boolean;
+  /** True until a public address has sent forwarding headers that the default did not believe, and been warned about once. */
   private warnDirect: boolean;
   private readonly limit: RateLimit | null;
   readonly now: () => number;
@@ -296,7 +312,8 @@ export class Runlight {
     }
     this.geo = options.geo;
     this.trustProxy = options.trustProxy ?? true;
-    this.warnDirect = options.trustProxy === undefined;
+    this.trustPrivate = options.trustProxy === undefined;
+    this.warnDirect = this.trustPrivate;
     const perMinute = options.rateLimit ?? 120;
     // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
     this.limit = perMinute === false || !(Number(perMinute) > 0) ? null : new RateLimit(Number(perMinute), () => this.now());
@@ -896,22 +913,34 @@ export class Runlight {
    * Cloudflare before nginx) reads only that one.
    */
   clientIp(request: Request, context: RequestContext = {}): string {
-    if (this.trustProxy) {
+    if (this.trusts(request, context)) {
       const h = request.headers;
       const last = (name: string) => h.get(name)?.split(",").map((x) => x.trim()).filter(Boolean).pop();
       const forwarded =
-        this.trustProxy === true ? (last("x-forwarded-for") ?? h.get("x-real-ip") ?? h.get("cf-connecting-ip")) : this.trustProxy === "x-forwarded-for" ? last("x-forwarded-for") : h.get(this.trustProxy);
+        this.trustProxy === true ? (last("x-forwarded-for") ?? h.get("x-real-ip") ?? h.get("cf-connecting-ip")) : this.trustProxy === "x-forwarded-for" ? last("x-forwarded-for") : h.get(this.trustProxy as string);
       if (forwarded?.trim()) return forwarded.trim();
-      // A public address with no forwarding header means nothing sits in front, and then any client
-      // could name its own address in one. Said once, only when trustProxy was left at its default.
-      if (this.warnDirect && context.ip && publicAddress(context.ip)) {
-        this.warnDirect = false;
-        console.warn(
-          "Runlight: a request came straight from a public address with no proxy in front, but trustProxy is on by default, so a client could send X-Forwarded-For and choose its own address, getting round the rate limits. Set trustProxy: false when nothing sits in front of this server, or put a proxy in front that sets the header.",
-        );
-      }
     }
     return context.ip ?? "";
+  }
+
+  /**
+   * Whether a request's forwarding headers count. Left at its default, trustProxy believes them only on a
+   * connection from this computer or a private network, or one whose address the app did not pass on (a
+   * hosting platform's function), since a client reaching the server straight from the internet could write
+   * them itself.
+   */
+  private trusts(request: Request, context: RequestContext): boolean {
+    if (!this.trustProxy) return false;
+    if (!this.trustPrivate || !context.ip || !publicAddress(context.ip)) return true;
+    // Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
+    const h = request.headers;
+    if (this.warnDirect && (h.has("x-forwarded-for") || h.has("x-real-ip") || h.has("cf-connecting-ip"))) {
+      this.warnDirect = false;
+      console.warn(
+        "Runlight: a request came from a public address with forwarding headers, which are not believed by default, since a client could write them itself and choose its own address. Behind a CDN that connects from public addresses, such as Cloudflare in front of this server, set trustProxy to the header it sets (cf-connecting-ip) or to true.",
+      );
+    }
+    return false;
   }
 
   /**
@@ -926,15 +955,16 @@ export class Runlight {
     const today = await this.store.salt(day, randomSalt());
     const yesterday = await this.store.saltIfExists(addDays(day, -1));
     const salts = { day, today, yesterday };
+    // Kept before old salts go, so dropping yesterday's from the store drops it from here too.
+    this.salts.set(timezone, salts);
     try {
       await this.dropOldSalts(now);
     } catch (error) {
+      this.salts.delete(timezone);
       // ClickHouse cannot say yet whether yesterday's visits are over, so a hit can still wait for it; the
       // next hit asks again, and old salts go once it answers.
       if (!this.store.waitable(error)) throw error;
-      return salts;
     }
-    this.salts.set(timezone, salts);
     return salts;
   }
 
@@ -962,12 +992,12 @@ export class Runlight {
     await this.store.dropSaltsExcept([...needed]);
   }
 
-  /** Handles one tracker request. Always resolves; bad input is dropped quietly. */
   /** The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is. */
-  private forwardedHost(request: Request): string | null {
-    return this.trustProxy ? request.headers.get("x-forwarded-host") : null;
+  private forwardedHost(request: Request, context: RequestContext = {}): string | null {
+    return this.trusts(request, context) ? request.headers.get("x-forwarded-host") : null;
   }
 
+  /** Handles one tracker request. Always resolves; bad input is dropped quietly. */
   async collect(request: Request, context: RequestContext = {}): Promise<void> {
     const length = Number(request.headers.get("content-length") ?? 0);
     if (length > MAX_BODY) return;
@@ -989,17 +1019,18 @@ export class Runlight {
     // another process writing the SQLite file) gets it a little later, at the time it arrived.
     const now = this.now();
     let ready: { site: SiteRow; hit: Hit; sender: Sender } | null = null;
+    const done: Progress = {};
     for (let attempt = 1; ; attempt++) {
       try {
         ready ??= await this.prepare(payload, request, context, now);
         if (!ready) return;
         this.waiting?.start();
         // Behind hits already waiting for ClickHouse, so a visitor's hits stay in order.
-        if (this.waiting?.active) return await this.keep(ready.hit, ready.sender);
-        return await this.record(ready.site, ready.hit, ready.sender);
+        if (this.waiting?.active) return await this.keep(ready.hit, ready.sender, done);
+        return await this.record(ready.site, ready.hit, ready.sender, done);
       } catch (error) {
         // A ClickHouse still down or busy after that: the hit waits in the other store until it is back.
-        if (ready && this.waiting && this.store.waitable(error) && (attempt >= 3 || !busy(error))) return this.keep(ready.hit, ready.sender, error);
+        if (ready && this.waiting && this.store.waitable(error) && (attempt >= 3 || !busy(error))) return this.keep(ready.hit, ready.sender, done, error);
         if (attempt >= 3 || !busy(error)) throw error;
         await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
       }
@@ -1035,8 +1066,9 @@ export class Runlight {
   }
 
   /** Keeps a hit to send once ClickHouse can take it, or throws `error` when too many wait already. */
-  private async keep(hit: Hit, sender: Sender, error?: unknown): Promise<void> {
-    const kept = await this.waiting!.add(hit.at, { hit, visitors: await sender.visitors(), visit: hit.kind === "engagement" ? null : await sender.visit() });
+  private async keep(hit: Hit, sender: Sender, done: Progress, error?: unknown): Promise<void> {
+    const visit = hit.kind === "engagement" || done.session ? null : await sender.visit();
+    const kept = await this.waiting!.add(hit.at, { hit, visitors: await sender.visitors(), visit, ...(Object.keys(done).length ? { done } : {}) });
     if (!kept) throw error ?? new Error("Runlight: too many hits are waiting for ClickHouse, so this one was dropped");
   }
 
@@ -1052,34 +1084,43 @@ export class Runlight {
   private async recordWaiting(w: WaitingHit): Promise<void> {
     const site = this.site(w.hit.site);
     if (!site) return;
-    await this.record(site, w.hit, {
-      visitors: async () => w.visitors,
-      visit: async () => {
-        if (!w.visit) throw new Error("Runlight: a waiting hit has no visit to start");
-        return w.visit;
+    await this.record(
+      site,
+      w.hit,
+      {
+        visitors: async () => w.visitors,
+        visit: async () => {
+          if (!w.visit) throw new Error("Runlight: a waiting hit has no visit to start");
+          return w.visit;
+        },
       },
-    });
+      (w.done ??= {}),
+    );
   }
 
-  private async record(site: SiteRow, hit: Hit, sender: Sender): Promise<void> {
-    if (hit.kind === "engagement") return this.engagement(site, hit);
+  private async record(site: SiteRow, hit: Hit, sender: Sender, done: Progress = {}): Promise<void> {
+    if (hit.kind === "engagement") return this.engagement(site, hit, done);
     const now = hit.at;
-    let session: { id: string; visitor: string } | null = null;
+    let session: { id: string; visitor: string } | null = done.session ?? null;
     let reopen = true;
     if (hit.kind === "event" && hit.pageviewId) {
       const pageview = await this.store.pageview(site.id, hit.pageviewId, now - EVENT_TAIL_MS);
       // An event joins its page's visit unless that visit began longer ago than reports look for its rows
       // (a tab left open for days); it then starts a visit of its own, as any later activity would.
       if (pageview && now - pageview.startedAt < EVENT_TAIL_MS) {
-        session = { id: pageview.session, visitor: pageview.visitor };
+        session ??= { id: pageview.session, visitor: pageview.visitor };
         // A visit idle past the 30 minutes stays ended: the event counts in it without reopening it.
         reopen = now - pageview.lastAt <= SESSION_IDLE_MS;
         if (now - pageview.startedAt > 3_600_000) await this.store.touchedOldVisit(site.id, pageview.startedAt, now - ROLLUP_DELAY_MS + 3_600_000);
       }
     }
     session ??= await this.sessionFor(site, sender, now);
+    done.session = session;
 
-    await this.store.touchSession(session.id, now, hit.kind, hit.path, reopen);
+    if (!done.touched) {
+      await this.store.touchSession(session.id, now, hit.kind, hit.path, reopen);
+      done.touched = true;
+    }
     await this.store.insertEvent({
       site: site.id,
       ts: now,
@@ -1127,7 +1168,7 @@ export class Runlight {
           },
           client.screenWidth,
         );
-        const location = await locate(request.headers, await ip(), this.geo, Boolean(this.trustProxy));
+        const location = await locate(request.headers, await ip(), this.geo, this.trusts(request, context));
         return {
           hostname: page.hostname,
           ...attribute(page, referrer, site.hostnames),
@@ -1225,7 +1266,7 @@ export class Runlight {
   async linkDomainResponse(request: Request, context: RequestContext = {}): Promise<Response | null> {
     const url = new URL(request.url);
     // A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
-    const given = this.forwardedHost(request) ?? request.headers.get("host") ?? url.host;
+    const given = this.forwardedHost(request, context) ?? request.headers.get("host") ?? url.host;
     const host = stripWww(given.split(",")[0]!.trim().split(":")[0] ?? "");
     if (!(await this.linkDomainSet()).has(host)) return null;
     // Lets the dashboard confirm that requests to this domain reach Runlight.
@@ -1253,7 +1294,7 @@ export class Runlight {
   async redirect(request: Request, slug: string, domain: string, context: RequestContext = {}): Promise<Response | null> {
     await this.init();
     const url = new URL(request.url);
-    const host = stripWww((this.forwardedHost(request) ?? request.headers.get("host") ?? url.host).split(":")[0] ?? "");
+    const host = stripWww((this.forwardedHost(request, context) ?? request.headers.get("host") ?? url.host).split(":")[0] ?? "");
     const link = await this.store.linkBySlug(slug);
     // The app's own link path answers for every link, so a link whose domain
     // was removed keeps working; a link domain answers only for its own links.
@@ -1290,13 +1331,16 @@ export class Runlight {
     return new Response(null, { status: 302, headers: { location: link.url, "cache-control": "no-store", "referrer-policy": "no-referrer-when-downgrade" } });
   }
 
-  private async engagement(site: SiteRow, hit: Hit): Promise<void> {
+  private async engagement(site: SiteRow, hit: Hit, done: Progress): Promise<void> {
     if (hit.engagedMs <= 0) return;
     const now = hit.at;
     const pageview = await this.store.pageview(site.id, hit.pageviewId, now - EVENT_TAIL_MS);
     // Reports look for a visit's rows only so long after it began, so later time on it is let go.
     if (!pageview || now - pageview.startedAt >= EVENT_TAIL_MS) return;
-    await this.store.addEngagement(pageview.session, hit.engagedMs);
+    if (!done.engaged) {
+      await this.store.addEngagement(pageview.session, hit.engagedMs);
+      done.engaged = true;
+    }
     // Only a visit that began more than an hour ago can belong to a day that is already added up.
     if (now - pageview.startedAt > 3_600_000) await this.store.touchedOldVisit(site.id, pageview.startedAt, now - ROLLUP_DELAY_MS + 3_600_000);
     await this.store.insertEvent({
@@ -1420,31 +1464,7 @@ function busy(error: unknown): boolean {
   return /timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked|ClickHouse is busy|could not reach ClickHouse/i.test(String((error as Error)?.message ?? error));
 }
 
-/** A request body as text, or null when it is longer than `max` bytes. */
+/** A request body as text, or null when it is longer than `max` bytes or breaks off. */
 async function readCapped(request: Request, max: number): Promise<string | null> {
-  if (!request.body) return "";
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.length;
-      if (size > max) {
-        await reader.cancel().catch(() => {});
-        return null;
-      }
-      chunks.push(value);
-    }
-  } catch {
-    return null;
-  }
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const c of chunks) {
-    all.set(c, at);
-    at += c.length;
-  }
-  return new TextDecoder().decode(all);
+  return readTextCapped(request, max).catch(() => null);
 }

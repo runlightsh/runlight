@@ -2,11 +2,11 @@
 export class BodyTooLong extends Error {}
 
 /**
- * Reads a response body as text, up to maxBytes. Past that it stops reading,
- * cancels the rest, and throws BodyTooLong, so an install or a page that
- * answers without end never fills memory.
+ * Reads a response's body, or a request's, as text, up to maxBytes. Past that
+ * it stops reading, cancels the rest, and throws BodyTooLong, so an install or
+ * a page that answers without end never fills memory.
  */
-export async function readTextCapped(response: Response, maxBytes: number): Promise<string> {
+export async function readTextCapped(response: Pick<Response, "body" | "headers">, maxBytes: number): Promise<string> {
   if (!response.body) return "";
   const declared = Number(response.headers.get("content-length"));
   if (declared > maxBytes) {
@@ -36,6 +36,6 @@ export async function readTextCapped(response: Response, maxBytes: number): Prom
 }
 
 /** Reads a response body as JSON, up to maxBytes, as readTextCapped does. */
-export async function readJsonCapped<T = unknown>(response: Response, maxBytes: number): Promise<T> {
+export async function readJsonCapped<T = unknown>(response: Pick<Response, "body" | "headers">, maxBytes: number): Promise<T> {
   return JSON.parse(await readTextCapped(response, maxBytes)) as T;
 }
