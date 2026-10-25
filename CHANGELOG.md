@@ -8,6 +8,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 - The dashboard's footer shows the install's version beside Powered by Runlight. A shared dashboard and the dashboard inside a CMS leave it out.
 
+### Fixed
+
+- The Go, Python, Ruby, and Rust packages take the time zone database's old names (Asia/Calcutta, US/Eastern, Europe/Kiev, and the rest of its backward file) on systems that ship them apart, as Debian and Ubuntu 26.04 do in tzdata-legacy, where before a site in one of those zones was refused.
+
 ## 0.3.0 - 2026-10-24
 
 ### Changed

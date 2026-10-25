@@ -74,9 +74,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Ubuntu 26.04 moved the time zone database's old names (Asia/Calcutta, US/Eastern) into
-      # tzdata-legacy, and the zone tests read every name the SDK accepts from the system's database.
-      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tzdata-legacy
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
