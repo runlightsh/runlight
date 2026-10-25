@@ -1369,6 +1369,11 @@ button.name:hover {
   text-decoration-color: currentColor;
 }
 
+/* The install's version, close beside the link rather than a whole gap away. */
+.powered-version {
+  margin-left: -8px;
+}
+
 .foot-range {
   flex: 1;
   text-align: right;
