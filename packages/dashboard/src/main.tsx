@@ -217,6 +217,11 @@ function App() {
     if (accounts) api.account().then((r) => setMe(r.account)).catch(() => {});
   };
   useEffect(refreshMe, []);
+  /** The install's version, beside Powered by Runlight; a shared dashboard does not tell it. */
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    if (!shared) api.about().then((r) => setVersion(r.version)).catch(() => {});
+  }, []);
   // Without accounts (an app's own install) whoever signs in owns it; with them, only once the account says so.
   // The owner and admins set up the assistant; members and viewers use it.
   const isOwner = accounts ? me?.role === "owner" || me?.role === "admin" : true;
@@ -659,6 +664,7 @@ function App() {
           </svg>
           {rich("foot.powered", { name: <span>Runlight</span> })}
         </a>
+        {version ? <span class="powered-version">v{version}</span> : null}
         <span class="foot-range">{stats ? `${rangeText(stats.range.from, stats.range.to)} · ${stats.range.timezone}` : ""}</span>
         <label class="language">
           <span class="visually-hidden">{t("foot.language")}</span>

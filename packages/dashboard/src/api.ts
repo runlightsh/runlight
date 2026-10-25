@@ -536,6 +536,12 @@ export const api = {
     get<{ domain: string; working: boolean; reason: string; code?: string; params?: Record<string, string>; target?: { host: string; addresses: string[] } }>(`link-domains/${encodeURIComponent(domain)}/check`, new URLSearchParams(site ? { site } : {})),
   removeLinkDomain: (site: string, domain: string) => del(`link-domains/${encodeURIComponent(domain)}${siteQuery(site)}`),
   updateSite: (id: string, patch: { name?: string; timezone?: string; hostnames?: string; retentionMonths?: number | null }) => send<{ site: Site }>("PATCH", `sites/${encodeURIComponent(id)}`, patch),
+  /** The install's own version, as GET <base>/api reports it. */
+  about: async () => {
+    const response = await reach(`${base}/api`, { credentials: "same-origin" });
+    if (!response.ok) throw await failure(response);
+    return (await response.json()) as { name: string; version: string; api: number };
+  },
   sites: () =>
     get<{ sites: Site[]; managed?: boolean; moving?: { through: number } }>("sites", new URLSearchParams()).then((r) => {
       install.managed = Boolean(r.managed);
