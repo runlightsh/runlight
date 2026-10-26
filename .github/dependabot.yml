@@ -60,6 +60,11 @@ updates:
     directories: ["/packages/go", "/packages/go/chi", "/packages/go/echo", "/packages/go/cmd/runlight", "/packages/go/dbtest"]
     schedule:
       interval: weekly
+    # modernc.org/sqlite 1.60 and later need Go 1.26, and Runlight still supports
+    # Go 1.25, so it stays on 1.59 until that support ends.
+    ignore:
+      - dependency-name: modernc.org/sqlite
+        versions: [">= 1.60.0"]
     groups:
       gomod:
         patterns: ["*"]
