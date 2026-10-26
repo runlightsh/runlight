@@ -1,7 +1,7 @@
 //! Amazon SES (API v2) with a hand-rolled Signature Version 4, so there is no
 //! AWS SDK to install. https://docs.aws.amazon.com/IAM/latest/UserGuide/create-signed-request.html
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 
 use super::transports::{MailConfig, MailError, Message, get_or_empty, mail_error, service_message};
 use crate::goals::CodedError;

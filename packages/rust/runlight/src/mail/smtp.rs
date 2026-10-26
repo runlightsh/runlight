@@ -182,7 +182,9 @@ impl Conn {
 }
 
 #[cfg(feature = "transport")]
-fn tls_config() -> Result<std::sync::Arc<tokio_rustls::rustls::ClientConfig>, String> {
+/// TLS for every connection Runlight makes: rustls on ring, checked against the platform's roots. The default
+/// Fetcher's reqwest client uses it too.
+pub(crate) fn tls_config() -> Result<std::sync::Arc<tokio_rustls::rustls::ClientConfig>, String> {
     use rustls_platform_verifier::BuilderVerifierExt;
     use std::sync::{Arc, OnceLock};
     use tokio_rustls::rustls;
@@ -194,6 +196,7 @@ fn tls_config() -> Result<std::sync::Arc<tokio_rustls::rustls::ClientConfig>, St
                 .with_safe_default_protocol_versions()
                 .map_err(|e| e.to_string())?
                 .with_platform_verifier()
+                .map_err(|e| e.to_string())?
                 .with_no_client_auth();
             Ok(Arc::new(config))
         })

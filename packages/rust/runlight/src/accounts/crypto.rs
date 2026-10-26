@@ -5,7 +5,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::aes::Aes256;
-use aes_gcm::aes::cipher::{BlockEncrypt, generic_array::GenericArray};
+use aes_gcm::aes::cipher::{Array, BlockCipherEncrypt};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -109,12 +109,12 @@ pub fn hmac(hash: HmacHash, key: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoEr
     }
     Ok(match hash {
         HmacHash::Sha1 => {
-            let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(key).expect("HMAC takes any key");
+            let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(key).expect("HMAC takes any key");
             mac.update(data);
             mac.finalize().into_bytes().to_vec()
         }
         HmacHash::Sha256 => {
-            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key");
+            let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes any key");
             mac.update(data);
             mac.finalize().into_bytes().to_vec()
         }
@@ -160,7 +160,7 @@ pub fn scrypt_derive(password: &[u8], salt: &[u8], n: u64, r: u32, p: u32, lengt
     if n < 2 || !n.is_power_of_two() || length == 0 {
         return None;
     }
-    let params = scrypt::Params::new(n.trailing_zeros() as u8, r, p, 32).ok()?;
+    let params = scrypt::Params::new(n.trailing_zeros() as u8, r, p).ok()?;
     let mut out = vec![0u8; length];
     scrypt::scrypt(password, salt, &params, &mut out).ok()?;
     Some(out)
@@ -273,7 +273,9 @@ pub fn seal_text(text: &str, secret: &str) -> String {
 #[doc(hidden)]
 pub fn seal_text_with_iv(text: &str, secret: &str, iv: &[u8]) -> String {
     let cipher = Aes256Gcm::new_from_slice(&seal_key(secret)).expect("a 32-byte key");
-    let out = cipher.encrypt(Nonce::from_slice(iv), text.as_bytes()).expect("AES-GCM seals any text");
+    let out = cipher
+        .encrypt(&Nonce::try_from(iv).expect("a twelve-byte IV"), text.as_bytes())
+        .expect("AES-GCM seals any text");
     let (body, tag) = out.split_at(out.len() - 16);
     format!("{}.{}.{}", base64url(iv), base64url(body), base64url(tag))
 }
@@ -298,7 +300,7 @@ pub fn unseal_text(sealed: &str, secret: &str) -> Option<String> {
     let key = seal_key(secret);
     let plain = if iv.len() == 12 {
         let cipher = Aes256Gcm::new_from_slice(&key).expect("a 32-byte key");
-        cipher.decrypt(Nonce::from_slice(&iv), Payload { msg: &joined, aad: &[] }).ok()?
+        cipher.decrypt(&Nonce::try_from(iv.as_slice()).ok()?, Payload { msg: &joined, aad: &[] }).ok()?
     } else {
         open_long_iv(&key, &iv, &joined)?
     };
@@ -310,20 +312,20 @@ pub fn unseal_text(sealed: &str, secret: &str) -> Option<String> {
 fn open_long_iv(key: &[u8], iv: &[u8], joined: &[u8]) -> Option<Vec<u8>> {
     let aes = Aes256::new_from_slice(key).ok()?;
     let encrypt = |block: [u8; 16]| {
-        let mut b = GenericArray::from(block);
+        let mut b = Array::from(block);
         aes.encrypt_block(&mut b);
         <[u8; 16]>::from(b)
     };
     let h = encrypt([0u8; 16]);
     let ghash = |chunks: &[&[u8]], lengths: [u64; 2]| {
-        let mut g = GHash::new(&GenericArray::from(h));
+        let mut g = GHash::new(&Array::from(h));
         for chunk in chunks {
             g.update_padded(chunk);
         }
         let mut last = [0u8; 16];
         last[..8].copy_from_slice(&lengths[0].to_be_bytes());
         last[8..].copy_from_slice(&lengths[1].to_be_bytes());
-        g.update(&[GenericArray::from(last)]);
+        g.update(&[Array::from(last)]);
         <[u8; 16]>::from(g.finalize())
     };
     let j0 = ghash(&[iv], [0, iv.len() as u64 * 8]);

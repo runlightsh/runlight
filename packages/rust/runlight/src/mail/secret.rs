@@ -47,8 +47,9 @@ pub fn seal(value: &str, secret: Option<&str>) -> String {
         _ => return format!("plain:{value}"),
     };
     let iv = crate::hash::random_bytes(12);
-    let data =
-        key_for(secret).encrypt(Nonce::from_slice(&iv), value.as_bytes()).expect("AES-GCM seals any value under 64 GB");
+    let data = key_for(secret)
+        .encrypt(&Nonce::try_from(iv.as_slice()).expect("twelve random bytes"), value.as_bytes())
+        .expect("AES-GCM seals any value under 64 GB");
     format!("v1:{}:{}", STANDARD.encode(&iv), STANDARD.encode(&data))
 }
 
@@ -71,7 +72,7 @@ pub fn unseal(sealed: &str, secret: Option<&str>) -> Option<String> {
     if iv.len() != 12 {
         return None;
     }
-    let plain = key_for(secret).decrypt(Nonce::from_slice(&iv), data.as_slice()).ok()?;
+    let plain = key_for(secret).decrypt(&Nonce::try_from(iv.as_slice()).ok()?, data.as_slice()).ok()?;
     // TextDecoder: a byte order mark goes, and bytes that are not UTF-8 become U+FFFD.
     let plain = plain.strip_prefix(&[0xef, 0xbb, 0xbf][..]).unwrap_or(&plain);
     Some(String::from_utf8_lossy(plain).into_owned())
