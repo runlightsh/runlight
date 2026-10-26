@@ -11,6 +11,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Fixed
 
 - The Go, Python, Ruby, and Rust packages take the time zone database's old names (Asia/Calcutta, US/Eastern, Europe/Kiev, and the rest of its backward file) on systems that ship them apart, as Debian and Ubuntu 26.04 do in tzdata-legacy, where before a site in one of those zones was refused.
+- The WordPress plugin's Connect button works again: it stopped with a fatal error before reaching the Runlight. The address the Runlight sends the admin back to now carries a WordPress nonce too, checked beside the OAuth state.
 
 ## 0.3.0 - 2026-10-24
 
