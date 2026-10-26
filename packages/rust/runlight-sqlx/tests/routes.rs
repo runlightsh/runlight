@@ -222,6 +222,43 @@ async fn inside_a_cms_the_dashboard_names_it_and_its_own_admin_may_frame_the_who
 }
 
 #[tokio::test]
+async fn an_apps_csrf_token_is_printed_in_the_dashboard_and_the_consent_form_asked_for_each_time_and_only_when_given() {
+    let made = Arc::new(AtomicI64::new(0));
+    let pages = async |csrf: Option<runlight::routes::Csrf>| {
+        let rl = runlight().await;
+        let routes = rl.routes(RoutesOptions { token: TokenOption::Open, csrf, ..RoutesOptions::default() }).unwrap();
+        let text = |response: Response| String::from_utf8(response.body).unwrap();
+        let dashboard = text(routes.handle(Request::get(format!("{APP}/runlight/"))).await);
+        let registered = routes
+            .handle(call(
+                "POST",
+                "/runlight/oauth/register",
+                r#"{"client_name":"App","redirect_uris":["https://app.example/cb"]}"#,
+                "",
+            ))
+            .await;
+        let client_id = registered.json_body().unwrap().get("client_id").and_then(Value::as_str).unwrap().to_string();
+        let params = runlight::http::SearchParams::from_pairs([
+            ("response_type", "code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", "https://app.example/cb"),
+            ("code_challenge", "a".repeat(43).as_str()),
+            ("code_challenge_method", "S256"),
+        ])
+        .to_string();
+        let consent = text(routes.handle(Request::get(format!("{APP}/runlight/oauth/authorize?{params}"))).await);
+        (dashboard, consent)
+    };
+    let (dashboard, consent) =
+        pages(Some(Arc::new(move || format!("tok-{}", made.fetch_add(1, Ordering::SeqCst) + 1)))).await;
+    assert!(dashboard.contains("data-csrf=\"tok-1\""), "{dashboard}");
+    assert!(consent.contains("<input type=\"hidden\" name=\"csrf\" value=\"tok-2\">"), "{consent}");
+    let (dashboard, consent) = pages(None).await;
+    assert!(!dashboard.contains("data-csrf"));
+    assert!(!consent.contains("name=\"csrf\""));
+}
+
+#[tokio::test]
 async fn a_site_change_refused_for_a_bad_domain_changes_nothing_retention_and_timezone_included() {
     let now = Arc::new(AtomicI64::new(1_759_276_800_000));
     let clock = now.clone();

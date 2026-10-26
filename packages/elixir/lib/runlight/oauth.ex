@@ -318,7 +318,7 @@ defmodule Runlight.OAuth do
           end
 
         request.method == "GET" ->
-          consent(rl, base, client, form, redirect, lang, if(cms, do: {:cms, host, counting}, else: manage))
+          consent(rl, base, client, form, redirect, lang, if(cms, do: {:cms, host, counting}, else: manage), ctx[:csrf])
 
         true ->
           # The consent form posts here from this page only; a form from another site is refused.
@@ -419,8 +419,10 @@ defmodule Runlight.OAuth do
     end
   end
 
-  defp consent(rl, base, client, form, redirect, lang, mode) do
-    hidden =
+  # `csrf` gives the token the consent form sends back in its csrf field, for the app's own check of where it
+  # comes from.
+  defp consent(rl, base, client, form, redirect, lang, mode, csrf) do
+    fields =
       ~w(response_type client_id redirect_uri code_challenge code_challenge_method state scope resource)
       |> Enum.map_join(fn k ->
         case SearchParams.get(form, k) do
@@ -428,6 +430,8 @@ defmodule Runlight.OAuth do
           v -> ~s(<input type="hidden" name="#{k}" value="#{esc(v)}">)
         end
       end)
+
+    hidden = fields <> if(csrf, do: ~s(<input type="hidden" name="csrf" value="#{esc(csrf.())}">), else: "")
 
     name = esc(client["name"])
     # The app names itself, so the page also shows where the answer goes, which it cannot fake.

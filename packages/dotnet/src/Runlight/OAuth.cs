@@ -57,6 +57,9 @@ public sealed class OAuthContext
     /// <summary>Notes who made a token; false takes it back (accounts' tokenMade).</summary>
     public Func<JsObject, string, CancellationToken, Task<bool>>? TokenMade { get; init; }
 
+    /// <summary>The token the consent form sends back in its csrf field, for the app's own check of where it comes from.</summary>
+    public Func<string>? Csrf { get; init; }
+
     /// <summary>Whether sites are managed in the dashboard, so a CMS plugin may be given a new one.</summary>
     public bool ManagedSites { get; init; }
 
@@ -413,6 +416,10 @@ public static class OAuth
                 {
                     hidden += "<input type=\"hidden\" name=\"" + k + "\" value=\"" + Esc(v) + "\">";
                 }
+            }
+            if (ctx.Csrf != null)
+            {
+                hidden += "<input type=\"hidden\" name=\"csrf\" value=\"" + Esc(ctx.Csrf()) + "\">";
             }
             // The app names itself, so the page also shows where the answer goes, which it cannot fake.
             string sendsTo = "<p class=\"note\">" + tr.Html("oauth.sendsTo", new JsObject { ["host"] = "<strong>" + Esc(new Url(redirect).Host) + "</strong>" }) + "</p>";

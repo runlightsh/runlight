@@ -245,6 +245,7 @@ public sealed class Routes
             SignIn = string.IsNullOrEmpty(_signIn) ? null : _signIn,
             AccountOf = _accountOf,
             TokenMade = _tokenMade,
+            Csrf = options.Csrf,
             ManagedSites = runlight.ManagedSites,
             AddSite = runlight.AddSiteAsync,
         };
@@ -632,7 +633,7 @@ public sealed class Routes
     /// The dashboard's page, which holds no data: the API it calls checks access. <paramref name="embed"/> is the dashboard
     /// inside a CMS's admin pages: its session (empty once its ticket was used or ran out) and the admin origin that frames it.
     /// </summary>
-    public static string Dashboard(string @base, string share = "", string signOut = "", bool geoCredit = false, bool accounts = false, string signIn = "", (string Session, string Origin)? embed = null, string cms = "")
+    public static string Dashboard(string @base, string share = "", string signOut = "", bool geoCredit = false, bool accounts = false, string signIn = "", (string Session, string Origin)? embed = null, string cms = "", string csrf = "")
     {
         ArgumentNullException.ThrowIfNull(@base);
         string b = EscapeAttr(@base);
@@ -643,6 +644,7 @@ public sealed class Routes
             + (geoCredit ? " data-geo-credit=\"\"" : "")
             + (accounts ? " data-accounts=\"\"" : "")
             + (cms.Length > 0 ? " data-cms=\"" + EscapeAttr(cms) + "\"" : "")
+            + (csrf.Length > 0 ? " data-csrf=\"" + EscapeAttr(csrf) + "\"" : "")
             + (embed is { } e ? " data-embed=\"" + EscapeAttr(e.Session) + "\" data-embed-origin=\"" + EscapeAttr(e.Origin) + "\"" : "");
         return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>Runlight</title>\n"
             + "<link rel=\"icon\" href=\"" + Brand.RunlightIcon + "\">\n"
@@ -3758,7 +3760,7 @@ public sealed class Routes
             // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
             string cms = _options.Cms ?? "";
             bool framed = cms.Length > 0;
-            return new Response(Dashboard(@base, "", _signOut ?? "", _options.GeoCredit, _web != null, _signIn ?? "", null, cms), 200, new Headers
+            return new Response(Dashboard(@base, "", _signOut ?? "", _options.GeoCredit, _web != null, _signIn ?? "", null, cms, _options.Csrf?.Invoke() ?? ""), 200, new Headers
             {
                 ["content-type"] = "text/html; charset=utf-8",
                 ["cache-control"] = "no-store",

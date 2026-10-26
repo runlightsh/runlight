@@ -7,6 +7,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Added
 
 - The dashboard's footer shows the install's version beside Powered by Runlight. A shared dashboard and the dashboard inside a CMS leave it out.
+- Routes take a `csrf` option: a function giving a token that the dashboard sends back with every change it makes, in an `x-runlight-csrf` header, and the OAuth consent form in a `csrf` field, for an `authorize` that checks where a change comes from as a CMS checks its own forms.
 
 ### Changed
 

@@ -236,3 +236,30 @@ def test_a_manage_grant_names_one_site_and_records_the_hubs_origin() -> None:
     assert [issued["scope"], issued["site"]] == ["manage", "a"]
     tokens = body(routes.handle(_at("https://x.com/runlight/api/tokens", "GET", owner)))["tokens"]
     assert rl.store.setting(f"token-origin:{tokens[0]['id']}") == "https://hub.example.net"
+
+
+def test_an_apps_csrf_token_is_printed_in_the_dashboard_and_the_consent_form_asked_for_each_time_and_only_when_given() -> None:
+    made = 0
+
+    def csrf() -> str:
+        nonlocal made
+        made += 1
+        return f"tok-{made}"
+
+    def pages(given: Any) -> tuple[str, str]:
+        rl = runlight({"site": {"hostnames": ["example.com"]}})
+        routes = rl.routes({"authorize": lambda r: True, **({"csrf": given} if given is not None else {})})
+        dashboard = routes.handle(_at("https://example.com/runlight/")).text()
+        registered = routes.handle(
+            _at("https://example.com/runlight/oauth/register", "POST", {"content-type": "application/json"}, _js.dumps({"client_name": "App", "redirect_uris": ["https://app.example/cb"]}))
+        )
+        params = _form({"response_type": "code", "client_id": body(registered)["client_id"], "redirect_uri": "https://app.example/cb", "code_challenge": "a" * 43, "code_challenge_method": "S256"})
+        consent = routes.handle(_at(f"https://example.com/runlight/oauth/authorize?{params}")).text()
+        return dashboard, consent
+
+    dashboard, consent = pages(csrf)
+    assert 'data-csrf="tok-1"' in dashboard
+    assert '<input type="hidden" name="csrf" value="tok-2">' in consent
+    dashboard, consent = pages(None)
+    assert "data-csrf" not in dashboard
+    assert 'name="csrf"' not in consent

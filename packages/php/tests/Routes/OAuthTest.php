@@ -223,4 +223,27 @@ final class OAuthTest extends TestCase
         $tokens = Make::body($routes->handle(self::at('https://x.com/runlight/api/tokens', 'GET', $owner)))['tokens'];
         $this->assertSame('https://hub.example.net', $rl->store->setting("token-origin:{$tokens[0]['id']}"));
     }
+
+    public function testAnAppsCsrfTokenIsPrintedInTheDashboardAndTheConsentFormAskedForEachTimeAndOnlyWhenGiven(): void
+    {
+        Make::needsCore($this);
+        $made = 0;
+        $pages = function (?callable $csrf): array {
+            $rl = Make::runlight(['site' => ['hostnames' => ['example.com']]]);
+            $routes = $rl->routes(['authorize' => static fn (): bool => true] + ($csrf !== null ? ['csrf' => $csrf] : []));
+            $dashboard = $routes->handle(self::at('https://example.com/runlight/'))->text();
+            $registered = $routes->handle(self::at('https://example.com/runlight/oauth/register', 'POST', ['content-type' => 'application/json'], Json::encode(['client_name' => 'App', 'redirect_uris' => ['https://app.example/cb']])));
+            $params = self::form(['response_type' => 'code', 'client_id' => Make::body($registered)['client_id'], 'redirect_uri' => 'https://app.example/cb', 'code_challenge' => str_repeat('a', 43), 'code_challenge_method' => 'S256']);
+            $consent = $routes->handle(self::at("https://example.com/runlight/oauth/authorize?$params"))->text();
+            return [$dashboard, $consent];
+        };
+        [$dashboard, $consent] = $pages(static function () use (&$made): string {
+            return 'tok-' . ++$made;
+        });
+        $this->assertStringContainsString('data-csrf="tok-1"', $dashboard);
+        $this->assertStringContainsString('<input type="hidden" name="csrf" value="tok-2">', $consent);
+        [$dashboard, $consent] = $pages(null);
+        $this->assertStringNotContainsString('data-csrf', $dashboard);
+        $this->assertStringNotContainsString('name="csrf"', $consent);
+    }
 }

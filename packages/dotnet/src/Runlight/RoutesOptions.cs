@@ -73,6 +73,13 @@ public sealed class RoutesOptions
     /// </summary>
     public string? Cms { get; init; }
 
+    /// <summary>
+    /// A token the dashboard sends back with every change it makes, in an x-runlight-csrf header, and the OAuth consent
+    /// form in a csrf field, for an <see cref="Authorize"/> that checks where a change comes from, as a CMS checks its own
+    /// forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives a nonce.
+    /// </summary>
+    public Func<string>? Csrf { get; init; }
+
     /// <summary>The address people open the app at, such as https://example.com.</summary>
     public string? Origin { get; init; }
 

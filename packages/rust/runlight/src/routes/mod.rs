@@ -49,6 +49,9 @@ pub enum TokenOption {
 /// Checks a request the app's own way.
 pub type Authorize = Arc<dyn Fn(&Request) -> BoxFuture<'static, Access> + Send + Sync>;
 
+/// Gives the token the dashboard and the OAuth consent form send back.
+pub type Csrf = Arc<dyn Fn() -> String + Send + Sync>;
+
 /// How routes() is set up. The option names are the SDK's.
 #[derive(Clone, Default)]
 pub struct RoutesOptions {
@@ -74,6 +77,10 @@ pub struct RoutesOptions {
     /// dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's
     /// own admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
     pub cms: Option<String>,
+    /// A token the dashboard sends back with every change it makes, in an x-runlight-csrf header, and the OAuth
+    /// consent form in a csrf field, for an `authorize` that checks where a change comes from, as a CMS checks its
+    /// own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives a nonce.
+    pub csrf: Option<Csrf>,
     /// The address people open the app at, such as https://example.com.
     pub origin: Option<String>,
     /// What the standalone server adds: more names the dashboard is reached at, and its accounts' hooks.
@@ -337,6 +344,7 @@ fn dashboard_page(
     sign_in: &str,
     embed: Option<Embedded<'_>>,
     cms: &str,
+    csrf: &str,
 ) -> String {
     let b = escape_attr(base);
     let hash = &BUILD_INFO.dashboard_hash;
@@ -358,6 +366,9 @@ fn dashboard_page(
     }
     if !cms.is_empty() {
         attrs.push_str(&format!(" data-cms=\"{}\"", escape_attr(cms)));
+    }
+    if !csrf.is_empty() {
+        attrs.push_str(&format!(" data-csrf=\"{}\"", escape_attr(csrf)));
     }
     if let Some(embed) = embed {
         attrs.push_str(&format!(
@@ -1130,6 +1141,7 @@ impl Routes {
                 "",
                 Some(Embedded { session: &session, origin: &origin }),
                 "",
+                "",
             );
             return Ok(Response::new(
                 page,
@@ -1166,7 +1178,7 @@ impl Routes {
                 ));
             };
             return Ok(Response::new(
-                dashboard_page(&self.0.base, &share.id, "", self.0.options.geo_credit, false, "", None, ""),
+                dashboard_page(&self.0.base, &share.id, "", self.0.options.geo_credit, false, "", None, "", ""),
                 200,
                 Headers::new()
                     .with("content-type", "text/html; charset=utf-8")
@@ -1215,6 +1227,7 @@ impl Routes {
                     self.0.sign_in.as_deref().unwrap_or(""),
                     None,
                     cms,
+                    &self.0.options.csrf.as_ref().map_or_else(String::new, |csrf| csrf()),
                 ),
                 200,
                 Headers::new()
@@ -1303,9 +1316,9 @@ mod tests {
 
     #[test]
     fn dashboard_names_the_cms_only_when_set() {
-        let plain = dashboard_page("/rl", "", "", false, true, "", None, "");
+        let plain = dashboard_page("/rl", "", "", false, true, "", None, "", "");
         assert!(!plain.contains("data-cms"));
-        let page = dashboard_page("/rl", "", "", false, true, "", None, "Word\"Press");
+        let page = dashboard_page("/rl", "", "", false, true, "", None, "Word\"Press", "");
         assert!(page.contains(" data-accounts=\"\" data-cms=\"Word&#34;Press\" data-world="));
     }
 }

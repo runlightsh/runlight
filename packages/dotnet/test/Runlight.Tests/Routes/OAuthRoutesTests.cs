@@ -211,4 +211,26 @@ public sealed class OAuthRoutesTests : RoutesTestCase
         var tokens = Obj(await routes.HandleAsync(At("https://x.com/runlight/api/tokens", "GET", owner))).Arr("tokens")!;
         Assert.Equal("https://hub.example.net", await rl.Store.SettingAsync("token-origin:" + ((JsObject)tokens[0]!).Str("id")));
     }
+
+    [Fact]
+    public async Task An_apps_csrf_token_is_printed_in_the_dashboard_and_the_consent_form_asked_for_each_time_and_only_when_given()
+    {
+        int made = 0;
+        async Task<(string Dashboard, string Consent)> PagesAsync(Func<string>? csrf)
+        {
+            var rl = await RunlightAsync(site: Site(hostnames: ["example.com"]));
+            var routes = rl.Routes(new RoutesOptions { Authorize = (_, _) => Task.FromResult<object>(true), Csrf = csrf });
+            string dashboard = (await routes.HandleAsync(At("https://example.com/runlight/"))).Text();
+            var registered = await routes.HandleAsync(At("https://example.com/runlight/oauth/register", "POST", H(("content-type", "application/json")), Json.Stringify(new JsObject { ["client_name"] = "App", ["redirect_uris"] = L("https://app.example/cb") })));
+            string parameters = Form(("response_type", "code"), ("client_id", Obj(registered).Str("client_id")!), ("redirect_uri", "https://app.example/cb"), ("code_challenge", new string('a', 43)), ("code_challenge_method", "S256"));
+            string consent = (await routes.HandleAsync(At("https://example.com/runlight/oauth/authorize?" + parameters))).Text();
+            return (dashboard, consent);
+        }
+        var given = await PagesAsync(() => "tok-" + ++made);
+        Assert.Contains("data-csrf=\"tok-1\"", given.Dashboard, StringComparison.Ordinal);
+        Assert.Contains("<input type=\"hidden\" name=\"csrf\" value=\"tok-2\">", given.Consent, StringComparison.Ordinal);
+        var none = await PagesAsync(null);
+        Assert.DoesNotContain("data-csrf", none.Dashboard, StringComparison.Ordinal);
+        Assert.DoesNotContain("name=\"csrf\"", none.Consent, StringComparison.Ordinal);
+    }
 }

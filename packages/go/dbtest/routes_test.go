@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -242,5 +243,37 @@ func TestTheRelayPageIsStaticAndRunsOnlyItsOwnScript(t *testing.T) {
 	}
 	if r := openRoutes.Handle(ctx, web.NewRequest("GET", "https://stats.example.com/runlight/pick-return", web.NewHeaders(), nil)); r.Status != 200 {
 		t.Errorf("signed out: %d", r.Status)
+	}
+}
+
+func TestAnAppsCSRFTokenIsPrintedInTheDashboardAndTheConsentFormAskedForEachTimeAndOnlyWhenGiven(t *testing.T) {
+	ctx := context.Background()
+	made := 0
+	pages := func(csrf func() string) (string, string) {
+		rl, err := runlight.New(runlight.Options{Store: Store(t, Kinds()[0]), Logf: func(string, ...any) {}, Site: &runlight.SiteOptions{Hostnames: []string{"example.com"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes, err := rl.Routes(runlight.RoutesOptions{Authorize: func(context.Context, *runlight.Request) runlight.Access { return runlight.AccessFull }, CSRF: csrf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dashboard := routes.Handle(ctx, web.NewRequest("GET", "https://example.com/runlight/", web.NewHeaders(), nil)).Text()
+		registered := routes.Handle(ctx, web.NewRequest("POST", "https://example.com/runlight/oauth/register", web.NewHeaders("content-type", "application/json"), []byte(`{"client_name":"App","redirect_uris":["https://app.example/cb"]}`)))
+		v, _ := js.Parse(registered.Text())
+		params := url.Values{"response_type": {"code"}, "client_id": {js.Str(js.Dig(v, "client_id"))}, "redirect_uri": {"https://app.example/cb"}, "code_challenge": {strings.Repeat("a", 43)}, "code_challenge_method": {"S256"}}.Encode()
+		consent := routes.Handle(ctx, web.NewRequest("GET", "https://example.com/runlight/oauth/authorize?"+params, web.NewHeaders(), nil)).Text()
+		return dashboard, consent
+	}
+	dashboard, consent := pages(func() string { made++; return fmt.Sprintf("tok-%d", made) })
+	if !strings.Contains(dashboard, `data-csrf="tok-1"`) {
+		t.Errorf("the dashboard lacks the token: %s", dashboard)
+	}
+	if !strings.Contains(consent, `<input type="hidden" name="csrf" value="tok-2">`) {
+		t.Errorf("the consent form lacks the token: %s", consent)
+	}
+	dashboard, consent = pages(nil)
+	if strings.Contains(dashboard, "data-csrf") || strings.Contains(consent, `name="csrf"`) {
+		t.Errorf("no token was given, but a page has one: %s %s", dashboard, consent)
 	}
 }

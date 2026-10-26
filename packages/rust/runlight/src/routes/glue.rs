@@ -112,6 +112,10 @@ impl crate::oauth::OAuthHost for Routes {
     fn token_made<'a>(&'a self, token: &'a TokenRow, by: &'a str) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(token_made_by(self, token, by))
     }
+
+    fn csrf(&self) -> Option<String> {
+        self.0.options.csrf.as_ref().map(|csrf| csrf())
+    }
 }
 
 pub(crate) async fn own_hosts(routes: &Routes) -> Vec<String> {

@@ -12,6 +12,7 @@ import java.util.WeakHashMap;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import sh.runlight.CodedError.SettingsError;
@@ -90,7 +91,8 @@ public final class OAuth {
    * someone to sign in, when there is such a page (the standalone server's). isReader says whether
    * the request comes from someone signed in who may only read, such as a viewer. accountOf names
    * the account a request comes from, where the app has accounts. tokenMade notes who made a token,
-   * and answers false when they can no longer make one, which takes it back.
+   * and answers false when they can no longer make one, which takes it back. csrf gives the token
+   * the consent form sends back in its csrf field, for the app's own check of where it comes from.
    */
   public static final class Context {
     public final Install runlight;
@@ -100,6 +102,7 @@ public final class OAuth {
     public Predicate<Request> isReader;
     public Function<Request, String> accountOf;
     public BiPredicate<Map<String, Object>, String> tokenMade;
+    public Supplier<String> csrf;
 
     public Context(Install runlight, String base, Predicate<Request> isOwner) {
       this.runlight = runlight;
@@ -583,6 +586,12 @@ public final class OAuth {
               .append(esc(form.get(k)))
               .append("\">");
         }
+      }
+      if (ctx.csrf != null) {
+        hidden
+            .append("<input type=\"hidden\" name=\"csrf\" value=\"")
+            .append(esc(ctx.csrf.get()))
+            .append("\">");
       }
       // The app names itself, so the page also shows where the answer goes, which it cannot fake.
       String sendsTo =

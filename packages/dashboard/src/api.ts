@@ -131,6 +131,11 @@ export const embedLive = Boolean(embedSession);
 /** A read-only view of one site: a share link or the dashboard inside a CMS. */
 export const shared = Boolean(share || embedOrigin);
 
+/** The token the app checks every change against, when it gives one, as a CMS checks its own forms. */
+const csrf = document.getElementById("app")?.dataset.csrf ?? "";
+/** What every change sends: its JSON type, and the app's token when there is one. */
+const changeHeaders = (json: boolean): Record<string, string> => ({ ...(json ? { "content-type": "application/json" } : {}), ...(csrf ? { "x-runlight-csrf": csrf } : {}) });
+
 /** What every read sends: a share's id or an embedded dashboard's session, when there is one. */
 const readHeaders = (): Record<string, string> | undefined =>
   share ? { "x-runlight-share": share } : embedOrigin ? { "x-runlight-embed": embedSession } : undefined;
@@ -424,7 +429,7 @@ async function send<T>(method: string, path: string, body: unknown): Promise<T> 
     const response = await reach(`${base}/api/${path}`, {
       method,
       credentials: "same-origin",
-      headers: { "content-type": "application/json" },
+      headers: changeHeaders(true),
       body: JSON.stringify(body),
     });
     if (!response.ok) throw await failure(response);
@@ -439,7 +444,7 @@ const del = async (path: string) => {
   reports.clear();
   if (path.startsWith("assistant") || path.startsWith("account")) assistantReports.clear();
   try {
-    const response = await reach(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin" });
+    const response = await reach(`${base}/api/${path}`, { method: "DELETE", credentials: "same-origin", headers: changeHeaders(false) });
     if (!response.ok) throw await failure(response);
   } finally {
     reports.clear();

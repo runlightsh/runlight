@@ -82,6 +82,12 @@ export interface RoutesOptions {
    */
   cms?: string;
   /**
+   * A token the dashboard sends back with every change it makes, in an x-runlight-csrf header, and the OAuth
+   * consent form in a csrf field, for an `authorize` that checks where a change comes from, as a CMS checks
+   * its own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives a nonce.
+   */
+  csrf?: () => string;
+  /**
    * The address people open the app at, such as https://example.com. A link
    * domain can never be its host, and links in email reports point there,
    * whatever Host header a request carries. Without it, the request's own
@@ -359,7 +365,7 @@ interface Embedded {
   origin: string;
 }
 
-const DASHBOARD = (base: string, share = "", signOut = "", geoCredit = false, accounts = false, signIn = "", embed: Embedded | null = null, cms = "") => `<!doctype html>
+const DASHBOARD = (base: string, share = "", signOut = "", geoCredit = false, accounts = false, signIn = "", embed: Embedded | null = null, cms = "", csrf = "") => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -370,7 +376,7 @@ const DASHBOARD = (base: string, share = "", signOut = "", geoCredit = false, ac
 <link rel="stylesheet" href="${escapeAttr(base)}/assets/app.${DASHBOARD_HASH}.css">
 </head>
 <body>
-<div id="app" data-base="${escapeAttr(base)}"${share ? ` data-share="${escapeAttr(share)}"` : ""}${signOut ? ` data-sign-out="${escapeAttr(signOut)}"` : ""}${signIn ? ` data-sign-in="${escapeAttr(signIn)}"` : ""}${geoCredit ? ` data-geo-credit=""` : ""}${accounts ? ` data-accounts=""` : ""}${cms ? ` data-cms="${escapeAttr(cms)}"` : ""}${embed ? ` data-embed="${escapeAttr(embed.session)}" data-embed-origin="${escapeAttr(embed.origin)}"` : ""} data-world="${escapeAttr(base)}/assets/world.${WORLD_HASH}.json" data-locales="${escapeAttr(localeUrls(base))}"></div>
+<div id="app" data-base="${escapeAttr(base)}"${share ? ` data-share="${escapeAttr(share)}"` : ""}${signOut ? ` data-sign-out="${escapeAttr(signOut)}"` : ""}${signIn ? ` data-sign-in="${escapeAttr(signIn)}"` : ""}${geoCredit ? ` data-geo-credit=""` : ""}${accounts ? ` data-accounts=""` : ""}${cms ? ` data-cms="${escapeAttr(cms)}"` : ""}${csrf ? ` data-csrf="${escapeAttr(csrf)}"` : ""}${embed ? ` data-embed="${escapeAttr(embed.session)}" data-embed-origin="${escapeAttr(embed.origin)}"` : ""} data-world="${escapeAttr(base)}/assets/world.${WORLD_HASH}.json" data-locales="${escapeAttr(localeUrls(base))}"></div>
 <script type="module" src="${escapeAttr(base)}/assets/app.${DASHBOARD_HASH}.js"></script>
 </body>
 </html>
@@ -2085,6 +2091,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     ...(signIn ? { signIn } : {}),
     ...(accountOf ? { accountOf } : {}),
     ...(tokenMade ? { tokenMade } : {}),
+    ...(options.csrf ? { csrf: options.csrf } : {}),
   };
 
   const handler: FetchHandler = async (request, context = {}) => {
@@ -2280,7 +2287,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         // the page explains how to sign in when it is refused.
         // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
         const framed = Boolean(options.cms);
-        return new Response(DASHBOARD(base, "", signOut, options.geoCredit, Boolean(web), signIn, null, options.cms ?? ""), {
+        return new Response(DASHBOARD(base, "", signOut, options.geoCredit, Boolean(web), signIn, null, options.cms ?? "", options.csrf?.() ?? ""), {
           headers: {
             "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store",

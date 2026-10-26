@@ -26,6 +26,10 @@ module Runlight
   # - cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
   #   dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's own
   #   admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+  # - csrf: a callable returning a token the dashboard sends back with every change it makes, in an x-runlight-csrf
+  #   header, and the OAuth consent form in a csrf field, for an authorize that checks where a change comes from, as
+  #   a CMS checks its own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives
+  #   a nonce.
   # - origin: the address people open the app at, such as https://example.com.
   # - ownHosts: a callable returning more names the dashboard is reached at.
   # - accountOf: a callable taking the Request and returning the account it comes from, or nil (internal, for the
@@ -182,6 +186,7 @@ module Runlight
       oauth["signIn"] = @sign_in if !@sign_in.nil? && @sign_in != ""
       oauth["accountOf"] = @account_of unless @account_of.nil?
       oauth["tokenMade"] = @token_made unless @token_made.nil?
+      oauth["csrf"] = options["csrf"] unless options["csrf"].nil?
       @oauth = oauth
     end
 
@@ -387,7 +392,7 @@ module Runlight
       # The dashboard's page, which holds no data: the API it calls checks access. `embed` is the dashboard inside a
       # CMS's admin pages: { "session", "origin" }, its session (empty once its ticket was used or ran out) and the
       # admin origin that frames it.
-      def dashboard(base, share = "", sign_out = "", geo_credit = false, accounts = false, sign_in = "", embed = nil, cms = "")
+      def dashboard(base, share = "", sign_out = "", geo_credit = false, accounts = false, sign_in = "", embed = nil, cms = "", csrf = "")
         b = escape_attr(base)
         hash = build_hash("dashboardHash")
         attributes = (share != "" ? " data-share=\"#{escape_attr(share)}\"" : "") +
@@ -396,6 +401,7 @@ module Runlight
                      (geo_credit ? ' data-geo-credit=""' : "") +
                      (accounts ? ' data-accounts=""' : "") +
                      (cms != "" ? " data-cms=\"#{escape_attr(cms)}\"" : "") +
+                     (csrf != "" ? " data-csrf=\"#{escape_attr(csrf)}\"" : "") +
                      (embed.nil? ? "" : " data-embed=\"#{escape_attr(embed["session"])}\" data-embed-origin=\"#{escape_attr(embed["origin"])}\"")
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>Runlight</title>\n" \
           "<link rel=\"icon\" href=\"#{Brand.runlight_icon}\">\n" \
@@ -2730,7 +2736,7 @@ module Runlight
         # the page explains how to sign in when it is refused.
         # Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
         cms = @options["cms"].to_s
-        return Http::Response.new(dashboard(base, "", @sign_out || "", Js.truthy?(@options["geoCredit"]), !@web.nil?, @sign_in || "", nil, cms), status: 200, headers: {
+        return Http::Response.new(dashboard(base, "", @sign_out || "", Js.truthy?(@options["geoCredit"]), !@web.nil?, @sign_in || "", nil, cms, @options["csrf"].nil? ? "" : @options["csrf"].call.to_s), status: 200, headers: {
           "content-type" => "text/html; charset=utf-8",
           "cache-control" => "no-store",
           "content-security-policy" => cms != "" ? DASHBOARD_CSP.sub("frame-ancestors 'none'", "frame-ancestors 'self'") : DASHBOARD_CSP,

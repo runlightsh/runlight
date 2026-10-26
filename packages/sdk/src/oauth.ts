@@ -155,6 +155,8 @@ export interface OAuthContext {
   accountOf?: (request: Request) => Promise<string | null>;
   /** Notes who made a token; false when they can no longer make one, which takes it back. */
   tokenMade?: (token: TokenRow, by: string) => Promise<boolean>;
+  /** The token the consent form sends back in its csrf field, for the app's own check of where it comes from. */
+  csrf?: () => string;
 }
 
 /** The URL that a 401 from the MCP endpoint points clients at, to start OAuth. */
@@ -246,7 +248,7 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     if (request.method === "GET") {
       const hidden = ["response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "scope", "resource"]
         .map((k) => (form.get(k) !== null ? `<input type="hidden" name="${k}" value="${esc(form.get(k)!)}">` : ""))
-        .join("");
+        .join("") + (ctx.csrf ? `<input type="hidden" name="csrf" value="${esc(ctx.csrf())}">` : "");
       // The app names itself, so the page also shows where the answer goes, which it cannot fake.
       const sendsTo = `<p class="note">${html("oauth.sendsTo", { host: `<strong>${esc(new URL(redirect).host)}</strong>` })}</p>`;
       if (cms) {

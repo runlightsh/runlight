@@ -15,6 +15,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
@@ -578,5 +580,42 @@ class OAuthTest {
             .get("tokens");
     assertEquals(
         "https://hub.example.net", rl.store.setting("token-origin:" + dig(tokens, "0.id")));
+  }
+
+  @Test
+  void anAppsCsrfTokenIsPrintedInTheDashboardAndTheConsentFormAskedForEachTimeAndOnlyWhenGiven() {
+    AtomicLong made = new AtomicLong();
+    Function<Supplier<String>, List<String>> pages =
+        csrf -> {
+          Routes.Options options = new Routes.Options().authorize(r -> true);
+          if (csrf != null) {
+            options.csrf(csrf);
+          }
+          Routes routes = oneSite(new Runlight.Options()).routes(options);
+          String dashboard = routes.handle(at("https://x.com/runlight/")).text();
+          String params =
+              form(
+                  "response_type",
+                  "code",
+                  "client_id",
+                  register(routes, "App", "https://app.example/cb"),
+                  "redirect_uri",
+                  "https://app.example/cb",
+                  "code_challenge",
+                  "a".repeat(43),
+                  "code_challenge_method",
+                  "S256");
+          String consent =
+              routes.handle(at("https://x.com/runlight/oauth/authorize?" + params)).text();
+          return List.of(dashboard, consent);
+        };
+    List<String> given = pages.apply(() -> "tok-" + made.incrementAndGet());
+    assertTrue(given.get(0).contains("data-csrf=\"tok-1\""), given.get(0));
+    assertTrue(
+        given.get(1).contains("<input type=\"hidden\" name=\"csrf\" value=\"tok-2\">"),
+        given.get(1));
+    List<String> none = pages.apply(null);
+    assertFalse(none.get(0).contains("data-csrf"));
+    assertFalse(none.get(1).contains("name=\"csrf\""));
   }
 }

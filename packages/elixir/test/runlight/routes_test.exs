@@ -1,5 +1,5 @@
 defmodule Runlight.RoutesTest do
-  @moduledoc "The SDK's routes.test.ts on the picker's relay page, broken percent escapes in a path, and the dashboard's CMS."
+  @moduledoc "The SDK's routes.test.ts on the picker's relay page, broken percent escapes in a path, and the dashboard's CMS and csrf token."
   use ExUnit.Case, async: true
 
   alias Runlight.Http.Request
@@ -173,6 +173,45 @@ defmodule Runlight.RoutesTest do
     assert Response.header(inside, "x-frame-options") == "SAMEORIGIN"
     assert Response.header(plain, "content-security-policy") =~ "frame-ancestors 'none'"
     assert Response.header(plain, "x-frame-options") == "DENY"
+  end
+
+  test "an app's csrf token is printed in the dashboard and the OAuth consent form, asked for each time, and only when given" do
+    {:ok, made} = Agent.start_link(fn -> 0 end)
+
+    pages = fn opts ->
+      routes = Runlight.routes(rl(site: [hostnames: ["example.com"]]), [authorize: fn _ -> true end] ++ opts)
+      dashboard = Runlight.Routes.handle(routes, req("/runlight/")).body
+
+      registered =
+        Runlight.Routes.handle(
+          routes,
+          req(
+            "/runlight/oauth/register",
+            "POST",
+            [{"content-type", "application/json"}],
+            Jason.encode!(%{client_name: "App", redirect_uris: ["https://app.example/cb"]})
+          )
+        )
+
+      params =
+        URI.encode_query(%{
+          response_type: "code",
+          client_id: body(registered)["client_id"],
+          redirect_uri: "https://app.example/cb",
+          code_challenge: String.duplicate("a", 43),
+          code_challenge_method: "S256"
+        })
+
+      consent = Runlight.Routes.handle(routes, req("/runlight/oauth/authorize?#{params}")).body
+      {dashboard, consent}
+    end
+
+    {dashboard, consent} = pages.(csrf: fn -> "tok-#{Agent.get_and_update(made, &{&1 + 1, &1 + 1})}" end)
+    assert dashboard =~ ~s(data-csrf="tok-1")
+    assert consent =~ ~s(<input type="hidden" name="csrf" value="tok-2">)
+    {dashboard, consent} = pages.([])
+    refute dashboard =~ "data-csrf"
+    refute consent =~ ~s(name="csrf")
   end
 
   test "a site change refused for a bad domain changes nothing" do

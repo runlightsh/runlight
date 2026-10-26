@@ -207,6 +207,10 @@ public final class Routes {
    *       inside one. The dashboard then says so in place of the steps to add the script, and pages
    *       of the same origin, the CMS's own admin, may show the whole dashboard in a frame. The
    *       WordPress, Drupal, and Craft plugins set it.
+   *   <li>csrf: a token the dashboard sends back with every change it makes, in an x-runlight-csrf
+   *       header, and the OAuth consent form in a csrf field, for an authorize that checks where a
+   *       change comes from, as a CMS checks its own forms. Asked for each time the dashboard or the
+   *       form is shown. The WordPress plugin gives a nonce.
    *   <li>origin: the address people open the app at, such as https://example.com.
    *   <li>ownHosts: more names the dashboard is reached at.
    *   <li>accountOf: the account a request comes from (internal, for the standalone server).
@@ -227,6 +231,7 @@ public final class Routes {
     public Object accounts;
     public boolean geoCredit;
     public String cms;
+    public Supplier<String> csrf;
     public String origin;
     public Supplier<Iterable<String>> ownHosts;
     public Function<Request, String> accountOf;
@@ -289,6 +294,17 @@ public final class Routes {
      */
     public Options cms(String value) {
       cms = value;
+      return this;
+    }
+
+    /**
+     * A token the dashboard sends back with every change it makes, in an x-runlight-csrf header,
+     * and the OAuth consent form in a csrf field, for an authorize that checks where a change comes
+     * from, as a CMS checks its own forms. Asked for each time the dashboard or the form is shown.
+     * The WordPress plugin gives a nonce.
+     */
+    public Options csrf(Supplier<String> value) {
+      csrf = value;
       return this;
     }
 
@@ -442,6 +458,7 @@ public final class Routes {
     }
     context.accountOf = accountOf;
     context.tokenMade = tokenMade;
+    context.csrf = options.csrf;
     this.oauth = context;
   }
 
@@ -961,6 +978,24 @@ public final class Routes {
       String embedSession,
       String embedOrigin,
       String cms) {
+    return dashboard(
+        base, share, signOut, geoCredit, accounts, signIn, embedSession, embedOrigin, cms, "");
+  }
+
+  /**
+   * The dashboard's page, with the token it sends back with every change when csrf is not empty.
+   */
+  public static String dashboard(
+      String base,
+      String share,
+      String signOut,
+      boolean geoCredit,
+      boolean accounts,
+      String signIn,
+      String embedSession,
+      String embedOrigin,
+      String cms,
+      String csrf) {
     String b = escapeAttr(base);
     String hash = hash("dashboardHash");
     String attributes =
@@ -970,6 +1005,7 @@ public final class Routes {
             + (geoCredit ? " data-geo-credit=\"\"" : "")
             + (accounts ? " data-accounts=\"\"" : "")
             + (!cms.isEmpty() ? " data-cms=\"" + escapeAttr(cms) + "\"" : "")
+            + (!csrf.isEmpty() ? " data-csrf=\"" + escapeAttr(csrf) + "\"" : "")
             + (embedOrigin != null
                 ? " data-embed=\""
                     + escapeAttr(embedSession)
@@ -4609,7 +4645,8 @@ public final class Routes {
               signIn != null ? signIn : "",
               null,
               null,
-              cms),
+              cms,
+              options.csrf != null ? options.csrf.get() : ""),
           200,
           Headers.of(
               "content-type",
