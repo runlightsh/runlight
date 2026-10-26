@@ -12,6 +12,9 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Changed
 
 - Emails (reports, test emails, invitations, and password resets) show the Runlight mark drawn in HTML, where before they loaded an image from runlight.sh, so opening one fetches nothing.
+- The WordPress plugin names its tables wp_runlight_events and so on, after WordPress's own prefix, where before they were wp_rl_events. An install that has them under the old names renames them, and their indexes, the first time it runs. Uninstalling drops whichever it has.
+- The WordPress plugin takes a change in the dashboard it runs at /runlight, or on its OAuth consent page, only with a WordPress nonce and from the site's own pages, so another site cannot make one with an admin's login. A read from another site's page is refused too, unless it is a visit.
+- The WordPress plugin puts every value in its SQL with `$wpdb->prepare()`, adds its script with `wp_enqueue_script()`, and writes its files through WordPress's filesystem API.
 
 ### Fixed
 

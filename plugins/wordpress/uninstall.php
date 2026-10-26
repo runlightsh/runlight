@@ -21,15 +21,7 @@ function runlight_uninstall_site(): void {
 	\Runlight\WordPress\Storage::remove();
 	// The folder is the plugin's alone: what Runlight kept there goes with it.
 	if ( is_dir( $folder ) ) {
-		$walk = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $folder, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::CHILD_FIRST );
-		foreach ( $walk as $entry ) {
-			if ( $entry->isDir() ) {
-				rmdir( $entry->getPathname() ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- the plugin's own folder, emptied first.
-			} else {
-				wp_delete_file( $entry->getPathname() );
-			}
-		}
-		rmdir( $folder ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- the plugin's own folder, emptied above.
+		\Runlight\WordPress\Storage::files()->rmdir( $folder, true );
 	}
 	wp_clear_scheduled_hook( \Runlight\WordPress\Local::CRON );
 	delete_option( 'runlight_settings' );

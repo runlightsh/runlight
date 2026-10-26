@@ -169,22 +169,18 @@ final class Reports
             $label = self::esc($t("metric.{$m['key']}"));
             $value = self::esc(($m['format'])($now[$m['key']]));
             $text = self::esc($d['text']);
-            return strtr(<<<'HTML'
-<td width="33%" class="rl-line" style="padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top">
+            return strtr('<td width="33%" class="rl-line" style="padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;vertical-align:top">
 <div class="rl-muted" style="font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280">{label}</div>
 <div class="rl-ink" style="font-size:24px;font-weight:600;color:#111827;margin-top:4px">{value}</div>
-<div class="rl-{tone}" style="font-size:12px;color:{color};margin-top:2px;min-height:16px">{text}</div></td>
-HTML, ['{label}' => $label, '{value}' => $value, '{tone}' => $d['tone'], '{color}' => $d['color'], '{text}' => $text]);
+<div class="rl-{tone}" style="font-size:12px;color:{color};margin-top:2px;min-height:16px">{text}</div></td>', ['{label}' => $label, '{value}' => $value, '{tone}' => $d['tone'], '{color}' => $d['color'], '{text}' => $text]);
         };
         $table = static function (array $l) use ($t): string {
             $title = self::esc($l['title']);
             $rows = $l['rows']
                 ? implode('', array_map(static fn (array $r): string => '<tr><td class="rl-row rl-body-text" style="padding:7px 0;border-top:1px solid #f0f0f0;color:#374151;word-break:break-all">' . self::esc($r[0]) . '</td><td align="right" class="rl-row rl-ink" style="padding:7px 0 7px 12px;border-top:1px solid #f0f0f0;color:#111827;font-weight:600;white-space:nowrap">' . self::esc($r[1]) . '</td></tr>', $l['rows']))
                 : '<tr><td class="rl-muted" style="padding:7px 0;color:#6b7280">' . self::esc($t('panel.empty')) . '</td></tr>';
-            return strtr(<<<'HTML'
-<h3 class="rl-ink" style="font-size:14px;color:#111827;margin:28px 0 8px">{title}</h3>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px">{rows}</table>
-HTML, ['{title}' => $title, '{rows}' => $rows]);
+            return strtr('<h3 class="rl-ink" style="font-size:14px;color:#111827;margin:28px 0 8px">{title}</h3>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px">{rows}</table>', ['{title}' => $title, '{rows}' => $rows]);
         };
 
         // Where the dashboard lives, without the scheme or the site query, so a reader
@@ -204,8 +200,7 @@ HTML, ['{title}' => $title, '{rows}' => $rows]);
         $cells1 = implode('', array_map($cell, array_slice($metrics, 0, 3)));
         $cells2 = implode('', array_map($cell, array_slice($metrics, 3)));
         $tables = implode('', array_map($table, $lists));
-        $html = strtr(<<<'HTML'
-<!doctype html><html lang="{code}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>{subject}</title>
+        $html = strtr('<!doctype html><html lang="{code}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>{subject}</title>
 <style>
 @media (prefers-color-scheme: dark) {
   .rl-page { background: #09090b !important; }
@@ -238,8 +233,7 @@ HTML, ['{title}' => $title, '{rows}' => $rows]);
 <p style="margin:32px 0 0"><a href="{dashboard}" class="rl-button" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:11px 18px;border-radius:8px;font-size:14px;font-weight:600">{open}</a></p>
 </td></tr></table>
 <p class="rl-foot" style="max-width:600px;font-size:12px;line-height:1.5;color:#6b7280;margin:16px auto 0">{footer} <a href="{unsubscribe}" style="color:#6b7280">{unsubscribeText}</a></p>
-</td></tr></table></body></html>
-HTML, [
+</td></tr></table></body></html>', [
             '{code}' => $code,
             '{subject}' => $e($subject),
             '{font}' => $font,

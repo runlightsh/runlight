@@ -12,7 +12,7 @@ Privacy friendly analytics with no cookies, kept in your own database. Counts vi
 
 == Description ==
 
-[Runlight](https://runlight.sh/) is open source web analytics that keeps every number in your own database. It counts visitors, pages, sources, places, devices, campaigns, and conversions without cookies and without keeping anything that could say who a visitor was, so there is no cookie banner to add.
+[Runlight](https://runlight.sh/) is open source web analytics that keeps every number in your own database. It counts visitors, pages, sources, places, devices, campaigns, and conversions without cookies and without keeping anything that could say who a visitor was. It sets no cookies and stores nothing on the visitor's device.
 
 Activate the plugin and choose to run Runlight inside WordPress, with nothing else to set up:
 
@@ -22,7 +22,7 @@ Activate the plugin and choose to run Runlight inside WordPress, with nothing el
 * The Runlight item in the admin menu shows this site's numbers in wp-admin, and the full dashboard opens at /runlight on your site, for anyone who can manage options.
 * Goals, funnels, short links, email reports, and imports from Umami, Bitly, and other services are all in the dashboard.
 
-The numbers stay in this site's database: in Runlight's own tables, named after WordPress's table prefix (such as wp_rl_events), when the database is MySQL 8.0.20 or MariaDB 11.4 or later, or else in a SQLite file in the uploads folder. Each site in a network keeps a SQLite file of its own.
+The numbers stay in this site's database: in Runlight's own tables, named after WordPress's table prefix (such as wp_runlight_events), when the database is MySQL 8.0.20 or MariaDB 11.4 or later, or else in a SQLite file in the uploads folder. Each site in a network keeps a SQLite file of its own.
 
 If you already run Runlight elsewhere, as the standalone server or inside an app, the plugin can send to that one instead. Press Connect in its settings and that Runlight fills them in, so one dashboard covers all your sites.
 
@@ -35,8 +35,11 @@ The script sets no cookies and stores nothing in the visitor's browser. Runlight
 The plugin bundles Runlight's own PHP package, runlight/runlight (MIT), at vendor/runlight/runlight, as Composer lays it out, with its built scripts in vendor/runlight/runlight/assets. Their source, and the tools that build them, are at [github.com/runlightsh/runlight](https://github.com/runlightsh/runlight):
 
 * vendor/runlight/runlight/src is the PHP package itself, from packages/php.
-* assets/dashboard.js and dashboard.css are the dashboard, built from packages/dashboard.
-* assets/tracker.js, picker.js, and pick-return.js are the tracking script, the goal picker, and the picker's relay page, built from packages/tracker.
+* vendor/runlight/runlight/assets/dashboard.js and dashboard.css are the dashboard, built from packages/dashboard.
+* vendor/runlight/runlight/assets/tracker.js, picker.js, and pick-return.js are the tracking script, the goal picker, and the picker's relay page, built from packages/tracker.
+* vendor/runlight/runlight/assets/world.json is the dashboard's world map: Natural Earth's 1:110m countries (public domain), by way of the world-atlas package, projected by packages/dashboard/scripts/world.mjs.
+* composer.json names the package, as Composer would install it into vendor.
+* The plugin's own assets/settings.js, assets/frame.js, and assets/dashboard.js are its source, not built.
 
 Running npm install and then npm run build at the top of the repository builds every one of them and copies them into packages/php/assets.
 
@@ -58,9 +61,9 @@ With plain permalinks, Runlight answers at /index.php/runlight rather than /runl
 
 No. Visits are counted in your own WordPress, or in the Runlight you chose, and nowhere else. Only if you add an AI provider's key and ask the assistant a question do the site's totals go to that provider, as External services describes.
 
-= Do I need a cookie banner? =
+= Does Runlight set cookies? =
 
-Not for Runlight: it sets no cookies and stores nothing on the visitor's device.
+No. It sets no cookies and stores nothing on the visitor's device. Whether your site needs a consent notice depends on everything else it runs and on where you and your visitors are, so check what applies to your site.
 
 = Where are the numbers? =
 
@@ -76,10 +79,11 @@ Yes. Cached pages still carry the script, so visits are counted. AI agents that 
 
 == External services ==
 
-Running inside WordPress, Runlight sends nothing anywhere until you set something up that needs another service. Each of these is off until you turn it on, and each is described where you turn it on.
+Running inside WordPress, Runlight fetches one thing on its own: your site's icon. When you open the dashboard, it shows the icon your site's home page links to, which Runlight fetches from your site, or from wherever that link points, sending nothing with the request.
+
+Beyond that, it sends nothing anywhere until you set something up that needs another service. Each of these is off until you turn it on, and each is described where you turn it on.
 
 * Locations: with "Show which countries visitors come from" on, the plugin downloads DB-IP's free country database from download.db-ip.com once a month and keeps it in its folder in uploads. Nothing is sent with the download, and visitors' addresses are looked up on your server and never sent. DB-IP's data is under CC BY 4.0 (https://db-ip.com/db/lite.php). Terms: https://db-ip.com/tos.php. Privacy: https://db-ip.com/privacy.php.
-* Your site's icon: the dashboard shows the icon your site's home page links to, which Runlight fetches from your site, or from wherever that link points.
 
 Email reports: when an SMTP or mail plugin such as WP Mail SMTP is active in WordPress, Runlight sends the reports you ask for, and test emails, with wp_mail, so they go wherever that plugin sends your site's other email. Otherwise, or when you choose one in the dashboard instead, it sends them through the mail service you set up there, with the key you enter. A report holds the site's totals for the week or month, and it is sent to the addresses you list, from the address you set, only when a report is due or you send a test. To send through an SMTP server, set it up in an SMTP plugin, which Runlight then uses. The services:
 
@@ -110,6 +114,11 @@ Imports: when you import from one of these in the dashboard, Runlight reads your
 * Dub (api.dub.co). Terms: https://dub.co/legal/terms. Privacy: https://dub.co/legal/privacy.
 * Rebrandly (api.rebrandly.com). Terms: https://www.rebrandly.com/terms-conditions. Privacy: https://www.rebrandly.com/privacy-policy.
 * Short.io (api.short.io and statistics.short.io). Terms: https://short.io/terms. Privacy: https://short.io/privacy.
+
+Other Runlight installs and link domains, only when you set them up in the dashboard:
+
+* Other installs: when you add another Runlight install to the dashboard, to see its sites beside this one's, Runlight sends the API token you enter, or one you allow on that install's own consent page, to the address you enter, and from then on reads that install's site list and numbers from it with that token while you look at them. Removing the install asks it to delete the token. That install is yours, so its terms are your own.
+* Short link domains: when you add a custom domain for short links, Runlight checks it by fetching https://<your domain>/.well-known/runlight-link-domain, a file on that domain, and sends nothing with the request. The domain is yours, so its terms are your own.
 
 Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone, at the address you enter. You run it yourself, so its terms are your own; Runlight is open source software under the MIT licence, and runlight.sh's terms and privacy policy are at https://runlight.sh/terms/ and https://runlight.sh/privacy/.
 

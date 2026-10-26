@@ -19,22 +19,6 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class Locations implements \Runlight\Server\DbIpFiles {
-	/**
-	 * The filesystem for these files. They are uploads, which PHP writes
-	 * itself as WordPress does with every upload, so the direct method is
-	 * the one that reaches them; FTP or SSH, which other methods use for
-	 * code, would not.
-	 */
-	private static function filesystem(): \WP_Filesystem_Direct {
-		static $direct = null;
-		if ( null === $direct ) {
-			require_once ABSPATH . 'wp-admin/includes/class-wp-filesystem-base.php';
-			require_once ABSPATH . 'wp-admin/includes/class-wp-filesystem-direct.php';
-			$direct = new \WP_Filesystem_Direct( null );
-		}
-		return $direct;
-	}
-
 	/** The mode files are written with: WordPress's, when it has set one. */
 	private static function mode(): int {
 		return defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644;
@@ -57,10 +41,10 @@ final class Locations implements \Runlight\Server\DbIpFiles {
 	 * @throws \RuntimeException When it cannot.
 	 */
 	public function gunzip( string $from, string $to ): void {
-		$packed   = self::filesystem()->get_contents( $from );
+		$packed   = Storage::files()->get_contents( $from );
 		$unpacked = is_string( $packed ) ? gzdecode( $packed ) : false;
 		unset( $packed );
-		if ( ! is_string( $unpacked ) || ! self::filesystem()->put_contents( $to, $unpacked, self::mode() ) ) {
+		if ( ! is_string( $unpacked ) || ! Storage::files()->put_contents( $to, $unpacked, self::mode() ) ) {
 			throw new \RuntimeException( 'could not unpack ' . esc_html( $from ) );
 		}
 	}
@@ -72,7 +56,7 @@ final class Locations implements \Runlight\Server\DbIpFiles {
 	 * @throws \RuntimeException When it cannot be read.
 	 */
 	public function open( string $file ): Mmdb {
-		$bytes = self::filesystem()->get_contents( $file );
+		$bytes = Storage::files()->get_contents( $file );
 		if ( ! is_string( $bytes ) ) {
 			throw new \RuntimeException( 'Could not read ' . esc_html( $file ) );
 		}
@@ -87,7 +71,7 @@ final class Locations implements \Runlight\Server\DbIpFiles {
 	 * @throws \RuntimeException When it cannot.
 	 */
 	public function move( string $from, string $to ): void {
-		if ( ! self::filesystem()->move( $from, $to, true ) ) {
+		if ( ! Storage::files()->move( $from, $to, true ) ) {
 			throw new \RuntimeException( 'could not move ' . esc_html( $from ) );
 		}
 	}

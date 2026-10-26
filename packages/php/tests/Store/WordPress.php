@@ -39,6 +39,12 @@ final class WordPress
         if (!class_exists(\wpdb::class, false)) {
             require __DIR__ . '/../Support/wpdb.php';
         }
+        // The plugin's stand-ins for WordPress's filesystem, which Storage::files() gives Sqlite3Db.
+        if (!class_exists(\WP_Filesystem_Direct::class, false)) {
+            require_once dirname(self::includes()) . '/tests/wp-admin/includes/class-wp-filesystem-base.php';
+            require_once dirname(self::includes()) . '/tests/wp-admin/includes/class-wp-filesystem-direct.php';
+        }
+        require_once self::includes() . '/Storage.php';
         require_once self::includes() . '/Sqlite3Db.php';
         require_once self::includes() . '/WpdbDb.php';
     }
@@ -53,6 +59,7 @@ final class WordPress
     /** The plugin's $wpdb driver over a database a mysql:// URL names. */
     public static function wpdb(string $url): Db
     {
+        self::load();
         return new \Runlight\WordPress\WpdbDb(self::connection($url));
     }
 

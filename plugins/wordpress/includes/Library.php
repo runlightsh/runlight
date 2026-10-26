@@ -18,14 +18,10 @@ final class Library {
 	/** The PHP the package needs, which is newer than the plugin's own. */
 	private const PHP = '8.2';
 
-	/** Where the package is: vendor/runlight/runlight in the plugin, or packages/php beside it in a checkout of the repository. */
+	/** Where the package is, vendor/runlight/runlight in the plugin, or an empty string when it is missing. */
 	private static function folder(): string {
-		$plugin = dirname( __DIR__ );
-		if ( is_dir( $plugin . '/vendor/runlight/runlight/src' ) ) {
-			return $plugin . '/vendor/runlight/runlight';
-		}
-		$checkout = dirname( $plugin, 2 ) . '/packages/php';
-		return is_dir( $checkout . '/src' ) ? $checkout : '';
+		$package = dirname( __DIR__ ) . '/vendor/runlight/runlight';
+		return is_dir( $package . '/src' ) ? $package : '';
 	}
 
 	/**

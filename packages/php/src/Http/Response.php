@@ -88,7 +88,7 @@ final class Response
     public function write(): void
     {
         if (is_string($this->body)) {
-            echo $this->body;
+            echo $this->body; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- a whole response, HTML, JSON, or script, built and escaped by Runlight and sent with its own content type.
             return;
         }
         while (ob_get_level() > 0) {

@@ -84,4 +84,23 @@ class wpdb
     {
         return $this->dbh->real_escape_string($value);
     }
+
+    /**
+     * The placeholders WpdbDb gives wpdb::prepare(), read as it reads them: %d a whole number, %s text quoted and
+     * escaped, %% a percent sign, and the values in one array or one by one.
+     */
+    public function prepare(string $query, mixed ...$args): string
+    {
+        if (count($args) === 1 && is_array($args[0])) {
+            $args = $args[0];
+        }
+        $i = 0;
+        return (string) preg_replace_callback('/%([%ds])/', function (array $m) use (&$i, $args): string {
+            if ($m[1] === '%') {
+                return '%';
+            }
+            $value = $args[$i++];
+            return $m[1] === 'd' ? (string) (int) $value : "'" . $this->_real_escape((string) $value) . "'";
+        }, $query);
+    }
 }

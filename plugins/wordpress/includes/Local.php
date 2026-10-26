@@ -28,6 +28,9 @@ final class Local {
 	/** The option holding when the upkeep last finished, or was first due. */
 	public const CHECKED = 'runlight_checked';
 
+	/** The action the nonce for changes in Runlight's dashboard is made for. */
+	private const NONCE = 'runlight_api';
+
 	private static ?Runlight $runlight = null;
 	private static ?Routes $routes     = null;
 
@@ -189,7 +192,9 @@ final class Local {
 				// other site reports AI agents to this one.
 				'cronSecret' => '',
 				'observeKey' => '',
-				'authorize'  => static fn (): bool => current_user_can( 'manage_options' ),
+				// Only an admin, and a change only with this site's nonce, from this site's own pages.
+				'authorize'  => static fn ( Request $request ): bool => current_user_can( 'manage_options' ) && self::nonced( $request ) && self::same_site( $request ),
+				'csrf'       => static fn (): string => wp_create_nonce( self::NONCE ),
 				'signIn'     => self::base() . '/login',
 				'origin'     => home_url(),
 				'geoCredit'  => Settings::get()['locations'],
@@ -214,7 +219,8 @@ final class Local {
 			'HTTP_AUTHORIZATION', 'HTTP_COOKIE', 'HTTP_USER_AGENT', 'HTTP_ACCEPT_LANGUAGE',
 			'HTTP_IF_NONE_MATCH', 'HTTP_SEC_CH_UA', 'HTTP_SEC_CH_UA_MOBILE', 'HTTP_SEC_CH_UA_PLATFORM',
 			'HTTP_X_FORWARDED_FOR', 'HTTP_X_FORWARDED_PROTO', 'HTTP_CF_CONNECTING_IP', 'HTTP_CF_IPCOUNTRY',
-			'HTTP_CF_REGION_CODE', 'HTTP_X_RUNLIGHT_SHARE', 'HTTP_X_RUNLIGHT_EMBED',
+			'HTTP_CF_REGION_CODE', 'HTTP_X_RUNLIGHT_SHARE', 'HTTP_X_RUNLIGHT_EMBED', 'HTTP_X_RUNLIGHT_CSRF',
+			'HTTP_SEC_FETCH_SITE', 'HTTP_SEC_FETCH_MODE',
 		) as $key ) {
 			if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {
 				$server[ $key ] = sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) );
@@ -326,6 +332,43 @@ final class Local {
 		}
 		self::runlight()->idle();
 		exit;
+	}
+
+	/**
+	 * Whether a request reads, or else carries this site's nonce for Runlight: the dashboard sends the one it was
+	 * given in an x-runlight-csrf header with every change, and the OAuth consent form in its csrf field.
+	 *
+	 * @param Request $request The request.
+	 */
+	private static function nonced( Request $request ): bool {
+		if ( in_array( $request->method, array( 'GET', 'HEAD', 'OPTIONS' ), true ) ) {
+			return true;
+		}
+		$nonce = (string) $request->headers->get( 'x-runlight-csrf' );
+		if ( '' === $nonce && str_starts_with( strtolower( (string) $request->headers->get( 'content-type' ) ), 'application/x-www-form-urlencoded' ) ) {
+			parse_str( $request->text(), $form );
+			$nonce = is_string( $form['csrf'] ?? null ) ? $form['csrf'] : '';
+		}
+		return '' !== $nonce && false !== wp_verify_nonce( sanitize_key( $nonce ), self::NONCE );
+	}
+
+	/**
+	 * Whether a request comes from a page on this site, as the browser says where a request comes from, beside
+	 * the nonce. A change must say it does. A read from a page on another site is refused too, as one could
+	 * run the upkeep, unless it is a visit, such as an app sending an admin to the OAuth consent page.
+	 *
+	 * @param Request $request The request.
+	 */
+	private static function same_site( Request $request ): bool {
+		$fetch = strtolower( (string) $request->headers->get( 'sec-fetch-site' ) );
+		if ( in_array( $request->method, array( 'GET', 'HEAD', 'OPTIONS' ), true ) ) {
+			return 'cross-site' !== $fetch || 'navigate' === strtolower( (string) $request->headers->get( 'sec-fetch-mode' ) );
+		}
+		if ( '' !== $fetch ) {
+			return 'same-origin' === $fetch || 'none' === $fetch;
+		}
+		$origin = (string) $request->headers->get( 'origin' );
+		return '' !== $origin && strtolower( (string) wp_parse_url( $origin, PHP_URL_HOST ) ) === strtolower( (string) wp_parse_url( $request->url, PHP_URL_HOST ) );
 	}
 
 	/** Tells page caches to leave this answer alone. */

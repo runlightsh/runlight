@@ -16,6 +16,21 @@ define( 'MINUTE_IN_SECONDS', 60 );
 define( 'HOUR_IN_SECONDS', 3600 );
 define( 'DAY_IN_SECONDS', 86400 );
 
+// The plugin finds the package only in its own vendor folder, which a checkout lacks: packages/php stands in for
+// it here. A copy unpacked from the zip (serve.php) brings its own, and must, so it is left to that.
+if ( ! getenv( 'RUNLIGHT_WP_PLUGIN' ) ) {
+	spl_autoload_register(
+		static function ( string $name ): void {
+			if ( str_starts_with( $name, 'Runlight\\' ) && ! str_starts_with( $name, 'Runlight\\WordPress\\' ) ) {
+				$file = dirname( __DIR__, 3 ) . '/packages/php/src/' . str_replace( '\\', '/', substr( $name, strlen( 'Runlight\\' ) ) ) . '.php';
+				if ( is_file( $file ) ) {
+					require $file;
+				}
+			}
+		}
+	);
+}
+
 $GLOBALS['wp_test'] = array(
 	'state'   => (string) getenv( 'RUNLIGHT_WP_STATE' ),
 	'home'    => getenv( 'RUNLIGHT_WP_HOME' ) ?: 'http://127.0.0.1',
@@ -180,6 +195,16 @@ function is_404(): bool {
 }
 function current_user_can( $capability, ...$args ): bool {
 	return $GLOBALS['wp_test']['can'];
+}
+/** A nonce for the action, the same each time, as WordPress's is within its tick. */
+function wp_create_nonce( $action = -1 ): string {
+	return substr( md5( 'nonce:' . $action ), 0, 10 );
+}
+function wp_verify_nonce( $nonce, $action = -1 ) {
+	return hash_equals( wp_create_nonce( $action ), (string) $nonce ) ? 1 : false;
+}
+function sanitize_key( $key ): string {
+	return preg_replace( '/[^a-z0-9_\-]/', '', strtolower( (string) $key ) );
 }
 function home_url( $path = '' ): string {
 	return rtrim( $GLOBALS['wp_test']['home'], '/' ) . '/' . ltrim( (string) $path, '/' );

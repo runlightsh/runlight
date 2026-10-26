@@ -1,0 +1,10 @@
+{
+  "name": "runlight/wordpress",
+  "description": "Counts visitors with Runlight: privacy friendly analytics with no cookies, kept in your own database.",
+  "type": "wordpress-plugin",
+  "license": "GPL-2.0-or-later",
+  "homepage": "https://runlight.sh/docs/wordpress/",
+  "require": {
+    "runlight/runlight": "^0.3.0"
+  }
+}

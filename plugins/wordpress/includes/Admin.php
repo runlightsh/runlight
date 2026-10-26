@@ -251,7 +251,7 @@ final class Admin {
 		$local    = 'local' === $settings['mode'];
 		// The setup screen stays until a choice is made, unless the admin asked for the fields to fill in by hand.
 		$unset  = ! Settings::set_up();
-		$manual = isset( $_GET['setup'] ) && 'manual' === $_GET['setup']; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- only picks which screen to show.
+		$manual = isset( $_GET['setup'] ) && 'manual' === sanitize_key( wp_unslash( $_GET['setup'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- only picks which screen to show.
 		if ( $unset && ! $manual ) {
 			self::setup( $missing );
 			return;
