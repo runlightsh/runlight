@@ -25,6 +25,13 @@ updates:
     directories: ["/"]
     schedule:
       interval: weekly
+    # A new TypeScript major changes the compiler's defaults, and Node's types
+    # stay on the oldest Node Runlight supports (22), so both move by hand.
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       npm:
         patterns: ["*"]
