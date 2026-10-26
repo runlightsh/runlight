@@ -142,13 +142,13 @@
   },
   "devDependencies": {
     "@libsql/client": "^0.18.0",
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.4",
     "@types/pg": "^8.23.1",
     "better-sqlite3": "^13.0.3",
-    "mysql2": "^3.24.5",
+    "mysql2": "^3.24.6",
     "pg": "^8.23.1",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3"
   },
