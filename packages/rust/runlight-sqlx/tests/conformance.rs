@@ -229,7 +229,7 @@ fn base32_decode(text: &str) -> Vec<u8> {
 }
 
 fn totp(secret: &str, step: i64) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&base32_decode(secret)).unwrap();
     mac.update(&step.to_be_bytes());
     let m = mac.finalize().into_bytes();
