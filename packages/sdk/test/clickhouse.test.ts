@@ -105,9 +105,9 @@ test("the pages report adds up engaged time the same in slices as in one query",
 });
 
 /** Two dozen visits over two hosts, four pages, four sources, two devices, and two events, through the tracker. */
-async function traffic(store: SqlStore) {
+async function traffic(store: SqlStore, start = Date.now() - 3_600_000) {
   // A second between hits, so a visit's first page is the one that came first in every store.
-  let now = Date.now() - 3_600_000;
+  let now = start;
   const rl = runlight({ store, site: { hostnames: ["example.com", "docs.example.com"], timezone: "UTC" }, now: () => now });
   const routes = rl.routes({ token: null });
   const referrers = ["https://www.google.com/", "https://news.ycombinator.com/", "", "https://www.bing.com/"];
@@ -125,8 +125,10 @@ async function traffic(store: SqlStore) {
 
 test("a lone page or hostname filter, read once on ClickHouse, counts the visits and their pageviews as SQLite does", { skip: !CLICKHOUSE }, async (t) => {
   const { store } = await own(t);
-  const clickhouseRoutes = (await traffic(store)).routes;
-  const sqliteRoutes = (await traffic(sqlite({ path: ":memory:" }))).routes;
+  // Both from one start, so an hour that ends between the two never puts a visit in a different hour in each.
+  const start = Date.now() - 3_600_000;
+  const clickhouseRoutes = (await traffic(store, start)).routes;
+  const sqliteRoutes = (await traffic(sqlite({ path: ":memory:" }), start)).routes;
   const filters = [["page:is:/p1"], ["page:contains:P2"], ["hostname:is:docs.example.com"], ["page:is:/p1", "channel:is:Organic Search"], ["page:contains:p", "device:not:mobile"], ["page:not:/p0"], ["page:is:/p1", "event:is:Signup"]];
   for (const f of filters) {
     for (const path of ["stats", "series", "rhythm", "breakdown&dimension=source", "breakdown&dimension=entry", "breakdown&dimension=device"]) {
