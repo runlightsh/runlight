@@ -151,8 +151,9 @@ const waiting: Array<() => void> = [];
 /**
  * Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core.
  * Past the queue's length it refuses at once, with an AccountError coded "busy".
+ * @internal Exported for its tests, which hold the checks to count the slots exactly.
  */
-async function slot<T>(fn: () => Promise<T>): Promise<T> {
+export async function slot<T>(fn: () => Promise<T>): Promise<T> {
   if (running >= CHECKING) {
     if (waiting.length >= WAITING) throw new AccountError("Runlight is busy checking other sign-ins. Try again in a moment.", "busy");
     await new Promise<void>((resolve) => waiting.push(resolve));

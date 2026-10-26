@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import { after, test } from "node:test";
 import { checkPassword, hashPassword, runlight } from "../src/index.js";
+import { slot } from "../src/accounts/auth.js";
 import { sealText, unsealText } from "../src/accounts/crypto.js";
 import { STORES, cleanup, freshStore } from "./helpers.js";
 
@@ -352,3 +353,29 @@ for (const kind of STORES) {
     assert.deepEqual((await accounts.invites(now)).map((i) => i.email), ["other@example.com"]);
   });
 }
+
+test("password checks run four at a time, sixty-four more wait their turn, and past that the rest are told to wait", async () => {
+  // Every check is held until the test lets it go, so the count never depends on how fast a check is.
+  const holds: Array<() => void> = [];
+  const started: number[] = [];
+  const check = (i: number) => () =>
+    new Promise<number>((resolve) => {
+      started.push(i);
+      holds.push(() => resolve(i));
+    });
+  const outcomes = Array.from({ length: 100 }, (_, i) => slot(check(i)).then(() => "checked", (error: { code?: string }) => error.code ?? "failed"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [0, 1, 2, 3], "four checks run at once");
+  // The fifth starts the moment one of the first four ends, as the slot passes straight to the next in line.
+  holds.shift()!();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [0, 1, 2, 3, 4]);
+  while (holds.length) {
+    holds.shift()!();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const settled = await Promise.all(outcomes);
+  assert.equal(settled.filter((s) => s === "checked").length, 68, "four checking and sixty-four waiting");
+  assert.deepEqual(settled.slice(68), Array(32).fill("busy"));
+  assert.equal(await slot(async () => "free again"), "free again", "and once they are done, the slots are free");
+});
