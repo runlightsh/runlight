@@ -24,9 +24,14 @@ final class Connect {
 		add_action( 'admin_post_runlight_connected', array( self::class, 'finish' ) );
 	}
 
-	/** Where the Runlight sends the admin back to, which it is registered with. */
-	private static function back(): string {
-		return admin_url( 'admin-post.php?action=runlight_connected' );
+	/**
+	 * Where the Runlight sends the admin back to, which it is registered with. Each attempt registers
+	 * afresh, so the address carries a nonce for the admin who started it.
+	 *
+	 * @param string $nonce The attempt's nonce.
+	 */
+	private static function back( string $nonce ): string {
+		return admin_url( 'admin-post.php?action=runlight_connected&_wpnonce=' . rawurlencode( $nonce ) );
 	}
 
 	/** Back to the settings page, or once connected to the numbers, with what happened to say there. */
@@ -52,13 +57,18 @@ final class Connect {
 		return is_array( $notice ) && 2 === count( $notice ) ? array( (bool) $notice[0], (string) $notice[1] ) : null;
 	}
 
-	/** The package's Connect, with WordPress's HTTP API and this plugin's words. */
-	private static function connect(): CmsConnect {
+	/**
+	 * The package's Connect, with WordPress's HTTP API and this plugin's words.
+	 *
+	 * @param string $nonce The attempt's nonce, which the address it comes back to carries.
+	 */
+	private static function connect( string $nonce ): CmsConnect {
 		Library::load();
 		if ( ! class_exists( CmsConnect::class ) ) {
 			self::done( __( 'This copy of the plugin is missing its vendor folder. Install it again from WordPress.org.', 'runlight' ) );
 		}
-		return new CmsConnect( new Fetcher(), self::back(), array( self::class, 'say' ) );
+		require_once __DIR__ . '/Fetcher.php';
+		return new CmsConnect( new Fetcher(), self::back( $nonce ), array( self::class, 'say' ) );
 	}
 
 	/**
@@ -122,7 +132,7 @@ final class Connect {
 		if ( ! Settings::can_change_address() ) {
 			$address = Settings::get()['address'];
 		}
-		[ $to, $pending, $error ] = self::connect()->start( $address );
+		[ $to, $pending, $error ] = self::connect( wp_create_nonce( 'runlight_connected' ) )->start( $address );
 		if ( null === $to ) {
 			self::done( $error );
 		}
@@ -145,18 +155,21 @@ final class Connect {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_die( esc_html__( 'Sorry, you are not allowed to connect this site.', 'runlight' ), 403 );
 		}
-		// Each attempt works once, and only for the admin who started it: the state it was sent with proves that.
+		// Each attempt works once, and only for the admin who started it: its nonce and the state it was sent with prove that.
 		$pending = get_transient( self::key( 'connect' ) );
 		delete_transient( self::key( 'connect' ) );
-		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- the state, kept for this admin and compared in CmsConnect::finish(), does a nonce's work.
+		$nonce = isset( $_GET['_wpnonce'] ) && is_string( $_GET['_wpnonce'] ) ? sanitize_key( wp_unslash( $_GET['_wpnonce'] ) ) : '';
+		if ( ! wp_verify_nonce( $nonce, 'runlight_connected' ) ) {
+			self::done( self::say( 'expired', array() ) );
+		}
 		$query = array();
 		foreach ( array( 'state', 'code', 'error', 'error_description' ) as $name ) {
 			if ( isset( $_GET[ $name ] ) && is_string( $_GET[ $name ] ) ) {
 				$query[ $name ] = sanitize_text_field( wp_unslash( $_GET[ $name ] ) );
 			}
 		}
-		// phpcs:enable WordPress.Security.NonceVerification.Recommended
-		[ $granted, $message ] = self::connect()->finish( $query, $pending );
+		// The address it was registered with, so the same nonce.
+		[ $granted, $message ] = self::connect( $nonce )->finish( $query, $pending );
 		if ( null === $granted ) {
 			self::done( $message );
 		}
