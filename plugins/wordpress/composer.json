@@ -5,6 +5,6 @@
   "license": "GPL-2.0-or-later",
   "homepage": "https://runlight.sh/docs/wordpress/",
   "require": {
-    "runlight/runlight": "^0.3.0"
+    "runlight/runlight": "^0.3.1"
   }
 }

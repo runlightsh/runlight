@@ -1,3 +1,3 @@
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 /** Bumped when the HTTP API changes shape, so the dashboard and the hub can tell. */
 export const API_VERSION = 1;

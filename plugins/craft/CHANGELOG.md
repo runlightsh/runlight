@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.3.1 - 2026-10-26
 
 ### Changed
 - Updated the Runlight library to 0.3.1. Email reports draw the Runlight logo in HTML instead of loading an image from runlight.sh.
