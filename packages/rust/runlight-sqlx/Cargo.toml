@@ -36,8 +36,8 @@ sqlx = { version = "0.9", default-features = false, features = ["mysql-rsa"] }
 tokio = { version = "1.44", features = ["full"] }
 # The conformance runner: the normalizer's lookbehinds, and the TOTP codes steps send.
 fancy-regex = "0.14"
-hmac = "0.13"
-sha1 = "0.11"
+hmac = "0.12"
+sha1 = "0.10"
 # The adapters' tests.
 axum = { version = "0.8.4", default-features = false }
 http = "1.1"
