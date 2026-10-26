@@ -273,7 +273,9 @@ defmodule Runlight.MailTest do
     assert error.params == %{"host" => "127.0.0.1:#{port}"}
     assert error.message == "SMTP: 127.0.0.1:#{port} took longer than 1 s"
     assert System.monotonic_time(:millisecond) - started < 2000
-    assert SmtpServer.conversation(2000).closed
+    # The deadline is the line above; this only waits for the server to see the connection closed, which a busy
+    # machine can take a while to schedule.
+    assert SmtpServer.conversation().closed
     SmtpServer.stop(pid)
   end
 
