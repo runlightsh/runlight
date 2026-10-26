@@ -152,7 +152,9 @@ impl ReqwestFetcher {
 /// would look the name up itself, and fails rather than fall back to one that is not pinned.
 #[cfg(feature = "transport")]
 fn client(manual: bool, resolve: &[(String, u16, Vec<IpAddr>)]) -> Result<reqwest::Client, FetchError> {
+    let tls = crate::mail::smtp::tls_config().map_err(FetchError::Failed)?;
     let mut b = reqwest::Client::builder()
+        .tls_backend_preconfigured((*tls).clone())
         .redirect(if manual { reqwest::redirect::Policy::none() } else { reqwest::redirect::Policy::limited(20) })
         .connect_timeout(std::time::Duration::from_secs(15));
     if !resolve.is_empty() {
