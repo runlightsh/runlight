@@ -130,6 +130,13 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Fixed the Connect button, which stopped with an error before reaching your Runlight. The address it sends you back to now carries a WordPress nonce too.
+* Changes made in the dashboard at /runlight, and on its consent page for AI apps, now need a WordPress nonce and must come from your site's own pages.
+* Renamed Runlight's tables from wp_rl_ to wp_runlight_ (after your table prefix). Existing tables and their indexes are renamed the first time the new version runs.
+* Every value in Runlight's SQL now goes through $wpdb->prepare(), its script is added with wp_enqueue_script(), and its files are written through WordPress's filesystem API.
+* Email reports draw the Runlight logo in HTML instead of loading an image from runlight.sh.
+
 = 0.3.0 =
 * Updated the bundled Runlight library to 0.3.0. Outbound link and File download events keep the link without its query string or fragment, and a funnel over more than 100,000 visits counts the newest 100,000.
 * Fixed a hit tried again after the database was busy counting twice in its visit.
