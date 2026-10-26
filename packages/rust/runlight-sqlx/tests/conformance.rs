@@ -76,7 +76,7 @@ fn normalize(value: &Value, key: &str) -> Value {
 /// A Set-Cookie header with its value as <value>, unless it clears the cookie.
 fn cookie_shape(header: &str) -> String {
     re(r"^([^=;]+)=([^;]*)")
-        .replacen(header, 1, |c: &fancy_regex::Captures| {
+        .replacen(header, 1, |c: &fancy_regex::Captures<str>| {
             format!("{}={}", &c[1], if c[2].is_empty() { "" } else { "<value>" })
         })
         .into_owned()
@@ -251,12 +251,14 @@ impl Player {
     fn fill(&self, text: &str) -> String {
         let now = self.now.load(Ordering::SeqCst);
         let with_codes = re(r"\{\{totp:(\w+)\}\}")
-            .replace_all(text, |c: &fancy_regex::Captures| {
+            .replace_all(text, |c: &fancy_regex::Captures<str>| {
                 totp(self.kept.get(&c[1]).map_or("", String::as_str), now.div_euclid(30_000))
             })
             .into_owned();
         re(r"\{\{(\w+)\}\}")
-            .replace_all(&with_codes, |c: &fancy_regex::Captures| self.kept.get(&c[1]).cloned().unwrap_or_default())
+            .replace_all(&with_codes, |c: &fancy_regex::Captures<str>| {
+                self.kept.get(&c[1]).cloned().unwrap_or_default()
+            })
             .into_owned()
     }
 
