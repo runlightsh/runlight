@@ -359,7 +359,7 @@ pub async fn build_report(
         None => dashboard_link.to_string(),
     };
     let at = t("email.at", &[("where", place.clone().into())]);
-    let mark = "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\">";
+    let mark = "<div role=\"img\" aria-label=\"Runlight\" style=\"width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center\">R</div>";
 
     let footer = t(
         "email.footer",

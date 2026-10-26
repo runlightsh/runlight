@@ -463,7 +463,7 @@ public final class Web {
                   + link
                   + "\n\nThe link works for seven days.\n",
               "html",
-              "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>"
+              "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><div role=\"img\" aria-label=\"Runlight\" style=\"width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center\">R</div><p>"
                   + esc(invitedBy)
                   + " invited you to the Runlight at "
                   + esc(host)
@@ -524,7 +524,7 @@ public final class Web {
                 + link
                 + "\n\nIf this was not you, change your password, since someone knows it.\n",
             "html",
-            "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p>Someone, most likely you, signed in to Runlight at "
+            "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><div role=\"img\" aria-label=\"Runlight\" style=\"width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center\">R</div><p>Someone, most likely you, signed in to Runlight at "
                 + esc(host)
                 + " with your password while your account was held up by too many failed tries.</p><p><a href=\""
                 + esc(link)

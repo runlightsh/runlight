@@ -1631,7 +1631,7 @@ public sealed class Routes
                     ["to"] = to,
                     ["subject"] = t.T("email.test.subject"),
                     ["text"] = t.T("email.test.body", new JsObject { ["service"] = name }),
-                    ["html"] = "<img src=\"https://runlight.sh/icon-192.png\" width=\"48\" height=\"48\" alt=\"Runlight\" style=\"display:block;width:48px;height:48px;margin-bottom:24px;border:0;border-radius:10px\"><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
+                    ["html"] = "<div role=\"img\" aria-label=\"Runlight\" style=\"width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center\">R</div><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
                 }, cancellationToken).ConfigureAwait(false);
                 // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
                 await Store.SetSettingAsync(tested, Js.Str(_rl.Now()), cancellationToken).ConfigureAwait(false);
