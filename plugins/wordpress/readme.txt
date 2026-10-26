@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.3.0
+Stable tag: 0.3.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -130,7 +130,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.3.1 =
 * Fixed the Connect button, which stopped with an error before reaching your Runlight. The address it sends you back to now carries a WordPress nonce too.
 * Changes made in the dashboard at /runlight, and on its consent page for AI apps, now need a WordPress nonce and must come from your site's own pages.
 * Renamed Runlight's tables from wp_rl_ to wp_runlight_ (after your table prefix). Existing tables and their indexes are renamed the first time the new version runs.
