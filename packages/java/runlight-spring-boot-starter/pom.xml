@@ -23,7 +23,7 @@
   <description>Runlight for Spring Boot 3.5 and 4: Runlight from runlight.* properties over the app's DataSource, the dashboard, API, and tracker on Spring MVC, short links, link domains, and AI agent fetches, and the scheduled check every minute.</description>
 
   <properties>
-    <spring-boot.version>4.1.1</spring-boot.version>
+    <spring-boot.version>4.1.2</spring-boot.version>
   </properties>
 
   <dependencyManagement>
