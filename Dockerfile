@@ -7,7 +7,7 @@
 # node:24-slim), so a rebuild of the same commit starts from the same image.
 # Dependabot (.github/dependabot.yml) proposes a new digest as it changes.
 
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS build
 # better-sqlite3 compiles from source where no prebuilt binary fits.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -24,7 +24,7 @@ RUN cp /src/package.json /src/package-lock.json . \
   && tar -xzf /pack/runlight-server-*.tgz -C packages/server --strip-components=1 \
   && npm ci --omit=dev --workspace packages/server --no-audit --no-fund
 
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 ENV NODE_ENV=production DATA_DIR=/data PORT=3000 HOST=0.0.0.0
 WORKDIR /app
 COPY --from=build /app /app
