@@ -209,8 +209,8 @@ public final class Routes {
    *       WordPress, Drupal, and Craft plugins set it.
    *   <li>csrf: a token the dashboard sends back with every change it makes, in an x-runlight-csrf
    *       header, and the OAuth consent form in a csrf field, for an authorize that checks where a
-   *       change comes from, as a CMS checks its own forms. Asked for each time the dashboard or the
-   *       form is shown. The WordPress plugin gives a nonce.
+   *       change comes from, as a CMS checks its own forms. Asked for each time the dashboard or
+   *       the form is shown. The WordPress plugin gives a nonce.
    *   <li>origin: the address people open the app at, such as https://example.com.
    *   <li>ownHosts: more names the dashboard is reached at.
    *   <li>accountOf: the account a request comes from (internal, for the standalone server).
