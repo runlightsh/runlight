@@ -31,7 +31,7 @@ if (!str_contains($main, "define( 'RUNLIGHT_PLUGIN_VERSION', '$version' )")) {
     exit(1);
 }
 
-$files = ['runlight.php', 'uninstall.php', 'readme.txt'];
+$files = ['runlight.php', 'uninstall.php', 'readme.txt', 'composer.json'];
 foreach (glob("$root/includes/*.php") ?: [] as $file) {
     $files[] = 'includes/' . basename($file);
 }

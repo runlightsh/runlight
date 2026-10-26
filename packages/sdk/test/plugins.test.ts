@@ -90,9 +90,15 @@ test("a CMS plugin keeps its saved keys only while its Runlight address stays th
 test("the WordPress plugin hands Runlight the request without the slashes WordPress adds", (t) => {
   // WordPress slashes $_SERVER as it boots (wp_magic_quotes); the stand-ins below do the same and undo it as it does.
   const includes = new URL("../../../plugins/wordpress/includes/", import.meta.url).pathname;
+  const library = new URL("../../php/src/", import.meta.url).pathname;
   const script = `
     namespace Runlight\\WordPress;
     define("ABSPATH", "/");
+    // The package from packages/php, as the plugin's vendor folder holds it.
+    spl_autoload_register(static function (string $name): void {
+      $file = ${JSON.stringify(library)} . str_replace("\\\\", "/", substr($name, strlen("Runlight\\\\"))) . ".php";
+      if (str_starts_with($name, "Runlight\\\\") && !str_starts_with($name, "Runlight\\\\WordPress\\\\") && is_file($file)) require $file;
+    });
     function slash($v) { return is_array($v) ? array_map(__NAMESPACE__ . "\\\\slash", $v) : (is_string($v) ? addslashes($v) : $v); }
     function wp_unslash($v) { return is_array($v) ? array_map(__NAMESPACE__ . "\\\\wp_unslash", $v) : (is_string($v) ? stripslashes($v) : $v); }
     function sanitize_text_field($v) { return trim(preg_replace("/%[a-f0-9]{2}/i", "", strip_tags($v))); }
@@ -343,7 +349,7 @@ test("without an object cache, the WordPress plugin's rate counts take two rows 
 });
 
 test("the WordPress plugin keeps its tables under WordPress's prefix, and drops only its own by name", (t) => {
-  const run = (tables: string[], kept = "") =>
+  const run = (names: string[], kept = "", tables = "runlight_") =>
     wordpressPhp(t, `
       class wpdb {
         public $prefix = "wpx_";
@@ -353,7 +359,11 @@ test("the WordPress plugin keeps its tables under WordPress's prefix, and drops 
         public function __construct(array $tables) { $this->tables = $tables; }
         public function get_var($sql) { return "8.4.3"; }
         public function esc_like($text) { return addcslashes($text, "_%\\\\"); }
-        public function prepare($sql, ...$args) { return str_replace("%s", "'" . $args[0] . "'", $sql); }
+        public function prepare($sql, ...$args) {
+          $args = isset($args[0]) && is_array($args[0]) ? $args[0] : $args;
+          $i = 0;
+          return preg_replace_callback("/%[is]/", static function ($m) use (&$i, $args) { $v = $args[$i++]; return $m[0] === "%i" ? chr(96) . $v . chr(96) : "'$v'"; }, $sql);
+        }
         public function get_col($sql) {
           preg_match("/LIKE '(.*)'/", $sql, $m);
           $start = stripslashes(substr($m[1], 0, -1));
@@ -362,27 +372,34 @@ test("the WordPress plugin keeps its tables under WordPress's prefix, and drops 
         public function query($sql) { if (preg_match("/^DROP TABLE IF EXISTS \\\`(.*)\\\`$/", $sql, $m)) { $this->dropped[] = $m[1]; } return 1; }
       }
       function esc_sql($v) { return $v; }
-      $GLOBALS["wpdb"] = new wpdb(${JSON.stringify(tables)});
+      $GLOBALS["wpdb"] = new wpdb(${JSON.stringify(names)});
       require ${JSON.stringify(WORDPRESS + "includes/Library.php")};
       require ${JSON.stringify(WORDPRESS + "includes/Storage.php")};
-      ${kept ? `update_option("runlight_storage", ["kind" => ${JSON.stringify(kept)}, "file" => "x.db"]);` : ""}
+      ${kept ? `update_option("runlight_storage", ["kind" => ${JSON.stringify(kept)}, "file" => "x.db"${tables ? `, "tables" => ${JSON.stringify(tables)}` : ""}]);` : ""}
       $kind = ${kept ? "null" : "Runlight\\WordPress\\Storage::kind()"};
       Runlight\\WordPress\\Storage::remove();
       echo json_encode(["kind" => $kind, "prefix" => Runlight\\WordPress\\Storage::prefix(), "dropped" => $GLOBALS["wpdb"]->dropped]);
     `);
-  const own = ["meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings", "reports", "tokens", "funnels", "rollup_days", "rollups"].map((n) => `wpx_rl_${n}`);
+  const names = ["meta", "sites", "salts", "sessions", "events", "links", "link_domains", "shares", "goals", "settings", "reports", "tokens", "funnels", "rollup_days", "rollups"];
+  const own = names.map((n) => `wpx_runlight_${n}`);
+  const older = names.map((n) => `wpx_rl_${n}`);
   const fresh = run(["wpx_options", "wpx_posts", "rl_events", "rl_meta"]);
   if (fresh === null) return;
-  // A new database: MySQL, under wpx_rl_, whatever a standalone Runlight keeps beside it as rl_.
-  assert.deepEqual(JSON.parse(fresh), { kind: "mysql", prefix: "wpx_rl_", dropped: [] });
-  // Runlight's own tables, left by an earlier copy: used again.
+  // A new database: MySQL, under wpx_runlight_, whatever a standalone Runlight keeps beside it as rl_.
+  assert.deepEqual(JSON.parse(fresh), { kind: "mysql", prefix: "wpx_runlight_", dropped: [] });
+  // Runlight's own tables, left by an earlier copy, under either name: used again.
   assert.equal(JSON.parse(run([...own, "wpx_options"])!).kind, "mysql");
-  // Another WordPress whose prefix is wpx_rl_ shares the database: a SQLite file instead.
-  assert.equal(JSON.parse(run(["wpx_options", "wpx_rl_options", "wpx_rl_posts", "wpx_rl_links"])!).kind, "sqlite");
-  assert.equal(JSON.parse(run(["wpx_options", ...own, "wpx_rl_extra"])!).kind, "sqlite");
+  assert.equal(JSON.parse(run([...older, "wpx_options"])!).kind, "mysql");
+  // Another WordPress whose prefix is wpx_runlight_ shares the database: a SQLite file instead.
+  assert.equal(JSON.parse(run(["wpx_options", "wpx_runlight_options", "wpx_runlight_posts", "wpx_runlight_links"])!).kind, "sqlite");
+  assert.equal(JSON.parse(run(["wpx_options", ...own, "wpx_runlight_extra"])!).kind, "sqlite");
+  // One whose prefix is wpx_rl_ is no trouble now.
+  assert.equal(JSON.parse(run(["wpx_options", "wpx_rl_options", "wpx_rl_posts", "wpx_rl_links"])!).kind, "mysql");
   // Uninstalling drops Runlight's tables by name and nothing else, and only where its record of the schema is.
-  assert.deepEqual(JSON.parse(run([...own, "wpx_options", "wpx_rl_extra", "rl_events", "rl_meta"], "mysql")!).dropped, own.slice().sort((a, b) => own.indexOf(a) - own.indexOf(b)));
-  assert.deepEqual(JSON.parse(run(["wpx_options", "wpx_rl_options", "wpx_rl_links"], "mysql")!).dropped, []);
+  assert.deepEqual(JSON.parse(run([...own, "wpx_options", "wpx_runlight_extra", "rl_events", "rl_meta"], "mysql")!).dropped, own);
+  assert.deepEqual(JSON.parse(run(["wpx_options", "wpx_runlight_options", "wpx_runlight_links"], "mysql")!).dropped, []);
+  // Tables made before 0.3.1, never renamed, go by their own names.
+  assert.deepEqual(JSON.parse(run([...older, ...own, "wpx_options"], "mysql", "")!).dropped, older);
 });
 
 test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs its check from the package it bundles", async (t) => {
@@ -469,6 +486,19 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
   const body = await stats.text();
   assert.equal(stats.status, 200, body);
   assert.equal(JSON.parse(body).stats.visitors, 1);
+  // A change needs the nonce the dashboard was given, from a page on this site; a read from another site's page is refused too.
+  const nonce = /data-csrf="([^"]+)"/.exec(html)?.[1] ?? "";
+  assert.ok(nonce, html);
+  const goal = async (headers: Record<string, string>) =>
+    (await get(`${home}/runlight/api/goals`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ name: "Thanks", kind: "page", match: "/thanks*" }) })).status;
+  assert.equal(await goal({ "sec-fetch-site": "same-origin" }), 401, "without the nonce");
+  assert.equal(await goal({ "sec-fetch-site": "same-origin", "x-runlight-csrf": "0123456789" }), 401, "with a wrong nonce");
+  assert.equal(await goal({ "sec-fetch-site": "cross-site", "x-runlight-csrf": nonce }), 401, "from another site's page");
+  assert.equal(await goal({ "x-runlight-csrf": nonce }), 401, "saying nowhere where it comes from");
+  const made = await get(`${home}/runlight/api/goals`, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "same-origin", "x-runlight-csrf": nonce }, body: JSON.stringify({ name: "Thanks", kind: "page", match: "/thanks*" }) });
+  assert.ok(made.status < 300, `from the dashboard: ${made.status} ${await made.text()}`);
+  assert.equal((await get(`${home}/runlight/api/goals`, { headers: { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors" } })).status, 401);
+  assert.equal((await get(`${home}/runlight/api/goals`, { headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors" } })).status, 200);
   const check = await get(`${home}/__check`);
   assert.match(await check.text(), /^checked [1-9]/);
   const other = await get(`${home}/hello`);

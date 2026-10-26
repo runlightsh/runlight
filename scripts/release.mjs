@@ -59,7 +59,7 @@ export const VERSIONED = [
   // (drupal.org stamps it into the packaged .info.yml; Packagist and the Craft
   // Plugin Store read the tag), and run Runlight inside the CMS with the PHP
   // package of their own release.
-  ...["plugins/drupal/composer.json", "plugins/craft/composer.json"].map((file) => ({ file, pattern: /^(\s+"runlight\/runlight": "\^)([^"]+)(")/m })),
+  ...["plugins/drupal/composer.json", "plugins/craft/composer.json", "plugins/wordpress/composer.json"].map((file) => ({ file, pattern: /^(\s+"runlight\/runlight": "\^)([^"]+)(")/m })),
   // The Python package: pyproject.toml for PyPI, and build.json, which
   // scripts/python-assets.mts writes from the SDK's VERSION and the package
   // reports as its own.

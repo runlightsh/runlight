@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class Sqlite3Db implements Db {
-	private ?\SQLite3 $sqlite = null;
+	private ?\SQLite3 $handle = null;
 	private int $depth        = 0;
 	/** Above zero while exclusive() holds the write lock. */
 	private int $held = 0;
@@ -30,23 +30,23 @@ final class Sqlite3Db implements Db {
 	}
 
 	/** The connection, opened on first use, so a request that reads nothing never opens the file. */
-	private function sqlite(): \SQLite3 {
-		if ( null === $this->sqlite ) {
+	private function handle(): \SQLite3 {
+		if ( null === $this->handle ) {
 			$new          = ! file_exists( $this->path );
-			$this->sqlite = new \SQLite3( $this->path );
+			$this->handle = new \SQLite3( $this->path );
 			// The file holds sealed keys, so it is for its owner and group alone (0660), whatever the umask: a
 			// scheduled job such as WP-CLI running as another user of the same group can still write to it. Set
 			// before WAL is turned on, so the -wal and -shm files SQLite makes beside it take the same mode.
 			if ( $new && '/' === DIRECTORY_SEPARATOR && file_exists( $this->path ) ) {
-				chmod( $this->path, 0660 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Runlight's own database file, just made.
+				Storage::files()->chmod( $this->path, 0660 );
 			}
-			$this->sqlite->enableExceptions( true );
-			$this->sqlite->busyTimeout( 5000 );
-			$this->sqlite->exec( 'PRAGMA journal_mode = WAL' );
-			$this->sqlite->exec( 'PRAGMA synchronous = NORMAL' );
-			$this->sqlite->exec( 'PRAGMA secure_delete = FAST' );
+			$this->handle->enableExceptions( true );
+			$this->handle->busyTimeout( 5000 );
+			$this->handle->exec( 'PRAGMA journal_mode = WAL' );
+			$this->handle->exec( 'PRAGMA synchronous = NORMAL' );
+			$this->handle->exec( 'PRAGMA secure_delete = FAST' );
 		}
-		return $this->sqlite;
+		return $this->handle;
 	}
 
 	/**
@@ -91,7 +91,7 @@ final class Sqlite3Db implements Db {
 	 */
 	public function affected( string $sql, array $params = array() ): int {
 		$this->execute( $sql, $params )->finalize();
-		return $this->sqlite()->changes();
+		return $this->handle()->changes();
 	}
 
 	public function transaction( callable $fn ): mixed {
@@ -117,9 +117,9 @@ final class Sqlite3Db implements Db {
 	}
 
 	public function close(): void {
-		if ( null !== $this->sqlite ) {
-			$this->sqlite->close();
-			$this->sqlite = null;
+		if ( null !== $this->handle ) {
+			$this->handle->close();
+			$this->handle = null;
 		}
 	}
 
@@ -130,18 +130,18 @@ final class Sqlite3Db implements Db {
 	 * @param callable $fn    What to run.
 	 */
 	private function within( string $begin, callable $fn ): mixed {
-		$sqlite = $this->sqlite();
-		$sqlite->exec( $begin );
+		$handle = $this->handle();
+		$handle->exec( $begin );
 		++$this->depth;
 		try {
 			$result = $fn( $this );
 			--$this->depth;
-			$sqlite->exec( 'COMMIT' );
+			$handle->exec( 'COMMIT' );
 			return $result;
 		} catch ( \Throwable $error ) {
 			$this->depth = 0;
 			try {
-				$sqlite->exec( 'ROLLBACK' );
+				$handle->exec( 'ROLLBACK' );
 			} catch ( \Throwable $ignored ) {
 				// Already rolled back by SQLite itself.
 				unset( $ignored );
@@ -158,7 +158,7 @@ final class Sqlite3Db implements Db {
 	 * @param array  $params Its values.
 	 */
 	private function execute( string $sql, array $params ): \SQLite3Result {
-		$statement = $this->sqlite()->prepare( $sql );
+		$statement = $this->handle()->prepare( $sql );
 		foreach ( array_values( $params ) as $i => $value ) {
 			if ( null === $value ) {
 				$statement->bindValue( $i + 1, null, SQLITE3_NULL );

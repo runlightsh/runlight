@@ -13,11 +13,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Tracker {
 	public static function boot(): void {
-		add_action( 'wp_head', array( self::class, 'script' ), 1 );
+		add_action( 'wp_enqueue_scripts', array( self::class, 'script' ) );
 		add_action( 'template_redirect', array( self::class, 'observe' ) );
 	}
 
-	/** The Runlight script, before any other head output, unless this visit should not count. */
+	/** The Runlight script, deferred in the head, unless this visit should not count. */
 	public static function script(): void {
 		$settings = Settings::get();
 		$address  = Settings::address();
@@ -27,10 +27,7 @@ final class Tracker {
 		if ( $settings['skip_admins'] && current_user_can( 'manage_options' ) ) {
 			return;
 		}
-		$attributes = array(
-			'defer' => true,
-			'src'   => $address . '/s.js',
-		);
+		$attributes = array();
 		if ( 'remote' === $settings['mode'] && '' !== $settings['site'] ) {
 			$attributes['data-site'] = $settings['site'];
 		}
@@ -43,7 +40,14 @@ final class Tracker {
 		if ( is_404() ) {
 			$attributes['data-404'] = true;
 		}
-		wp_print_script_tag( $attributes );
+		// Runlight's own script, served by the Runlight it reports to, unversioned since that Runlight caches it.
+		wp_enqueue_script( 'runlight', $address . '/s.js', array(), null, array( 'strategy' => 'defer' ) ); // phpcs:ignore WordPress.WP.EnqueuedResourceParameters.MissingVersion -- the Runlight serving it sets how long it is cached.
+		add_filter(
+			'wp_script_attributes',
+			static function ( array $tag ) use ( $attributes ): array {
+				return 'runlight-js' === ( $tag['id'] ?? '' ) ? array_merge( $tag, $attributes ) : $tag;
+			}
+		);
 	}
 
 	/**

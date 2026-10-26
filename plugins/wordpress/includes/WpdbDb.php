@@ -6,7 +6,8 @@
  * Runlight writes its SQL for SQLite and Postgres with `?` placeholders. As
  * the package's MySQL driver does, each statement is turned into MySQL's
  * form first by MysqlText: a "quoted" name in backticks, a backslash inside
- * 'text' doubled, and each `?` replaced by its value, escaped by $wpdb itself.
+ * 'text' doubled, and each `?` replaced, here by one of $wpdb->prepare()'s
+ * placeholders, so $wpdb puts every value in itself.
  * The connection is WordPress's, so its SQL mode is not changed; where it
  * includes NO_BACKSLASH_ESCAPES, a backslash in 'text' is left as it is.
  *
@@ -32,6 +33,13 @@ final class WpdbDb implements Db {
 	/** Whether WordPress's session is in NO_BACKSLASH_ESCAPES mode, read once; null until then. */
 	private ?bool $plain_backslashes = null;
 
+	/**
+	 * The values of the statement being turned into MySQL's form, in order, for $wpdb->prepare().
+	 *
+	 * @var list<int|string>
+	 */
+	private array $values = array();
+
 	/** @param \wpdb $wpdb WordPress's database. */
 	public function __construct( private readonly \wpdb $wpdb ) {}
 
@@ -48,7 +56,7 @@ final class WpdbDb implements Db {
 	 */
 	public function all( string $sql, array $params = array() ): array {
 		$text = $this->text( $sql, $params );
-		$rows = $this->quietly( fn () => $this->wpdb->get_results( $text, ARRAY_A ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
+		$rows = $this->quietly( fn () => $this->wpdb->get_results( $text, ARRAY_A ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, made by $wpdb->prepare() in text().
 		$this->check();
 		return is_array( $rows ) ? array_values( $rows ) : array();
 	}
@@ -135,7 +143,7 @@ final class WpdbDb implements Db {
 	 * @param string $sql A statement with its values in place.
 	 */
 	private function query( string $sql ): void {
-		$this->quietly( fn () => $this->wpdb->query( $sql ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, every value escaped by $wpdb in text().
+		$this->quietly( fn () => $this->wpdb->query( $sql ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery,PluginCheck.Security.DirectDB.UnescapedDBParameter -- Runlight's own statement on its own tables, made by $wpdb->prepare() in text().
 		$this->check();
 	}
 
@@ -163,13 +171,26 @@ final class WpdbDb implements Db {
 	}
 
 	/**
-	 * A statement as MySQL reads it, with its values in place.
+	 * A statement as MySQL reads it, with its values put in by $wpdb->prepare(). A % in Runlight's own SQL, as
+	 * in a LIKE pattern or a date format, is doubled first, so prepare() reads only the placeholders as its own.
 	 *
 	 * @param string $sql    SQL written for SQLite and Postgres, with `?` placeholders.
 	 * @param array  $params Its values.
 	 */
 	private function text( string $sql, array $params ): string {
-		return MysqlText::of( $sql, array_values( $params ), $this->literal( ... ), ! $this->no_backslash_escapes() );
+		$this->values = array();
+		$text         = MysqlText::of( $sql, array_values( $params ), $this->placeholder( ... ), ! $this->no_backslash_escapes() );
+		if ( array() === $this->values ) {
+			return $text;
+		}
+		$text = strtr(
+			str_replace( '%', '%%', $text ),
+			array(
+				"\x01d\x01" => '%d',
+				"\x01s\x01" => '%s',
+			)
+		);
+		return (string) $this->wpdb->prepare( $text, $this->values ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- Runlight's own statement, its values as placeholders.
 	}
 
 	/**
@@ -185,24 +206,21 @@ final class WpdbDb implements Db {
 	}
 
 	/**
-	 * A value as a MySQL literal, text escaped by $wpdb as its own prepare() escapes it.
+	 * Where a value goes, marked for text() to give prepare() its placeholder, and the value kept for it. A null
+	 * goes in as NULL itself, which prepare() has no placeholder for.
 	 *
 	 * @param mixed $value The value.
 	 */
-	private function literal( mixed $value ): string {
+	private function placeholder( mixed $value ): string {
 		if ( null === $value ) {
 			return 'NULL';
 		}
-		if ( is_bool( $value ) ) {
-			return $value ? '1' : '0';
+		if ( is_bool( $value ) || is_int( $value ) ) {
+			$this->values[] = (int) $value;
+			return "\x01d\x01";
 		}
-		if ( is_int( $value ) ) {
-			return (string) $value;
-		}
-		if ( is_float( $value ) ) {
-			// Text MySQL reads back as the same number, as the package binds a float.
-			return "'" . \Runlight\Json::number( $value ) . "'";
-		}
-		return "'" . $this->wpdb->_real_escape( (string) $value ) . "'";
+		// A float goes as text MySQL reads back as the same number, as the package binds a float.
+		$this->values[] = is_float( $value ) ? \Runlight\Json::number( $value ) : (string) $value;
+		return "\x01s\x01";
 	}
 }
