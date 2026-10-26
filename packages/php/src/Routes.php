@@ -40,6 +40,10 @@ use Runlight\Store\SqlStore;
  * - cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
  *   dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's own
  *   admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+ * - csrf: callable(): string, a token the dashboard sends back with every change it makes, in an x-runlight-csrf
+ *   header, and the OAuth consent form in a csrf field, for an authorize that checks where a change comes from, as
+ *   a CMS checks its own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives
+ *   a nonce.
  * - origin: the address people open the app at, such as https://example.com.
  * - ownHosts: callable(): iterable<string>, more names the dashboard is reached at.
  * - accountOf: callable(Request): ?string, the account a request comes from (internal, for the standalone server).
@@ -200,6 +204,9 @@ final class Routes
         }
         if ($this->tokenMade !== null) {
             $oauth['tokenMade'] = $this->tokenMade;
+        }
+        if (isset($options['csrf'])) {
+            $oauth['csrf'] = \Closure::fromCallable($options['csrf']);
         }
         $this->oauth = $oauth;
     }
@@ -563,7 +570,7 @@ final class Routes
      *
      * @param array{session: string, origin: string}|null $embed
      */
-    public static function dashboard(string $base, string $share = '', string $signOut = '', bool $geoCredit = false, bool $accounts = false, string $signIn = '', ?array $embed = null, string $cms = ''): string
+    public static function dashboard(string $base, string $share = '', string $signOut = '', bool $geoCredit = false, bool $accounts = false, string $signIn = '', ?array $embed = null, string $cms = '', string $csrf = ''): string
     {
         $b = self::escapeAttr($base);
         $hash = self::hash('dashboardHash');
@@ -573,6 +580,7 @@ final class Routes
             . ($geoCredit ? ' data-geo-credit=""' : '')
             . ($accounts ? ' data-accounts=""' : '')
             . ($cms !== '' ? ' data-cms="' . self::escapeAttr($cms) . '"' : '')
+            . ($csrf !== '' ? ' data-csrf="' . self::escapeAttr($csrf) . '"' : '')
             . ($embed !== null ? ' data-embed="' . self::escapeAttr($embed['session']) . '" data-embed-origin="' . self::escapeAttr($embed['origin']) . '"' : '');
         return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"robots\" content=\"noindex\">\n<title>Runlight</title>\n"
             . '<link rel="icon" href="' . Brand::runlightIcon() . "\">\n"
@@ -3121,7 +3129,7 @@ final class Routes
             // the page explains how to sign in when it is refused.
             // Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
             $cms = (string) ($this->options['cms'] ?? '');
-            return new Response(self::dashboard($base, '', $this->signOut ?? '', !empty($this->options['geoCredit']), $this->web !== null, $this->signIn ?? '', null, $cms), 200, [
+            return new Response(self::dashboard($base, '', $this->signOut ?? '', !empty($this->options['geoCredit']), $this->web !== null, $this->signIn ?? '', null, $cms, isset($this->options['csrf']) ? (string) ($this->options['csrf'])() : ''), 200, [
                 'content-type' => 'text/html; charset=utf-8',
                 'cache-control' => 'no-store',
                 'content-security-policy' => $cms !== '' ? str_replace("frame-ancestors 'none'", "frame-ancestors 'self'", self::DASHBOARD_CSP) : self::DASHBOARD_CSP,

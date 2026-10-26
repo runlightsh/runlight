@@ -22,6 +22,10 @@ answers every request under the base path. Options take the TypeScript names:
 - cms: the CMS that adds the script to every page, such as "WordPress", when Runlight runs inside one. The
   dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's own
   admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
+- csrf: a callable giving a token the dashboard sends back with every change it makes, in an x-runlight-csrf
+  header, and the OAuth consent form in a csrf field, for an authorize that checks where a change comes from, as a
+  CMS checks its own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives a
+  nonce.
 - origin: the address people open the app at, such as https://example.com. A link domain can never be its host,
   and links in email reports point there, whatever Host header a request carries.
 - ownHosts: a callable giving more names the dashboard is reached at, which can never be link domains either.
@@ -404,7 +408,7 @@ def _locale_urls(base: str) -> str:
 
 
 def dashboard(
-    base: str, share: str = "", sign_out: str = "", geo_credit: bool = False, accounts: bool = False, sign_in: str = "", embed: Mapping[str, str] | None = None, cms: str = ""
+    base: str, share: str = "", sign_out: str = "", geo_credit: bool = False, accounts: bool = False, sign_in: str = "", embed: Mapping[str, str] | None = None, cms: str = "", csrf: str = ""
 ) -> str:
     """The dashboard's page, which holds no data: the API it calls checks access. `embed` is the dashboard inside a
     CMS's admin pages: its session (empty once its ticket was used or ran out) and the admin origin that frames it."""
@@ -417,6 +421,7 @@ def dashboard(
         + (' data-geo-credit=""' if geo_credit else "")
         + (' data-accounts=""' if accounts else "")
         + (f' data-cms="{_escape_attr(cms)}"' if cms else "")
+        + (f' data-csrf="{_escape_attr(csrf)}"' if csrf else "")
         + (f' data-embed="{_escape_attr(embed["session"])}" data-embed-origin="{_escape_attr(embed["origin"])}"' if embed is not None else "")
     )
     return (
@@ -595,6 +600,8 @@ class Routes:
             oauth["accountOf"] = self.account_of
         if self.token_made:
             oauth["tokenMade"] = self.token_made
+        if options.get("csrf") is not None:
+            oauth["csrf"] = options["csrf"]
         self.oauth = oauth
 
     # Fetch-style names, as routes.ts hands them back.
@@ -2728,7 +2735,7 @@ class Routes:
             # Inside a CMS, its admin, on this same origin, shows the whole dashboard in a frame; nothing else may.
             cms = str(self.options.get("cms") or "")
             return Response(
-                dashboard(base, "", self.sign_out or "", _js.truthy(self.options.get("geoCredit")), self.web is not None, self.sign_in or "", None, cms),
+                dashboard(base, "", self.sign_out or "", _js.truthy(self.options.get("geoCredit")), self.web is not None, self.sign_in or "", None, cms, str(self.options["csrf"]()) if self.options.get("csrf") is not None else ""),
                 200,
                 {
                     "content-type": "text/html; charset=utf-8",

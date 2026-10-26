@@ -478,3 +478,23 @@ test("inside a CMS, the dashboard names it and its own admin may frame the whole
   assert.match(alone.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
   assert.equal(alone.headers.get("x-frame-options"), "DENY");
 });
+
+test("an app's csrf token is printed in the dashboard and the OAuth consent form, asked for each time, and only when given", async () => {
+  let made = 0;
+  const pages = async (csrf?: () => string) => {
+    const rl = runlight({ store: sqlite({ path: ":memory:" }), site: { hostnames: ["example.com"] } });
+    const { GET, POST } = rl.routes({ authorize: () => true, ...(csrf ? { csrf } : {}) });
+    const dashboard = await (await GET(new Request("https://example.com/runlight/"))).text();
+    const registered = await POST(new Request("https://example.com/runlight/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "App", redirect_uris: ["https://app.example/cb"] }) }));
+    const { client_id } = (await registered.json()) as { client_id: string };
+    const params = new URLSearchParams({ response_type: "code", client_id, redirect_uri: "https://app.example/cb", code_challenge: "a".repeat(43), code_challenge_method: "S256" });
+    const consent = await (await GET(new Request(`https://example.com/runlight/oauth/authorize?${params}`))).text();
+    return { dashboard, consent };
+  };
+  const given = await pages(() => `tok-${++made}`);
+  assert.match(given.dashboard, /data-csrf="tok-1"/);
+  assert.match(given.consent, /<input type="hidden" name="csrf" value="tok-2">/);
+  const none = await pages();
+  assert.doesNotMatch(none.dashboard, /data-csrf/);
+  assert.doesNotMatch(none.consent, /name="csrf"/);
+});

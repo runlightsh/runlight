@@ -263,7 +263,7 @@ type embedded struct {
 }
 
 // dashboardPage is the dashboard's HTML, which holds no data.
-func dashboardPage(base, share, signOut string, geoCredit, accounts bool, signIn string, embed *embedded, cms string) string {
+func dashboardPage(base, share, signOut string, geoCredit, accounts bool, signIn string, embed *embedded, cms, csrf string) string {
 	var attrs strings.Builder
 	if share != "" {
 		attrs.WriteString(` data-share="` + escapeAttr(share) + `"`)
@@ -282,6 +282,9 @@ func dashboardPage(base, share, signOut string, geoCredit, accounts bool, signIn
 	}
 	if cms != "" {
 		attrs.WriteString(` data-cms="` + escapeAttr(cms) + `"`)
+	}
+	if csrf != "" {
+		attrs.WriteString(` data-csrf="` + escapeAttr(csrf) + `"`)
 	}
 	if embed != nil {
 		attrs.WriteString(` data-embed="` + escapeAttr(embed.session) + `" data-embed-origin="` + escapeAttr(embed.origin) + `"`)

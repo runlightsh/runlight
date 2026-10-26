@@ -18,7 +18,8 @@ the site's agents key, so connecting fills in the plugin's settings.
 
 The context the routes pass is a dict: runlight, base, isOwner (a function of the request giving a bool), and
 optionally signIn (text), isReader (a function of the request), accountOf (a function of the request giving an
-account id or None), and tokenMade (a function of the token row and who made it, giving a bool).
+account id or None), tokenMade (a function of the token row and who made it, giving a bool), and csrf (a function
+giving the token the consent form sends back in its csrf field).
 """
 
 from __future__ import annotations
@@ -309,7 +310,7 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
             hidden = "".join(
                 f'<input type="hidden" name="{k}" value="{_esc(form.get(k) or "")}">' if form.get(k) is not None else ""
                 for k in ("response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "scope", "resource")
-            )
+            ) + (f'<input type="hidden" name="csrf" value="{_esc(str(ctx["csrf"]()))}">' if ctx.get("csrf") else "")
             # The app names itself, so the page also shows where the answer goes, which it cannot fake.
             sends_to = f'<p class="note">{html("oauth.sendsTo", {"host": f"<strong>{_esc(Url(redirect).host)}</strong>"})}</p>'
             buttons = (

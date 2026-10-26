@@ -100,6 +100,8 @@ pub trait OAuthHost: Send + Sync {
     fn account_of<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<Option<String>, Error>>;
     /// Notes who made a token; false when they can no longer make one, which takes it back.
     fn token_made<'a>(&'a self, token: &'a TokenRow, by: &'a str) -> BoxFuture<'a, Result<bool, Error>>;
+    /// The token the consent form sends back in its csrf field, for the app's own check of where it comes from.
+    fn csrf(&self) -> Option<String>;
 }
 
 /// Per install, the per-address limit on registrations.
@@ -465,7 +467,7 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     }
 
     if request.method == "GET" {
-        let hidden: String = [
+        let mut hidden: String = [
             "response_type",
             "client_id",
             "redirect_uri",
@@ -481,6 +483,9 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
                 .map_or_else(String::new, |v| format!("<input type=\"hidden\" name=\"{k}\" value=\"{}\">", esc(v)))
         })
         .collect();
+        if let Some(csrf) = host.csrf() {
+            hidden.push_str(&format!("<input type=\"hidden\" name=\"csrf\" value=\"{}\">", esc(&csrf)));
+        }
         // The app names itself, so the page also shows where the answer goes, which it cannot fake.
         let to_host = Url::parse(&redirect).ok_or_else(|| Error::Other("TypeError: Invalid URL".into()))?.host();
         let sends_to = format!(

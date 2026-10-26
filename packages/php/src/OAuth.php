@@ -30,8 +30,9 @@ use Runlight\Mail\Secret;
  * the site's agents key, so connecting fills in the plugin's settings.
  *
  * The context the routes pass is an array: runlight, base, isOwner (callable(Request): bool), and optionally
- * signIn (string), isReader (callable(Request): bool), accountOf (callable(Request): ?string), and tokenMade
- * (callable(array $token, string $by): bool).
+ * signIn (string), isReader (callable(Request): bool), accountOf (callable(Request): ?string), tokenMade
+ * (callable(array $token, string $by): bool), and csrf (callable(): string, the token the consent form sends back
+ * in its csrf field).
  */
 final class OAuth
 {
@@ -307,6 +308,9 @@ final class OAuth
                     if ($form->get($k) !== null) {
                         $hidden .= '<input type="hidden" name="' . $k . '" value="' . self::esc($form->get($k)) . '">';
                     }
+                }
+                if (isset($ctx['csrf'])) {
+                    $hidden .= '<input type="hidden" name="csrf" value="' . self::esc((string) ($ctx['csrf'])()) . '">';
                 }
                 // The app names itself, so the page also shows where the answer goes, which it cannot fake.
                 $sendsTo = '<p class="note">' . $h('oauth.sendsTo', ['host' => '<strong>' . self::esc((new Url($redirect))->host()) . '</strong>']) . '</p>';

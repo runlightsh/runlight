@@ -30,6 +30,12 @@ defmodule Runlight.Routes do
       in place of the steps to add the script, and pages of the same origin,
       the CMS's own admin, may show the whole dashboard in a frame. The
       WordPress, Drupal, and Craft plugins set it.
+    * `:csrf` - a function of no arguments giving a token the dashboard sends
+      back with every change it makes, in an x-runlight-csrf header, and the
+      OAuth consent form in a csrf field, for an `:authorize` that checks
+      where a change comes from, as a CMS checks its own forms. Asked for each
+      time the dashboard or the form is shown. The WordPress plugin gives a
+      nonce.
   """
 
   alias Runlight.Assets
@@ -66,6 +72,7 @@ defmodule Runlight.Routes do
     :sign_out,
     :geo_credit,
     :cms,
+    :csrf,
     :own_hosts,
     :account_of,
     :token_made,
@@ -206,6 +213,7 @@ defmodule Runlight.Routes do
       sign_out: sign_out,
       geo_credit: Keyword.get(opts, :geo_credit, false),
       cms: Keyword.get(opts, :cms) || "",
+      csrf: Keyword.get(opts, :csrf),
       own_hosts: Keyword.get(opts, :own_hosts),
       account_of: Keyword.get(opts, :account_of) || if(web, do: &Runlight.Accounts.Web.account_of(web, &1)),
       token_made: Keyword.get(opts, :token_made) || if(web, do: &Runlight.Accounts.Web.token_made(web, &1, &2)),
@@ -405,7 +413,7 @@ defmodule Runlight.Routes do
 
   # The dashboard page. `embed`, for the dashboard inside a CMS's admin pages, holds its session (empty once its
   # ticket was used or ran out) and the admin origin that frames it.
-  defp dashboard(base, share, sign_out, geo_credit, accounts, sign_in, embed \\ nil, cms \\ "") do
+  defp dashboard(base, share, sign_out, geo_credit, accounts, sign_in, embed \\ nil, cms \\ "", csrf \\ "") do
     b = escape_attr(base)
 
     attrs =
@@ -415,6 +423,7 @@ defmodule Runlight.Routes do
         if(geo_credit, do: ~s( data-geo-credit=""), else: "") <>
         if(accounts, do: ~s( data-accounts=""), else: "") <>
         if(cms != "", do: ~s( data-cms="#{escape_attr(cms)}"), else: "") <>
+        if(csrf != "", do: ~s( data-csrf="#{escape_attr(csrf)}"), else: "") <>
         if embed,
           do: ~s( data-embed="#{escape_attr(embed.session)}" data-embed-origin="#{escape_attr(embed.origin)}"),
           else: ""
@@ -3679,7 +3688,8 @@ defmodule Runlight.Routes do
       end,
       sign_in: routes.sign_in,
       account_of: routes.account_of,
-      token_made: routes.token_made
+      token_made: routes.token_made,
+      csrf: routes.csrf
     }
   end
 
@@ -3959,7 +3969,8 @@ defmodule Runlight.Routes do
               routes.web != nil,
               routes.sign_in,
               nil,
-              routes.cms
+              routes.cms,
+              if(routes.csrf, do: routes.csrf.(), else: "")
             ),
             200,
             [

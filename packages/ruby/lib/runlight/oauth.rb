@@ -23,7 +23,8 @@ module Runlight
   #
   # The context the routes pass is a Hash: "runlight", "base", "isOwner" (callable(request) giving a bool), and
   # optionally "signIn" (String), "isReader" (callable(request) giving a bool), "accountOf" (callable(request)
-  # giving an account id or nil), and "tokenMade" (callable(token, by) giving a bool).
+  # giving an account id or nil), "tokenMade" (callable(token, by) giving a bool), and "csrf" (callable giving the
+  # token the consent form sends back in its csrf field).
   module OAuth
     CODE_MS = 5 * 60_000
     # An app stored before client ids were signed, which never finished connecting within a day, is removed.
@@ -206,6 +207,7 @@ module Runlight
           %w[response_type client_id redirect_uri code_challenge code_challenge_method state scope resource].each do |k|
             hidden << "<input type=\"hidden\" name=\"#{k}\" value=\"#{esc(form.get(k))}\">" unless form.get(k).nil?
           end
+          hidden << "<input type=\"hidden\" name=\"csrf\" value=\"#{esc(ctx["csrf"].call.to_s)}\">" if ctx["csrf"]
           # The app names itself, so the page also shows where the answer goes, which it cannot fake.
           sends_to = "<p class=\"note\">#{h.call("oauth.sendsTo", { "host" => "<strong>#{esc(Http::Url.new(redirect).host)}</strong>" })}</p>"
           buttons = "<div class=\"buttons\"><button type=\"submit\" name=\"decision\" value=\"deny\" class=\"ghost\">#{h.call("oauth.deny")}</button>" \

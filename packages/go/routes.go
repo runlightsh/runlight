@@ -67,6 +67,10 @@ type RoutesOptions struct {
 	// The dashboard then says so in place of the steps to add the script, and pages of the same origin, the CMS's
 	// own admin, may show the whole dashboard in a frame. The WordPress, Drupal, and Craft plugins set it.
 	CMS string
+	// CSRF is a token the dashboard sends back with every change it makes, in an x-runlight-csrf header, and the
+	// OAuth consent form in a csrf field, for an Authorize that checks where a change comes from, as a CMS checks
+	// its own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives a nonce.
+	CSRF func() string
 	// Origin is the address people open the app at, such as
 	// https://example.com. A link domain can never be its host, and links in
 	// email reports point there, whatever Host header a request carries.
@@ -228,6 +232,7 @@ func (r *Runlight) Routes(options RoutesOptions) (*Routes, error) {
 		signIn:    rt.signIn,
 		accountOf: rt.accountOf,
 		tokenMade: rt.tokenMade,
+		csrf:      options.CSRF,
 	}
 	return rt, nil
 }

@@ -207,4 +207,25 @@ class RoutesOAuthTest < RoutesTestCase
     tokens = RoutesMake.body(routes.handle(at("https://x.com/runlight/api/tokens", "GET", owner)))["tokens"]
     assert_equal "https://hub.example.net", rl.store.setting("token-origin:#{tokens[0]["id"]}")
   end
+
+  def test_an_apps_csrf_token_is_printed_in_the_dashboard_and_the_consent_form_asked_for_each_time_and_only_when_given
+    made = 0
+    pages = lambda do |csrf|
+      rl = RoutesMake.runlight({ "site" => { "hostnames" => ["example.com"] } })
+      routes = rl.routes({ "authorize" => ->(_r) { true } }.merge(csrf.nil? ? {} : { "csrf" => csrf }))
+      dashboard = routes.handle(at("https://example.com/runlight/")).text
+      registered = routes.handle(at("https://example.com/runlight/oauth/register", "POST", { "content-type" => "application/json" },
+                                    Json.encode({ "client_name" => "App", "redirect_uris" => ["https://app.example/cb"] })))
+      params = form({ "response_type" => "code", "client_id" => RoutesMake.body(registered)["client_id"], "redirect_uri" => "https://app.example/cb",
+                      "code_challenge" => "a" * 43, "code_challenge_method" => "S256" })
+      consent = routes.handle(at("https://example.com/runlight/oauth/authorize?#{params}")).text
+      [dashboard, consent]
+    end
+    dashboard, consent = pages.call(-> { "tok-#{made += 1}" })
+    assert_includes dashboard, 'data-csrf="tok-1"'
+    assert_includes consent, '<input type="hidden" name="csrf" value="tok-2">'
+    dashboard, consent = pages.call(nil)
+    refute_includes dashboard, "data-csrf"
+    refute_includes consent, 'name="csrf"'
+  end
 end

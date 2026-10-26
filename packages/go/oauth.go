@@ -99,6 +99,8 @@ type oauthHost struct {
 	signIn    string
 	accountOf func(ctx context.Context, request *Request) string
 	tokenMade func(ctx context.Context, token TokenRow, by string) bool
+	// csrf is the token the consent form sends back in its csrf field, for the app's own check of where it comes from.
+	csrf func() string
 
 	limitOnce sync.Once
 	limit     *rateLimit
@@ -498,6 +500,9 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 			if v, ok := form.Get(k); ok {
 				hidden.WriteString(`<input type="hidden" name="` + k + `" value="` + escapeHTML(v) + `">`)
 			}
+		}
+		if o.csrf != nil {
+			hidden.WriteString(`<input type="hidden" name="csrf" value="` + escapeHTML(o.csrf()) + `">`)
 		}
 		// The app names itself, so the page also shows where the answer goes, which it cannot fake.
 		sendsTo := `<p class="note">` + h("oauth.sendsTo", "host", "<strong>"+escapeHTML(whatwg.MustParse(redirect).Host())+"</strong>") + `</p>`

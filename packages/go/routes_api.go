@@ -1648,7 +1648,7 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 		if session != "" {
 			status = 200
 		}
-		return web.NewResponse(status, []byte(dashboardPage(rt.base, "", "", rt.options.GeoCredit, false, "", &embedded{session: session, origin: origin}, "")),
+		return web.NewResponse(status, []byte(dashboardPage(rt.base, "", "", rt.options.GeoCredit, false, "", &embedded{session: session, origin: origin}, "", "")),
 			"content-type", "text/html; charset=utf-8", "cache-control", "no-store",
 			"content-security-policy", strings.Replace(dashboardCSP, "frame-ancestors 'none'", "frame-ancestors "+origin, 1),
 			"referrer-policy", "no-referrer", "x-robots-tag", "noindex"), nil
@@ -1668,7 +1668,7 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 			tr := NewTranslator(acceptedLanguage(request))
 			return smallPage(tr.Lang, "<h1>"+escapeHTML(tr.T("share.goneTitle", nil))+"</h1><p>"+escapeHTML(tr.T("share.gone", nil))+"</p>", 404), nil
 		}
-		return web.NewResponse(200, []byte(dashboardPage(rt.base, share.ID, "", rt.options.GeoCredit, false, "", nil, "")),
+		return web.NewResponse(200, []byte(dashboardPage(rt.base, share.ID, "", rt.options.GeoCredit, false, "", nil, "", "")),
 			"content-type", "text/html; charset=utf-8", "cache-control", "no-store", "content-security-policy", dashboardCSP, "x-frame-options", "DENY",
 			// The share id is the key; never send it on to another site.
 			"referrer-policy", "no-referrer", "x-robots-tag", "noindex"), nil
@@ -1692,7 +1692,11 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 		if rt.options.CMS != "" {
 			csp, frame = strings.Replace(dashboardCSP, "frame-ancestors 'none'", "frame-ancestors 'self'", 1), "SAMEORIGIN"
 		}
-		return web.NewResponse(200, []byte(dashboardPage(rt.base, "", rt.signOut, rt.options.GeoCredit, rt.web != nil, rt.signIn, nil, rt.options.CMS)),
+		csrf := ""
+		if rt.options.CSRF != nil {
+			csrf = rt.options.CSRF()
+		}
+		return web.NewResponse(200, []byte(dashboardPage(rt.base, "", rt.signOut, rt.options.GeoCredit, rt.web != nil, rt.signIn, nil, rt.options.CMS, csrf)),
 			"content-type", "text/html; charset=utf-8", "cache-control", "no-store", "content-security-policy", csp, "x-frame-options", frame, "referrer-policy", "same-origin"), nil
 	}
 	return Coded("Not found", "not_found", 404, nil), nil
