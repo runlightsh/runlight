@@ -365,12 +365,27 @@ module Runlight
           result = yield(self)
           limit_statements(@statement_timeout) if @statement_timeout.positive?
           result
+        rescue Exception
+          # The connection goes back to the pool, so a block that fails must not leave it without its
+          # statement timeout: it is put back, or the session starts over, which sets it again.
+          limit_again(c) if @statement_timeout.positive?
+          raise
         ensure
           begin
             c.execute("DO RELEASE_LOCK(#{MYSQL_LOCK})")
           rescue StandardError
             # A lost connection ends its session, and the lock with it.
           end
+        end
+      end
+
+      def limit_again(c)
+        limit_statements(@statement_timeout)
+      rescue StandardError
+        begin
+          c.reconnect!
+        rescue StandardError
+          # Gone for good: the pool replaces a connection it cannot verify.
         end
       end
 

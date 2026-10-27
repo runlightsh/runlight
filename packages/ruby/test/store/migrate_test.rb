@@ -223,6 +223,8 @@ class StoreMigrateTest < StoreTestCase
     assert_equal 1, Integer(seen["held"])
     assert_equal 0, Float(seen["t"])
     assert_equal mariadb ? 120 : 120_000, Float(store.db.all(limit_sql)[0]["t"]), "and put back after"
+    assert_raises(RuntimeError) { store.db.exclusive { raise "failed" } }
+    assert_equal mariadb ? 120 : 120_000, Float(store.db.all(limit_sql)[0]["t"]), "and after a block that fails"
     assert_nil store.db.all("SELECT IS_USED_LOCK(CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))) AS id")[0]["id"]
 
     # Sums arrive as numbers the store can read, and a transaction reads what was committed before each statement.

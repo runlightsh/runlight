@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- The Ruby package on MySQL and MariaDB keeps its statement timeout on a connection whose locked work failed, such as making the tables or a change that has to be the only one at a time. Before, that connection went back to the pool with no time limit, so a slow query on it could run for good. The other packages already did this.
+
 ## 0.3.2 - 2026-10-26
 
 ### Changed
