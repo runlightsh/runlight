@@ -6,5 +6,5 @@ go 1.25.0
 
 require (
 	github.com/go-chi/chi/v5 v5.5.0
-	runlight.sh/go v0.3.1
+	runlight.sh/go v0.3.2
 )

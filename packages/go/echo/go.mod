@@ -6,5 +6,5 @@ go 1.25.0
 
 require (
 	github.com/labstack/echo/v5 v5.4.2
-	runlight.sh/go v0.3.1
+	runlight.sh/go v0.3.2
 )

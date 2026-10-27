@@ -12,11 +12,11 @@ Add `sh.runlight:runlight` from Maven Central to your build, with the JDBC drive
 <dependency>
   <groupId>sh.runlight</groupId>
   <artifactId>runlight</artifactId>
-  <version>0.3.1</version>
+  <version>0.3.2</version>
 </dependency>
 ```
 
-In Gradle, that is `implementation("sh.runlight:runlight:0.3.1")`.
+In Gradle, that is `implementation("sh.runlight:runlight:0.3.2")`.
 
 Create one instance for your app.
 

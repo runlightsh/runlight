@@ -3,7 +3,7 @@
  * Plugin Name:       Runlight
  * Plugin URI:        https://runlight.sh/
  * Description:       Privacy friendly analytics with no cookies, kept in your own database. Runs Runlight inside WordPress, or sends to one you run elsewhere, counts AI agents that read your pages, and shows your dashboard in wp-admin.
- * Version:           0.3.1
+ * Version:           0.3.2
  * Requires at least: 6.5
  * Requires PHP:      8.1
  * Author:            Jon C. Phillips
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 define( 'RUNLIGHT_PLUGIN_FILE', __FILE__ );
-define( 'RUNLIGHT_PLUGIN_VERSION', '0.3.1' );
+define( 'RUNLIGHT_PLUGIN_VERSION', '0.3.2' );
 
 require_once __DIR__ . '/includes/Agents.php';
 require_once __DIR__ . '/includes/Settings.php';

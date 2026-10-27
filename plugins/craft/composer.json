@@ -16,7 +16,7 @@
     "require": {
         "php": ">=8.2",
         "craftcms/cms": "^5.3",
-        "runlight/runlight": "^0.3.1"
+        "runlight/runlight": "^0.3.2"
     },
     "autoload": {
         "psr-4": {
