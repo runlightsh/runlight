@@ -2,6 +2,14 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Changed
+
+- The Rust package uses reqwest 0.13 and the current RustCrypto crates (sha2 0.11, hmac 0.13, aes-gcm 0.11, scrypt, and pbkdf2). It still connects over rustls and trusts the system's certificates.
+- The Java package is tested against version 4 of the MariaDB driver, and the Go package builds with chi 5.5 and echo 5.4.2. modernc.org/sqlite stays at 1.59, so the Go package still builds on Go 1.25.
+- The Docker image is built on the latest Node 24 slim image, and the .NET server uses Microsoft.Data.Sqlite 10.0.14.
+
 ## 0.3.1 - 2026-10-26
 
 ### Added
