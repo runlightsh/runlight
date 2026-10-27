@@ -130,6 +130,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Maintenance release with updated dependencies. Nothing changes in how the plugin works.
+
 = 0.3.1 =
 * Fixed the Connect button, which stopped with an error before reaching your Runlight. The address it sends you back to now carries a WordPress nonce too.
 * Changes made in the dashboard at /runlight, and on its consent page for AI apps, now need a WordPress nonce and must come from your site's own pages.

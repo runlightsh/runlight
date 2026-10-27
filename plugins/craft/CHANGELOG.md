@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Updated the Runlight library to 0.3.2, a maintenance release with updated dependencies. Nothing changes in how the plugin works.
+
 ## 0.3.1 - 2026-10-26
 
 ### Changed
