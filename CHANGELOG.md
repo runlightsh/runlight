@@ -7,6 +7,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Fixed
 
 - The Ruby package on MySQL and MariaDB keeps its statement timeout on a connection whose locked work failed, such as making the tables or a change that has to be the only one at a time. Before, that connection went back to the pool with no time limit, so a slow query on it could run for good. The other packages already did this.
+- The Account sheet's Sign out everywhere section has space and a line above it like Two-factor sign-in, and its button is styled like the others.
 
 ## 0.3.2 - 2026-10-26
 

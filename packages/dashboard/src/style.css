@@ -4913,12 +4913,13 @@ a.ghost {
   height: 16px;
 }
 
-/* Two-factor sign-in in the Account sheet. */
+/* Two-factor sign-in and Sign out everywhere in the Account sheet. */
 .account-body > .link-form {
   padding-bottom: 0;
 }
 
-.twofactor {
+.twofactor,
+.everywhere {
   margin-top: 20px;
   padding-top: 20px;
   border-top: 1px solid var(--line);

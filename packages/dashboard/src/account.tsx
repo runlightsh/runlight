@@ -107,13 +107,13 @@ function SignOutEverywhere() {
       });
   };
   return (
-    <div class="link-form">
+    <div class="link-form everywhere">
       <div class="field-row">
         <span class="field-label">{t("account.everywhere")}</span>
         <span class="field-hint">{t("account.everywhereHint")}</span>
       </div>
       <div class="settings-actions start">
-        <button type="button" disabled={busy} onClick={go}>
+        <button type="button" class="ghost" disabled={busy} onClick={go}>
           <Icon name="signOut" />
           {t("account.everywhere")}
         </button>
