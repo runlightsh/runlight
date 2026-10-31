@@ -163,12 +163,12 @@ final class TimeTest extends TestCase
 
     /**
      * The fixture came from Node's ICU with time zone data 2025c. PHP's copy of the data may be newer, and
-     * disagree wherever a zone's rules changed since (British Columbia, Alberta, and Manitoba keeping summer time,
+     * disagree wherever a zone's rules changed since (British Columbia, Alberta, Manitoba, and Cuba keeping summer time,
      * Morocco's Ramadan dates): these zones' instants from 2026 on are not compared, and every other zone must match.
      */
     private const CHANGED_SINCE_2025C = [
         'America/Vancouver', 'Canada/Pacific', 'America/Edmonton', 'America/Inuvik', 'America/Yellowknife', 'Canada/Mountain',
-        'America/Winnipeg', 'America/Rainy_River', 'Canada/Central', 'Africa/Casablanca', 'Africa/El_Aaiun',
+        'America/Winnipeg', 'America/Rainy_River', 'Canada/Central', 'Africa/Casablanca', 'Africa/El_Aaiun', 'America/Havana', 'Cuba',
     ];
 
     /**
