@@ -61,12 +61,14 @@ const REPORTS = ["stats?period=7d&compare=off", "breakdown?period=7d&compare=off
 
 test("hits that come while ClickHouse is down wait in the other store and count the same once it is back", { skip: !CLICKHOUSE }, async () => {
   const start = Date.now() - 3_600_000;
-  const plain = server(sqlite({ path: ":memory:" }), { now: start });
-  await visits(plain, { now: start });
+  // One clock for both, so that a run just after midnight asks both for the same days.
+  const clock = { now: start };
+  const plain = server(sqlite({ path: ":memory:" }), clock);
+  await visits(plain, clock);
 
   const rows = sqlite({ path: ":memory:" });
   const store = switched(rows);
-  const clock = { now: start };
+  clock.now = start;
   const s = server(store, clock);
   await s.rl.init();
   const up = down(store);
