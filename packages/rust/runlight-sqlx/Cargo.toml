@@ -35,7 +35,7 @@ runlight = { workspace = true, features = ["axum"] }
 sqlx = { version = "0.9", default-features = false, features = ["mysql-rsa"] }
 tokio = { version = "1.44", features = ["full"] }
 # The conformance runner: the normalizer's lookbehinds, and the TOTP codes steps send.
-fancy-regex = "0.19"
+fancy-regex = "0.20"
 hmac = "0.13"
 sha1 = "0.11"
 # The adapters' tests.
