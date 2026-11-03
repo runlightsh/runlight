@@ -4,6 +4,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Security
+
+- The Go standalone server uses golang.org/x/text 0.41, which fixes a panic on crafted input in its precis package (GO-2026-6629), reached through the Postgres driver. 0.41 is the newest release that still builds on Go 1.25.
+
 ### Fixed
 
 - The Ruby package on MySQL and MariaDB keeps its statement timeout on a connection whose locked work failed, such as making the tables or a change that has to be the only one at a time. Before, that connection went back to the pool with no time limit, so a slow query on it could run for good. The other packages already did this.
