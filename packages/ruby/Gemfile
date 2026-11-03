@@ -4,7 +4,8 @@ source "https://rubygems.org"
 
 gemspec
 
-gem "minitest", ">= 5.16"
+# Rails 7.2 from 7.2.3.1 on takes minitest 5 only.
+gem "minitest", ">= 5.16", *(ENV.fetch("RUNLIGHT_RAILS", "8.1") == "7.2" ? ["< 6"] : [])
 gem "rake", ">= 13"
 
 # Runlight::RackApp and the standalone server speak Rack; rack stays optional for apps.
