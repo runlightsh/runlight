@@ -128,6 +128,15 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 * When an administrator presses Connect, the plugin asks that address for its OAuth details and registers this site with it, sending the site's host and the wp-admin address to come back to. The administrator then allows the connection on that Runlight's own page, and on the way back the plugin sends the one-time code it was given and gets this site's id, agents key, and dashboard key, which it saves in its setting.
 * When an administrator opens the Runlight page in wp-admin and you have entered a dashboard key, the plugin sends that key and the address wp-admin is served from (its scheme, host, and port) to the same Runlight, from your server, and gets back a ticket that opens the dashboard once. The page then loads the dashboard from that Runlight in a frame, in the administrator's browser.
 
+== Screenshots ==
+
+1. The dashboard shows visitors, visits, pageviews, bounce rate, and visit duration, compared with the period before.
+2. The Sources box splits visitors into channels such as Organic Search, Social, and AI.
+3. The AI agents box shows which agents fetched your pages, split between agents reading for a person and crawlers.
+4. The realtime view shows who is on the site now and what they are reading.
+5. The Conversions box lists your goals with their rates, counts, and revenue.
+6. The Links box lists your short links and their clicks.
+
 == Changelog ==
 
 = 0.3.3 =
