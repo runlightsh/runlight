@@ -130,12 +130,12 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Screenshots ==
 
-1. The dashboard shows visitors, visits, pageviews, bounce rate, and visit duration, compared with the period before.
-2. The Sources box splits visitors into channels such as Organic Search, Social, and AI.
-3. The AI agents box shows which agents fetched your pages, split between agents reading for a person and crawlers.
-4. The realtime view shows who is on the site now and what they are reading.
-5. The Conversions box lists your goals with their rates, counts, and revenue.
-6. The Links box lists your short links and their clicks.
+1. The Runlight page in wp-admin shows the site's visitors, visits, pageviews, bounce rate, and visit duration.
+2. Further down are the top pages, the sources and channels, the countries, and the hours when people visit.
+3. The AI agents box shows which agents fetched your pages, for a person or as crawlers, beside devices, events, and campaigns.
+4. Short links and goals are in the same dashboard, with their clicks, conversions, and revenue.
+5. The first time, you choose whether Runlight runs in this WordPress or on a Runlight you run elsewhere.
+6. The settings page sets what Runlight counts.
 
 == Changelog ==
 
