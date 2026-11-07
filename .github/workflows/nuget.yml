@@ -74,7 +74,7 @@ jobs:
           version="$(sed -n 's/^ *<Version>\(.*\)<\/Version>$/\1/p' Directory.Build.props)"
           if [ "v$version" != "$TAG" ]; then echo "packages/dotnet is $version, the tag is $TAG"; exit 1; fi
       # The SDK dotnet.yml builds and packs with; global.json pins its floor.
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
       # The solution: only the three projects under src are packable.
@@ -113,7 +113,7 @@ jobs:
         with:
           name: nuget-packages
           path: packages
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
       # The job's OIDC token for an API key that lives one hour, so this is
