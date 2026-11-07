@@ -147,6 +147,8 @@
   "device.tablet": "Tableta",
   "ai.live": "Lecturas en directo",
   "ai.crawl": "Rastreos",
+  "ai.live.note": "Un asistente leyó la página hace un momento para responder a la pregunta de alguien.",
+  "ai.crawl.note": "Recopilada para entrenar IA o para un índice de búsqueda, sin nadie esperando una respuesta.",
   "rhythm.busiest": "Pico: {when}",
   "rhythm.table": "Visitas por día de la semana y hora",
   "rhythm.cell_one": "{when}: {n} visita",

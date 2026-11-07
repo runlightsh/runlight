@@ -147,6 +147,8 @@
   "device.tablet": "Tablet",
   "ai.live": "Live-Abrufe",
   "ai.crawl": "Crawls",
+  "ai.live.note": "Ein Assistent hat die Seite gerade gelesen, um eine Frage zu beantworten.",
+  "ai.crawl.note": "Gesammelt für KI-Training oder einen Suchindex, ohne dass jemand auf eine Antwort wartet.",
   "rhythm.busiest": "Spitze: {when}",
   "rhythm.table": "Besuche nach Wochentag und Uhrzeit",
   "rhythm.cell_one": "{when}: {n} Besuch",
