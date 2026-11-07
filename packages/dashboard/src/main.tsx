@@ -20,6 +20,7 @@ import { ConversionsPanel } from "./goals.js";
 import { Install, SettingsModal, isSection, type Section } from "./settings.js";
 import { fitFrame, openInTab, opening, openingIn } from "./open.js";
 import { applyTheme, isDark, onThemeChange, setTheme, themeChoice, type ThemeChoice } from "./theme.js";
+import { AI_AGENTS } from "../../sdk/src/data/agents.js";
 import "./style.css";
 
 /** A fresh dashboard compares with nothing; the cards show changes once a comparison is picked. */
@@ -704,7 +705,7 @@ const CHANNEL_COLORS: Record<string, number> = {
   Campaign: 8,
 };
 const DEVICE_COLORS: Record<string, number> = { desktop: 1, mobile: 2, tablet: 3 };
-const LIVE_AGENTS = new Set(["ChatGPT-User", "Claude-User", "Perplexity-User", "MistralAI-User", "meta-externalfetcher"]);
+const LIVE_AGENTS = new Set(AI_AGENTS.filter((a) => a.kind === "live").map((a) => a.name));
 
 function layout(): Array<{ title: Key; tabs: Tab[]; wide?: boolean }> {
   const f = { filterable: true };
@@ -740,7 +741,7 @@ function layout(): Array<{ title: Key; tabs: Tab[]; wide?: boolean }> {
       title: "panel.ai",
       wide: true,
       tabs: [
-        { dimension: "ai_agent", label: "tab.agents", column: "fetches", groups: { of: (v) => (LIVE_AGENTS.has(v) ? "ai.live" : "ai.crawl"), slots: { "ai.live": 3, "ai.crawl": 1 } } },
+        { dimension: "ai_agent", label: "tab.agents", column: "fetches", groups: { of: (v) => (LIVE_AGENTS.has(v) ? "ai.live" : "ai.crawl"), slots: { "ai.live": 3, "ai.crawl": 1 }, notes: { "ai.live": "ai.live.note", "ai.crawl": "ai.crawl.note" } } },
         { dimension: "ai_page", label: "tab.pages", column: "fetches" },
       ],
     },

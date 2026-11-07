@@ -28,7 +28,7 @@ export interface Tab {
    */
   colors?: Record<string, number>;
   /** Groups rows into a two-part mix, such as live fetches against crawls. */
-  groups?: { of: (value: string) => Key; slots: Partial<Record<Key, number>> };
+  groups?: { of: (value: string) => Key; slots: Partial<Record<Key, number>>; notes?: Partial<Record<Key, Key>> };
 }
 
 interface Props {
@@ -55,7 +55,7 @@ export function label(dimension: string, value: string): string {
   return value;
 }
 
-function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number }> }) {
+function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number; note?: string }> }) {
   const total = parts.reduce((sum, p) => sum + p.n, 0);
   if (total === 0) return null;
   return (
@@ -73,6 +73,16 @@ function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number }
           </span>
         ))}
       </div>
+      {parts.some((p) => p.note) ? (
+        <dl class="mix-notes">
+          {parts.filter((p) => p.note).map((p) => (
+            <div>
+              <dt>{p.name}</dt>
+              <dd>{p.note}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
     </div>
   );
 }
@@ -374,13 +384,16 @@ export function Panel({ title, tabs, view, onFilter, wide, map }: Props) {
   const all = rows ?? [];
   // A box with nothing to list says what would be here, without headings or tools that need rows.
   const empty = !error && rows !== null && all.length === 0;
-  let mix: Array<{ name: string; n: number; slot: number }> = [];
+  let mix: Array<{ name: string; n: number; slot: number; note?: string }> = [];
   if (tab.colors) {
     mix = all.filter((r) => tab.colors![r.value] !== undefined).map((r) => ({ name: label(tab.dimension, r.value), n: Number(r[column] ?? 0), slot: tab.colors![r.value]! }));
   } else if (tab.groups) {
     const sums = new Map<Key, number>();
     for (const r of all) sums.set(tab.groups.of(r.value), (sums.get(tab.groups.of(r.value)) ?? 0) + Number(r[column] ?? 0));
-    mix = (Object.entries(tab.groups.slots) as Array<[Key, number]>).map(([key, slot]) => ({ name: t(key), n: sums.get(key) ?? 0, slot }));
+    mix = (Object.entries(tab.groups.slots) as Array<[Key, number]>).map(([key, slot]) => {
+      const note = tab.groups!.notes?.[key];
+      return { name: t(key), n: sums.get(key) ?? 0, slot, note: note ? t(note) : undefined };
+    });
   }
 
   return (
