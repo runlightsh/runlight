@@ -5,6 +5,8 @@ module runlight.sh/go/echo
 go 1.25.0
 
 require (
-	github.com/labstack/echo/v5 v5.4.2
+	github.com/labstack/echo/v5 v5.4.4
 	runlight.sh/go v0.3.3
 )
+
+require golang.org/x/text v0.41.0 // indirect
