@@ -1,4 +1,2 @@
 github.com/go-chi/chi/v5 v5.5.0 h1:xdKQ1dJmVJsmgahrXSKhUx8NyVPzpwdlyrrQFpMPJgg=
 github.com/go-chi/chi/v5 v5.5.0/go.mod h1:d1IG7GtKPSjPyBP365PH8sAGVHk3qfB/IhjFNRH1wWM=
-runlight.sh/go v0.3.3 h1:Yl0OjKTdph7EVaj3MevOy8MAWUIEo32VNmh0tTvBWwA=
-runlight.sh/go v0.3.3/go.mod h1:ODm/5HYW6LT8qEUT0zIz7qrF896rp5JxziVotY10dK8=
