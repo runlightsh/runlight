@@ -1,5 +1,5 @@
 import { Loading } from "./loading.js";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useRef, useState } from "preact/hooks";
 import { api, download, geoCredit, viewParams, type Row, type View } from "./api.js";
 import { count, countryName, duration, flag, hourLabel, percent, readablePath, weekdays } from "./format.js";
 import type { RhythmCell } from "./api.js";
@@ -56,6 +56,7 @@ export function label(dimension: string, value: string): string {
 }
 
 function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number; note?: string }> }) {
+  const id = useId();
   const total = parts.reduce((sum, p) => sum + p.n, 0);
   if (total === 0) return null;
   return (
@@ -66,23 +67,22 @@ function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number; 
         ))}
       </div>
       <div class="mix-key">
-        {parts.map((p) => (
+        {parts.map((p, i) => (
           <span>
             <span class={`swatch s${p.slot}`} />
-            {p.name} <b>{percent(p.n / total)}</b>
+            {p.name}
+            {p.note ? (
+              <button type="button" class="mix-help has-tip" aria-label={p.name} aria-describedby={`${id}-${i}`}>
+                ?
+                <span class="hover-tip" role="tooltip" id={`${id}-${i}`}>
+                  {p.note}
+                </span>
+              </button>
+            ) : null}
+            <b>{percent(p.n / total)}</b>
           </span>
         ))}
       </div>
-      {parts.some((p) => p.note) ? (
-        <dl class="mix-notes">
-          {parts.filter((p) => p.note).map((p) => (
-            <div>
-              <dt>{p.name}</dt>
-              <dd>{p.note}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
     </div>
   );
 }

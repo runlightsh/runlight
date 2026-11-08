@@ -10,7 +10,7 @@ Runlight counts visitors without cookies and without storing anyone’s IP addre
 
 - Visitors, pages, sources, countries, devices, and campaigns, over any period you choose.
 - Goals and the revenue they bring, funnels, and the paths visits take through your site.
-- AI agents such as ChatGPT and Claude counted when they read your pages.
+- AI agents such as ChatGPT and Claude counted when they read your pages, by the name they give in their user agent.
 - Short links on your own domains, with their clicks counted.
 - Weekly or monthly email reports, and a read-only dashboard you can share by link.
 - An assistant that answers questions about your numbers and prepares goals, funnels, email reports, share links, and member invitations for you to review and confirm in chat. The MCP server for AI apps remains read-only.

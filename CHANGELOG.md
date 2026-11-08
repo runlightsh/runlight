@@ -6,7 +6,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Changed
 
-- The AI agents panel says what each group means under its bar: a live fetch is an assistant reading the page while it answers someone's question, and a crawl is collected for AI training or a search index with nobody waiting. The dashboard now takes the list of live agents from the SDK, so the two can't drift apart.
+- The AI agents panel says what each group means in a small "?" tip beside its name: a live fetch is an assistant reading the page while it answers someone's question, and a crawl is collected for AI training or a search index with nobody waiting. The dashboard now takes the list of live agents from the SDK, so the two can't drift apart.
+- The AI agents panel is labelled as claimed traffic, and its notes say an agent's name comes from its user agent, which is self-reported and not verified.
 
 ## 0.3.3 - 2026-11-06
 

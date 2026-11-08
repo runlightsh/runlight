@@ -1067,7 +1067,7 @@ h2 .aside {
   color: var(--muted);
 }
 
-.mix-key span {
+.mix-key > span {
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
@@ -1079,27 +1079,40 @@ h2 .aside {
   font-weight: 600;
 }
 
-.mix-notes {
-  display: grid;
-  gap: 3px;
-  margin: 8px 0 0;
-  font-size: 12px;
+.mix-help {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 5px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: none;
   color: var(--muted);
+  font: 600 9px/1 var(--sans);
 }
 
-.mix-notes dt {
-  display: inline;
+.mix-help:hover,
+.mix-help:focus-visible {
   color: var(--ink);
-  font-weight: 600;
+  border-color: var(--muted);
 }
 
-.mix-notes dt::after {
-  content: ": ";
+/* The keys sit near the panel's left edge, so the tip opens to the right of its "?" rather than centred on it. */
+.mix-help.has-tip .hover-tip {
+  left: -9px;
+  text-align: left;
+  transform: translate(0, 4px);
 }
 
-.mix-notes dd {
-  display: inline;
-  margin: 0;
+.mix-help.has-tip .hover-tip::after {
+  left: 15px;
+}
+
+.mix-help.has-tip:hover .hover-tip,
+.mix-help.has-tip:focus-visible .hover-tip {
+  transform: translate(0, 0);
 }
 
 .cols {
