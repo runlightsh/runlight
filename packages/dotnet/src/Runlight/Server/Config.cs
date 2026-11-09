@@ -24,6 +24,8 @@ namespace Runlight.Server;
 ///   TRUST_PROXY           unset believes forwarded addresses only from a private network; "false" never,
 ///                         "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
 ///   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
+///   RUNLIGHT_AGENT_RANGES on (the default) downloads the AI agents' published address lists daily; off
+///                         keeps the lists that came with this version
 ///   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
 ///   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
 /// </code>
@@ -285,6 +287,17 @@ public sealed partial class Config
     }
 
     /// <summary>
+    /// Whether the server downloads the address lists AI companies publish, once a day, to check AI agent fetches
+    /// against: on (the default) or off, which keeps the lists that came with this version.
+    /// </summary>
+    public bool AgentRanges() => Get("RUNLIGHT_AGENT_RANGES") switch
+    {
+        null or "on" => true,
+        "off" => false,
+        _ => throw new InvalidOperationException("Runlight: Set RUNLIGHT_AGENT_RANGES to on or off"),
+    };
+
+    /// <summary>
     /// DB-IP's monthly download, for RUNLIGHT_GEO city (the default) or country, or null. The same one each time, so
     /// a running server's lookups see what its schedule downloads.
     /// </summary>
@@ -366,6 +379,7 @@ public sealed partial class Config
     /// <param name="setup">Whether to make the setup code when there is none, as the web pages need.</param>
     public Standalone Standalone(Func<long>? now = null, IFetcher? fetcher = null, bool setup = true)
     {
+        bool agentRanges = AgentRanges();
         var dbIp = DbIp();
         var geo = Geo();
         string? code = setup ? SetupCode() : null;
@@ -379,6 +393,7 @@ public sealed partial class Config
             GeoCredit = dbIp != null,
             CronSecret = Get("CRON_SECRET"),
             ObserveKey = Get("RUNLIGHT_OBSERVE_KEY"),
+            UpdateAgentRanges = agentRanges,
             Geo = geo,
             SetupCode = code,
             SetupWhere = code != null ? "in the file setup.txt in Runlight's data folder (<code>runlight setup</code> prints it too)" : null,

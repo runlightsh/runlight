@@ -1637,12 +1637,21 @@ class SqlStore:
     def breakdown(self, query: dict[str, Any], dimension: str, limit: int, offset: int) -> list[dict[str, Any]]:
         page = [limit, offset]
         dialect = self.db.dialect()
-        if dimension in ("ai_agent", "ai_page"):
-            col = "e.name" if dimension == "ai_agent" else "e.path"
+        if dimension == "ai_agent":
+            # A fetch's title holds its address check (see Runlight.observe); only "verified" is not claimed.
+            claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END"
             rows = self.db.all(
-                f"""SELECT {col} AS value, COUNT(*) AS fetches FROM rl_events e
+                f"""SELECT e.name AS value, {claimed} AS claimed, COUNT(*) AS fetches FROM rl_events e
          WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
-         GROUP BY {col} ORDER BY fetches DESC, {col}{self._text_order} LIMIT ? OFFSET ?""",
+         GROUP BY e.name, {claimed} ORDER BY fetches DESC, e.name{self._text_order}, claimed LIMIT ? OFFSET ?""",
+                [query["site"], query["from"], query["to"], *page],
+            )
+            return [{"value": _string(r["value"]), "visitors": 0, "fetches": num(r["fetches"]), "claimed": num(r["claimed"]) == 1} for r in rows]
+        if dimension == "ai_page":
+            rows = self.db.all(
+                f"""SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+         GROUP BY e.path ORDER BY fetches DESC, e.path{self._text_order} LIMIT ? OFFSET ?""",
                 [query["site"], query["from"], query["to"], *page],
             )
             return [{"value": _string(r["value"]), "visitors": 0, "fetches": num(r["fetches"])} for r in rows]

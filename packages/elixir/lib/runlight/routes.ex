@@ -2303,7 +2303,8 @@ defmodule Runlight.Routes do
     else
       with {:ok, body} <- read_json(request) do
         batch = is_list(body["fetches"])
-        # One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+        # One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is the
+        # address the agent's request came from, checked against its company's list and then dropped.
         list = if batch, do: body["fetches"], else: [body]
 
         if length(list) > 500 do
@@ -2325,8 +2326,14 @@ defmodule Runlight.Routes do
 
                 user_agent = item |> JS.prop("userAgent") |> JS.nullish("") |> JS.string() |> JS.slice(0, 500)
 
-                {:cont,
-                 {:ok, pages ++ [%{page: page, user_agent: user_agent, at: if(at != nil and JS.finite?(at), do: at)}]}}
+                ip =
+                  case JS.prop(item, "ip") do
+                    ip when is_binary(ip) -> JS.slice(ip, 0, 100)
+                    _ -> ""
+                  end
+
+                page = %{page: page, user_agent: user_agent, at: if(at != nil and JS.finite?(at), do: at), ip: ip}
+                {:cont, {:ok, pages ++ [page]}}
               end
             end)
 
@@ -2382,7 +2389,10 @@ defmodule Runlight.Routes do
       {:ok, keep} ->
         recorded =
           Enum.count(keep, fn p ->
-            Runlight.observe(rl, Request.new(Url.href(p.page), headers: [{"user-agent", p.user_agent}]), p.at)
+            # A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
+            Runlight.observe(rl, Request.new(Url.href(p.page), headers: [{"user-agent", p.user_agent}]), p.at,
+              agent_ip: p.ip
+            )
           end)
 
         # A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.

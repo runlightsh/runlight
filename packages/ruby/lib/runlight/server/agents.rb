@@ -25,7 +25,7 @@ module Runlight
       S = "[^#{Js::SPACE}]"
 
       # host? ip - user [time] "METHOD /path HTTP/x" status bytes "referrer" "user agent"
-      COMBINED = /\A(?:(#{S}+) )?#{S}+ #{S}+ #{S}+ \[([^\]]+)\] "(#{S}+) (#{S}+)[^"]*" ([0-9]{3}) #{S}+ "(?:[^"\\]|\\[^\n\r  ])*" "((?:[^"\\]|\\[^\n\r  ])*)"/
+      COMBINED = /\A(?:(#{S}+) )?(#{S}+) #{S}+ #{S}+ \[([^\]]+)\] "(#{S}+) (#{S}+)[^"]*" ([0-9]{3}) #{S}+ "(?:[^"\\]|\\[^\n\r  ])*" "((?:[^"\\]|\\[^\n\r  ])*)"/
 
       # A request line and status, in a line that might be a combined log line without its host.
       REQUEST = %r{"#{S}+ /#{S}* [^"]*" [0-9]{3}}
@@ -137,8 +137,15 @@ module Runlight
             url = uri.is_a?(String) ? page_url(uri, host) : nil
             return nil if url.nil?
 
+            # client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the connection's.
+            client = at(request, "client_ip")
+            remote = at(request, "remote_ip")
+            ip = if client.is_a?(String) then client
+                 elsif remote.is_a?(String) then remote
+                 else ""
+                 end
             return { "method" => method, "url" => url, "status" => Js.number(either(at(entry, "status"), 0)),
-                     "userAgent" => Js.string(ua), "at" => at_ms }
+                     "userAgent" => Js.string(ua), "at" => at_ms, "ip" => ip }
           rescue Json::ParseError, TypeError
             return nil
           end
@@ -154,11 +161,11 @@ module Runlight
         base = vhost.nil? ? site : "https://#{vhost}"
         return nil if base.nil? || base == ""
 
-        url = page_url(m[4], base)
+        url = page_url(m[5], base)
         return nil if url.nil?
 
-        { "method" => m[3], "url" => url, "status" => m[5].to_i, "userAgent" => m[6].gsub('\\"', '"'),
-          "at" => log_time(m[2]) }
+        { "method" => m[4], "url" => url, "status" => m[6].to_i, "userAgent" => m[7].gsub('\\"', '"'),
+          "at" => log_time(m[3]), "ip" => m[2] }
       end
 
       # The lines worth sending: GETs that succeeded, from known AI agents. now gives epoch milliseconds, for a
@@ -170,7 +177,10 @@ module Runlight
 
         at = hit["at"]
         finite = !at.is_a?(Float) || at.finite?
-        { "url" => hit["url"], "userAgent" => hit["userAgent"], "at" => finite ? at : (now || method(:clock)).call }
+        fetch = { "url" => hit["url"], "userAgent" => hit["userAgent"], "at" => finite ? at : (now || method(:clock)).call }
+        # The address goes along so the server can check the agent's published list.
+        fetch["ip"] = hit["ip"] unless hit["ip"].nil? || hit["ip"] == ""
+        fetch
       end
 
       def clock

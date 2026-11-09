@@ -3,6 +3,8 @@ package runlight
 import (
 	"regexp"
 	"strings"
+
+	"runlight.sh/go/internal/js"
 )
 
 // AiAgent is an AI agent, matched on the user agent, checked before the bot
@@ -16,31 +18,50 @@ type AiAgent struct {
 	Kind    string `json:"kind"`
 	// Token is matched case-insensitively as a substring of the user agent.
 	Token string `json:"token"`
+	// Ranges is the list of addresses its company publishes for it, which a
+	// request naming it is checked against (see agentcheck.go). "" when the
+	// company publishes none, so its requests stay claimed.
+	Ranges string `json:"ranges,omitempty"`
 }
+
+// JSValue writes the agent as the SDK does, without ranges when its company publishes no list.
+func (a AiAgent) JSValue() any {
+	o := js.NewObject("name", a.Name, "company", a.Company, "kind", a.Kind, "token", a.Token)
+	if a.Ranges != "" {
+		o.Set("ranges", a.Ranges)
+	}
+	return o
+}
+
+const (
+	openAIRanges     = "https://openai.com/"
+	anthropicRanges  = "https://claude.com/crawling/bots.json"
+	perplexityRanges = "https://www.perplexity.ai/"
+)
 
 // AiAgents is every AI agent Runlight knows, in the order they are tried.
 var AiAgents = []AiAgent{
-	{"ChatGPT-User", "OpenAI", "live", "chatgpt-user"},
-	{"OAI-SearchBot", "OpenAI", "crawl", "oai-searchbot"},
-	{"GPTBot", "OpenAI", "crawl", "gptbot"},
-	{"Claude-User", "Anthropic", "live", "claude-user"},
-	{"Claude-SearchBot", "Anthropic", "crawl", "claude-searchbot"},
-	{"ClaudeBot", "Anthropic", "crawl", "claudebot"},
-	{"Claude-Web", "Anthropic", "crawl", "claude-web"},
-	{"anthropic-ai", "Anthropic", "crawl", "anthropic-ai"},
-	{"Perplexity-User", "Perplexity", "live", "perplexity-user"},
-	{"PerplexityBot", "Perplexity", "crawl", "perplexitybot"},
-	{"MistralAI-User", "Mistral", "live", "mistralai-user"},
-	{"meta-externalfetcher", "Meta", "live", "meta-externalfetcher"},
-	{"meta-externalagent", "Meta", "crawl", "meta-externalagent"},
-	{"DuckAssistBot", "DuckDuckGo", "crawl", "duckassistbot"},
-	{"Amazonbot", "Amazon", "crawl", "amazonbot"},
-	{"Bytespider", "ByteDance", "crawl", "bytespider"},
-	{"CCBot", "Common Crawl", "crawl", "ccbot"},
-	{"cohere-ai", "Cohere", "crawl", "cohere-ai"},
-	{"YouBot", "You.com", "crawl", "youbot"},
-	{"Diffbot", "Diffbot", "crawl", "diffbot"},
-	{"Timpibot", "Timpi", "crawl", "timpibot"},
+	{"ChatGPT-User", "OpenAI", "live", "chatgpt-user", openAIRanges + "chatgpt-user.json"},
+	{"OAI-SearchBot", "OpenAI", "crawl", "oai-searchbot", openAIRanges + "searchbot.json"},
+	{"GPTBot", "OpenAI", "crawl", "gptbot", openAIRanges + "gptbot.json"},
+	{"Claude-User", "Anthropic", "live", "claude-user", anthropicRanges},
+	{"Claude-SearchBot", "Anthropic", "crawl", "claude-searchbot", anthropicRanges},
+	{"ClaudeBot", "Anthropic", "crawl", "claudebot", anthropicRanges},
+	{"Claude-Web", "Anthropic", "crawl", "claude-web", anthropicRanges},
+	{"anthropic-ai", "Anthropic", "crawl", "anthropic-ai", anthropicRanges},
+	{"Perplexity-User", "Perplexity", "live", "perplexity-user", perplexityRanges + "perplexity-user.json"},
+	{"PerplexityBot", "Perplexity", "crawl", "perplexitybot", perplexityRanges + "perplexitybot.json"},
+	{"MistralAI-User", "Mistral", "live", "mistralai-user", "https://mistral.ai/mistralai-user-ips.json"},
+	{"meta-externalfetcher", "Meta", "live", "meta-externalfetcher", ""},
+	{"meta-externalagent", "Meta", "crawl", "meta-externalagent", ""},
+	{"DuckAssistBot", "DuckDuckGo", "crawl", "duckassistbot", "https://duckduckgo.com/duckassistbot.json"},
+	{"Amazonbot", "Amazon", "crawl", "amazonbot", ""},
+	{"Bytespider", "ByteDance", "crawl", "bytespider", ""},
+	{"CCBot", "Common Crawl", "crawl", "ccbot", "https://index.commoncrawl.org/ccbot.json"},
+	{"cohere-ai", "Cohere", "crawl", "cohere-ai", ""},
+	{"YouBot", "You.com", "crawl", "youbot", ""},
+	{"Diffbot", "Diffbot", "crawl", "diffbot", ""},
+	{"Timpibot", "Timpi", "crawl", "timpibot", ""},
 }
 
 // botPattern is the SDK's BOT_PATTERN without its two lookaheads,

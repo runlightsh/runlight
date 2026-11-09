@@ -2055,12 +2055,22 @@ final class SqlStore
     {
         $page = [$limit, $offset];
         $dialect = $this->db->dialect();
-        if ($dimension === 'ai_agent' || $dimension === 'ai_page') {
-            $col = $dimension === 'ai_agent' ? 'e.name' : 'e.path';
+        if ($dimension === 'ai_agent') {
+            // A fetch's title holds its address check (see Runlight::observe); only "verified" is not claimed.
+            $claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END";
             $rows = $this->db->all(
-                "SELECT $col AS value, COUNT(*) AS fetches FROM rl_events e
+                "SELECT e.name AS value, $claimed AS claimed, COUNT(*) AS fetches FROM rl_events e
          WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
-         GROUP BY $col ORDER BY fetches DESC, $col{$this->textOrder()} LIMIT ? OFFSET ?",
+         GROUP BY e.name, $claimed ORDER BY fetches DESC, e.name{$this->textOrder()}, claimed LIMIT ? OFFSET ?",
+                [$query['site'], $query['from'], $query['to'], ...$page],
+            );
+            return array_map(static fn (array $row): array => ['value' => (string) $row['value'], 'visitors' => 0, 'fetches' => Sql::num($row['fetches']), 'claimed' => Sql::num($row['claimed']) === 1], $rows);
+        }
+        if ($dimension === 'ai_page') {
+            $rows = $this->db->all(
+                "SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+         GROUP BY e.path ORDER BY fetches DESC, e.path{$this->textOrder()} LIMIT ? OFFSET ?",
                 [$query['site'], $query['from'], $query['to'], ...$page],
             );
             return array_map(static fn (array $row): array => ['value' => (string) $row['value'], 'visitors' => 0, 'fetches' => Sql::num($row['fetches'])], $rows);

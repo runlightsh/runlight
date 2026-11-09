@@ -57,6 +57,8 @@ export interface Row {
   scrollDepth?: number;
   visitDuration?: number;
   fetches?: number;
+  /** An AI agent whose address was not in its company's published list, or could not be checked. */
+  claimed?: boolean;
 }
 
 export interface RhythmCell {

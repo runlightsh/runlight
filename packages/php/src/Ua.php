@@ -46,7 +46,7 @@ final class Ua
         '5.1' => 'XP',
     ];
 
-    /** @return array{name: string, company: string, kind: string, token: string}|null */
+    /** @return array{name: string, company: string, kind: string, token: string, ranges?: string}|null */
     public static function aiAgent(string $ua): ?array
     {
         $lower = Js::lower($ua);

@@ -61,7 +61,7 @@ public sealed class AgentsOptions
 /// so the next run, or a restarted follow, carries on from there.
 ///
 /// The port of the Node server's agents.ts, by way of the PHP package's. A fetch is an object of url, userAgent,
-/// and at (epoch milliseconds).
+/// at (epoch milliseconds), and ip when the line has the address the request came from.
 /// </summary>
 public static partial class Agents
 {
@@ -89,7 +89,7 @@ public static partial class Agents
 
     // host? ip - user [time] "METHOD /path HTTP/x" status bytes "referrer" "user agent"
     private static readonly Regex Combined = new(
-        "^(?:(" + S + "+) )?" + S + "+ " + S + "+ " + S + "+ \\[([^\\]]+)\\] \"(" + S + "+) (" + S + "+)[^\"]*\" ([0-9]{3}) " + S + "+ \"" + Quoted + "\" \"(" + Quoted + ")\"",
+        "^(?:(" + S + "+) )?(" + S + "+) " + S + "+ " + S + "+ \\[([^\\]]+)\\] \"(" + S + "+) (" + S + "+)[^\"]*\" ([0-9]{3}) " + S + "+ \"" + Quoted + "\" \"(" + Quoted + ")\"",
         RegexOptions.CultureInvariant);
 
     /// <summary>A request line and status, in a line that might be a combined log line without its host.</summary>
@@ -198,7 +198,8 @@ public static partial class Agents
     };
 
     /// <summary>
-    /// One log line as a page fetch, or null: an object of method, url, status, userAgent, and at.
+    /// One log line as a page fetch, or null: an object of method, url, status, userAgent, at, and ip (the address
+    /// the request came from, or "" when the line has none).
     /// <paramref name="site"/> is the address pages live at (https://example.com), for formats that do not record
     /// the host.
     /// </summary>
@@ -248,6 +249,8 @@ public static partial class Agents
                     ["status"] = Whole(Js.Number(ImportHttp.Coalesce(At(entry, "status"), 0L))),
                     ["userAgent"] = Js.String(ua),
                     ["at"] = at,
+                    // client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the connection's.
+                    ["ip"] = At(request, "client_ip") is string client ? client : At(request, "remote_ip") is string remote ? remote : "",
                 };
             }
             catch (Exception e) when (e is JsonParseException or JsTypeError or InvalidCastException)
@@ -268,21 +271,23 @@ public static partial class Agents
         {
             return null;
         }
-        string? page = PageUrl(m.Groups[4].Value, root);
+        string? page = PageUrl(m.Groups[5].Value, root);
         return page != null
             ? new JsObject
             {
-                ["method"] = m.Groups[3].Value,
+                ["method"] = m.Groups[4].Value,
                 ["url"] = page,
-                ["status"] = Int(m.Groups[5].Value),
-                ["userAgent"] = m.Groups[6].Value.Replace("\\\"", "\"", StringComparison.Ordinal),
-                ["at"] = Whole(LogTime(m.Groups[2].Value)),
+                ["status"] = Int(m.Groups[6].Value),
+                ["userAgent"] = m.Groups[7].Value.Replace("\\\"", "\"", StringComparison.Ordinal),
+                ["at"] = Whole(LogTime(m.Groups[3].Value)),
+                ["ip"] = m.Groups[2].Value,
             }
             : null;
     }
 
     /// <summary>
-    /// The lines worth sending: GETs that succeeded, from known AI agents, as an object of url, userAgent, and at.
+    /// The lines worth sending: GETs that succeeded, from known AI agents, as an object of url, userAgent, at, and
+    /// ip when the line has one.
     /// <paramref name="now"/> is epoch milliseconds, for a line whose time cannot be read.
     /// </summary>
     public static JsObject? AgentFetch(string line, string? site = null, Func<long>? now = null)
@@ -298,12 +303,18 @@ public static partial class Agents
             return null;
         }
         object? at = hit.Get("at");
-        return new JsObject
+        var fetch = new JsObject
         {
             ["url"] = hit.Get("url"),
             ["userAgent"] = hit.Get("userAgent"),
             ["at"] = double.IsFinite(Number(at)) ? at : (now ?? Clock)(),
         };
+        // The address goes along so the server can check the agent's published list; it is not kept there.
+        if (hit.Get("ip") is string { Length: > 0 } ip)
+        {
+            fetch["ip"] = ip;
+        }
+        return fetch;
     }
 
     private static long Clock() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();

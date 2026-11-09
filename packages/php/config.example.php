@@ -30,4 +30,8 @@ return [
 
     // Lets a scheduler run the check over HTTP when it cannot run the cron command.
     // 'CRON_SECRET' => '',
+
+    // on (the default) downloads the address lists AI companies publish once a day, which AI agent fetches are
+    // checked against; off keeps the lists that came with this version.
+    // 'RUNLIGHT_AGENT_RANGES' => 'off',
 ];

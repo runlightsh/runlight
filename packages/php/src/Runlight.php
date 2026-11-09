@@ -62,6 +62,10 @@ use Runlight\Store\SqlStore;
  * - localInstalls: lets a connected install be at http://localhost or http://127.0.0.1, for trying a hub and
  *   an app on one machine. Default false: otherwise anyone who can add a site could have this server ask
  *   services on its own machine, so other installs must be public https addresses.
+ * - updateAgentRanges: downloads the address lists AI companies publish, at most once a day during check(), so
+ *   requests that name an agent are checked against current addresses. Default false: the lists that came with
+ *   this version are used, and Runlight makes no requests of its own for them. Lists another process sharing
+ *   the database downloaded are used either way.
  * - dataDir: a folder of the server's own, outside the web root, for the small files requests share when APCu
  *   is not loaded: rate counts and cached site icons. Default the system's temporary folder, where they go in
  *   a folder only this server's user can open.
@@ -102,6 +106,8 @@ final class Runlight
     private const ROLLUP_DELAY_MS = 2 * 3_600_000;
     /** The longest a tracker hit waits for the tables while another process creates or upgrades them, in seconds. */
     private const TRACKER_WAIT = 10;
+    /** How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on. */
+    private const AGENT_RANGES_EVERY_MS = 86_400_000;
 
     public readonly SqlStore $store;
     /** Whether sites are managed in the dashboard. */
@@ -118,6 +124,8 @@ final class Runlight
     public readonly bool $localInstalls;
     /** The folder for files shared between requests, or null for the system's temporary folder. See Scratch. */
     public readonly ?string $dataDir;
+    /** Whether check() downloads the AI agents' address lists once a day. */
+    public readonly bool $updateAgentRanges;
     /** The app's own place for values shared between requests, used in place of APCu and files, or null. */
     public readonly ?Cache $cache;
     /**
@@ -153,6 +161,11 @@ final class Runlight
     private bool $checking = false;
     /** When planner statistics were last gathered. */
     private int $optimizedAt = 0;
+    /**
+     * @var array<string, list<string>>|null the AI agents' address lists in use: those that came with this version,
+     * with any downloaded copies from the database over them. Null until a fetch or a check first needs them.
+     */
+    private ?array $agentRanges = null;
     /** @var array{at: int, domains: array<string, true>}|null */
     private ?array $linkDomainCache = null;
     /** @var array<string, array{day: string, today: string, yesterday: ?string}> each timezone's salts for its current day, so a lookup is a map read until midnight there */
@@ -203,6 +216,7 @@ final class Runlight
         $this->clock = $options['now'] ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->fetcher = $options['fetcher'] ?? new CurlFetcher();
         $this->localInstalls = (bool) ($options['localInstalls'] ?? false);
+        $this->updateAgentRanges = (bool) ($options['updateAgentRanges'] ?? false);
         $this->links = new Links($this);
         $this->linkPath = '/' . preg_replace('#^/+|/+$#D', '', (string) ($options['linkPath'] ?? '/go'));
         $mail = $options['mail'] ?? null;
@@ -1741,8 +1755,14 @@ final class Runlight
      * Records a request from a known AI agent. Call it from middleware for
      * every page request; it ignores everything else and never throws.
      * Agents do not run JavaScript, so the tracker cannot see them.
+     *
+     * The request's address (from `$context['ip']` or a trusted proxy header, as for tracker hits, or
+     * `agentIp` when a log reader or plugin reports it) is checked against the list the agent's company
+     * publishes and then dropped: only "verified", "mismatch", or "" is kept with the fetch.
+     *
+     * @param array{ip?: string, agentIp?: string} $context
      */
-    public function observe(Request $request, int|float|null $at = null): bool
+    public function observe(Request $request, int|float|null $at = null, array $context = []): bool
     {
         try {
             if ($request->method !== 'GET') {
@@ -1780,7 +1800,9 @@ final class Runlight
                 'pageview' => '',
                 'path' => Js::slice($url->pathname, 0, 1000),
                 'hostname' => Sources::stripWww($url->hostname),
-                'title' => '',
+                // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
+                // there was nothing to check against. The address itself is not kept.
+                'title' => AgentCheck::checkAgent($agent, isset($context['agentIp']) ? (string) $context['agentIp'] : $this->clientIp($request, $context), $this->agentRanges()),
                 'name' => $agent['name'],
                 'props' => ['company' => $agent['company'], 'kind' => $agent['kind']],
                 'engagedMs' => 0,
@@ -1843,6 +1865,84 @@ final class Runlight
         $this->store->optimize(true);
     }
 
+    /**
+     * The AI agents' address lists in use. A process that has not run a check yet reads the copies another
+     * process downloaded from the database once, so a request handled apart from the scheduled check uses
+     * them too.
+     *
+     * @return array<string, list<string>>
+     */
+    private function agentRanges(): array
+    {
+        if ($this->agentRanges === null) {
+            $lists = AgentCheck::bundled()['lists'];
+            try {
+                $lists = [...$lists, ...($this->savedAgentRanges()['lists'] ?? [])];
+            } catch (\Throwable $error) {
+                Log::write("Runlight: could not read the AI agents' address lists " . $error->getMessage());
+            }
+            $this->agentRanges = $lists;
+        }
+        return $this->agentRanges;
+    }
+
+    /**
+     * The lists downloaded by any process sharing this database, each read whole as a download is, or null
+     * when none were saved.
+     *
+     * @return array{at: int, lists: array<string, list<string>>}|null
+     */
+    private function savedAgentRanges(): ?array
+    {
+        $stored = $this->store->setting('agent-ranges');
+        if ($stored === null || $stored === '') {
+            return null;
+        }
+        $parsed = json_decode($stored, true);
+        if (!is_array($parsed)) {
+            return null;
+        }
+        $lists = [];
+        foreach (is_array($parsed['lists'] ?? null) ? $parsed['lists'] : [] as $url => $list) {
+            $entries = is_array($list) && array_is_list($list)
+                ? array_map(static fn (mixed $p): array => is_string($p) && str_contains($p, ':') ? ['ipv6Prefix' => $p] : ['ipv4Prefix' => $p], $list)
+                : null;
+            $prefixes = AgentCheck::readRangeList(['prefixes' => $entries]);
+            if ($prefixes !== null) {
+                $lists[(string) $url] = $prefixes;
+            }
+        }
+        $at = Js::number($parsed['at'] ?? 0);
+        return ['at' => is_finite($at) ? (int) $at : 0, 'lists' => $lists];
+    }
+
+    /**
+     * Uses the agents' address lists downloaded by any process sharing this database, and downloads them
+     * again when updateAgentRanges is on and the last try was a day ago or more. A list that cannot be
+     * fetched or read keeps the copy it replaces; a failed day is not retried until the next day.
+     */
+    private function refreshAgentRanges(): void
+    {
+        try {
+            $saved = $this->savedAgentRanges();
+            $bundled = AgentCheck::bundled()['lists'];
+            if ($this->updateAgentRanges && ($saved === null || $this->now() - $saved['at'] >= self::AGENT_RANGES_EVERY_MS)) {
+                $lists = $saved['lists'] ?? [];
+                foreach (array_keys($bundled) as $url) {
+                    $fresh = AgentCheck::downloadRangeList($this->fetcher, (string) $url);
+                    if ($fresh !== null) {
+                        $lists[(string) $url] = $fresh;
+                    }
+                }
+                $saved = ['at' => $this->now(), 'lists' => $lists];
+                $this->store->setSetting('agent-ranges', Json::encode(['at' => $saved['at'], 'lists' => (object) $lists]));
+            }
+            $this->agentRanges = [...$bundled, ...($saved['lists'] ?? [])];
+        } catch (\Throwable $error) {
+            Log::write("Runlight: could not update the AI agents' address lists " . $error->getMessage());
+        }
+    }
+
     /** @return array{ok: true, reports: array{sent: int, failed: int}} */
     private function runCheck(): array
     {
@@ -1855,6 +1955,7 @@ final class Runlight
         }
         // A name or timezone changed in the dashboard by another process reaches this one too.
         $this->overrides = $this->store->siteOverrides();
+        $this->refreshAgentRanges();
         $this->salts = [];
         foreach (array_unique(array_column($this->sites(), 'timezone')) as $timezone) {
             $this->currentSalts($this->now(), $timezone);

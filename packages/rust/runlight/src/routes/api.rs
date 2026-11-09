@@ -1292,7 +1292,8 @@ impl Routes {
             Ok(b) => Value::Object(b),
             Err(r) => return Ok(r),
         };
-        // One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+        // One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is
+        // the address the agent's request came from, checked against its company's list and then dropped.
         let batch = body.get("fetches").is_some_and(Value::is_array);
         let list: Vec<Value> = match body.get("fetches") {
             Some(Value::Array(a)) => a.clone(),
@@ -1301,7 +1302,7 @@ impl Routes {
         if list.len() > 500 {
             return Ok(coded("Send at most 500 fetches at a time", "observe_many", 413, None));
         }
-        let mut pages: Vec<(Url, String, Option<f64>)> = Vec::new();
+        let mut pages: Vec<(Url, String, Option<f64>, String)> = Vec::new();
         for item in &list {
             if item.is_null() {
                 return Ok(coded("Send the page's url", "observe_url", 400, None));
@@ -1318,10 +1319,14 @@ impl Routes {
                 _ => None,
             }
             .filter(|a| a.is_finite());
-            pages.push((page, js::head16(&js::str_or_empty(item.get("userAgent")), 500), at));
+            let ip = match item.get("ip") {
+                Some(Value::String(ip)) => js::head16(ip, 100),
+                _ => String::new(),
+            };
+            pages.push((page, js::head16(&js::str_or_empty(item.get("userAgent")), 500), at, ip));
         }
         rl.init().await?;
-        let mut keep: Vec<&(Url, String, Option<f64>)> = pages.iter().collect();
+        let mut keep: Vec<&(Url, String, Option<f64>, String)> = pages.iter().collect();
         if let Some(key_site) = key_site {
             // A site's own key reports only pages on that site's domains.
             keep.retain(|p| rl.site_for(&p.0.hostname(), None).is_some_and(|s| s.id == key_site));
@@ -1331,9 +1336,10 @@ impl Routes {
             }
         }
         let mut recorded = 0;
-        for (page, ua, at) in keep {
+        // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
+        for (page, ua, at, ip) in keep {
             let observed = Request::get(page.href()).header("user-agent", ua);
-            if rl.observe(&observed, *at).await {
+            if rl.observe_with(&observed, *at, Some(ip)).await {
                 recorded += 1;
             }
         }

@@ -1650,7 +1650,22 @@ const OBSERVE: Scenario[] = [
       post("/api/observe", { url: "https://shop.example.com/k", userAgent: GPTBOT }, asJson("{{key}}")),
       post("/api/observe", { fetches: [{ url: "https://blog.example.com/k2", userAgent: GPTBOT }, { url: "https://shop.example.com/k2", userAgent: GPTBOT }] }, asJson("{{key}}")),
       getAs("/api/observe-key?site=blog", as("observe-install")),
+      // A report's ip is checked against the agent's published list and dropped: in it, not in it, no list
+      // (Meta publishes none), an address that is not one, IPv6, and IPv4 written as IPv6.
+      post("/api/observe", { url: "https://blog.example.com/v", userAgent: GPTBOT, ip: "20.171.206.17" }, asJson("observe-install")),
+      post("/api/observe", {
+        fetches: [
+          { url: "https://blog.example.com/v", userAgent: GPTBOT, ip: "198.51.100.23" },
+          { url: "https://blog.example.com/v", userAgent: CLAUDEBOT, ip: "216.73.216.10" },
+          { url: "https://blog.example.com/v", userAgent: CLAUDEBOT, ip: " [::ffff:216.73.216.11] " },
+          { url: "https://blog.example.com/v", userAgent: "Mozilla/5.0 (compatible; CCBot/2.0; +https://commoncrawl.org/faq/)", ip: "2600:1f28:365:8000::5" },
+          { url: "https://blog.example.com/v", userAgent: "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)", ip: "157.240.0.1" },
+          { url: "https://blog.example.com/v", userAgent: GPTBOT, ip: "not an address" },
+          { url: "https://blog.example.com/v", userAgent: GPTBOT, ip: 351391249 },
+        ],
+      }, asJson("observe-install")),
       get("/api/breakdown?site=blog&period=today&dimension=ai_agent"),
+      get("/api/breakdown?site=blog&period=today&dimension=ai_agent&format=csv"),
       get("/api/breakdown?site=blog&period=today&dimension=ai_page"),
       get("/api/breakdown?site=shop&period=today&dimension=ai_page"),
       get("/api/stats?site=blog&period=today&compare=off"),

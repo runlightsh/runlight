@@ -28,6 +28,8 @@ var (
 	localesJSON []byte
 	//go:embed build.json
 	buildJSON []byte
+	//go:embed agent-ranges.json
+	agentRangesJSON []byte
 )
 
 // Build is what build.json says about the copied files.
@@ -40,6 +42,17 @@ var Build struct {
 	TrackerHash   string `json:"trackerHash"`
 	Icon          string `json:"icon"`
 }
+
+// AgentRanges is the address lists AI companies publish for their agents, as
+// they were when this version was built: each list's address and its
+// prefixes, such as 20.171.206.0/24.
+var AgentRanges struct {
+	FetchedAt string              `json:"fetchedAt"`
+	Lists     map[string][]string `json:"lists"`
+}
+
+// AgentRangeOrder is the lists' addresses in the order the file has them.
+var AgentRangeOrder []string
 
 // Locales is each language's dashboard strings, as the JSON text the SDK
 // holds them in; "en" is English.
@@ -56,6 +69,10 @@ func init() {
 	if err := json.Unmarshal(localesJSON, &Locales); err != nil {
 		panic("assets: locales.json: " + err.Error())
 	}
+	if err := json.Unmarshal(agentRangesJSON, &AgentRanges); err != nil {
+		panic("assets: agent-ranges.json: " + err.Error())
+	}
+	AgentRangeOrder = keysInOrder(agentRangesJSON, "lists")
 	// locales.json is written with English first and the rest in the SDK's own order.
 	dec := json.NewDecoder(bytes.NewReader(localesJSON))
 	_, _ = dec.Token()
@@ -65,4 +82,29 @@ func init() {
 		var skip json.RawMessage
 		_ = dec.Decode(&skip)
 	}
+}
+
+// keysInOrder is the keys of the object at field of a JSON object, in the order they are written.
+func keysInOrder(text []byte, field string) []string {
+	var outer map[string]json.RawMessage
+	if json.Unmarshal(text, &outer) != nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(outer[field]))
+	if _, err := dec.Token(); err != nil {
+		return nil
+	}
+	var keys []string
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return keys
+		}
+		keys = append(keys, key.(string))
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return keys
+		}
+	}
+	return keys
 }

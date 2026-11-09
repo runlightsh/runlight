@@ -2813,14 +2813,15 @@ public sealed class Routes
         {
             return (Response)parsedBody;
         }
-        // One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+        // One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is
+        // the address the agent's request came from, checked against its company's list and then dropped.
         bool batch = body.Prop("fetches") is List<object?>;
         var list = batch ? (List<object?>)body.Get("fetches")! : [body];
         if (list.Count > 500)
         {
             return Coded("Send at most 500 fetches at a time", "observe_many", 413);
         }
-        var pages = new List<(Url Page, string UserAgent, double? At)>();
+        var pages = new List<(Url Page, string UserAgent, double? At, string? Ip)>();
         foreach (object? item in list)
         {
             object? Read(string key) => item is JsObject o ? o.Prop(key) : Undefined.Value;
@@ -2833,7 +2834,8 @@ public sealed class Routes
             object? at = Read("at");
             double? when = at is long or int or double ? Js.Num(at) : (at is string s ? ImportHttp.ParseDate(s) : (double?)null);
             object? agent = Read("userAgent");
-            pages.Add((page, Js.Slice(agent is null or Undefined ? "" : Js.String(agent), 0, 500), when != null && double.IsFinite(when.Value) ? when : null));
+            string? ip = Read("ip") is string address ? Js.Slice(address, 0, 100) : null;
+            pages.Add((page, Js.Slice(agent is null or Undefined ? "" : Js.String(agent), 0, 500), when != null && double.IsFinite(when.Value) ? when : null, ip is { Length: > 0 } ? ip : null));
         }
         await rl.InitAsync(cancellationToken).ConfigureAwait(false);
         var keep = pages;
@@ -2849,9 +2851,10 @@ public sealed class Routes
             }
         }
         long recorded = 0;
+        // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         foreach (var p in keep)
         {
-            if (await rl.ObserveAsync(new Request(p.Page.Href, "GET", new Headers { ["user-agent"] = p.UserAgent }), p.At, cancellationToken).ConfigureAwait(false))
+            if (await rl.ObserveAsync(new Request(p.Page.Href, "GET", new Headers { ["user-agent"] = p.UserAgent }), p.At, agentIp: p.Ip ?? "", cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 recorded++;
             }

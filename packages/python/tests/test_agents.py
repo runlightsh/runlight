@@ -72,11 +72,18 @@ def files(dir: Any) -> list[str]:
 def test_log_lines_nginx_and_apache_combined_a_vhost_column_and_caddys_json() -> None:
     assert parse_line(line("/blog/post?x=1", GPTBOT), "https://example.com") == {
         "method": "GET", "url": "https://example.com/blog/post?x=1", "status": 200, "userAgent": GPTBOT, "at": utc(2026, 10, 7, 17, 55, 36),
+        "ip": "203.0.113.9",
     }  # fmt: skip
     assert parse_line(line("/", GPTBOT)) is None, "with no host anywhere there is no page to name"
     assert parse_line(line("/", GPTBOT, vhost="blog.example.com:443"))["url"] == "https://blog.example.com/"
     caddy = _js.dumps({"ts": 1791399336.5, "status": 200, "request": {"method": "GET", "host": "example.com", "uri": "/docs/", "tls": {}, "headers": {"User-Agent": [CLAUDE]}}})
-    assert parse_line(caddy) == {"method": "GET", "url": "https://example.com/docs/", "status": 200, "userAgent": CLAUDE, "at": 1791399336500}
+    assert parse_line(caddy) == {"method": "GET", "url": "https://example.com/docs/", "status": 200, "userAgent": CLAUDE, "at": 1791399336500, "ip": ""}
+    # Caddy's client_ip is the visitor after its trusted proxies; remote_ip is the connection.
+    behind_proxy = _js.dumps({"ts": 1791399336.5, "status": 200, "request": {"method": "GET", "host": "example.com", "uri": "/", "remote_ip": "10.0.0.2", "client_ip": "216.73.216.10", "headers": {"User-Agent": [CLAUDE]}}})
+    assert parse_line(behind_proxy)["ip"] == "216.73.216.10"
+    assert parse_line(_js.dumps({"ts": 1, "status": 200, "request": {"method": "GET", "host": "example.com", "uri": "/", "remote_ip": "216.73.216.11", "headers": {}}}))["ip"] == "216.73.216.11"
+    assert parse_line(line("/", GPTBOT, vhost="blog.example.com:443"))["ip"] == "203.0.113.9", "after a vhost column"
+    assert agent_fetch(line("/", GPTBOT), "https://example.com")["ip"] == "203.0.113.9", "the address goes along for the check"
     assert parse_line("not a log line") is None
     # A target is a path and query on the site, never read as an address: a backslash cannot name another host.
     assert parse_line(line("/\\evil.example/x?y=1", GPTBOT), "https://example.com")["url"] == "https://example.com//evil.example/x?y=1"

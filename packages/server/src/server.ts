@@ -24,6 +24,8 @@ export interface ServerOptions {
   geo?: GeoLookup;
   /** Credit DB-IP in the dashboard, when its free data supplies locations. */
   geoCredit?: boolean;
+  /** Download the address lists AI companies publish once a day, to check AI agent fetches against. */
+  updateAgentRanges?: boolean;
   now?: () => number;
   /** Optional operational dashboard, served only to an unrestricted owner or admin. */
   monitoring?: Handler;
@@ -95,6 +97,7 @@ export function createServer(options: ServerOptions): RunlightServer {
     secret: options.secret,
     ...(options.trustProxy === undefined ? {} : { trustProxy: options.trustProxy }),
     ...(options.geo ? { geo: options.geo } : {}),
+    updateAgentRanges: options.updateAgentRanges ?? false,
     now,
   });
 

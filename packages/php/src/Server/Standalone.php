@@ -66,6 +66,7 @@ final class Standalone
      *     dataDir?: string|null,
      *     cronSecret?: string|null,
      *     observeKey?: string|null,
+     *     updateAgentRanges?: bool,
      * } $options
      *
      * - secret: signs sessions and encrypts saved keys. Keep it stable.
@@ -77,6 +78,8 @@ final class Standalone
      *   written down, for the page that asks for it.
      * - cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
      * - dataDir: the server's data folder, where the files requests share go rather than the system's temporary folder.
+     * - updateAgentRanges: download the address lists AI companies publish once a day, to check AI agent fetches
+     *   against. Default false.
      */
     public function __construct(array $options)
     {
@@ -109,6 +112,7 @@ final class Standalone
         if (isset($options['dataDir'])) {
             $runlight['dataDir'] = $options['dataDir'];
         }
+        $runlight['updateAgentRanges'] = (bool) ($options['updateAgentRanges'] ?? false);
         $rl = $this->runlight = new Runlight($runlight);
 
         // Accounts, shared with apps that turn them on. The first one is made with the one-time code, or with the

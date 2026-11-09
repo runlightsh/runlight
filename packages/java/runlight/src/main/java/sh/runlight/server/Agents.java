@@ -72,9 +72,9 @@ public final class Agents {
       Pattern.compile(
           "^(?:("
               + S
-              + "+) )?"
+              + "+) )?("
               + S
-              + "+ "
+              + "+) "
               + S
               + "+ "
               + S
@@ -273,8 +273,9 @@ public final class Agents {
   }
 
   /**
-   * One log line as a page fetch, or null: method, url, status, userAgent, and at. {@code site} is
-   * the address pages live at (https://example.com), for formats that do not record the host.
+   * One log line as a page fetch, or null: method, url, status, userAgent, at, and ip (the address
+   * the request came from, or "" when the line does not say). {@code site} is the address pages
+   * live at (https://example.com), for formats that do not record the host.
    */
   public static Map<String, Object> parseLine(String line, String site) {
     String text = Js.trim(line);
@@ -321,6 +322,11 @@ public final class Agents {
       if (url == null) {
         return null;
       }
+      // client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the
+      // connection's.
+      Object clientIp = at(request, "client_ip");
+      Object remoteIp = at(request, "remote_ip");
+      String ip = clientIp instanceof String c ? c : remoteIp instanceof String r ? r : "";
       return Json.object(
           "method",
           method,
@@ -331,7 +337,9 @@ public final class Agents {
           "userAgent",
           Js.string(ua),
           "at",
-          when);
+          when,
+          "ip",
+          ip);
     }
     Matcher m = COMBINED.matcher(text);
     if (!m.find()) {
@@ -351,20 +359,22 @@ public final class Agents {
     if (base == null || base.isEmpty()) {
       return null;
     }
-    String url = pageUrl(m.group(4), base);
+    String url = pageUrl(m.group(5), base);
     return url == null
         ? null
         : Json.object(
             "method",
-            m.group(3),
+            m.group(4),
             "url",
             url,
             "status",
-            Long.parseLong(m.group(5)),
+            Long.parseLong(m.group(6)),
             "userAgent",
-            m.group(6).replace("\\\"", "\""),
+            m.group(7).replace("\\\"", "\""),
             "at",
-            logTime(m.group(2)));
+            logTime(m.group(3)),
+            "ip",
+            m.group(2));
   }
 
   /** {@link #parseLine(String, String)} for a line that must name its own host. */
@@ -373,7 +383,8 @@ public final class Agents {
   }
 
   /**
-   * The lines worth sending: GETs that succeeded, from known AI agents, as url, userAgent, and at.
+   * The lines worth sending: GETs that succeeded, from known AI agents, as url, userAgent, at, and
+   * ip when the line names one.
    *
    * @param now epoch milliseconds, for a line whose time cannot be read; the clock when null
    */
@@ -390,13 +401,19 @@ public final class Agents {
       return null;
     }
     Object when = hit.get("at");
-    return Json.object(
-        "url",
-        hit.get("url"),
-        "userAgent",
-        hit.get("userAgent"),
-        "at",
-        Js.isFinite(when) ? when : (Object) (now != null ? now.getAsLong() : clock()));
+    Map<String, Object> fetch =
+        Json.object(
+            "url",
+            hit.get("url"),
+            "userAgent",
+            hit.get("userAgent"),
+            "at",
+            Js.isFinite(when) ? when : (Object) (now != null ? now.getAsLong() : clock()));
+    // The address goes along so the server can check the agent's published list.
+    if (hit.get("ip") instanceof String ip && !ip.isEmpty()) {
+      fetch.put("ip", ip);
+    }
+    return fetch;
   }
 
   /** {@link #agentFetch(String, String, LongSupplier)} on the clock. */

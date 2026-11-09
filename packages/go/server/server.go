@@ -46,9 +46,11 @@ type Options struct {
 	Geo        runlight.GeoLookup
 	// GeoCredit credits DB-IP in the dashboard, when its free data supplies locations.
 	GeoCredit bool
-	Now       func() int64
-	Fetcher   runlight.Fetcher
-	Logf      func(format string, args ...any)
+	// UpdateAgentRanges downloads the address lists AI companies publish once a day, to check AI agent fetches against.
+	UpdateAgentRanges bool
+	Now               func() int64
+	Fetcher           runlight.Fetcher
+	Logf              func(format string, args ...any)
 }
 
 // Server is a running standalone server's parts.
@@ -109,6 +111,7 @@ func New(options Options) (*Server, error) {
 	rl, err := runlight.New(runlight.Options{
 		Store: options.Store, ManagedSites: true, Secret: &options.Secret, IgnoreProxy: options.IgnoreProxy, ProxyHeader: options.ProxyHeader,
 		TrustProxy: options.TrustProxy, Geo: options.Geo, Now: options.Now, Fetcher: options.Fetcher, Logf: logf,
+		UpdateAgentRanges: options.UpdateAgentRanges,
 	})
 	if err != nil {
 		return nil, err

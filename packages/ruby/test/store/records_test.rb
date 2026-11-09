@@ -167,7 +167,9 @@ class StoreRecordsTest < StoreTestCase
     %w[GPTBot GPTBot ClaudeBot ClaudeBot Amazonbot].each_with_index do |agent, i|
       store.insert_event({ "site" => "default", "ts" => NOW - i * MIN, "kind" => "fetch", "visitor" => "", "session" => "", "pageview" => "", "path" => i.odd? ? "/a" : "/b", "hostname" => "example.com", "title" => "", "name" => agent, "props" => { "company" => "X", "kind" => "crawler" }, "engagedMs" => 0, "scroll" => nil, "link" => "" })
     end
-    assert_equal [{ "value" => "ClaudeBot", "visitors" => 0, "fetches" => 2 }, { "value" => "GPTBot", "visitors" => 0, "fetches" => 2 }, { "value" => "Amazonbot", "visitors" => 0, "fetches" => 1 }],
+    # A fetch with no address check is claimed: its name rests on the user agent alone.
+    assert_equal [{ "value" => "ClaudeBot", "visitors" => 0, "fetches" => 2, "claimed" => true }, { "value" => "GPTBot", "visitors" => 0, "fetches" => 2, "claimed" => true },
+                  { "value" => "Amazonbot", "visitors" => 0, "fetches" => 1, "claimed" => true }],
                  store.breakdown(today, "ai_agent", 10, 0)
     assert_equal [{ "value" => "/a", "visitors" => 0, "fetches" => 2 }], store.breakdown(today, "ai_page", 1, 1)
     assert_equal 0, store.stats(today)["visits"]

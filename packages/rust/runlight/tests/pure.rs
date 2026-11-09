@@ -50,8 +50,14 @@ fn user_agents_read_as_the_sdk_reads_them() {
     }
     for case in list(&fixture("ua"), "cases") {
         let text = s(case, "ua");
-        let agent = ua::ai_agent(text)
-            .map(|a| obj! { "name" => a.name, "company" => a.company, "kind" => a.kind, "token" => a.token });
+        // As the SDK writes an agent: its list's address only when its company publishes one.
+        let agent = ua::ai_agent(text).map(|a| {
+            let mut o = obj! { "name" => a.name, "company" => a.company, "kind" => a.kind, "token" => a.token };
+            if let (Some(url), Some(o)) = (a.ranges, o.as_object_mut()) {
+                o.set("ranges", url);
+            }
+            o
+        });
         let got = obj! {
             "agent" => agent,
             "bot" => ua::is_bot(text),

@@ -15,6 +15,8 @@ import { attribute, parsePage, stripWww, type Page } from "./sources.js";
 import { EVENT_TAIL_MS, type ReportRow, type SessionRow, type SiteOverrides, type SiteRow, type SqlStore } from "./store.js";
 import { addDays, isTimezone, localDate, startOf } from "./time.js";
 import { aiAgent, isBot, parseClient } from "./ua.js";
+import { checkAgent, downloadRangeList, readRangeList } from "./agentcheck.js";
+import { AGENT_RANGES } from "./data/agent-ranges.js";
 import { Waiting } from "./waiting.js";
 
 export interface SiteOptions {
@@ -94,9 +96,18 @@ export interface RunlightOptions {
    * machine, so other installs must be public https addresses.
    */
   localInstalls?: boolean;
+  /**
+   * Downloads the address lists AI companies publish, at most once a day during the scheduled check,
+   * so requests that name an agent are checked against current addresses. Default false: the lists
+   * that came with this version are used, and Runlight makes no requests of its own for them.
+   */
+  updateAgentRanges?: boolean;
   /** For tests. */
   now?: () => number;
 }
+
+/** How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on. */
+const AGENT_RANGES_EVERY_MS = 86_400_000;
 
 /** A mail service and who reports come from. */
 export type MailSettings = MailConfig & { from: string; fromName?: string };
@@ -260,6 +271,9 @@ export class Runlight {
   /** True until a public address has sent forwarding headers that the default did not believe, and been warned about once. */
   private warnDirect: boolean;
   private readonly limit: RateLimit | null;
+  private readonly updateAgentRanges: boolean;
+  /** The agents' address lists in use: downloaded ones from the database when there are any, else those that came with this version. */
+  private agentRanges: Record<string, string[]> = AGENT_RANGES.lists;
   readonly now: () => number;
   /** Short links: create, change, delete, and import. */
   readonly links: Links;
@@ -318,6 +332,7 @@ export class Runlight {
     // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
     this.limit = perMinute === false || !(Number(perMinute) > 0) ? null : new RateLimit(Number(perMinute), () => this.now());
     this.now = options.now ?? Date.now;
+    this.updateAgentRanges = options.updateAgentRanges ?? false;
     this.links = new Links(this);
     this.linkPath = `/${(options.linkPath ?? "/go").replace(/^\/+|\/+$/g, "")}`;
     const mail = options.mail;
@@ -1365,8 +1380,13 @@ export class Runlight {
    * Records a request from a known AI agent. Call it from middleware for
    * every page request; it ignores everything else and never throws.
    * Agents do not run JavaScript, so the tracker cannot see them.
+   *
+   * The request's address (from `context.ip` or a trusted proxy header, as
+   * for tracker hits, or `agentIp` when a log reader or plugin reports it)
+   * is checked against the list the agent's company publishes and then
+   * dropped: only "verified", "mismatch", or "" is kept with the fetch.
    */
-  async observe(request: Request, at?: number): Promise<boolean> {
+  async observe(request: Request, at?: number, context: RequestContext & { agentIp?: string } = {}): Promise<boolean> {
     try {
       if (request.method !== "GET") return false;
       const agent = aiAgent(request.headers.get("user-agent") ?? "");
@@ -1393,9 +1413,11 @@ export class Runlight {
         pageview: "",
         path: url.pathname.slice(0, 1000),
         hostname: stripWww(url.hostname),
-        title: "",
         name: agent.name,
         props: { company: agent.company, kind: agent.kind },
+        // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
+        // there was nothing to check against. The address itself is not kept.
+        title: checkAgent(agent, context.agentIp ?? this.clientIp(request, context), this.agentRanges),
         engagedMs: 0,
         scroll: null,
         link: "",
@@ -1432,6 +1454,42 @@ export class Runlight {
     return this.checking;
   }
 
+  /**
+   * Uses the agents' address lists downloaded by any process sharing this database, and downloads them
+   * again when updateAgentRanges is on and the last try was a day ago or more. A list that cannot be
+   * fetched or read keeps the copy it replaces; a failed day is not retried until the next day.
+   */
+  private async refreshAgentRanges(): Promise<void> {
+    try {
+      const stored = await this.store.setting("agent-ranges");
+      let saved: { at: number; lists: Record<string, string[]> } | null = null;
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as { at?: unknown; lists?: Record<string, unknown> };
+          const lists: Record<string, string[]> = {};
+          for (const [url, list] of Object.entries(parsed.lists ?? {})) {
+            const prefixes = readRangeList({ prefixes: Array.isArray(list) ? list.map((p) => (String(p).includes(":") ? { ipv6Prefix: p } : { ipv4Prefix: p })) : null });
+            if (prefixes) lists[url] = prefixes;
+          }
+          saved = { at: Number(parsed.at) || 0, lists };
+        } catch {}
+      }
+      if (this.updateAgentRanges && (!saved || this.now() - saved.at >= AGENT_RANGES_EVERY_MS)) {
+        const urls = [...new Set(Object.keys(AGENT_RANGES.lists))];
+        const lists: Record<string, string[]> = { ...saved?.lists };
+        for (const url of urls) {
+          const fresh = await downloadRangeList(url);
+          if (fresh) lists[url] = fresh;
+        }
+        saved = { at: this.now(), lists };
+        await this.store.setSetting("agent-ranges", JSON.stringify(saved));
+      }
+      this.agentRanges = { ...AGENT_RANGES.lists, ...saved?.lists };
+    } catch (error) {
+      console.error("Runlight: could not update the AI agents' address lists", error);
+    }
+  }
+
   private async runCheck(): Promise<{ ok: true; reports: { sent: number; failed: number } }> {
     await this.init();
     if (this.managedSites) {
@@ -1440,6 +1498,7 @@ export class Runlight {
     }
     // A name or timezone changed in the dashboard by another process reaches this one too.
     this.overrides = await this.store.siteOverrides();
+    await this.refreshAgentRanges();
     this.salts.clear();
     for (const timezone of new Set(this.sites.map((s) => s.timezone))) await this.currentSalts(this.now(), timezone);
     await this.dropOldSalts(this.now());

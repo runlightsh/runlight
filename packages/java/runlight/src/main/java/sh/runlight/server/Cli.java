@@ -79,7 +79,9 @@ public final class Cli {
       DATA_DIR and refreshes it each month. Set it to country for a smaller file, to
       off, or to the path of your own MMDB file. CRON_SECRET lets a scheduler run
       the check over HTTP, and RUNLIGHT_OBSERVE_KEY is one key for every site's AI
-      agent reports.
+      agent reports. RUNLIGHT_AGENT_RANGES=off stops the daily download of the
+      address lists AI companies publish, which AI agent fetches are checked
+      against; the lists that came with this version are used instead.
 
       Docs: https://runlight.sh/docs/java/
       """;

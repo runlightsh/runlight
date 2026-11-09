@@ -160,7 +160,9 @@ class CoreIngestTest < CoreTestCase
     refute fetch.call("/logo.png", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0)")
     refute fetch.call("/", Harness::CHROME_MAC)
     today = t.today
-    assert_equal [{ "value" => "ChatGPT-User", "visitors" => 0, "fetches" => 1 }, { "value" => "ClaudeBot", "visitors" => 0, "fetches" => 1 }],
+    # With no address to check, the names rest on the user agent alone.
+    assert_equal [{ "value" => "ChatGPT-User", "visitors" => 0, "fetches" => 1, "claimed" => true },
+                  { "value" => "ClaudeBot", "visitors" => 0, "fetches" => 1, "claimed" => true }],
                  t.store.breakdown(today, "ai_agent", 10, 0)
     assert_equal [{ "value" => "/blog/post", "visitors" => 0, "fetches" => 2 }], t.store.breakdown(today, "ai_page", 10, 0)
     assert_equal 0, t.stats(today)["visitors"], "fetches are not visits"
@@ -169,6 +171,109 @@ class CoreIngestTest < CoreTestCase
     refute t.rl.observe(Request.new("https://example.com/old", headers: { "user-agent" => ua }), t.now - (8 * DAY))
     assert t.rl.observe(Request.new("https://example.com/later", headers: { "user-agent" => ua }), t.now + DAY)
     assert_equal t.now, t.store.db.all("SELECT ts FROM rl_events WHERE path = '/later'")[0]["ts"].to_i
+  end
+
+  on_every_database("an ai agents address is checked against its companys list and only the answer is kept") do |kind|
+    t = Harness.new(kind)
+    gptbot = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+    meta = "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)"
+    fetch = lambda do |ua, ip = nil|
+      headers = { "user-agent" => ua, "host" => "example.com" }
+      headers["x-forwarded-for"] = ip unless ip.nil?
+      t.rl.observe(Request.new("https://example.com/post", headers: headers))
+    end
+    fetch.call(gptbot, "20.171.206.17") # in OpenAI's published GPTBot list
+    fetch.call(gptbot, "20.171.206.18")
+    fetch.call(gptbot, "198.51.100.23") # says GPTBot, comes from elsewhere
+    fetch.call(gptbot) # no address to check
+    fetch.call(meta, "157.240.0.1") # Meta publishes no list
+    # A log reader's or plugin's report names the agent's address itself; it never stands in for the reporter's.
+    t.rl.observe(Request.new("https://example.com/post", headers: { "user-agent" => gptbot, "x-forwarded-for" => "198.51.100.40" }), nil,
+                 { "agentIp" => "20.171.206.99" })
+
+    assert_equal [
+      { "value" => "GPTBot", "visitors" => 0, "fetches" => 3, "claimed" => false },
+      { "value" => "GPTBot", "visitors" => 0, "fetches" => 2, "claimed" => true },
+      { "value" => "meta-externalagent", "visitors" => 0, "fetches" => 1, "claimed" => true },
+    ], t.store.breakdown(t.today, "ai_agent", 10, 0)
+    titles = t.store.db.all("SELECT title FROM rl_events WHERE kind = 'fetch'").map { |r| r["title"].to_s }.sort
+    assert_equal ["", "", "mismatch", "verified", "verified", "verified"], titles
+    dump = Json.encode(t.store.db.all("SELECT * FROM rl_events"))
+    %w[20.171.206.17 198.51.100.23 157.240.0.1 198.51.100.40 20.171.206.99].each { |ip| refute_includes dump, ip, "no address: #{ip}" }
+  end
+
+  # The downloads go through a fake fetcher, so these run on every database and never reach the network.
+  on_every_database("update agent ranges downloads the lists once a day keeps a good copy over a bad download and shares it through the database") do |kind|
+    answer = ->(_url) { Runlight::Http::Response.json({ "prefixes" => [{ "ipv4Prefix" => "192.0.2.0/24" }] }) }
+    fetcher = FakeFetcher.new { |url, _init| answer.call(url) }
+    asked = -> { fetcher.requests.map { |r| r["url"] } }
+    t = Harness.new(kind, { "updateAgentRanges" => true, "fetcher" => fetcher })
+    t.now = utc(2026, 11, 8, 12)
+    gptbot = "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+    fetch_from = lambda do |rl, ip|
+      rl.observe(Request.new("https://example.com/post", headers: { "user-agent" => gptbot, "host" => "example.com", "x-forwarded-for" => ip }))
+    end
+    t.rl.check
+    assert_includes asked.call, "https://openai.com/gptbot.json"
+    assert_equal Runlight::AgentCheck.bundled["lists"].keys, asked.call, "each bundled list, once"
+    request = fetcher.requests[0]
+    assert_equal "Runlight (+https://runlight.sh)", request["headers"]["user-agent"]
+    assert_equal "follow", fetcher.inits[0]["redirect"]
+    assert_equal 15_000, fetcher.inits[0]["timeoutMs"]
+    assert_equal 4_000_000, fetcher.inits[0]["maxBytes"]
+    first_round = asked.call.length
+    fetch_from.call(t.rl, "192.0.2.7") # in the downloaded list
+    fetch_from.call(t.rl, "20.171.206.17") # in the bundled list only, which the download replaced
+    t.advance(HOUR)
+    t.rl.check
+    assert_equal first_round, asked.call.length, "not again within the day"
+
+    t.advance(DAY)
+    answer = ->(_url) { Runlight::Http::Response.new("<html>maintenance</html>", status: 200) }
+    t.rl.check
+    assert_equal first_round * 2, asked.call.length, "a day later it tries again"
+    fetch_from.call(t.rl, "192.0.2.8") # the bad download kept the good copy
+
+    # Another process sharing the database uses the lists without downloading them.
+    other = Runlight::Core.new({ "store" => t.store, "site" => {}, "now" => -> { t.now }, "fetcher" => fetcher })
+    other.check
+    assert_equal first_round * 2, asked.call.length
+    fetch_from.call(other, "192.0.2.9")
+
+    titles = t.store.db.all("SELECT title FROM rl_events WHERE kind = 'fetch'").map { |r| r["title"].to_s }.sort
+    assert_equal %w[mismatch verified verified verified], titles
+    saved = Json.decode(t.store.setting("agent-ranges"))
+    assert_equal t.now, saved["at"], "a failed day is saved too, so it is not tried again until the next"
+    assert_equal ["192.0.2.0/24"], saved["lists"]["https://openai.com/gptbot.json"]
+  end
+
+  on_every_database("a download that fails or is too large keeps the copy already saved and the day is not tried again") do |kind|
+    fetcher = FakeFetcher.new do |url, _init|
+      raise Runlight::Http::FetchError, "fetch failed" if url.include?("openai.com")
+
+      Runlight::Http::Response.new("{}", status: 200, headers: { "content-length" => "4000001" })
+    end
+    t = Harness.new(kind, { "updateAgentRanges" => true, "fetcher" => fetcher })
+    t.rl.check
+    assert_equal Runlight::AgentCheck.bundled["lists"].length, fetcher.requests.length
+    saved = Json.decode(t.store.setting("agent-ranges"))
+    assert_equal({ "at" => t.now, "lists" => {} }, saved, "saved even when every download failed")
+    # The bundled lists stay in use.
+    t.rl.observe(Request.new("https://example.com/post", headers: { "user-agent" => "GPTBot/1.2", "host" => "example.com", "x-forwarded-for" => "20.171.206.17" }))
+    assert_equal ["verified"], t.store.db.all("SELECT title FROM rl_events WHERE kind = 'fetch'").map { |r| r["title"] }
+    # A saved value that is not JSON, or lists that do not read, are passed over.
+    t.store.set_setting("agent-ranges", Json.encode({ "at" => t.now, "lists" => { "https://openai.com/gptbot.json" => ["nonsense"] } }))
+    t.rl.check
+    assert_equal Runlight::AgentCheck.bundled["lists"].length, fetcher.requests.length
+    t.rl.observe(Request.new("https://example.com/post", headers: { "user-agent" => "GPTBot/1.2", "host" => "example.com", "x-forwarded-for" => "20.171.206.17" }))
+    assert_equal %w[verified verified], t.store.db.all("SELECT title FROM rl_events WHERE kind = 'fetch'").map { |r| r["title"] }
+  end
+
+  on_every_database("without update agent ranges runlight never downloads the lists") do |kind|
+    fetcher = FakeFetcher.new { |_url, _init| Runlight::Http::Response.new("{}") }
+    t = Harness.new(kind, { "fetcher" => fetcher })
+    t.rl.check
+    assert_empty fetcher.requests
   end
 
   on_every_database("several sites in one install told apart by hostname") do |kind|

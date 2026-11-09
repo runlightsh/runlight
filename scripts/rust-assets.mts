@@ -3,6 +3,7 @@
 // reads them with include_str!, since a published crate cannot reach outside
 // its own directory). Run after building the dashboard or tracker; with
 // --check it only says whether the copies are current.
+import { AGENT_RANGES } from "../packages/sdk/src/data/agent-ranges.ts";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { ACTION_TOOL } from "../packages/sdk/src/assistant-action.ts";
 import * as dashboard from "../packages/sdk/src/generated/dashboard.ts";
@@ -19,6 +20,7 @@ const files: Record<string, string> = {
   "tracker.js": tracker.TRACKER,
   "picker.js": tracker.PICKER,
   "pick-return.js": tracker.PICK_RELAY,
+  "agent-ranges.json": `${JSON.stringify(AGENT_RANGES, null, 1)}\n`,
   "locales.json": `${JSON.stringify({ en: dashboard.ENGLISH, ...dashboard.LOCALES }, null, 1)}\n`,
   "build.json": `${JSON.stringify(
     {

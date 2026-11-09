@@ -1,7 +1,8 @@
 defmodule Runlight.Assets do
   @moduledoc false
   # Internal. The dashboard bundle, its CSS, the world map, the locales, the
-  # tracker, the picker, and its relay page's script: the TypeScript SDK's
+  # tracker, the picker, its relay page's script, and the AI agents' address
+  # lists: the TypeScript SDK's
   # generated files, copied into priv/assets by scripts/elixir-assets.mts
   # (never edited by hand), read into the compiled module so a release needs
   # no priv lookup.
@@ -9,7 +10,7 @@ defmodule Runlight.Assets do
   @dir Path.expand("../../priv/assets", __DIR__)
 
   for name <-
-        ~w(assistant-action.json dashboard.js dashboard.css world.json tracker.js picker.js pick-return.js locales.json build.json) do
+        ~w(assistant-action.json dashboard.js dashboard.css world.json tracker.js picker.js pick-return.js locales.json build.json agent-ranges.json) do
     @external_resource Path.join(@dir, name)
   end
 
@@ -26,6 +27,9 @@ defmodule Runlight.Assets do
   @build_text File.read!(Path.join(@dir, "build.json"))
 
   @build Runlight.JS.parse!(@build_text)
+  @agent_ranges @dir |> Path.join("agent-ranges.json") |> File.read!() |> Runlight.JS.parse!()
+  @agent_range_urls @agent_ranges |> Runlight.JS.prop("lists") |> Runlight.JS.Object.keys()
+  @agent_range_lists Map.new(Runlight.JS.Object.to_list(Runlight.JS.prop(@agent_ranges, "lists")))
   @locales (for {code, text} <- Runlight.JS.Object.to_list(Runlight.JS.parse!(@locales_text)), into: %{} do
               {code, text}
             end)
@@ -43,6 +47,15 @@ defmodule Runlight.Assets do
 
   @doc "The languages other than English, in the dashboard's order."
   def locale_codes, do: @locale_codes
+
+  @doc "The URLs of the address lists AI companies publish, in the order the bundled copy has them."
+  def agent_range_urls, do: @agent_range_urls
+
+  @doc "The bundled copy of those lists, by URL, as prefix strings."
+  def agent_range_lists, do: @agent_range_lists
+
+  @doc "The day the bundled lists were fetched, YYYY-MM-DD."
+  def agent_ranges_fetched_at, do: Runlight.JS.prop(@agent_ranges, "fetchedAt")
 
   def version, do: @build["version"]
   def api_version, do: @build["apiVersion"]

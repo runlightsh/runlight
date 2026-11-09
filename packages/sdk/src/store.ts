@@ -311,6 +311,12 @@ export interface BreakdownRow {
   /** Mean engaged time per visit, milliseconds, for visit dimensions. */
   visitDuration?: number;
   fetches?: number;
+  /**
+   * For AI agents: true for fetches whose address was not found in the list the agent's company
+   * publishes, or could not be checked, so the name rests on the user agent alone. An agent can have a
+   * row of each.
+   */
+  claimed?: boolean;
 }
 
 export interface Realtime {
@@ -2510,12 +2516,22 @@ export class SqlStore {
 
   async breakdown(query: Query, dimension: Dimension, limit: number, offset: number): Promise<BreakdownRow[]> {
     const page = [limit, offset];
-    if (dimension === "ai_agent" || dimension === "ai_page") {
-      const col = dimension === "ai_agent" ? "e.name" : "e.path";
+    if (dimension === "ai_agent") {
+      // A fetch's title holds its address check (see Runlight.observe); only "verified" is not claimed.
+      const claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END";
       const rows = await this.db.all(
-        `SELECT ${col} AS value, COUNT(*) AS fetches FROM rl_events e
+        `SELECT e.name AS value, ${claimed} AS claimed, COUNT(*) AS fetches FROM rl_events e
          WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
-         GROUP BY ${col} ORDER BY fetches DESC, ${col}${this.textOrder} LIMIT ? OFFSET ?`,
+         GROUP BY e.name, ${claimed} ORDER BY fetches DESC, e.name${this.textOrder}, claimed LIMIT ? OFFSET ?`,
+        [query.site, query.from, query.to, ...page],
+      );
+      return rows.map((row) => ({ value: String(row.value), visitors: 0, fetches: num(row.fetches), claimed: num(row.claimed) === 1 }));
+    }
+    if (dimension === "ai_page") {
+      const rows = await this.db.all(
+        `SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+         GROUP BY e.path ORDER BY fetches DESC, e.path${this.textOrder} LIMIT ? OFFSET ?`,
         [query.site, query.from, query.to, ...page],
       );
       return rows.map((row) => ({ value: String(row.value), visitors: 0, fetches: num(row.fetches) }));

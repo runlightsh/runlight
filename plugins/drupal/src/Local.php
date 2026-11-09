@@ -485,9 +485,12 @@ final class Local implements DestructableInterface {
    *   The page's address.
    * @param string $agent
    *   The agent's user agent.
+   * @param string $ip
+   *   The agent's address, as Drupal works it out, checked against the list
+   *   its company publishes and then dropped.
    */
-  public function observe(string $url, string $agent): void {
-    $this->runlight()->observe(new Request($url, 'GET', ['user-agent' => $agent]));
+  public function observe(string $url, string $agent, string $ip = ''): void {
+    $this->runlight()->observe(new Request($url, 'GET', ['user-agent' => $agent]), NULL, ['ip' => $ip]);
   }
 
   /**

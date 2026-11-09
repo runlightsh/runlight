@@ -1,6 +1,7 @@
 package sh.runlight.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashMap;
@@ -139,6 +140,12 @@ class StandaloneTest {
         "/login",
         server.handle(req("/setup?code=" + CODE)).headers().get("location"),
         "setup closes once an account exists");
+  }
+
+  @Test
+  void theAgentRangesDownloadIsOffUnlessTheServerTurnsItOn() {
+    assertFalse(make(options -> {}).runlight.updateAgentRanges);
+    assertTrue(make(options -> options.updateAgentRanges(true)).runlight.updateAgentRanges);
   }
 
   @Test

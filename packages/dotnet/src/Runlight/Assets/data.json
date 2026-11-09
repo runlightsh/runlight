@@ -5,67 +5,78 @@
       "name": "ChatGPT-User",
       "company": "OpenAI",
       "kind": "live",
-      "token": "chatgpt-user"
+      "token": "chatgpt-user",
+      "ranges": "https://openai.com/chatgpt-user.json"
     },
     {
       "name": "OAI-SearchBot",
       "company": "OpenAI",
       "kind": "crawl",
-      "token": "oai-searchbot"
+      "token": "oai-searchbot",
+      "ranges": "https://openai.com/searchbot.json"
     },
     {
       "name": "GPTBot",
       "company": "OpenAI",
       "kind": "crawl",
-      "token": "gptbot"
+      "token": "gptbot",
+      "ranges": "https://openai.com/gptbot.json"
     },
     {
       "name": "Claude-User",
       "company": "Anthropic",
       "kind": "live",
-      "token": "claude-user"
+      "token": "claude-user",
+      "ranges": "https://claude.com/crawling/bots.json"
     },
     {
       "name": "Claude-SearchBot",
       "company": "Anthropic",
       "kind": "crawl",
-      "token": "claude-searchbot"
+      "token": "claude-searchbot",
+      "ranges": "https://claude.com/crawling/bots.json"
     },
     {
       "name": "ClaudeBot",
       "company": "Anthropic",
       "kind": "crawl",
-      "token": "claudebot"
+      "token": "claudebot",
+      "ranges": "https://claude.com/crawling/bots.json"
     },
     {
       "name": "Claude-Web",
       "company": "Anthropic",
       "kind": "crawl",
-      "token": "claude-web"
+      "token": "claude-web",
+      "ranges": "https://claude.com/crawling/bots.json"
     },
     {
       "name": "anthropic-ai",
       "company": "Anthropic",
       "kind": "crawl",
-      "token": "anthropic-ai"
+      "token": "anthropic-ai",
+      "ranges": "https://claude.com/crawling/bots.json"
     },
     {
       "name": "Perplexity-User",
       "company": "Perplexity",
       "kind": "live",
-      "token": "perplexity-user"
+      "token": "perplexity-user",
+      "ranges": "https://www.perplexity.ai/perplexity-user.json"
     },
     {
       "name": "PerplexityBot",
       "company": "Perplexity",
       "kind": "crawl",
-      "token": "perplexitybot"
+      "token": "perplexitybot",
+      "ranges": "https://www.perplexity.ai/perplexitybot.json"
     },
     {
       "name": "MistralAI-User",
       "company": "Mistral",
       "kind": "live",
-      "token": "mistralai-user"
+      "token": "mistralai-user",
+      "ranges": "https://mistral.ai/mistralai-user-ips.json"
     },
     {
       "name": "meta-externalfetcher",
@@ -83,7 +94,8 @@
       "name": "DuckAssistBot",
       "company": "DuckDuckGo",
       "kind": "crawl",
-      "token": "duckassistbot"
+      "token": "duckassistbot",
+      "ranges": "https://duckduckgo.com/duckassistbot.json"
     },
     {
       "name": "Amazonbot",
@@ -101,7 +113,8 @@
       "name": "CCBot",
       "company": "Common Crawl",
       "kind": "crawl",
-      "token": "ccbot"
+      "token": "ccbot",
+      "ranges": "https://index.commoncrawl.org/ccbot.json"
     },
     {
       "name": "cohere-ai",

@@ -15,18 +15,20 @@ from runlight.version import VERSION
 
 ENV = [
     "DATA_DIR", "DATABASE_URL", "RUNLIGHT_SECRET", "RUNLIGHT_TOKEN", "RUNLIGHT_URL", "TRUST_PROXY", "RUNLIGHT_GEO",
-    "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "PORT", "HOST",
+    "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "RUNLIGHT_AGENT_RANGES", "PORT", "HOST",
 ]  # fmt: skip
 
 
 @pytest.fixture
 def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A data folder of its own, with nothing else from the environment, and no location data fetched."""
+    """A data folder of its own, with nothing else from the environment, and no location data or AI agent address
+    lists fetched."""
     for name in ENV:
         monkeypatch.delenv(name, raising=False)
     folder = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(folder))
     monkeypatch.setenv("RUNLIGHT_GEO", "off")
+    monkeypatch.setenv("RUNLIGHT_AGENT_RANGES", "off")
     return folder
 
 
@@ -92,6 +94,22 @@ def test_unknown_commands_and_bad_settings_say_so(data: Path, monkeypatch: pytes
     code, _, err = run("check")
     assert code == 1
     assert "Set RUNLIGHT_URL to the dashboard's address only" in err
+
+
+def test_agent_ranges_are_on_by_default_and_turned_off_or_refused(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runlight.server.cli import Settings
+
+    monkeypatch.delenv("RUNLIGHT_AGENT_RANGES")
+    assert Settings().agent_ranges() is True
+    assert Settings().server().runlight._update_agent_ranges is True
+    monkeypatch.setenv("RUNLIGHT_AGENT_RANGES", " on ")
+    assert Settings().agent_ranges() is True
+    monkeypatch.setenv("RUNLIGHT_AGENT_RANGES", "off")
+    assert Settings().server().runlight._update_agent_ranges is False
+    monkeypatch.setenv("RUNLIGHT_AGENT_RANGES", "yes")
+    code, _, err = run("check")
+    assert code == 1
+    assert "Set RUNLIGHT_AGENT_RANGES to on or off" in err
 
 
 def test_the_server_starts_answers_and_stops_on_sigterm(data: Path) -> None:

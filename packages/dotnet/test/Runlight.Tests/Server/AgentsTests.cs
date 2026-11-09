@@ -91,14 +91,20 @@ public sealed class AgentsTests : ServerTestCase
     public void Log_lines_nginx_and_apache_combined_a_vhost_column_and_caddys_json()
     {
         Assert.Equal(
-            Json.Stringify(new JsObject { ["method"] = "GET", ["url"] = "https://example.com/blog/post?x=1", ["status"] = 200L, ["userAgent"] = GptBot, ["at"] = Utc(2026, 10, 7, 17, 55, 36) }),
+            Json.Stringify(new JsObject { ["method"] = "GET", ["url"] = "https://example.com/blog/post?x=1", ["status"] = 200L, ["userAgent"] = GptBot, ["at"] = Utc(2026, 10, 7, 17, 55, 36), ["ip"] = "203.0.113.9" }),
             Json.Stringify(Agents.ParseLine(Line("/blog/post?x=1", GptBot), "https://example.com")));
         Assert.Null(Agents.ParseLine(Line("/", GptBot))); // with no host anywhere there is no page to name
         Assert.Equal("https://blog.example.com/", Agents.ParseLine(Line("/", GptBot, vhost: "blog.example.com:443"))!.Str("url"));
         string caddy = Json.Stringify(new JsObject { ["ts"] = 1791399336.5, ["status"] = 200L, ["request"] = new JsObject { ["method"] = "GET", ["host"] = "example.com", ["uri"] = "/docs/", ["tls"] = new JsObject(), ["headers"] = new JsObject { ["User-Agent"] = new List<object?> { Claude } } } });
         Assert.Equal(
-            Json.Stringify(new JsObject { ["method"] = "GET", ["url"] = "https://example.com/docs/", ["status"] = 200L, ["userAgent"] = Claude, ["at"] = 1791399336500L }),
+            Json.Stringify(new JsObject { ["method"] = "GET", ["url"] = "https://example.com/docs/", ["status"] = 200L, ["userAgent"] = Claude, ["at"] = 1791399336500L, ["ip"] = "" }),
             Json.Stringify(Agents.ParseLine(caddy)));
+        // Caddy's client_ip is the visitor after its trusted proxies; remote_ip is the connection.
+        string behindProxy = Json.Stringify(new JsObject { ["ts"] = 1791399336.5, ["status"] = 200L, ["request"] = new JsObject { ["method"] = "GET", ["host"] = "example.com", ["uri"] = "/", ["remote_ip"] = "10.0.0.2", ["client_ip"] = "216.73.216.10", ["headers"] = new JsObject { ["User-Agent"] = new List<object?> { Claude } } } });
+        Assert.Equal("216.73.216.10", Agents.ParseLine(behindProxy)!.Str("ip"));
+        Assert.Equal("216.73.216.11", Agents.ParseLine(Json.Stringify(new JsObject { ["ts"] = 1L, ["status"] = 200L, ["request"] = new JsObject { ["method"] = "GET", ["host"] = "example.com", ["uri"] = "/", ["remote_ip"] = "216.73.216.11", ["headers"] = new JsObject() } }))!.Str("ip"));
+        Assert.Equal("203.0.113.9", Agents.ParseLine(Line("/", GptBot, vhost: "blog.example.com:443"))!.Str("ip")); // after a vhost column
+        Assert.Equal("203.0.113.9", Agents.AgentFetch(Line("/", GptBot), "https://example.com")!.Str("ip")); // the address goes along for the check
         Assert.Null(Agents.ParseLine("not a log line"));
         // A target is a path and query on the site, never read as an address: a backslash cannot name another host.
         Assert.Equal("https://example.com//evil.example/x?y=1", Agents.ParseLine(Line("/\\evil.example/x?y=1", GptBot), "https://example.com")!.Str("url"));
@@ -478,7 +484,7 @@ public sealed class AgentsTests : ServerTestCase
         Assert.Equal("https://stats.example.com/api/observe", sent.Requests[0].Url);
         Assert.Equal("Bearer rlo_all", sent.Requests[0].Headers.Str("authorization"));
         Assert.Equal(
-            Json.Stringify(new JsObject { ["fetches"] = new List<object?> { new JsObject { ["url"] = "https://example.com/a", ["userAgent"] = GptBot, ["at"] = Utc(2026, 10, 7, 17, 55, 36) } } }),
+            Json.Stringify(new JsObject { ["fetches"] = new List<object?> { new JsObject { ["url"] = "https://example.com/a", ["userAgent"] = GptBot, ["at"] = Utc(2026, 10, 7, 17, 55, 36), ["ip"] = "203.0.113.9" } } }),
             sent.Requests[0].Body);
         var saved = (JsObject)Json.Parse(File.ReadAllText(_dir + "/state.json"))!;
         Assert.Equal(["ino", "offset", "head", "length"], saved.Select(e => e.Key));

@@ -16,31 +16,52 @@ pub struct AiAgent {
     pub kind: &'static str,
     /// Matched case-insensitively as a substring of the user agent.
     pub token: &'static str,
+    /// The list of addresses its company publishes for it, which a request naming it is checked against
+    /// (see [`crate::agentcheck`]). None when the company publishes none, so its requests stay claimed.
+    pub ranges: Option<&'static str>,
 }
 
 const fn agent(name: &'static str, company: &'static str, kind: &'static str, token: &'static str) -> AiAgent {
-    AiAgent { name, company, kind, token }
+    AiAgent { name, company, kind, token, ranges: None }
 }
+
+const fn listed(
+    name: &'static str,
+    company: &'static str,
+    kind: &'static str,
+    token: &'static str,
+    ranges: &'static str,
+) -> AiAgent {
+    AiAgent { name, company, kind, token, ranges: Some(ranges) }
+}
+
+const ANTHROPIC: &str = "https://claude.com/crawling/bots.json";
 
 /// The known AI agents, in the SDK's order.
 pub const AI_AGENTS: &[AiAgent] = &[
-    agent("ChatGPT-User", "OpenAI", "live", "chatgpt-user"),
-    agent("OAI-SearchBot", "OpenAI", "crawl", "oai-searchbot"),
-    agent("GPTBot", "OpenAI", "crawl", "gptbot"),
-    agent("Claude-User", "Anthropic", "live", "claude-user"),
-    agent("Claude-SearchBot", "Anthropic", "crawl", "claude-searchbot"),
-    agent("ClaudeBot", "Anthropic", "crawl", "claudebot"),
-    agent("Claude-Web", "Anthropic", "crawl", "claude-web"),
-    agent("anthropic-ai", "Anthropic", "crawl", "anthropic-ai"),
-    agent("Perplexity-User", "Perplexity", "live", "perplexity-user"),
-    agent("PerplexityBot", "Perplexity", "crawl", "perplexitybot"),
-    agent("MistralAI-User", "Mistral", "live", "mistralai-user"),
+    listed("ChatGPT-User", "OpenAI", "live", "chatgpt-user", "https://openai.com/chatgpt-user.json"),
+    listed("OAI-SearchBot", "OpenAI", "crawl", "oai-searchbot", "https://openai.com/searchbot.json"),
+    listed("GPTBot", "OpenAI", "crawl", "gptbot", "https://openai.com/gptbot.json"),
+    listed("Claude-User", "Anthropic", "live", "claude-user", ANTHROPIC),
+    listed("Claude-SearchBot", "Anthropic", "crawl", "claude-searchbot", ANTHROPIC),
+    listed("ClaudeBot", "Anthropic", "crawl", "claudebot", ANTHROPIC),
+    listed("Claude-Web", "Anthropic", "crawl", "claude-web", ANTHROPIC),
+    listed("anthropic-ai", "Anthropic", "crawl", "anthropic-ai", ANTHROPIC),
+    listed(
+        "Perplexity-User",
+        "Perplexity",
+        "live",
+        "perplexity-user",
+        "https://www.perplexity.ai/perplexity-user.json",
+    ),
+    listed("PerplexityBot", "Perplexity", "crawl", "perplexitybot", "https://www.perplexity.ai/perplexitybot.json"),
+    listed("MistralAI-User", "Mistral", "live", "mistralai-user", "https://mistral.ai/mistralai-user-ips.json"),
     agent("meta-externalfetcher", "Meta", "live", "meta-externalfetcher"),
     agent("meta-externalagent", "Meta", "crawl", "meta-externalagent"),
-    agent("DuckAssistBot", "DuckDuckGo", "crawl", "duckassistbot"),
+    listed("DuckAssistBot", "DuckDuckGo", "crawl", "duckassistbot", "https://duckduckgo.com/duckassistbot.json"),
     agent("Amazonbot", "Amazon", "crawl", "amazonbot"),
     agent("Bytespider", "ByteDance", "crawl", "bytespider"),
-    agent("CCBot", "Common Crawl", "crawl", "ccbot"),
+    listed("CCBot", "Common Crawl", "crawl", "ccbot", "https://index.commoncrawl.org/ccbot.json"),
     agent("cohere-ai", "Cohere", "crawl", "cohere-ai"),
     agent("YouBot", "You.com", "crawl", "youbot"),
     agent("Diffbot", "Diffbot", "crawl", "diffbot"),

@@ -2431,14 +2431,39 @@ impl SqlStore {
 
     pub async fn breakdown(&self, query: &Query, dimension: &str, limit: i64, offset: i64) -> R<Vec<Value>> {
         let dialect = self.dialect();
-        if dimension == "ai_agent" || dimension == "ai_page" {
-            let col = if dimension == "ai_agent" { "e.name" } else { "e.path" };
+        if dimension == "ai_agent" {
+            // A fetch's title holds its address check (see Runlight::observe); only "verified" is not claimed.
+            let claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END";
             let rows = self
                 .all(
                     &format!(
-                        "SELECT {col} AS value, COUNT(*) AS fetches FROM rl_events e
+                        "SELECT e.name AS value, {claimed} AS claimed, COUNT(*) AS fetches FROM rl_events e
          WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
-         GROUP BY {col} ORDER BY fetches DESC, {col}{} LIMIT ? OFFSET ?",
+         GROUP BY e.name, {claimed} ORDER BY fetches DESC, e.name{}, claimed LIMIT ? OFFSET ?",
+                        self.text_order()
+                    ),
+                    params![&query.site, query.from, query.to, limit, offset],
+                )
+                .await?;
+            return Ok(rows
+                .iter()
+                .map(|r| {
+                    obj! {
+                        "value" => r.text("value"),
+                        "visitors" => 0,
+                        "fetches" => r.num("fetches"),
+                        "claimed" => r.num("claimed") == 1.0,
+                    }
+                })
+                .collect());
+        }
+        if dimension == "ai_page" {
+            let rows = self
+                .all(
+                    &format!(
+                        "SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+         GROUP BY e.path ORDER BY fetches DESC, e.path{} LIMIT ? OFFSET ?",
                         self.text_order()
                     ),
                     params![&query.site, query.from, query.to, limit, offset],

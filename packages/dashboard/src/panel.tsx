@@ -55,6 +55,12 @@ export function label(dimension: string, value: string): string {
   return value;
 }
 
+/** A row as people should read it: its value's label, and "(claimed)" on an AI agent whose address did not check out. */
+export function rowLabel(dimension: string, row: Row): string {
+  const text = label(dimension, row.value);
+  return row.claimed ? t("ai.claimed", { name: text }) : text;
+}
+
 function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number; note?: string }> }) {
   const id = useId();
   const total = parts.reduce((sum, p) => sum + p.n, 0);
@@ -95,7 +101,7 @@ function Rows({ rows, tab, onFilter, onDetail }: { rows: Row[]; tab: Tab; onFilt
     <ol class="rows">
       {rows.map((row) => {
         const n = Number(row[column] ?? 0);
-        const text = label(tab.dimension, row.value);
+        const text = rowLabel(tab.dimension, row);
         const slot = dot(row.value);
         const name = (
           <>
@@ -186,7 +192,7 @@ function SheetTable({ rows, tab, onFilter }: { rows: Row[]; tab: Tab; onFilter: 
     ? [...rows].sort((a, b) => {
         const order =
           sort.by < 0
-            ? label(tab.dimension, a.value).localeCompare(label(tab.dimension, b.value), undefined, { numeric: true, sensitivity: "base" })
+            ? rowLabel(tab.dimension, a).localeCompare(rowLabel(tab.dimension, b), undefined, { numeric: true, sensitivity: "base" })
             : columns[sort.by]!.by(a) - columns[sort.by]!.by(b);
         return sort.descending ? -order : order;
       })
@@ -211,7 +217,7 @@ function SheetTable({ rows, tab, onFilter }: { rows: Row[]; tab: Tab; onFilter: 
       </thead>
       <tbody>
         {sorted.map((row) => {
-          const text = label(tab.dimension, row.value);
+          const text = rowLabel(tab.dimension, row);
           return (
             <tr>
               <td class="sheet-name">
@@ -256,7 +262,7 @@ function AllRows({ title, tab, view, onFilter, onClose }: { title: Key; tab: Tab
     };
   }, []);
   const needle = query.trim().toLowerCase();
-  const shown = (rows ?? []).filter((r) => !needle || label(tab.dimension, r.value).toLowerCase().includes(needle));
+  const shown = (rows ?? []).filter((r) => !needle || rowLabel(tab.dimension, r).toLowerCase().includes(needle));
   return (
     <div class="scrim center" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div class={sheetColumns(tab).length > 3 ? "list-sheet wide" : "list-sheet"} role="dialog" aria-modal="true" aria-label={`${t(title)}: ${t(tab.label)}`} ref={dialog}>

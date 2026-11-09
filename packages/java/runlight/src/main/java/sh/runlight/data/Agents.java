@@ -8,34 +8,65 @@ import sh.runlight.Json;
 
 /**
  * AI agents, matched on the user agent, checked before the bot test so they are recorded as fetches
- * rather than dropped. An agent is an object with name, company, kind, and token.
+ * rather than dropped. An agent is an object with name, company, kind, and token, and ranges when
+ * its company publishes the addresses it fetches from.
  *
  * <p>"live" means an assistant fetched the page because a person asked about it just now. "crawl"
  * is training or search indexing. The token is matched case-insensitively as a substring of the
- * user agent.
+ * user agent. ranges is the URL of that list of addresses, which a request naming the agent is
+ * checked against (see {@link sh.runlight.AgentCheck}); without one, its requests stay claimed.
  */
 public final class Agents {
   private Agents() {}
 
+  private static final String OPENAI = "https://openai.com/";
+  private static final String ANTHROPIC = "https://claude.com/crawling/bots.json";
+  private static final String PERPLEXITY = "https://www.perplexity.ai/";
+
   public static final List<Map<String, Object>> AI_AGENTS =
       List.of(
-          agent("ChatGPT-User", "OpenAI", "live", "chatgpt-user"),
-          agent("OAI-SearchBot", "OpenAI", "crawl", "oai-searchbot"),
-          agent("GPTBot", "OpenAI", "crawl", "gptbot"),
-          agent("Claude-User", "Anthropic", "live", "claude-user"),
-          agent("Claude-SearchBot", "Anthropic", "crawl", "claude-searchbot"),
-          agent("ClaudeBot", "Anthropic", "crawl", "claudebot"),
-          agent("Claude-Web", "Anthropic", "crawl", "claude-web"),
-          agent("anthropic-ai", "Anthropic", "crawl", "anthropic-ai"),
-          agent("Perplexity-User", "Perplexity", "live", "perplexity-user"),
-          agent("PerplexityBot", "Perplexity", "crawl", "perplexitybot"),
-          agent("MistralAI-User", "Mistral", "live", "mistralai-user"),
+          agent("ChatGPT-User", "OpenAI", "live", "chatgpt-user", OPENAI + "chatgpt-user.json"),
+          agent("OAI-SearchBot", "OpenAI", "crawl", "oai-searchbot", OPENAI + "searchbot.json"),
+          agent("GPTBot", "OpenAI", "crawl", "gptbot", OPENAI + "gptbot.json"),
+          agent("Claude-User", "Anthropic", "live", "claude-user", ANTHROPIC),
+          agent("Claude-SearchBot", "Anthropic", "crawl", "claude-searchbot", ANTHROPIC),
+          agent("ClaudeBot", "Anthropic", "crawl", "claudebot", ANTHROPIC),
+          agent("Claude-Web", "Anthropic", "crawl", "claude-web", ANTHROPIC),
+          agent("anthropic-ai", "Anthropic", "crawl", "anthropic-ai", ANTHROPIC),
+          agent(
+              "Perplexity-User",
+              "Perplexity",
+              "live",
+              "perplexity-user",
+              PERPLEXITY + "perplexity-user.json"),
+          agent(
+              "PerplexityBot",
+              "Perplexity",
+              "crawl",
+              "perplexitybot",
+              PERPLEXITY + "perplexitybot.json"),
+          agent(
+              "MistralAI-User",
+              "Mistral",
+              "live",
+              "mistralai-user",
+              "https://mistral.ai/mistralai-user-ips.json"),
           agent("meta-externalfetcher", "Meta", "live", "meta-externalfetcher"),
           agent("meta-externalagent", "Meta", "crawl", "meta-externalagent"),
-          agent("DuckAssistBot", "DuckDuckGo", "crawl", "duckassistbot"),
+          agent(
+              "DuckAssistBot",
+              "DuckDuckGo",
+              "crawl",
+              "duckassistbot",
+              "https://duckduckgo.com/duckassistbot.json"),
           agent("Amazonbot", "Amazon", "crawl", "amazonbot"),
           agent("Bytespider", "ByteDance", "crawl", "bytespider"),
-          agent("CCBot", "Common Crawl", "crawl", "ccbot"),
+          agent(
+              "CCBot",
+              "Common Crawl",
+              "crawl",
+              "ccbot",
+              "https://index.commoncrawl.org/ccbot.json"),
           agent("cohere-ai", "Cohere", "crawl", "cohere-ai"),
           agent("YouBot", "You.com", "crawl", "youbot"),
           agent("Diffbot", "Diffbot", "crawl", "diffbot"),
@@ -50,5 +81,12 @@ public final class Agents {
   private static Map<String, Object> agent(String name, String company, String kind, String token) {
     return Collections.unmodifiableMap(
         Json.object("name", name, "company", company, "kind", kind, "token", token));
+  }
+
+  private static Map<String, Object> agent(
+      String name, String company, String kind, String token, String ranges) {
+    return Collections.unmodifiableMap(
+        Json.object(
+            "name", name, "company", company, "kind", kind, "token", token, "ranges", ranges));
   }
 }

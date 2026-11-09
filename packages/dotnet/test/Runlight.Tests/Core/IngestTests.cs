@@ -203,7 +203,8 @@ public sealed class IngestTests : CoreTestCase
         Assert.False(await Fetch("/logo.png", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0)"));
         Assert.False(await Fetch("/", Harness.ChromeMac));
         var today = await t.TodayAsync();
-        Assert.Equal("[{\"value\":\"ChatGPT-User\",\"visitors\":0,\"fetches\":1},{\"value\":\"ClaudeBot\",\"visitors\":0,\"fetches\":1}]", J(await t.Store.BreakdownAsync(today, "ai_agent", 10, 0)));
+        // With no address to check, the names rest on the user agent alone.
+        Assert.Equal("[{\"value\":\"ChatGPT-User\",\"visitors\":0,\"fetches\":1,\"claimed\":true},{\"value\":\"ClaudeBot\",\"visitors\":0,\"fetches\":1,\"claimed\":true}]", J(await t.Store.BreakdownAsync(today, "ai_agent", 10, 0)));
         Assert.Equal("[{\"value\":\"/blog/post\",\"visitors\":0,\"fetches\":2}]", J(await t.Store.BreakdownAsync(today, "ai_page", 10, 0)));
         Assert.Equal(0, (await t.StatsAsync(today)).Num("visitors")); // fetches are not visits
         // A log reader's time: older than a week is dropped, ahead of now counts as now.
@@ -211,6 +212,117 @@ public sealed class IngestTests : CoreTestCase
         Assert.False(await t.Rl.ObserveAsync(new Request("https://example.com/old", "GET", new Headers { ["user-agent"] = ua }), t.Now - 8 * DAY));
         Assert.True(await t.Rl.ObserveAsync(new Request("https://example.com/later", "GET", new Headers { ["user-agent"] = ua }), t.Now + DAY));
         Assert.Equal(t.Now, (long)Js.Number((await t.Store.Db.AllAsync("SELECT ts FROM rl_events WHERE path = '/later'"))[0].Get("ts")));
+    }
+
+    private const string GptBot = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)";
+
+    private static Request AgentRequest(string ua, string? forwardedFor = null)
+    {
+        var headers = new Headers { ["user-agent"] = ua, ["host"] = "example.com" };
+        if (forwardedFor != null)
+        {
+            headers["x-forwarded-for"] = forwardedFor;
+        }
+        return new Request("https://example.com/post", "GET", headers);
+    }
+
+    private static async Task<List<string>> FetchTitlesAsync(Harness t) =>
+        [.. (await t.Store.Db.AllAsync("SELECT title FROM rl_events WHERE kind = 'fetch'")).Select(r => (string)r.Get("title")!).Order(StringComparer.Ordinal)];
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task An_AI_agents_address_is_checked_against_its_companys_list_and_only_the_answer_is_kept(string kind)
+    {
+        var t = await Harness.CreateAsync(kind);
+        const string meta = "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)";
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot, "20.171.206.17"))); // in OpenAI's published GPTBot list
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot, "20.171.206.18")));
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot, "198.51.100.23"))); // says GPTBot, comes from elsewhere
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot))); // no address to check
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(meta, "157.240.0.1"))); // Meta publishes no list
+        // A log reader's or plugin's report names the agent's address itself; it never stands in for the reporter's.
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot, "198.51.100.40"), agentIp: "20.171.206.99"));
+        // The connection's address counts when no trusted proxy names another.
+        Assert.True(await t.Rl.ObserveAsync(new Request("https://example.com/post", "GET", new Headers { ["user-agent"] = GptBot, ["host"] = "example.com" }), ip: "20.171.206.100"));
+
+        Assert.Equal(
+            "[{\"value\":\"GPTBot\",\"visitors\":0,\"fetches\":4,\"claimed\":false},{\"value\":\"GPTBot\",\"visitors\":0,\"fetches\":2,\"claimed\":true},{\"value\":\"meta-externalagent\",\"visitors\":0,\"fetches\":1,\"claimed\":true}]",
+            J(await t.Store.BreakdownAsync(await t.TodayAsync(), "ai_agent", 10, 0)));
+        Assert.Equal(["", "", "mismatch", "verified", "verified", "verified", "verified"], await FetchTitlesAsync(t));
+        string dump = J(await t.Store.Db.AllAsync("SELECT * FROM rl_events"));
+        foreach (string ip in new[] { "20.171.206.17", "198.51.100.23", "157.240.0.1", "198.51.100.40", "20.171.206.99", "20.171.206.100" })
+        {
+            Assert.DoesNotContain(ip, dump, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task UpdateAgentRanges_downloads_the_lists_once_a_day_keeps_a_good_copy_over_a_bad_download_and_shares_it_through_the_database(string kind)
+    {
+        Func<string, Response> answer = _ => Response.JsonOf(new JsObject { ["prefixes"] = new List<object?> { new JsObject { ["ipv4Prefix"] = "192.0.2.0/24" } } });
+        var fetcher = new FakeFetcher((url, _) => answer(url));
+        var t = await Harness.CreateAsync(kind, fetcher: fetcher, updateAgentRanges: true);
+        Task<bool> FetchFrom(Runlight rl, string ip) => rl.ObserveAsync(AgentRequest(GptBot, ip));
+        await t.Rl.CheckAsync();
+        var asked = fetcher.Requests.Where(r => !r.Url.Contains("/api/", StringComparison.Ordinal)).ToList();
+        Assert.Contains("https://openai.com/gptbot.json", asked.Select(r => r.Url));
+        Assert.Equal(AgentCheck.BundledUrls, asked.Select(r => r.Url)); // each list once, in the snapshot's order
+        Assert.All(asked, r =>
+        {
+            Assert.Equal("GET", r.Method);
+            Assert.Equal("Runlight (+https://runlight.sh)", r.Headers.Str("user-agent"));
+            Assert.Equal(15_000, r.TimeoutMs);
+            Assert.Equal(4_000_000, r.Init.MaxBytes);
+            Assert.Equal("follow", r.Init.Redirect);
+        });
+        int firstRound = fetcher.Requests.Count;
+        await FetchFrom(t.Rl, "192.0.2.7"); // in the downloaded list
+        await FetchFrom(t.Rl, "20.171.206.17"); // in the bundled list only, which the download replaced
+        var saved = (JsObject)Json.Parse((await t.Store.SettingAsync("agent-ranges"))!)!;
+        Assert.Equal(t.Now, saved.Long("at"));
+        Assert.Equal("[\"192.0.2.0/24\"]", J(saved.Obj("lists")!.Get("https://openai.com/gptbot.json")));
+        t.Advance(HOUR);
+        await t.Rl.CheckAsync();
+        Assert.Equal(firstRound, fetcher.Requests.Count); // not again within the day
+
+        t.Advance(DAY);
+        int n = 0;
+        // Half the lists come back as a page, the rest fail to arrive at all.
+        answer = _ => n++ % 2 == 0 ? new Response("<html>maintenance</html>", 200) : throw new FetchException("Could not connect");
+        await t.Rl.CheckAsync();
+        Assert.Equal(firstRound * 2, fetcher.Requests.Count); // a day later it tries again
+        await FetchFrom(t.Rl, "192.0.2.8"); // the bad download kept the good copy
+        Assert.Equal(t.Now, ((JsObject)Json.Parse((await t.Store.SettingAsync("agent-ranges"))!)!).Long("at")); // and is not retried until tomorrow
+
+        // Another process sharing the database uses the lists without downloading them.
+        var other = new Runlight(new RunlightOptions { Store = t.Store, Now = () => t.Now, Fetcher = fetcher });
+        await other.CheckAsync();
+        Assert.Equal(firstRound * 2, fetcher.Requests.Count);
+        await FetchFrom(other, "192.0.2.9");
+
+        Assert.Equal(["mismatch", "verified", "verified", "verified"], await FetchTitlesAsync(t));
+    }
+
+    [Theory]
+    [MemberData(nameof(Databases.KindData), MemberType = typeof(Databases))]
+    public async Task Without_UpdateAgentRanges_Runlight_never_downloads_the_lists(string kind)
+    {
+        var fetcher = new FakeFetcher((_, _) => new Response("{}"));
+        var t = await Harness.CreateAsync(kind, fetcher: fetcher);
+        await t.Rl.CheckAsync();
+        t.Advance(2 * DAY);
+        await t.Rl.CheckAsync();
+        Assert.Empty(fetcher.Requests);
+        // Lists saved in the database that are not lists are ignored, and the bundled ones stay in use.
+        await t.Store.SetSettingAsync("agent-ranges", "{\"at\":1,\"lists\":{\"https://openai.com/gptbot.json\":[\"not a prefix\"]}}");
+        await t.Rl.CheckAsync();
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot, "20.171.206.17")));
+        await t.Store.SetSettingAsync("agent-ranges", "not json");
+        await t.Rl.CheckAsync();
+        Assert.True(await t.Rl.ObserveAsync(AgentRequest(GptBot, "20.171.206.18")));
+        Assert.Empty(fetcher.Requests);
+        Assert.Equal(["verified", "verified"], await FetchTitlesAsync(t));
     }
 
     [Theory]

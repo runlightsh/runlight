@@ -89,6 +89,9 @@ final class AgentObserver implements HttpKernelInterface {
     if ($mode !== 'remote' || $address === '' || $key === '') {
       return;
     }
+    // The agent's address, as Drupal works out a visitor's, goes along to be
+    // checked against its company's list; Runlight keeps only the answer.
+    $ip = (string) $request->getClientIp();
     /** @var \Drupal\Core\Cache\CacheBackendInterface $cache */
     $cache = ($this->cache)();
     // A Runlight that did not answer is left alone for a minute, so a down
@@ -101,7 +104,7 @@ final class AgentObserver implements HttpKernelInterface {
         'connect_timeout' => 1,
         'timeout' => 3,
         'headers' => ['Authorization' => 'Bearer ' . $key],
-        'json' => ['url' => $url, 'userAgent' => $agent],
+        'json' => ['url' => $url, 'userAgent' => $agent] + ($ip !== '' ? ['ip' => $ip] : []),
       ]);
     }
     catch (\Throwable $e) {
@@ -124,7 +127,7 @@ final class AgentObserver implements HttpKernelInterface {
       if (!$local->active() || $path === $base || str_starts_with($path, $base . '/')) {
         return;
       }
-      $local->observe($url, $agent);
+      $local->observe($url, $agent, (string) $request->getClientIp());
     }
     catch (\Throwable $e) {
       ($this->logger)()->notice('Could not record an AI agent fetch: @message', ['@message' => $e->getMessage()]);

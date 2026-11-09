@@ -42,6 +42,9 @@ module Runlight
   # - localInstalls: lets a connected install be at http://localhost or http://127.0.0.1, for trying a hub and
   #   an app on one machine. Default false: otherwise anyone who can add a site could have this server ask
   #   services on its own machine, so other installs must be public https addresses.
+  # - updateAgentRanges: downloads the address lists AI companies publish, at most once a day during check(), so
+  #   requests that name an agent are checked against current addresses. Default false: the lists that came
+  #   with this version are used, and Runlight makes no requests of its own for them.
   # - now: a callable giving the clock in milliseconds. For tests.
   # - fetcher: what every outgoing request goes through (anything with fetch(url, init)). Default
   #   Http::NetFetcher.
@@ -72,7 +75,9 @@ module Runlight
     ROLLUP_DELAY_MS = 2 * 3_600_000
     # The longest a tracker hit waits for the tables while another process creates or upgrades them.
     TRACKER_WAIT_MS = 10_000
-    private_constant :ROLLUP_VERSION, :ROLLUP_BATCH, :REMOTE_MAX_BYTES, :METERED_ROLLUP_BATCH, :ROLLUP_DELAY_MS, :TRACKER_WAIT_MS
+    # How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on.
+    AGENT_RANGES_EVERY_MS = 86_400_000
+    private_constant :AGENT_RANGES_EVERY_MS, :ROLLUP_VERSION, :ROLLUP_BATCH, :REMOTE_MAX_BYTES, :METERED_ROLLUP_BATCH, :ROLLUP_DELAY_MS, :TRACKER_WAIT_MS
 
     BUSY = /timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked/i
     private_constant :BUSY
@@ -164,6 +169,10 @@ module Runlight
                        else Mail::Transports::SERVICES.select { |s| offered.include?(s["id"]) }.freeze
                        end
       @local_installs = options["localInstalls"] ? true : false
+      @update_agent_ranges = Js.truthy?(options["updateAgentRanges"])
+      # The agents' address lists in use: downloaded ones from the database when there are any, else those that
+      # came with this version.
+      @agent_ranges = AgentCheck.bundled["lists"]
       @secret = if options.key?("secret") && !options["secret"].nil?
                   options["secret"].to_s
                 else
@@ -961,7 +970,12 @@ module Runlight
     # Records a request from a known AI agent. Call it from middleware for
     # every page request; it ignores everything else and never raises.
     # Agents do not run JavaScript, so the tracker cannot see them.
-    def observe(request, at = nil)
+    #
+    # The request's address (from context "ip" or a trusted proxy header, as
+    # for tracker hits, or context "agentIp" when a log reader or plugin
+    # reports it) is checked against the list the agent's company publishes
+    # and then dropped: only "verified", "mismatch", or "" is kept with the fetch.
+    def observe(request, at = nil, context = {})
       return false if request.method != "GET"
 
       agent = Ua.ai_agent(request.headers.get("user-agent") || "")
@@ -993,9 +1007,11 @@ module Runlight
         "pageview" => "",
         "path" => Js.slice(url.pathname, 0, 1000),
         "hostname" => Sources.strip_www(url.hostname),
-        "title" => "",
         "name" => agent["name"],
         "props" => { "company" => agent["company"], "kind" => agent["kind"] },
+        # A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when there was
+        # nothing to check against. The address itself is not kept.
+        "title" => AgentCheck.check_agent(agent, agent_ip(request, context), @agent_ranges),
         "engagedMs" => 0,
         "scroll" => nil,
         "link" => "",
@@ -1502,6 +1518,61 @@ module Runlight
       })
     end
 
+    # The address an AI agent's request is checked from: the one a report names, else the client's.
+    def agent_ip(request, context)
+      given = context.key?("agentIp") ? context["agentIp"] : context[:agent_ip]
+      given.nil? ? client_ip(request, context) : given.to_s
+    end
+    private :agent_ip
+
+    # Uses the agents' address lists downloaded by any process sharing this database, and downloads them again
+    # when updateAgentRanges is on and the last try was a day ago or more. A list that cannot be fetched or read
+    # keeps the copy it replaces; a failed day is not retried until the next day.
+    def refresh_agent_ranges
+      saved = saved_agent_ranges(@store.setting("agent-ranges"))
+      if @update_agent_ranges && (saved.nil? || now - saved["at"] >= AGENT_RANGES_EVERY_MS)
+        lists = saved.nil? ? {} : saved["lists"].dup
+        AgentCheck.bundled["lists"].each_key do |url|
+          fresh = AgentCheck.download_range_list(url, @fetcher)
+          lists[url] = fresh unless fresh.nil?
+        end
+        saved = { "at" => now, "lists" => lists }
+        @store.set_setting("agent-ranges", Json.encode(saved))
+      end
+      @agent_ranges = saved.nil? ? AgentCheck.bundled["lists"] : AgentCheck.bundled["lists"].merge(saved["lists"])
+    rescue StandardError => e
+      warn("Runlight: could not update the AI agents' address lists #{e.message}")
+    end
+    private :refresh_agent_ranges
+
+    # The "agent-ranges" setting, { "at" => ms, "lists" => { url => [prefix] } } with each list read as a
+    # download is, or nil when there is none or it is not JSON. A list that does not read is left out.
+    def saved_agent_ranges(stored)
+      return nil if stored.nil? || stored == ""
+
+      parsed = begin
+        Json.decode(stored)
+      rescue StandardError
+        return nil
+      end
+      return nil if parsed.nil?
+
+      given = parsed.is_a?(Hash) ? parsed["lists"] : nil
+      entries = if given.is_a?(Hash) then given.to_a
+                elsif given.is_a?(Array) then given.each_with_index.map { |list, i| [i.to_s, list] }
+                else []
+                end
+      lists = {}
+      entries.each do |url, list|
+        wrapped = list.is_a?(Array) ? list.map { |p| { (Js.string(p).include?(":") ? "ipv6Prefix" : "ipv4Prefix") => p } } : nil
+        prefixes = AgentCheck.read_range_list({ "prefixes" => wrapped })
+        lists[url] = prefixes unless prefixes.nil?
+      end
+      at = parsed.is_a?(Hash) ? Js.number(parsed["at"]) : 0
+      { "at" => at.is_a?(Float) && (at.nan? || at.zero?) ? 0 : at, "lists" => lists }
+    end
+    private :saved_agent_ranges
+
     def run_check
       init
       # Requests take a current schema version on trust; the scheduled check goes over every table and index.
@@ -1512,6 +1583,7 @@ module Runlight
       end
       # A name or timezone changed in the dashboard by another process reaches this one too.
       @overrides = @store.site_overrides
+      refresh_agent_ranges
       @salts = {}
       sites.map { |site| site["timezone"] }.uniq.each { |timezone| current_salts(now, timezone) }
       drop_old_salts(now)

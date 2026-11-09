@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::agentcheck::{AGENT_RANGES, RangeList, RangeLists, check_agent, download_range_list, read_stored_list};
 use crate::assistant::locale_compare;
 use crate::error::Error;
 use crate::geo::{SharedGeo, locate};
@@ -143,6 +144,10 @@ pub struct RunlightOptions {
     /// on one machine. Default false: otherwise anyone who can add a site could have this server ask
     /// services on its own machine, so other installs must be public https addresses.
     pub local_installs: bool,
+    /// Downloads the address lists AI companies publish, at most once a day during the scheduled check,
+    /// so requests that name an agent are checked against current addresses. Default false: the lists
+    /// that came with this version are used, and Runlight makes no requests of its own for them.
+    pub update_agent_ranges: bool,
     /// Stands in for DNS where an install's or a service's address is checked before it is fetched, for
     /// tests.
     pub lookup: Option<Lookup>,
@@ -167,6 +172,7 @@ impl RunlightOptions {
             now: None,
             fetcher: None,
             local_installs: false,
+            update_agent_ranges: false,
             lookup: None,
         }
     }
@@ -296,6 +302,10 @@ pub(crate) struct Inner {
     pub(crate) secret: Option<String>,
     pub(crate) fetcher: SharedFetcher,
     local_installs: bool,
+    update_agent_ranges: bool,
+    /// The agents' address lists in use: downloaded ones from the database when there are any, else those
+    /// that came with this version.
+    agent_ranges: Mutex<Arc<RangeLists>>,
     lookup: Option<Lookup>,
     state: Mutex<State>,
     ready: tokio::sync::Mutex<bool>,
@@ -379,6 +389,8 @@ impl Runlight {
             secret,
             fetcher: options.fetcher.unwrap_or_else(default_fetcher),
             local_installs: options.local_installs,
+            update_agent_ranges: options.update_agent_ranges,
+            agent_ranges: Mutex::new(AGENT_RANGES.lists.clone()),
             lookup: options.lookup,
             state: Mutex::new(State { configured, ..State::default() }),
             ready: tokio::sync::Mutex::new(false),
@@ -1704,8 +1716,18 @@ impl Runlight {
 
     /// Records a request from a known AI agent. Call it from middleware for every page request; it
     /// ignores everything else and never fails. `at` is when a log reader saw the page served.
+    ///
+    /// The request's address (its remote address, or a trusted proxy header, as for tracker hits) is
+    /// checked against the list the agent's company publishes and then dropped: only "verified",
+    /// "mismatch", or "" is kept with the fetch.
     pub async fn observe(&self, request: &Request, at: Option<f64>) -> bool {
-        match self.observe_inner(request, at).await {
+        self.observe_with(request, at, None).await
+    }
+
+    /// [`Runlight::observe`] for a fetch a log reader or plugin reports, with the address the agent's
+    /// request came from (`agent_ip`), which is checked in place of the request's own and then dropped.
+    pub async fn observe_with(&self, request: &Request, at: Option<f64>, agent_ip: Option<&str>) -> bool {
+        match self.observe_inner(request, at, agent_ip).await {
             Ok(done) => done,
             Err(error) => {
                 // Analytics must never break the page it watches, but a failure should still be seen.
@@ -1715,7 +1737,7 @@ impl Runlight {
         }
     }
 
-    async fn observe_inner(&self, request: &Request, at: Option<f64>) -> Result<bool, Error> {
+    async fn observe_inner(&self, request: &Request, at: Option<f64>, agent_ip: Option<&str>) -> Result<bool, Error> {
         if request.method != "GET" {
             return Ok(false);
         }
@@ -1747,6 +1769,14 @@ impl Runlight {
         let mut props = Object::new();
         props.set("company", agent.company);
         props.set("kind", agent.kind);
+        // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
+        // there was nothing to check against. The address itself is not kept.
+        let ip = match agent_ip {
+            Some(ip) => ip.to_string(),
+            None => self.client_ip(request),
+        };
+        let lists = self.0.agent_ranges.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let title = check_agent(agent, &ip, &lists).to_string();
         self.0
             .store
             .insert_event(&EventRow {
@@ -1758,7 +1788,7 @@ impl Runlight {
                 pageview: String::new(),
                 path: js::head16(&pathname, 1000),
                 hostname: strip_www(&url.hostname()),
-                title: String::new(),
+                title,
                 name: agent.name.into(),
                 props: Some(props),
                 engaged_ms: 0,
@@ -1787,8 +1817,9 @@ impl Runlight {
         {
             let mut state = self.state();
             state.overrides = overrides;
-            state.salts.clear();
         }
+        self.refresh_agent_ranges().await;
+        self.state().salts.clear();
         let mut zones: Vec<String> = Vec::new();
         for site in self.sites() {
             if !zones.contains(&site.timezone) {
@@ -1823,6 +1854,68 @@ impl Runlight {
         Ok(crate::obj! { "ok" => true, "reports" => crate::obj! { "sent" => reports.0, "failed" => reports.1 } })
     }
 }
+
+impl Runlight {
+    /// Uses the agents' address lists downloaded by any process sharing this database, and downloads them
+    /// again when update_agent_ranges is on and the last try was a day ago or more. A list that cannot be
+    /// fetched or read keeps the copy it replaces; a failed day is not retried until the next day.
+    async fn refresh_agent_ranges(&self) {
+        if let Err(error) = self.refresh_agent_ranges_inner().await {
+            eprintln!("Runlight: could not update the AI agents' address lists {error}");
+        }
+    }
+
+    async fn refresh_agent_ranges_inner(&self) -> Result<(), Error> {
+        let store = &self.0.store;
+        let stored = store.setting("agent-ranges").await?;
+        // What was saved: when, and the lists that still read as lists, in their saved order.
+        let mut saved: Option<(f64, Object)> = None;
+        if let Some(stored) = stored.filter(|s| !s.is_empty())
+            && let Ok(parsed) = js::parse(&stored)
+            && !parsed.is_null()
+        {
+            let mut lists = Object::new();
+            let entries: Vec<(String, Value)> = match parsed.get("lists") {
+                Some(Value::Object(o)) => o.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                Some(Value::Array(a)) => a.iter().enumerate().map(|(i, v)| (i.to_string(), v.clone())).collect(),
+                _ => Vec::new(),
+            };
+            for (url, list) in entries {
+                if let Some(prefixes) = read_stored_list(&list) {
+                    lists.set(url, Value::Array(prefixes.into_iter().map(Value::from).collect()));
+                }
+            }
+            let at = js::opt_number(parsed.get("at"));
+            saved = Some((if at.is_nan() { 0.0 } else { at }, lists));
+        }
+        let now = self.now();
+        if self.0.update_agent_ranges && saved.as_ref().is_none_or(|(at, _)| now as f64 - at >= AGENT_RANGES_EVERY_MS) {
+            let mut lists = saved.map(|(_, lists)| lists).unwrap_or_default();
+            for url in &AGENT_RANGES.urls {
+                if let Some(fresh) = download_range_list(&*self.0.fetcher, url, 15_000).await {
+                    lists.set(url.clone(), Value::Array(fresh.into_iter().map(Value::from).collect()));
+                }
+            }
+            let now = self.now();
+            store
+                .set_setting("agent-ranges", Some(&crate::obj! { "at" => now, "lists" => lists.clone() }.to_json()))
+                .await?;
+            saved = Some((now as f64, lists));
+        }
+        let mut in_use: RangeLists = (*AGENT_RANGES.lists).clone();
+        if let Some((_, lists)) = saved {
+            for (url, list) in lists.iter() {
+                let prefixes = list.as_array().map(|a| a.iter().map(js::js_string).collect()).unwrap_or_default();
+                in_use.insert(url.to_string(), Arc::new(RangeList::new(prefixes)));
+            }
+        }
+        *self.0.agent_ranges.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(in_use);
+        Ok(())
+    }
+}
+
+/// How often the scheduled check downloads the agents' address lists, when update_agent_ranges is on.
+const AGENT_RANGES_EVERY_MS: f64 = 86_400_000.0;
 
 fn obj_zone(zone: &str, since: i64) -> String {
     crate::obj! { "zone" => zone, "since" => since }.to_json()

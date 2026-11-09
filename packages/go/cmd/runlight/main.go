@@ -11,6 +11,8 @@
 //	TRUST_PROXY       unset believes forwarded addresses only from a private network; "false" never,
 //	                  "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
 //	RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
+//	RUNLIGHT_AGENT_RANGES  on (the default) downloads the AI agents' published address lists daily; off
+//	                  keeps the lists that came with this version
 package main
 
 import (
@@ -65,6 +67,9 @@ RUNLIGHT_GEO picks where locations come from when no platform header gives
 them. It is city by default, which downloads DB-IP's free city database into
 DATA_DIR and refreshes it each month. Set it to country for a smaller file, to
 off, or to the path of your own MMDB file.
+RUNLIGHT_AGENT_RANGES=off stops the daily download of the address lists AI
+companies publish, which AI agent fetches are checked against; the lists that
+came with this version are used instead.
 
 Docs: https://runlight.sh/docs/go/
 `
@@ -326,6 +331,9 @@ func run(args []string) error {
 	if err := trustProxyFrom(env("TRUST_PROXY"), &options); err != nil {
 		return err
 	}
+	if options.UpdateAgentRanges, err = agentRangesFrom(env("RUNLIGHT_AGENT_RANGES")); err != nil {
+		return err
+	}
 	srv, err := server.New(options)
 	if err != nil {
 		return err
@@ -473,6 +481,18 @@ func trustProxyFrom(given string, options *server.Options) error {
 		return fmt.Errorf("Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not %q", given)
 	}
 	return nil
+}
+
+// agentRangesFrom reads RUNLIGHT_AGENT_RANGES: on, the default, downloads the AI agents' published address
+// lists once a day; off keeps the lists that came with this version.
+func agentRangesFrom(given string) (bool, error) {
+	switch given {
+	case "", "on":
+		return true, nil
+	case "off":
+		return false, nil
+	}
+	return false, errors.New("Set RUNLIGHT_AGENT_RANGES to on or off")
 }
 
 func firstOf(values ...string) string {

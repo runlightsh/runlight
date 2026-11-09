@@ -39,6 +39,17 @@ type Fetch struct {
 	URL       string  `json:"url"`
 	UserAgent string  `json:"userAgent"`
 	At        float64 `json:"at"`
+	// IP is the address the request came from, sent so the server can check the agent's published list.
+	IP string `json:"ip,omitempty"`
+}
+
+// JSValue writes the fetch as /api/observe takes it, without ip when the log line gave none.
+func (f Fetch) JSValue() any {
+	o := js.NewObject("url", f.URL, "userAgent", f.UserAgent, "at", f.At)
+	if f.IP != "" {
+		o.Set("ip", f.IP)
+	}
+	return o
 }
 
 // Hit is one log line as a request.
@@ -48,6 +59,7 @@ type Hit struct {
 	Status    float64 `json:"status"`
 	UserAgent string  `json:"userAgent"`
 	At        float64 `json:"at"`
+	IP        string  `json:"ip"`
 }
 
 // pageURL is a request target as a page on the site. Absolute targets ("GET
@@ -102,7 +114,7 @@ func logTime(value string) float64 {
 
 var (
 	// host? ip - user [time] "METHOD /path HTTP/x" status bytes "referrer" "user agent"
-	combined   = regexp.MustCompile(`^(?:(\S+) )?\S+ \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) \S+ "(?:[^"\\]|\\.)*" "((?:[^"\\]|\\.)*)"`)
+	combined   = regexp.MustCompile(`^(?:(\S+) )?(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) \S+ "(?:[^"\\]|\\.)*" "((?:[^"\\]|\\.)*)"`)
 	hasLetter  = regexp.MustCompile(`(?i)[a-z]`)
 	onlyDigits = regexp.MustCompile(`^[\d.:]+$`)
 	portSuffix = regexp.MustCompile(`:\d+$`)
@@ -173,7 +185,14 @@ func ParseLine(line, site string) *Hit {
 		} else if _, u := status.(js.Undefined); u {
 			status = 0.0
 		}
-		return &Hit{Method: method, URL: url, Status: js.ToNumber(status), UserAgent: ua, At: at}
+		// client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the connection's.
+		ip := ""
+		if v, ok := js.Dig(request, "client_ip").(string); ok {
+			ip = v
+		} else if v, ok := js.Dig(request, "remote_ip").(string); ok {
+			ip = v
+		}
+		return &Hit{Method: method, URL: url, Status: js.ToNumber(status), UserAgent: ua, At: at, IP: ip}
 	}
 	m := combined.FindStringSubmatch(text)
 	if m == nil {
@@ -187,12 +206,12 @@ func ParseLine(line, site string) *Hit {
 	if base == "" {
 		return nil
 	}
-	url, ok := pageURL(m[4], base)
+	url, ok := pageURL(m[5], base)
 	if !ok {
 		return nil
 	}
-	status, _ := strconv.Atoi(m[5])
-	return &Hit{Method: m[3], URL: url, Status: float64(status), UserAgent: strings.ReplaceAll(m[6], `\"`, `"`), At: logTime(m[2])}
+	status, _ := strconv.Atoi(m[6])
+	return &Hit{Method: m[4], URL: url, Status: float64(status), UserAgent: strings.ReplaceAll(m[7], `\"`, `"`), At: logTime(m[3]), IP: m[2]}
 }
 
 // AgentFetch is a line worth sending: a GET that succeeded, from a known AI
@@ -206,7 +225,7 @@ func AgentFetch(line, site string, now int64) *Fetch {
 	if math.IsNaN(at) || math.IsInf(at, 0) {
 		at = float64(now)
 	}
-	return &Fetch{URL: hit.URL, UserAgent: hit.UserAgent, At: at}
+	return &Fetch{URL: hit.URL, UserAgent: hit.UserAgent, At: at, IP: hit.IP}
 }
 
 // AgentsOptions configure a run of RunAgents.

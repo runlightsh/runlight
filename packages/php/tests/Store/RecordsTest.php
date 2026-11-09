@@ -226,7 +226,7 @@ final class RecordsTest extends StoreTestCase
         foreach (['GPTBot', 'GPTBot', 'ClaudeBot', 'ClaudeBot', 'Amazonbot'] as $i => $agent) {
             $store->insertEvent(['site' => 'default', 'ts' => self::NOW - $i * self::MIN, 'kind' => 'fetch', 'visitor' => '', 'session' => '', 'pageview' => '', 'path' => $i % 2 ? '/a' : '/b', 'hostname' => 'example.com', 'title' => '', 'name' => $agent, 'props' => ['company' => 'X', 'kind' => 'crawler'], 'engagedMs' => 0, 'scroll' => null, 'link' => '']);
         }
-        $this->assertSame([['value' => 'ClaudeBot', 'visitors' => 0, 'fetches' => 2], ['value' => 'GPTBot', 'visitors' => 0, 'fetches' => 2], ['value' => 'Amazonbot', 'visitors' => 0, 'fetches' => 1]], $store->breakdown(self::today(), 'ai_agent', 10, 0));
+        $this->assertSame([['value' => 'ClaudeBot', 'visitors' => 0, 'fetches' => 2, 'claimed' => true], ['value' => 'GPTBot', 'visitors' => 0, 'fetches' => 2, 'claimed' => true], ['value' => 'Amazonbot', 'visitors' => 0, 'fetches' => 1, 'claimed' => true]], $store->breakdown(self::today(), 'ai_agent', 10, 0));
         $this->assertSame([['value' => '/a', 'visitors' => 0, 'fetches' => 2]], $store->breakdown(self::today(), 'ai_page', 1, 1));
         $this->assertSame(0, $store->stats(self::today())['visits']);
         $this->assertSame('{"company":"X","kind":"crawler"}', $store->db->all("SELECT props FROM rl_events WHERE kind = 'fetch' LIMIT 1")[0]['props']);

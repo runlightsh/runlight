@@ -2377,7 +2377,8 @@ final class Routes
         if ($body instanceof Response) {
             return $body;
         }
-        // One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+        // One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is
+        // the address the agent's request came from, checked against its company's list and then dropped.
         $fetches = Js::get($body, 'fetches');
         $batch = is_array($fetches);
         $list = $batch ? $fetches : [$body];
@@ -2395,10 +2396,12 @@ final class Routes
             $at = $read('at');
             $when = is_int($at) || is_float($at) ? $at : (is_string($at) ? ImportHttp::parseDate($at) : null);
             $agent = $read('userAgent');
+            $ip = $read('ip');
             $pages[] = [
                 'page' => $page,
                 'userAgent' => Js::slice($agent === null || $agent instanceof Undefined ? '' : Js::string($agent), 0, 500),
                 'at' => $when !== null && is_finite((float) $when) ? $when : null,
+                'ip' => is_string($ip) ? Js::slice($ip, 0, 100) : '',
             ];
         }
         $rl->init();
@@ -2413,8 +2416,9 @@ final class Routes
             }
         }
         $recorded = 0;
+        // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         foreach ($keep as $p) {
-            if ($rl->observe(new Request($p['page']->href(), 'GET', ['user-agent' => $p['userAgent']]), $p['at'])) {
+            if ($rl->observe(new Request($p['page']->href(), 'GET', ['user-agent' => $p['userAgent']]), $p['at'], ['agentIp' => $p['ip']])) {
                 $recorded++;
             }
         }

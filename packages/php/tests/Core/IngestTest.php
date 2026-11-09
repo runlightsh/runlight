@@ -5,13 +5,17 @@ declare(strict_types=1);
 namespace Runlight\Tests\Core;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use Runlight\AgentCheck;
+use Runlight\Http\FetchError;
 use Runlight\Http\Request;
+use Runlight\Http\Response;
 use Runlight\Json;
 use Runlight\Runlight;
 use Runlight\Store\SqlStore;
 use Runlight\Store\Stores;
 use Runlight\Tests\Store\Databases;
 use Runlight\Tests\Store\WatchedDb;
+use Runlight\Tests\Support\FakeFetcher;
 
 /** The tracker endpoint's work, as ingest.test.ts, audit.test.ts, and hardening.test.ts test it, read back from the store. */
 final class IngestTest extends CoreTestCase
@@ -228,7 +232,8 @@ final class IngestTest extends CoreTestCase
         self::assertFalse($fetch('/logo.png', 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0)'));
         self::assertFalse($fetch('/', Harness::CHROME_MAC));
         $today = $t->today();
-        self::assertEquals([['value' => 'ChatGPT-User', 'visitors' => 0, 'fetches' => 1], ['value' => 'ClaudeBot', 'visitors' => 0, 'fetches' => 1]], $t->store()->breakdown($today, 'ai_agent', 10, 0));
+        // With no address to check, the names rest on the user agent alone.
+        self::assertEquals([['value' => 'ChatGPT-User', 'visitors' => 0, 'fetches' => 1, 'claimed' => true], ['value' => 'ClaudeBot', 'visitors' => 0, 'fetches' => 1, 'claimed' => true]], $t->store()->breakdown($today, 'ai_agent', 10, 0));
         self::assertEquals([['value' => '/blog/post', 'visitors' => 0, 'fetches' => 2]], $t->store()->breakdown($today, 'ai_page', 10, 0));
         self::assertSame(0, $t->stats($today)['visitors'], 'fetches are not visits');
         // A log reader's time: older than a week is dropped, ahead of now counts as now.
@@ -236,6 +241,109 @@ final class IngestTest extends CoreTestCase
         self::assertFalse($t->rl->observe(new Request('https://example.com/old', 'GET', ['user-agent' => $ua]), $t->now - 8 * self::DAY));
         self::assertTrue($t->rl->observe(new Request('https://example.com/later', 'GET', ['user-agent' => $ua]), $t->now + self::DAY));
         self::assertSame($t->now, (int) $t->store()->db->all("SELECT ts FROM rl_events WHERE path = '/later'")[0]['ts']);
+    }
+
+    #[DataProvider('kinds')]
+    public function testAnAiAgentsAddressIsCheckedAgainstItsCompanysListAndOnlyTheAnswerIsKept(string $kind): void
+    {
+        $t = new Harness($kind);
+        $gptbot = 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)';
+        $meta = 'meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)';
+        $fetch = fn (string $ua, ?string $ip = null): bool => $t->rl->observe(new Request('https://example.com/post', 'GET', ['user-agent' => $ua, 'host' => 'example.com', ...($ip !== null ? ['x-forwarded-for' => $ip] : [])]));
+        $fetch($gptbot, '20.171.206.17'); // in OpenAI's published GPTBot list
+        $fetch($gptbot, '20.171.206.18');
+        $fetch($gptbot, '198.51.100.23'); // says GPTBot, comes from elsewhere
+        $fetch($gptbot); // no address to check
+        $fetch($meta, '157.240.0.1'); // Meta publishes no list
+        // A log reader's or plugin's report names the agent's address itself; it never stands in for the reporter's.
+        $t->rl->observe(new Request('https://example.com/post', 'GET', ['user-agent' => $gptbot, 'x-forwarded-for' => '198.51.100.40']), null, ['agentIp' => '20.171.206.99']);
+
+        self::assertSame([
+            ['value' => 'GPTBot', 'visitors' => 0, 'fetches' => 3, 'claimed' => false],
+            ['value' => 'GPTBot', 'visitors' => 0, 'fetches' => 2, 'claimed' => true],
+            ['value' => 'meta-externalagent', 'visitors' => 0, 'fetches' => 1, 'claimed' => true],
+        ], $t->store()->breakdown($t->today(), 'ai_agent', 10, 0));
+        $titles = array_map(static fn (array $r): string => (string) $r['title'], $t->store()->db->all("SELECT title FROM rl_events WHERE kind = 'fetch'"));
+        sort($titles);
+        self::assertSame(['', '', 'mismatch', 'verified', 'verified', 'verified'], $titles);
+        $dump = Json::encode($t->store()->db->all('SELECT * FROM rl_events'));
+        foreach (['20.171.206.17', '198.51.100.23', '157.240.0.1', '198.51.100.40', '20.171.206.99'] as $ip) {
+            self::assertStringNotContainsString($ip, $dump, "no address: $ip");
+        }
+    }
+
+    public function testUpdateAgentRangesDownloadsTheListsOnceADayKeepsAGoodCopyOverABadDownloadAndSharesItThroughTheDatabase(): void
+    {
+        $asked = [];
+        $answer = static fn (): Response => Response::json(['prefixes' => [['ipv4Prefix' => '192.0.2.0/24']]]);
+        $fetcher = new FakeFetcher(static function (string $url, array $init) use (&$asked, &$answer): Response {
+            $asked[] = $url;
+            return $answer($url);
+        });
+        $t = new Harness('sqlite', ['updateAgentRanges' => true, 'fetcher' => $fetcher]);
+        $gptbot = 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)';
+        $fetchFrom = static fn (Runlight $rl, string $ip): bool => $rl->observe(new Request('https://example.com/post', 'GET', ['user-agent' => $gptbot, 'host' => 'example.com', 'x-forwarded-for' => $ip]));
+        $t->rl->check();
+        self::assertContains('https://openai.com/gptbot.json', $asked);
+        self::assertSame('Runlight (+https://runlight.sh)', $fetcher->requests[0]['headers']['user-agent']);
+        $firstRound = count($asked);
+        self::assertSame(count(AgentCheck::bundled()['lists']), $firstRound, 'every bundled list, once');
+        $fetchFrom($t->rl, '192.0.2.7'); // in the downloaded list
+        $fetchFrom($t->rl, '20.171.206.17'); // in the bundled list only, which the download replaced
+        $t->advance(Harness::HOUR);
+        $t->rl->check();
+        self::assertCount($firstRound, $asked, 'not again within the day');
+
+        $t->advance(Harness::DAY);
+        $answer = static fn (): Response => new Response('<html>maintenance</html>', 200);
+        $t->rl->check();
+        self::assertCount($firstRound * 2, $asked, 'a day later it tries again');
+        $fetchFrom($t->rl, '192.0.2.8'); // the bad download kept the good copy
+
+        // Another process sharing the database uses the lists without downloading them, before its first check and after.
+        $other = new Runlight(['store' => $t->store(), 'site' => [], 'now' => fn (): int => $t->now, 'fetcher' => $fetcher]);
+        $fetchFrom($other, '192.0.2.9');
+        $other->check();
+        self::assertCount($firstRound * 2, $asked);
+        $fetchFrom($other, '192.0.2.10');
+
+        $titles = array_map(static fn (array $r): string => (string) $r['title'], $t->store()->db->all("SELECT title FROM rl_events WHERE kind = 'fetch'"));
+        sort($titles);
+        self::assertSame(['mismatch', 'verified', 'verified', 'verified', 'verified'], $titles);
+        $saved = Json::decode((string) $t->store()->setting('agent-ranges'), true);
+        self::assertSame(['192.0.2.0/24'], $saved['lists']['https://openai.com/gptbot.json']);
+    }
+
+    public function testADownloadThatFailsOrIsNotAListKeepsTheCopyItWouldReplace(): void
+    {
+        $answers = [
+            static fn (): Response => new Response('{}', 500),
+            static fn (): Response => new Response('{"prefixes": [{"ipv4Prefix": "1.2.3.0/24"}, {"ipv4Prefix": "nope"}]}', 200),
+            static fn (): Response => new Response('', 200, ['content-length' => '4000001']),
+            static fn (): Response => throw new FetchError('Could not connect'),
+        ];
+        $round = 0;
+        $fetcher = new FakeFetcher(static function () use (&$answers, &$round): Response {
+            return $answers[$round % count($answers)]();
+        });
+        $t = new Harness('sqlite', ['updateAgentRanges' => true, 'fetcher' => $fetcher]);
+        $t->rl->check();
+        self::assertCount(count(AgentCheck::bundled()['lists']), $fetcher->requests);
+        // Nothing came down, which is saved too, so the next try waits a day.
+        self::assertSame([], (array) Json::decode((string) $t->store()->setting('agent-ranges'))->lists);
+        $t->rl->check();
+        self::assertCount(count(AgentCheck::bundled()['lists']), $fetcher->requests);
+        $t->rl->observe(new Request('https://example.com/post', 'GET', ['user-agent' => 'Mozilla/5.0 (compatible; GPTBot/1.2)', 'host' => 'example.com', 'x-forwarded-for' => '20.171.206.17']));
+        self::assertSame('verified', $t->store()->db->all("SELECT title FROM rl_events WHERE kind = 'fetch'")[0]['title'], 'the bundled list still checks');
+    }
+
+    public function testWithoutUpdateAgentRangesRunlightNeverDownloadsTheLists(): void
+    {
+        $fetcher = new FakeFetcher(static fn (): Response => new Response('{}'));
+        $t = new Harness('sqlite', ['fetcher' => $fetcher]);
+        $t->rl->check();
+        self::assertSame([], $fetcher->requests);
+        self::assertNull($t->store()->setting('agent-ranges'));
     }
 
     #[DataProvider('kinds')]

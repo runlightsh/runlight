@@ -111,6 +111,18 @@ public sealed partial class Runlight
 
     private (long At, HashSet<string> Domains)? _linkDomainCache;
 
+    /// <summary>How often the scheduled check downloads the agents' address lists, when UpdateAgentRanges is on.</summary>
+    private const long AgentRangesEveryMs = 86_400_000;
+
+    /// <summary>Whether the scheduled check downloads the agents' address lists (see RunlightOptions).</summary>
+    public bool UpdateAgentRanges { get; }
+
+    /// <summary>
+    /// The agents' address lists in use: downloaded ones from the database when there are any, else those that
+    /// came with this version. Replaced, never changed in place.
+    /// </summary>
+    private volatile IReadOnlyDictionary<string, IReadOnlyList<string>> _agentRanges = AgentCheck.Bundled;
+
     public Runlight(RunlightOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -155,6 +167,7 @@ public sealed partial class Runlight
         _mailServices = offered == null ? null : Transports.Services.Where(s => offered.Contains(s.Str("id")!, StringComparer.Ordinal)).Select(s => s.Str("id")!).ToList();
         Secret = options.Secret ?? Env.Get("RUNLIGHT_SECRET") ?? Env.Get("RUNLIGHT_TOKEN");
         LocalInstalls = options.LocalInstalls;
+        UpdateAgentRanges = options.UpdateAgentRanges;
     }
 
     public SqlStore Store { get; }
@@ -1855,13 +1868,29 @@ public sealed partial class Runlight
     }
 
     /// <summary>
-    /// Records a request from a known AI agent. Call it from middleware for every page request; it ignores
-    /// everything else and never throws. Agents do not run JavaScript, so the tracker cannot see them.
+    /// Records a request from a known AI agent, as the overload with addresses does, for callers that pass
+    /// the token by position as they did before addresses were checked.
     /// </summary>
     /// <param name="request">The page request.</param>
     /// <param name="at">When a log reader says the page was served, in epoch milliseconds; now when null.</param>
     /// <param name="cancellationToken">Stops the work.</param>
-    public async Task<bool> ObserveAsync(Request request, double? at = null, CancellationToken cancellationToken = default)
+    public Task<bool> ObserveAsync(Request request, double? at, CancellationToken cancellationToken) =>
+        ObserveAsync(request, at, ip: null, agentIp: null, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// Records a request from a known AI agent. Call it from middleware for every page request; it ignores
+    /// everything else and never throws. Agents do not run JavaScript, so the tracker cannot see them.
+    ///
+    /// The request's address (from <paramref name="ip"/> or a trusted proxy header, as for tracker hits, or
+    /// <paramref name="agentIp"/> when a log reader or plugin reports it) is checked against the list the
+    /// agent's company publishes and then dropped: only "verified", "mismatch", or "" is kept with the fetch.
+    /// </summary>
+    /// <param name="request">The page request.</param>
+    /// <param name="at">When a log reader says the page was served, in epoch milliseconds; now when null.</param>
+    /// <param name="ip">The connection's address, when the request does not carry it.</param>
+    /// <param name="agentIp">The agent's address as a report names it, which takes the place of the request's.</param>
+    /// <param name="cancellationToken">Stops the work.</param>
+    public async Task<bool> ObserveAsync(Request request, double? at = null, string? ip = null, string? agentIp = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         try
@@ -1908,7 +1937,9 @@ public sealed partial class Runlight
                 ["pageview"] = "",
                 ["path"] = Js.Slice(url.Pathname, 0, 1000),
                 ["hostname"] = Sources.StripWww(url.Hostname),
-                ["title"] = "",
+                // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
+                // there was nothing to check against. The address itself is not kept.
+                ["title"] = AgentCheck.Check(agent, agentIp ?? ClientIp(request, ip), _agentRanges),
                 ["name"] = agent.Get("name"),
                 ["props"] = new JsObject { ["company"] = agent.Get("company"), ["kind"] = agent.Get("kind") },
                 ["engagedMs"] = 0L,
@@ -2101,6 +2132,76 @@ public sealed partial class Runlight
         }
     }
 
+    /// <summary>
+    /// Uses the agents' address lists downloaded by any process sharing this database, and downloads them again
+    /// when UpdateAgentRanges is on and the last try was a day ago or more. A list that cannot be fetched or read
+    /// keeps the copy it replaces; a failed day is not retried until the next day.
+    /// </summary>
+    private async Task RefreshAgentRangesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            string? stored = await Store.SettingAsync("agent-ranges", cancellationToken).ConfigureAwait(false);
+            (long At, Dictionary<string, IReadOnlyList<string>> Lists)? saved = null;
+            if (stored != null)
+            {
+                try
+                {
+                    var parsed = Json.Parse(stored);
+                    var lists = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+                    if ((parsed as JsObject)?.Get("lists") is JsObject given)
+                    {
+                        foreach (var (url, list) in given)
+                        {
+                            var prefixes = AgentCheck.ReadRangeList(AgentCheck.AsPublished(list as List<object?>));
+                            if (prefixes != null)
+                            {
+                                lists[url] = prefixes;
+                            }
+                        }
+                    }
+                    double at = Js.Number((parsed as JsObject)?.Get("at"));
+                    saved = (double.IsFinite(at) ? (long)at : 0, lists);
+                }
+                catch (JsonParseException)
+                {
+                }
+            }
+            if (UpdateAgentRanges && (saved == null || Now() - saved.Value.At >= AgentRangesEveryMs))
+            {
+                var lists = saved == null ? new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal) : new Dictionary<string, IReadOnlyList<string>>(saved.Value.Lists, StringComparer.Ordinal);
+                foreach (string url in AgentCheck.BundledUrls)
+                {
+                    var fresh = await AgentCheck.DownloadRangeListAsync(url, Fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (fresh != null)
+                    {
+                        lists[url] = fresh;
+                    }
+                }
+                saved = (Now(), lists);
+                var save = new JsObject();
+                foreach (var (url, list) in lists)
+                {
+                    save[url] = list.Cast<object?>().ToList();
+                }
+                await Store.SetSettingAsync("agent-ranges", Json.Stringify(new JsObject { ["at"] = saved.Value.At, ["lists"] = save }), cancellationToken).ConfigureAwait(false);
+            }
+            var inUse = new Dictionary<string, IReadOnlyList<string>>(AgentCheck.Bundled, StringComparer.Ordinal);
+            if (saved != null)
+            {
+                foreach (var (url, list) in saved.Value.Lists)
+                {
+                    inUse[url] = list;
+                }
+            }
+            _agentRanges = inUse;
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            await Console.Error.WriteLineAsync("Runlight: could not update the AI agents' address lists " + error.Message).ConfigureAwait(false);
+        }
+    }
+
     private async Task<JsObject> RunCheckAsync(CancellationToken cancellationToken)
     {
         await InitAsync(cancellationToken).ConfigureAwait(false);
@@ -2117,6 +2218,7 @@ public sealed partial class Runlight
         }
         // A name or timezone changed in the dashboard by another process reaches this one too.
         _overrides = await Store.SiteOverridesAsync(cancellationToken).ConfigureAwait(false);
+        await RefreshAgentRangesAsync(cancellationToken).ConfigureAwait(false);
         _salts.Clear();
         foreach (string timezone in Sites().Select(Zone).Distinct(StringComparer.Ordinal))
         {

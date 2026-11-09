@@ -2090,7 +2090,7 @@ module Runlight
       body = read_json(request)
       return body if body.is_a?(Http::Response)
 
-      # One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+      # One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader.
       fetches = Js.get(body, "fetches")
       batch = fetches.is_a?(Array)
       list = batch ? fetches : [body]
@@ -2110,10 +2110,14 @@ module Runlight
                      Importers::Client.parse_date(at)
                    end
         agent = read.call("userAgent")
+        # ip is the address the agent's request came from, checked against its company's list and then dropped.
+        ip = read.call("ip")
+        ip = ip.is_a?(String) ? Js.slice(ip, 0, 100) : ""
         pages << {
           "page" => page,
           "userAgent" => Js.slice(agent.nil? || agent.equal?(UNDEFINED) ? "" : Js.string(agent), 0, 500),
           "at" => !whenever.nil? && whenever.to_f.finite? ? whenever : nil,
+          "ip" => ip,
         }
       end
       keep = pages
@@ -2125,8 +2129,10 @@ module Runlight
         return coded("Unauthorized", "unauthorized", 401) if !batch && keep.empty?
       end
       recorded = 0
+      # A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
       keep.each do |p|
-        recorded += 1 if rl.observe(Http::Request.new(p["page"].href, method: "GET", headers: { "user-agent" => p["userAgent"] }), p["at"])
+        request = Http::Request.new(p["page"].href, method: "GET", headers: { "user-agent" => p["userAgent"] })
+        recorded += 1 if rl.observe(request, p["at"], { "agentIp" => p["ip"] })
       end
       # A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
       return Http::Response.new("", status: 204) unless batch

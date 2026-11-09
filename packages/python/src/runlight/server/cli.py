@@ -11,6 +11,8 @@ cli.ts). Settings come from the environment:
     TRUST_PROXY       unset believes forwarded addresses only from a private network; "false" never,
                       "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
     RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
+    RUNLIGHT_AGENT_RANGES  on (the default) downloads the AI agents' published address lists daily; off
+                      keeps the lists that came with this version
     CRON_SECRET       lets a scheduler run the check over HTTP, at POST /api/check
     RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
 """
@@ -58,6 +60,9 @@ RUNLIGHT_GEO picks where locations come from when no platform header gives
 them. It is city by default, which downloads DB-IP's free city database into
 DATA_DIR and refreshes it each month. Set it to country for a smaller file, to
 off, or to the path of your own MMDB file.
+RUNLIGHT_AGENT_RANGES=off stops the daily download of the address lists AI
+companies publish, which AI agent fetches are checked against; the lists that
+came with this version are used instead.
 
 Docs: https://runlight.sh/docs/python/
 """
@@ -145,6 +150,16 @@ class Settings:
             return value
         raise ValueError(f'Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not "{given}"')
 
+    def agent_ranges(self) -> bool:
+        """RUNLIGHT_AGENT_RANGES: on (the default) downloads the AI agents' published address lists once a day; off
+        keeps the lists that came with this version."""
+        value = env_value("RUNLIGHT_AGENT_RANGES")
+        if value is None or value == "on":
+            return True
+        if value == "off":
+            return False
+        raise ValueError("Set RUNLIGHT_AGENT_RANGES to on or off")
+
     def geo(self) -> tuple[Any, Any]:
         """The DB-IP download (or None) and the lookup to use (or None)."""
         from .dbip import DbIp, file_lookup
@@ -167,6 +182,7 @@ class Settings:
             "token": env_value("RUNLIGHT_TOKEN"),
             "url": self.url(),
             "trustProxy": self.trust_proxy(),
+            "updateAgentRanges": self.agent_ranges(),
             "geoCredit": dbip is not None,
             "cronSecret": env_value("CRON_SECRET"),
             "observeKey": env_value("RUNLIGHT_OBSERVE_KEY"),

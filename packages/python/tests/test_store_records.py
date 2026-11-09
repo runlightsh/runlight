@@ -188,9 +188,9 @@ def test_ai_agent_fetches_are_their_own_rows_outside_visits(databases: Any, kind
     for i, agent in enumerate(["GPTBot", "GPTBot", "ClaudeBot", "ClaudeBot", "Amazonbot"]):
         s.insert_event(event(ts=NOW - i * MIN, kind="fetch", path="/a" if i % 2 else "/b", hostname="example.com", name=agent, props={"company": "X", "kind": "crawler"}))
     assert s.breakdown(today(), "ai_agent", 10, 0) == [
-        {"value": "ClaudeBot", "visitors": 0, "fetches": 2},
-        {"value": "GPTBot", "visitors": 0, "fetches": 2},
-        {"value": "Amazonbot", "visitors": 0, "fetches": 1},
+        {"value": "ClaudeBot", "visitors": 0, "fetches": 2, "claimed": True},
+        {"value": "GPTBot", "visitors": 0, "fetches": 2, "claimed": True},
+        {"value": "Amazonbot", "visitors": 0, "fetches": 1, "claimed": True},
     ]
     assert s.breakdown(today(), "ai_page", 1, 1) == [{"value": "/a", "visitors": 0, "fetches": 2}]
     assert s.stats(today())["visits"] == 0

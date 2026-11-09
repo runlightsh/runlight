@@ -10,7 +10,8 @@ carries on after the log is rotated. Without it, it reads what is new and
 stops, for cron. In both modes the state file remembers how far it read, so the
 next run, or a restarted follow, carries on from there.
 
-The port of the Node server's agents.ts. A fetch is a dict of url, userAgent, and at (epoch milliseconds).
+The port of the Node server's agents.ts. A fetch is a dict of url, userAgent, at (epoch milliseconds), and ip when
+the log has one: the address the request came from, sent so the server can check the agent's published list.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ _ANY = "[^\\n\\r\\u2028\\u2029]"
 
 # host? ip - user [time] "METHOD /path HTTP/x" status bytes "referrer" "user agent"
 _COMBINED = re.compile(
-    f'^(?:({_S}+) )?{_S}+ {_S}+ {_S}+ \\[([^\\]]+)\\] "({_S}+) ({_S}+)[^"]*" ([0-9]{{3}}) {_S}+ "(?:[^"\\\\]|\\\\{_ANY})*" "((?:[^"\\\\]|\\\\{_ANY})*)"'
+    f'^(?:({_S}+) )?({_S}+) {_S}+ {_S}+ \\[([^\\]]+)\\] "({_S}+) ({_S}+)[^"]*" ([0-9]{{3}}) {_S}+ "(?:[^"\\\\]|\\\\{_ANY})*" "((?:[^"\\\\]|\\\\{_ANY})*)"'
 )
 # A request line and status, in a line that might be a combined log line without its host.
 _REQUEST = re.compile(f'"{_S}+ /{_S}* [^"]*" [0-9]{{3}}')
@@ -112,7 +113,7 @@ def _either(value: Any, otherwise: Any) -> Any:
 
 
 def parse_line(line: str, site: str | None = None) -> dict[str, Any] | None:
-    """One log line as a page fetch {method, url, status, userAgent, at}, or None. `site` is the address pages
+    """One log line as a page fetch {method, url, status, userAgent, at, ip}, or None. `site` is the address pages
     live at (https://example.com), for formats that do not record the host."""
     text = _js.trim(line)
     if not text:
@@ -144,7 +145,11 @@ def parse_line(line: str, site: str | None = None) -> dict[str, Any] | None:
             url = _page_url(uri, host)
             if url is None:
                 return None
-            return {"method": method, "url": url, "status": _js.number(_either(_at(entry, "status"), 0)), "userAgent": _js.string(ua), "at": at}
+            # client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the connection's.
+            client_ip = _at(request, "client_ip")
+            remote_ip = _at(request, "remote_ip")
+            ip = client_ip if isinstance(client_ip, str) else remote_ip if isinstance(remote_ip, str) else ""
+            return {"method": method, "url": url, "status": _js.number(_either(_at(entry, "status"), 0)), "userAgent": _js.string(ua), "at": at, "ip": ip}
         except (ValueError, TypeError, RecursionError):
             return None
     m = _COMBINED.match(text)
@@ -156,10 +161,10 @@ def parse_line(line: str, site: str | None = None) -> dict[str, Any] | None:
     base = f"https://{vhost}" if vhost is not None else site
     if not base:
         return None
-    url = _page_url(m.group(4), base)
+    url = _page_url(m.group(5), base)
     if url is None:
         return None
-    return {"method": m.group(3), "url": url, "status": int(m.group(5)), "userAgent": m.group(6).replace('\\"', '"'), "at": _log_time(m.group(2))}
+    return {"method": m.group(4), "url": url, "status": int(m.group(6)), "userAgent": m.group(7).replace('\\"', '"'), "at": _log_time(m.group(3)), "ip": m.group(2)}
 
 
 def _clock() -> int:
@@ -172,7 +177,10 @@ def agent_fetch(line: str, site: str | None = None, now: Callable[[], int] | Non
     hit = parse_line(line, site)
     if hit is None or hit["method"] != "GET" or hit["status"] < 200 or hit["status"] >= 400 or ai_agent(hit["userAgent"]) is None:
         return None
-    return {"url": hit["url"], "userAgent": hit["userAgent"], "at": hit["at"] if _js.is_finite(hit["at"]) else (now or _clock)()}
+    fetch = {"url": hit["url"], "userAgent": hit["userAgent"], "at": hit["at"] if _js.is_finite(hit["at"]) else (now or _clock)()}
+    if hit["ip"]:
+        fetch["ip"] = hit["ip"]
+    return fetch
 
 
 def _send(options: dict[str, Any], fetcher: Fetcher, fetches: list[dict[str, Any]]) -> int | float:

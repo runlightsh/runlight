@@ -24,11 +24,18 @@ test("log lines: nginx and Apache combined, a vhost column, and Caddy's JSON", (
     status: 200,
     userAgent: GPTBOT,
     at: Date.UTC(2026, 9, 7, 17, 55, 36),
+    ip: "203.0.113.9",
   });
   assert.equal(parseLine(line("/", GPTBOT), undefined), null, "with no host anywhere there is no page to name");
   assert.equal(parseLine(line("/", GPTBOT, 200, "GET", "07/Oct/2026:13:55:36 -0400", "blog.example.com:443"))?.url, "https://blog.example.com/");
   const caddy = JSON.stringify({ ts: 1791399336.5, status: 200, request: { method: "GET", host: "example.com", uri: "/docs/", tls: {}, headers: { "User-Agent": [CLAUDE] } } });
-  assert.deepEqual(parseLine(caddy), { method: "GET", url: "https://example.com/docs/", status: 200, userAgent: CLAUDE, at: 1791399336500 });
+  assert.deepEqual(parseLine(caddy), { method: "GET", url: "https://example.com/docs/", status: 200, userAgent: CLAUDE, at: 1791399336500, ip: "" });
+  // Caddy's client_ip is the visitor after its trusted proxies; remote_ip is the connection.
+  const behindProxy = JSON.stringify({ ts: 1791399336.5, status: 200, request: { method: "GET", host: "example.com", uri: "/", remote_ip: "10.0.0.2", client_ip: "216.73.216.10", headers: { "User-Agent": [CLAUDE] } } });
+  assert.equal(parseLine(behindProxy)?.ip, "216.73.216.10");
+  assert.equal(parseLine(JSON.stringify({ ts: 1, status: 200, request: { method: "GET", host: "example.com", uri: "/", remote_ip: "216.73.216.11", headers: {} } }))?.ip, "216.73.216.11");
+  assert.equal(parseLine(line("/", GPTBOT, 200, "GET", "07/Oct/2026:13:55:36 -0400", "blog.example.com:443"))?.ip, "203.0.113.9", "after a vhost column");
+  assert.equal(agentFetch(line("/", GPTBOT), "https://example.com")?.ip, "203.0.113.9", "the address goes along for the check");
   assert.equal(parseLine("not a log line"), null);
   // A target is a path and query on the site, never read as an address: a backslash cannot name another host.
   assert.equal(parseLine(line("/\\evil.example/x?y=1", GPTBOT), "https://example.com")?.url, "https://example.com//evil.example/x?y=1");

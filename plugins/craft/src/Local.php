@@ -403,10 +403,13 @@ final class Local
         }
     }
 
-    /** Records a page served to an AI agent, once the page has been sent. */
-    public static function observe(string $url, string $agent): void
+    /**
+     * Records a page served to an AI agent, once the page has been sent. Its address is checked against the
+     * list its company publishes and then dropped.
+     */
+    public static function observe(string $url, string $agent, string $ip = ''): void
     {
-        self::runlight()->observe(new Request($url, 'GET', ['user-agent' => $agent]));
+        self::runlight()->observe(new Request($url, 'GET', ['user-agent' => $agent]), null, ['ip' => $ip]);
     }
 
     /** Forgets what was kept between requests, for uninstalling. */

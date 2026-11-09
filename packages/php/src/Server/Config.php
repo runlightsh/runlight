@@ -27,6 +27,8 @@ use Runlight\Store\Stores;
  *   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
  *   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
  *   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
+ *   RUNLIGHT_AGENT_RANGES on (the default) downloads the AI agents' published address lists daily; off
+ *                         keeps the lists that came with this version
  *
  * Relative paths are read from the project folder.
  */
@@ -273,6 +275,19 @@ final class Config
         throw new \RuntimeException("Runlight: set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not \"$given\"");
     }
 
+    /** Whether the scheduled check downloads the AI agents' published address lists: RUNLIGHT_AGENT_RANGES, on unless it is off. */
+    public function agentRanges(): bool
+    {
+        $value = $this->get('RUNLIGHT_AGENT_RANGES');
+        if ($value === null || $value === 'on') {
+            return true;
+        }
+        if ($value === 'off') {
+            return false;
+        }
+        throw new \RuntimeException('Set RUNLIGHT_AGENT_RANGES to on or off');
+    }
+
     /** DB-IP's monthly download, for RUNLIGHT_GEO city (the default) or country, or null. */
     public function dbIp(): ?DbIp
     {
@@ -362,6 +377,7 @@ final class Config
             'cronSecret' => $this->get('CRON_SECRET'),
             'observeKey' => $this->get('RUNLIGHT_OBSERVE_KEY'),
             'dataDir' => $this->dataDir(),
+            'updateAgentRanges' => $this->agentRanges(),
         ];
         if ($geo !== null) {
             $settings['geo'] = $geo;

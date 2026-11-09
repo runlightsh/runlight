@@ -37,6 +37,9 @@ Options, with the TS names (as a dict, or as keyword arguments in snake_case, `r
 - localInstalls: lets a connected install be at http://localhost or http://127.0.0.1, for trying a hub and an
   app on one machine. Default False: otherwise anyone who can add a site could have this server ask services
   on its own machine, so other installs must be public https addresses.
+- updateAgentRanges: downloads the address lists AI companies publish, at most once a day during the scheduled
+  check, so requests that name an agent are checked against current addresses. Default False: the lists that came
+  with this version are used, and Runlight makes no requests of its own for them.
 - now: a callable giving the clock in epoch milliseconds. For tests.
 - fetcher: the Fetcher every outgoing request goes through. Default UrllibFetcher.
 
@@ -83,6 +86,8 @@ REMOTE_MAX_BYTES = 2 * 1024 * 1024
 # On a database that caps statements per request (Cloudflare D1), fewer days a check, about 30 statements.
 METERED_ROLLUP_BATCH = 4
 ROLLUP_DELAY_MS = 2 * 3_600_000
+# How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on.
+AGENT_RANGES_EVERY_MS = 86_400_000
 # The longest a tracker hit waits for the tables while another process creates or upgrades them.
 TRACKER_WAIT_MS = 10_000
 
@@ -216,6 +221,10 @@ class Runlight:
         self.fetcher: Fetcher = opts.get("fetcher") or UrllibFetcher()
         # Whether a connected install may be on this machine, at http://localhost or http://127.0.0.1.
         self.local_installs: bool = bool(opts.get("localInstalls", False))
+        self._update_agent_ranges: bool = bool(opts.get("updateAgentRanges", False))
+        # The agents' address lists in use: downloaded ones from the database when there are any, else those that
+        # came with this version.
+        self._agent_ranges: dict[str, list[str]] | None = None
         # Short links: create, change, delete, and import.
         self.links = Links(self)
         # Where links on the app's own domain are served, such as "/go".
@@ -1507,9 +1516,14 @@ class Runlight:
             }
         )
 
-    def observe(self, request: Request, at: int | float | None = None) -> bool:
+    def observe(self, request: Request, at: int | float | None = None, context: Mapping[str, Any] | None = None) -> bool:
         """Records a request from a known AI agent. Call it from middleware for every page request; it ignores
-        everything else and never raises. Agents do not run JavaScript, so the tracker cannot see them."""
+        everything else and never raises. Agents do not run JavaScript, so the tracker cannot see them.
+
+        The request's address (the context's `ip` or a trusted proxy header, as for tracker hits, or the context's
+        `agentIp` when a log reader or plugin reports it) is checked against the list the agent's company publishes
+        and then dropped: only "verified", "mismatch", or "" is kept with the fetch."""
+        from .agentcheck import check_agent
         from .sources import strip_www
         from .ua import ai_agent
 
@@ -1540,6 +1554,9 @@ class Runlight:
             if finite and at < now - 7 * 86_400_000:  # type: ignore[operator]
                 return False
             ts = int(math.floor(at)) if finite and at <= now else now  # type: ignore[operator, arg-type]
+            context = context or {}
+            agent_ip = context.get("agentIp")
+            ip = str(agent_ip) if agent_ip is not None else self.client_ip(request, context)
             self.store.insert_event(
                 {
                     "site": site["id"],
@@ -1550,7 +1567,9 @@ class Runlight:
                     "pageview": "",
                     "path": _js.slice16(url.pathname, 0, 1000),
                     "hostname": strip_www(url.hostname),
-                    "title": "",
+                    # A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
+                    # there was nothing to check against. The address itself is not kept.
+                    "title": check_agent(agent, ip, self.agent_ranges),
                     "name": agent["name"],
                     "props": {"company": agent["company"], "kind": agent["kind"]},
                     "engagedMs": 0,
@@ -1565,6 +1584,36 @@ class Runlight:
             return False
 
     # The scheduled check
+
+    @property
+    def agent_ranges(self) -> dict[str, list[str]]:
+        """The agents' address lists in use, by list URL."""
+        if self._agent_ranges is None:
+            from . import assets
+
+            self._agent_ranges = dict(assets.AGENT_RANGES["lists"])
+        return self._agent_ranges
+
+    def _refresh_agent_ranges(self) -> None:
+        """Uses the agents' address lists downloaded by any process sharing this database, and downloads them again
+        when updateAgentRanges is on and the last try was a day ago or more. A list that cannot be fetched or read
+        keeps the copy it replaces; a failed day is not retried until the next day."""
+        from . import assets
+        from .agentcheck import download_range_list, saved_lists
+
+        try:
+            saved = saved_lists(self.store.setting("agent-ranges"))
+            if self._update_agent_ranges and (saved is None or self.now() - saved["at"] >= AGENT_RANGES_EVERY_MS):
+                lists = dict(saved["lists"]) if saved is not None else {}
+                for url in assets.AGENT_RANGES["lists"]:
+                    fresh = download_range_list(self.fetcher, url)
+                    if fresh:
+                        lists[url] = fresh
+                saved = {"at": self.now(), "lists": lists}
+                self.store.set_setting("agent-ranges", _js.dumps(saved))
+            self._agent_ranges = {**assets.AGENT_RANGES["lists"], **(saved["lists"] if saved is not None else {})}
+        except Exception as error:
+            print(f"Runlight: could not update the AI agents' address lists {error!r}", file=sys.stderr)
 
     def freshen_statistics(self) -> None:
         """Gathers planner statistics again if the events have outgrown them, at most once an hour, so an app that
@@ -1616,6 +1665,7 @@ class Runlight:
             self._load_remotes()
         # A name or timezone changed in the dashboard by another process reaches this one too.
         self._overrides = self.store.site_overrides()
+        self._refresh_agent_ranges()
         self._salts = {}
         for timezone in dict.fromkeys(site["timezone"] for site in self.sites):
             self._current_salts(self.now(), timezone)

@@ -43,6 +43,8 @@ import sh.runlight.store.Stores;
  *   TRUST_PROXY           unset believes forwarded addresses only from a private network; "false" never,
  *                         "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
  *   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
+ *   RUNLIGHT_AGENT_RANGES on (the default) downloads the AI agents' published address lists daily;
+ *                         off keeps the lists that came with this version
  *   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
  *   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
  * </pre>
@@ -367,6 +369,22 @@ public final class Config implements AutoCloseable {
             + "\"");
   }
 
+  /**
+   * RUNLIGHT_AGENT_RANGES: on (the default) downloads the address lists AI companies publish once a
+   * day, which AI agent fetches are checked against; off keeps the lists that came with this
+   * version. Anything else is a mistake, said so rather than guessed at.
+   */
+  public boolean updateAgentRanges() {
+    String value = get("RUNLIGHT_AGENT_RANGES");
+    if (value == null || value.equals("on")) {
+      return true;
+    }
+    if (value.equals("off")) {
+      return false;
+    }
+    throw new IllegalStateException("Set RUNLIGHT_AGENT_RANGES to on or off");
+  }
+
   /** DB-IP's monthly download, for RUNLIGHT_GEO city (the default) or country, or null. */
   public DbIp dbIp() {
     String mode = get("RUNLIGHT_GEO");
@@ -480,6 +498,7 @@ public final class Config implements AutoCloseable {
             .geoCredit(dbIp != null)
             .cronSecret(get("CRON_SECRET"))
             .observeKey(get("RUNLIGHT_OBSERVE_KEY"))
+            .updateAgentRanges(updateAgentRanges())
             .geo(geo);
     if (code != null) {
       options.setupCode(code);
