@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.4.0 - 2026-11-09
 
 ### Added
 - AI agents are checked against the addresses their companies publish (OpenAI, Anthropic, Perplexity, Mistral, DuckDuckGo, and Common Crawl). A fetch from a listed address shows under the agent's name, and any other shows as claimed, such as "GPTBot (claimed)". The plugin now sends the agent's address with each fetch it reports; Runlight compares it, then drops it, keeping only whether it matched.
