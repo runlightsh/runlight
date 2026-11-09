@@ -309,7 +309,8 @@ class CliTest {
 
   @Test
   void theServerServesTheDashboardSetupAndHealthOverHttp() throws Exception {
-    configure("PORT=0", "HOST=127.0.0.1", "RUNLIGHT_GEO=off");
+    // No downloads: a test reaches nothing outside the machine.
+    configure("PORT=0", "HOST=127.0.0.1", "RUNLIGHT_GEO=off", "RUNLIGHT_AGENT_RANGES=off");
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     ByteArrayOutputStream err = new ByteArrayOutputStream();
     try (Config config = new Config(root);

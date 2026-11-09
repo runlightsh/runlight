@@ -2796,16 +2796,22 @@ public final class Runlight
       long now = now();
       if (updateAgentRanges && (savedAt == null || now - savedAt >= AGENT_RANGES_EVERY_MS)) {
         for (String url : AgentCheck.bundled().keySet()) {
+          // A server shutting down interrupts its check, which then stops and writes nothing.
+          if (Thread.currentThread().isInterrupted()) {
+            break;
+          }
           List<String> fresh = AgentCheck.downloadRangeList(fetcher, url);
           if (fresh != null) {
             saved.put(url, fresh);
           }
         }
-        Map<String, Object> lists = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> entry : saved.entrySet()) {
-          lists.put(entry.getKey(), new ArrayList<Object>(entry.getValue()));
+        if (!Thread.currentThread().isInterrupted()) {
+          Map<String, Object> lists = new LinkedHashMap<>();
+          for (Map.Entry<String, List<String>> entry : saved.entrySet()) {
+            lists.put(entry.getKey(), new ArrayList<Object>(entry.getValue()));
+          }
+          store.setSetting("agent-ranges", Json.stringify(Json.object("at", now, "lists", lists)));
         }
-        store.setSetting("agent-ranges", Json.stringify(Json.object("at", now, "lists", lists)));
       }
       Map<String, List<String>> inUse = new LinkedHashMap<>(AgentCheck.bundled());
       for (Map.Entry<String, List<String>> entry : saved.entrySet()) {

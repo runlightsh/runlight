@@ -254,6 +254,15 @@ public final class Cli {
       }
       timer.shutdownNow();
       http.stop(1);
+      // A check under way, such as one downloading the agents' address lists, is interrupted and
+      // given a moment to end, so nothing writes to the data once the server has stopped.
+      try {
+        if (!timer.awaitTermination(20, TimeUnit.SECONDS)) {
+          System.err.println("Runlight: the scheduled check did not stop in time");
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
       stopped.countDown();
     }
 
