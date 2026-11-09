@@ -1,5 +1,14 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Added
+- AI agents are checked against the addresses their companies publish (OpenAI, Anthropic, Perplexity, Mistral, DuckDuckGo, and Common Crawl). A fetch from a listed address shows under the agent's name, and any other shows as claimed, such as "GPTBot (claimed)". The plugin now sends the agent's address with each fetch it reports; Runlight compares it, then drops it, keeping only whether it matched.
+- With filters applied, the dashboard keeps them in a bar along the top once you scroll past the numbers, so you can change or clear them without scrolling back up.
+
+### Changed
+- The AI agents panel explains each group in a small "?" tip: a live fetch is an assistant reading the page to answer someone, and a crawl is collected for training or a search index.
+
 ## 0.3.3 - 2026-11-06
 
 ### Changed
