@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { runlight } from "../src/index.js";
+import { ClickHouseStore } from "../src/stores/clickhouse.js";
 import { SAFARI_IPHONE, STORES, cleanup, setup as setupFor, type StoreKind } from "./helpers.js";
 
 after(cleanup);
@@ -9,6 +10,9 @@ for (const kind of STORES) describe(kind, () => suite(kind));
 
 function suite(kind: StoreKind) {
 const setup = (options?: Parameters<typeof setupFor>[1]) => setupFor(kind, options);
+/** Rows as stored, read from ClickHouse when the store keeps visits there, since its SQL side then holds none. */
+const stored = <T = Record<string, unknown>>(t: ReturnType<typeof setup>, sql: string): Promise<T[]> =>
+  t.rl.store instanceof ClickHouseStore ? t.rl.store.clickhouse.all<T>(sql) : t.rl.store.db.all<T>(sql);
 
 const MIN = 60_000;
 
@@ -197,8 +201,8 @@ test("nothing identifying is stored", async () => {
   const t = setup();
   await t.send({ k: "pageview", u: "https://example.com/?email=jane@example.org&utm_campaign=x", i: "p1" }, { ip: "192.0.2.55" });
   const dump = JSON.stringify([
-    await t.rl.store.db.all("SELECT * FROM rl_sessions"),
-    await t.rl.store.db.all("SELECT * FROM rl_events"),
+    await stored(t, "SELECT * FROM rl_sessions"),
+    await stored(t, "SELECT * FROM rl_events"),
   ]);
   assert.ok(!dump.includes("192.0.2.55"), "no IP");
   assert.ok(!dump.includes("jane@example.org"), "no query string");
@@ -257,9 +261,9 @@ test("an AI agent's address is checked against its company's list, and only the 
     { value: "GPTBot", visitors: 0, fetches: 2, claimed: true },
     { value: "meta-externalagent", visitors: 0, fetches: 1, claimed: true },
   ]);
-  const titles = (await t.rl.store.db.all<{ title: string }>("SELECT title FROM rl_events WHERE kind = 'fetch'")).map((r) => r.title).sort();
+  const titles = (await stored<{ title: string }>(t, "SELECT title FROM rl_events WHERE kind = 'fetch'")).map((r) => r.title).sort();
   assert.deepEqual(titles, ["", "", "mismatch", "verified", "verified", "verified"]);
-  const dump = JSON.stringify(await t.rl.store.db.all("SELECT * FROM rl_events"));
+  const dump = JSON.stringify(await stored(t, "SELECT * FROM rl_events"));
   for (const ip of ["20.171.206.17", "198.51.100.23", "157.240.0.1", "198.51.100.40", "20.171.206.99"]) assert.ok(!dump.includes(ip), `no address: ${ip}`);
 });
 
@@ -299,7 +303,7 @@ if (kind === "sqlite") test("updateAgentRanges downloads the lists once a day, k
     assert.equal(asked.length, firstRound * 2);
     await other.observe(new Request("https://example.com/post", { headers: { "user-agent": GPTBOT, host: "example.com", "x-forwarded-for": "192.0.2.9" } }));
 
-    const titles = (await t.rl.store.db.all<{ title: string }>("SELECT title FROM rl_events WHERE kind = 'fetch'")).map((r) => r.title).sort();
+    const titles = (await stored<{ title: string }>(t, "SELECT title FROM rl_events WHERE kind = 'fetch'")).map((r) => r.title).sort();
     assert.deepEqual(titles, ["mismatch", "verified", "verified", "verified"]);
   } finally {
     globalThis.fetch = real;
