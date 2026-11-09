@@ -28,3 +28,16 @@ func TestAMySQLURLCarriesItsTLSSettingAndAskedHostsAreOfferedTLSByDefault(t *tes
 		}
 	}
 }
+
+func TestRunlightAgentRangesIsOnByDefaultOffWhenAskedAndAnythingElseIsAMistake(t *testing.T) {
+	for given, want := range map[string]bool{"": true, "on": true, "off": false} {
+		if got, err := agentRangesFrom(given); err != nil || got != want {
+			t.Errorf("%q: %v %v, want %v", given, got, err, want)
+		}
+	}
+	for _, given := range []string{"true", "false", "ON", "1", "no"} {
+		if _, err := agentRangesFrom(given); err == nil || err.Error() != "Set RUNLIGHT_AGENT_RANGES to on or off" {
+			t.Errorf("%q: %v", given, err)
+		}
+	}
+}

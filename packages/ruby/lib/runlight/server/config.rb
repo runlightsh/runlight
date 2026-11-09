@@ -21,6 +21,8 @@ module Runlight
     #   RUNLIGHT_GEO          city (the default), country, off, or the path to an MMDB file
     #   CRON_SECRET           lets a scheduler run the check over HTTP, at POST /api/check
     #   RUNLIGHT_OBSERVE_KEY  one key for every site's AI agent reports
+    #   RUNLIGHT_AGENT_RANGES on (the default) downloads the AI agents' published address lists daily; off
+    #                         keeps the lists that came with this version
     #
     # Relative paths are read from the project folder.
     class Config
@@ -117,6 +119,16 @@ module Runlight
 
       # false with nothing in front, or the one header your proxy sets, such as cf-connecting-ip behind Cloudflare.
       # Unset stays nil, so the library's default applies: forwarding headers count only from a private address.
+      # Whether the scheduled check downloads the AI agents' address lists: RUNLIGHT_AGENT_RANGES on (the
+      # default) or off.
+      def agent_ranges
+        value = get("RUNLIGHT_AGENT_RANGES")
+        return true if value.nil? || value == "on"
+        return false if value == "off"
+
+        raise RuntimeError, "Runlight: set RUNLIGHT_AGENT_RANGES to on or off"
+      end
+
       def trust_proxy
         value = (get("TRUST_PROXY") || "").downcase
         return nil if value == ""
@@ -196,6 +208,7 @@ module Runlight
           "geoCredit" => !db_ip.nil?,
           "cronSecret" => get("CRON_SECRET"),
           "observeKey" => get("RUNLIGHT_OBSERVE_KEY"),
+          "updateAgentRanges" => agent_ranges,
         }
         settings["geo"] = geo unless geo.nil?
         unless code.nil?

@@ -644,10 +644,13 @@ func (rt *Routes) observeAPI(c *call) (*Response, error) {
 	if len(list) > 500 {
 		return Coded("Send at most 500 fetches at a time", "observe_many", 413, nil), nil
 	}
+	// One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is
+	// the address the agent's request came from, checked against its company's list and then dropped.
 	type observed struct {
 		page      *whatwg.URL
 		userAgent string
 		at        *float64
+		ip        string
 	}
 	pages := []observed{}
 	for _, item := range list {
@@ -673,7 +676,13 @@ func (rt *Routes) observeAPI(c *call) (*Response, error) {
 		if at != nil && (math.IsNaN(*at) || math.IsInf(*at, 0)) {
 			at = nil
 		}
-		pages = append(pages, observed{page, head16(field(o, "userAgent"), 500), at})
+		ip := ""
+		if o != nil {
+			if v, ok := o.Value("ip").(string); ok {
+				ip = head16(v, 100)
+			}
+		}
+		pages = append(pages, observed{page, head16(field(o, "userAgent"), 500), at, ip})
 	}
 	if err := r.Init(ctx); err != nil {
 		return nil, err
@@ -696,7 +705,8 @@ func (rt *Routes) observeAPI(c *call) (*Response, error) {
 	recorded := 0
 	for _, p := range keep {
 		req := web.NewRequest("GET", p.page.Href(), web.NewHeaders("user-agent", p.userAgent), nil)
-		if r.Observe(ctx, req, p.at) {
+		// A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
+		if r.ObserveReport(ctx, req, p.at, p.ip) {
 			recorded++
 		}
 	}

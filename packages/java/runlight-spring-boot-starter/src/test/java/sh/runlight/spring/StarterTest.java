@@ -367,4 +367,16 @@ class StarterTest {
     assertEquals(false, RunlightAutoConfiguration.trustProxy("false"));
     assertEquals("cf-connecting-ip", RunlightAutoConfiguration.trustProxy("CF-Connecting-IP"));
   }
+
+  @Test
+  void theAgentRangesDownloadIsOffUnlessAskedFor() {
+    try (ConfigurableApplicationContext context =
+        start(database(), "runlight.check.enabled=false")) {
+      assertEquals(false, context.getBean(Runlight.class).updateAgentRanges);
+    }
+    try (ConfigurableApplicationContext context =
+        start(database(), "runlight.check.enabled=false", "runlight.update-agent-ranges=true")) {
+      assertEquals(true, context.getBean(Runlight.class).updateAgentRanges);
+    }
+  }
 }

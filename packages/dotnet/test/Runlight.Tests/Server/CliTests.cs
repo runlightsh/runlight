@@ -156,7 +156,8 @@ public sealed class CliTests : ServerTestCase
     [Fact]
     public async Task Migrate_cron_help_and_unknown_commands()
     {
-        Configure(new() { ["RUNLIGHT_GEO"] = "off" });
+        // Off, so the check downloads nothing.
+        Configure(new() { ["RUNLIGHT_GEO"] = "off", ["RUNLIGHT_AGENT_RANGES"] = "off" });
         var (code, output, error) = await CliAsync("migrate");
         Assert.Equal(0, code);
         Assert.Equal("Runlight's tables are up to date in " + _root + "/runlight-data/runlight.db.\n", output);
@@ -191,6 +192,23 @@ public sealed class CliTests : ServerTestCase
     }
 
     [Fact]
+    public void The_agents_address_lists_are_downloaded_unless_turned_off()
+    {
+        Configure(new() { ["RUNLIGHT_GEO"] = "off" });
+        Assert.True(Settings().AgentRanges()); // on by default
+        Configure(new() { ["RUNLIGHT_GEO"] = "off", ["RUNLIGHT_AGENT_RANGES"] = "on" });
+        Assert.True(Settings().AgentRanges());
+        Assert.True(Settings().Standalone(setup: false).Runlight.UpdateAgentRanges);
+        Configure(new() { ["RUNLIGHT_GEO"] = "off", ["RUNLIGHT_AGENT_RANGES"] = "off" });
+        Assert.False(Settings().AgentRanges());
+        Assert.False(Settings().Standalone(setup: false).Runlight.UpdateAgentRanges);
+        Configure(new() { ["RUNLIGHT_GEO"] = "off", ["RUNLIGHT_AGENT_RANGES"] = "sometimes" });
+        var e = Assert.Throws<InvalidOperationException>(() => Settings().AgentRanges());
+        Assert.Contains("Set RUNLIGHT_AGENT_RANGES to on or off", e.Message, StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => Settings().Standalone(setup: false));
+    }
+
+    [Fact]
     public async Task A_sqlite_file_gets_its_folder()
     {
         var store = Stores.Sqlite(SqliteFactory.Instance, _root + "/data/deeper/runlight.db");
@@ -202,7 +220,7 @@ public sealed class CliTests : ServerTestCase
     [Fact]
     public async Task Serve_answers_on_kestrel_says_how_to_make_the_first_account_and_stops_when_asked()
     {
-        Configure(new() { ["PORT"] = Js.Str(ServePort), ["HOST"] = "127.0.0.1", ["RUNLIGHT_GEO"] = "off" });
+        Configure(new() { ["PORT"] = Js.Str(ServePort), ["HOST"] = "127.0.0.1", ["RUNLIGHT_GEO"] = "off", ["RUNLIGHT_AGENT_RANGES"] = "off" });
         using var stop = new CancellationTokenSource();
         var output = new StringWriter();
         var error = new StringWriter();

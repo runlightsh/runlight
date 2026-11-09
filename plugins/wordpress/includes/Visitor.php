@@ -60,6 +60,21 @@ final class Visitor {
 	}
 
 	/**
+	 * The address of the request being served, from the same server
+	 * variables Local reads, unslashed and sanitized as it reads them. An AI
+	 * agent's is checked against the list its company publishes, then dropped.
+	 */
+	public static function current(): string {
+		$server = array();
+		foreach ( array( 'REMOTE_ADDR', 'HTTP_X_FORWARDED_FOR', 'HTTP_CF_CONNECTING_IP' ) as $key ) {
+			if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {
+				$server[ $key ] = sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) );
+			}
+		}
+		return self::address( $server );
+	}
+
+	/**
 	 * Whether the request came through Cloudflare, by the same check that lets
 	 * its CF-Connecting-IP header name the visitor: the connection is from one
 	 * of Cloudflare's own addresses. Only then are its location headers real.

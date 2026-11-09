@@ -25,10 +25,13 @@ func TestLogLinesReadAsTypeScriptReadsThem(t *testing.T) {
 		site, _ := js.Dig(c, "site").(string)
 		var parsed, fetched any
 		if hit := ParseLine(line, site); hit != nil {
-			parsed = js.NewObject("method", hit.Method, "url", hit.URL, "status", hit.Status, "userAgent", hit.UserAgent, "at", fixtureNumber(hit.At))
+			parsed = js.NewObject("method", hit.Method, "url", hit.URL, "status", hit.Status, "userAgent", hit.UserAgent, "at", fixtureNumber(hit.At), "ip", hit.IP)
 		}
 		if found := AgentFetch(line, site, now); found != nil {
 			fetched = js.NewObject("url", found.URL, "userAgent", found.UserAgent, "at", fixtureNumber(found.At))
+			if found.IP != "" {
+				fetched.(*js.Object).Set("ip", found.IP)
+			}
 		}
 		if got, want := js.Stringify(parsed), js.Stringify(js.Dig(c, "parsed")); got != want {
 			t.Errorf("parse %q (%q):\n got %s\nwant %s", line, site, got, want)
@@ -118,5 +121,30 @@ func TestARunCarriesOnWhereTheLastStopped(t *testing.T) {
 	}
 	if _, err := os.Stat(state + ".lock"); !os.IsNotExist(err) {
 		t.Fatal("the lock was left behind")
+	}
+}
+
+// The address a fetch came from goes with it to /api/observe, for the agent's published list; Caddy's
+// client_ip (after its trusted proxies) comes before remote_ip, and a line with neither sends none.
+func TestAFetchCarriesTheAddressItCameFrom(t *testing.T) {
+	caddy := func(request string) string {
+		return `{"ts":1791395736,"status":200,"request":{"method":"GET","host":"example.com","uri":"/","headers":{"User-Agent":["` + gptbot + `"]}` + request + `}}`
+	}
+	for line, want := range map[string]string{
+		logLine("/"): "203.0.113.9",
+		`example.com:443 2001:db8::1 - - [07/Oct/2026:13:55:36 -0400] "GET / HTTP/1.1" 200 5120 "-" "` + gptbot + `"`: "2001:db8::1",
+		caddy(`,"client_ip":"198.51.100.7","remote_ip":"10.0.0.1"`):                                                   "198.51.100.7",
+		caddy(`,"remote_ip":"10.0.0.1"`): "10.0.0.1",
+		caddy(``):                        "",
+	} {
+		found := AgentFetch(line, "https://example.com", 0)
+		if found == nil || found.IP != want {
+			t.Errorf("%s: %+v, want %q", line, found, want)
+			continue
+		}
+		sent := js.Stringify(found)
+		if has := strings.Contains(sent, `"ip"`); has != (want != "") {
+			t.Errorf("%s: sent as %s", line, sent)
+		}
 	}
 }

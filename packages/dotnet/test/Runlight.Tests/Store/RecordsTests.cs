@@ -212,7 +212,9 @@ public sealed class RecordsTests : StoreTestCase
             await store.InsertEventAsync(new JsObject { ["site"] = "default", ["ts"] = NOW - i * MIN, ["kind"] = "fetch", ["visitor"] = "", ["session"] = "", ["pageview"] = "", ["path"] = i % 2 != 0 ? "/a" : "/b", ["hostname"] = "example.com", ["title"] = "", ["name"] = agents[i], ["props"] = new JsObject { ["company"] = "X", ["kind"] = "crawler" }, ["engagedMs"] = 0L, ["scroll"] = null, ["link"] = "" });
         }
         static JsObject Row(string value, int fetches) => new() { ["value"] = value, ["visitors"] = 0, ["fetches"] = fetches };
-        Same(L(Row("ClaudeBot", 2), Row("GPTBot", 2), Row("Amazonbot", 1)), await store.BreakdownAsync(Today(), "ai_agent", 10, 0));
+        // With no address check in title, every fetch is claimed.
+        static JsObject Agent(string value, int fetches) => new() { ["value"] = value, ["visitors"] = 0, ["fetches"] = fetches, ["claimed"] = true };
+        Same(L(Agent("ClaudeBot", 2), Agent("GPTBot", 2), Agent("Amazonbot", 1)), await store.BreakdownAsync(Today(), "ai_agent", 10, 0));
         Same(L(Row("/a", 2)), await store.BreakdownAsync(Today(), "ai_page", 1, 1));
         Same(0, (await store.StatsAsync(Today())).Get("visits"));
         Assert.Equal("{\"company\":\"X\",\"kind\":\"crawler\"}", (await store.Db.AllAsync("SELECT props FROM rl_events WHERE kind = 'fetch' LIMIT 1"))[0].Get("props"));

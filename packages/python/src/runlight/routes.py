@@ -2036,7 +2036,8 @@ class Routes:
         body = self._read_json(request)
         if isinstance(body, Response):
             return body
-        # One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+        # One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is the
+        # address the agent's request came from, checked against its company's list and then dropped.
         fetches = _get(body, "fetches")
         batch = isinstance(fetches, list)
         items = fetches if batch else [body]
@@ -2060,6 +2061,9 @@ class Routes:
             entry: dict[str, Any] = {"page": page, "userAgent": _js.slice16("" if agent is None or agent is _js.UNDEFINED else _js.string(agent), 0, 500)}
             if when is not None and _js.is_finite(when):
                 entry["at"] = when
+            ip = _get(item, "ip")
+            if isinstance(ip, str) and _js.slice16(ip, 0, 100):
+                entry["ip"] = _js.slice16(ip, 0, 100)
             pages.append(entry)
         rl.init()
         keep = pages
@@ -2071,8 +2075,9 @@ class Routes:
             if not batch and not keep:
                 return coded("Unauthorized", "unauthorized", 401)
         recorded = 0
+        # A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         for p in keep:
-            if rl.observe(Request(p["page"].href, "GET", {"user-agent": p["userAgent"]}), p.get("at")):
+            if rl.observe(Request(p["page"].href, "GET", {"user-agent": p["userAgent"]}), p.get("at"), {"agentIp": p.get("ip", "")}):
                 recorded += 1
         # A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
         if not batch:

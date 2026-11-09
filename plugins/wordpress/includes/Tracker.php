@@ -69,11 +69,14 @@ final class Tracker {
 		}
 		$path = isset( $_SERVER['REQUEST_URI'] ) ? esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '/';
 		$url  = self::page_url( $path );
+		// The agent's address, found as a visitor's is, goes along to be checked against its company's list.
+		require_once __DIR__ . '/Visitor.php';
+		$ip = Visitor::current();
 		// Last of all at shutdown, once nothing else will write to the page.
 		add_action(
 			'shutdown',
-			static function () use ( $settings, $local, $url, $agent ): void {
-				self::report( $local ? null : $settings, $url, $agent );
+			static function () use ( $settings, $local, $url, $agent, $ip ): void {
+				self::report( $local ? null : $settings, $url, $agent, $ip );
 			},
 			PHP_INT_MAX
 		);
@@ -101,8 +104,9 @@ final class Tracker {
 	 * @param array{address:string,observe_key:string}|null $settings The plugin's settings, or null for Runlight here.
 	 * @param string                                        $url      The page the agent fetched.
 	 * @param string                                        $agent    The agent's user agent.
+	 * @param string                                        $ip       The agent's address, or an empty string when there is none to tell.
 	 */
-	private static function report( ?array $settings, string $url, string $agent ): void {
+	private static function report( ?array $settings, string $url, string $agent, string $ip ): void {
 		if ( session_status() === PHP_SESSION_ACTIVE ) {
 			session_write_close();
 		}
@@ -112,7 +116,7 @@ final class Tracker {
 			litespeed_finish_request();
 		}
 		if ( null === $settings ) {
-			Local::observe( $url, $agent );
+			Local::observe( $url, $agent, $ip );
 			return;
 		}
 		wp_remote_post(
@@ -124,9 +128,12 @@ final class Tracker {
 					'content-type'  => 'application/json',
 				),
 				'body'    => wp_json_encode(
-					array(
-						'url'       => $url,
-						'userAgent' => $agent,
+					array_merge(
+						array(
+							'url'       => $url,
+							'userAgent' => $agent,
+						),
+						'' !== $ip ? array( 'ip' => $ip ) : array()
 					)
 				),
 			)

@@ -4,7 +4,8 @@ so this port serves the very same bytes. Each is read on first use.
 
 DASHBOARD_JS, DASHBOARD_CSS, DASHBOARD_HASH, WORLD_JSON, WORLD_HASH, LOCALES (language to its messages as JSON
 text, English left out), LOCALES_HASH, ENGLISH (the English messages as JSON text), TRACKER, TRACKER_HASH,
-PICKER, PICK_RELAY (the picker's relay page script), and BUILD (assets/build.json: the versions, the hashes, and
+PICKER, PICK_RELAY (the picker's relay page script), AGENT_RANGES (the AI agents' published address lists as they
+were when this version was made: {"fetchedAt", "lists": {url: [prefix, ...]}}), and BUILD (assets/build.json: the versions, the hashes, and
 the icon).
 """
 
@@ -32,6 +33,11 @@ def _build() -> dict[str, Any]:
 
 
 @functools.cache
+def _agent_ranges() -> dict[str, Any]:
+    return json.loads(_text("agent-ranges.json"))
+
+
+@functools.cache
 def _locales() -> dict[str, str]:
     return json.loads(_text("locales.json"))
 
@@ -39,6 +45,8 @@ def _locales() -> dict[str, str]:
 def __getattr__(name: str) -> Any:
     if name == "BUILD":
         return _build()
+    if name == "AGENT_RANGES":
+        return _agent_ranges()
     if name == "DASHBOARD_JS":
         return _text("dashboard.js")
     if name == "DASHBOARD_CSS":

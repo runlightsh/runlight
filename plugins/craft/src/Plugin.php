@@ -285,13 +285,20 @@ final class Plugin extends BasePlugin
             litespeed_finish_request();
         }
         try {
+            // The agent's address, found as a visitor's is, goes along to be checked against its company's list;
+            // Runlight keeps only the answer.
+            $headers = [];
+            foreach ($request->getHeaders()->toArray() as $name => $values) {
+                $headers[strtolower((string) $name)] = array_map('strval', (array) $values);
+            }
+            $ip = Visitor::of($request, $headers);
             if ($local) {
-                Local::observe($request->getAbsoluteUrl(), $agent);
+                Local::observe($request->getAbsoluteUrl(), $agent, $ip);
                 return;
             }
             Craft::createGuzzleClient(['connect_timeout' => 1, 'timeout' => 3])->post($settings->getAddress() . '/api/observe', [
                 'headers' => ['Authorization' => 'Bearer ' . $key],
-                'json' => ['url' => $request->getAbsoluteUrl(), 'userAgent' => $agent],
+                'json' => ['url' => $request->getAbsoluteUrl(), 'userAgent' => $agent] + ($ip !== '' ? ['ip' => $ip] : []),
             ]);
         } catch (\Throwable $e) {
             if (!$local) {

@@ -2428,14 +2428,26 @@ func (s *Store) HostnameSuggestions(ctx context.Context, query Query, limit int)
 // Breakdown is a dimension's values for a range, most visited first.
 func (s *Store) Breakdown(ctx context.Context, query Query, dimension string, limit, offset int) ([]BreakdownRow, error) {
 	page := []any{int64(limit), int64(offset)}
-	if dimension == "ai_agent" || dimension == "ai_page" {
-		col := "e.path"
-		if dimension == "ai_agent" {
-			col = "e.name"
-		}
-		rows, err := s.db.All(ctx, `SELECT `+col+` AS value, COUNT(*) AS fetches FROM rl_events e
+	if dimension == "ai_agent" {
+		// A fetch's title holds its address check (see Runlight.Observe); only "verified" is not claimed.
+		claimed := "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END"
+		rows, err := s.db.All(ctx, `SELECT e.name AS value, `+claimed+` AS claimed, COUNT(*) AS fetches FROM rl_events e
          WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
-         GROUP BY `+col+` ORDER BY fetches DESC, `+col+s.textOrder()+` LIMIT ? OFFSET ?`, append([]any{query.Site, query.From, query.To}, page...)...)
+         GROUP BY e.name, `+claimed+` ORDER BY fetches DESC, e.name`+s.textOrder()+`, claimed LIMIT ? OFFSET ?`, append([]any{query.Site, query.From, query.To}, page...)...)
+		if err != nil {
+			return nil, err
+		}
+		out := []BreakdownRow{}
+		for _, r := range rows {
+			claimed := numInt(r["claimed"]) == 1
+			out = append(out, BreakdownRow{Value: str(r["value"]), Visitors: 0, Fetches: i64(numInt(r["fetches"])), Claimed: &claimed})
+		}
+		return out, nil
+	}
+	if dimension == "ai_page" {
+		rows, err := s.db.All(ctx, `SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e
+         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+         GROUP BY e.path ORDER BY fetches DESC, e.path`+s.textOrder()+` LIMIT ? OFFSET ?`, append([]any{query.Site, query.From, query.To}, page...)...)
 		if err != nil {
 			return nil, err
 		}

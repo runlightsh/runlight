@@ -223,9 +223,19 @@ public sealed partial class SqlStore
         long qTo = query.Long("to");
         var filters = Sql.Filters(query);
         string dialect = Dialect;
-        if (dimension is "ai_agent" or "ai_page")
+        if (dimension == "ai_agent")
         {
-            string col = dimension == "ai_agent" ? "e.name" : "e.path";
+            // A fetch's title holds its address check (see Runlight.ObserveAsync); only "verified" is not claimed.
+            const string claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END";
+            var agents = await Db.AllAsync(
+                "SELECT e.name AS value, " + claimed + " AS claimed, COUNT(*) AS fetches FROM rl_events e\n         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'\n         GROUP BY e.name, " + claimed + " ORDER BY fetches DESC, e.name" + TextOrder() + ", claimed LIMIT ? OFFSET ?",
+                A(site, qFrom, qTo, limit, offset),
+                cancellationToken).ConfigureAwait(false);
+            return agents.Select(row => new JsObject { ["value"] = Sql.S(row.Get("value")), ["visitors"] = 0L, ["fetches"] = Sql.Num(row.Get("fetches")), ["claimed"] = Sql.Num(row.Get("claimed")) == 1 }).ToList();
+        }
+        if (dimension == "ai_page")
+        {
+            const string col = "e.path";
             var fetched = await Db.AllAsync(
                 "SELECT " + col + " AS value, COUNT(*) AS fetches FROM rl_events e\n         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'\n         GROUP BY " + col + " ORDER BY fetches DESC, " + col + TextOrder() + " LIMIT ? OFFSET ?",
                 A(site, qFrom, qTo, limit, offset),

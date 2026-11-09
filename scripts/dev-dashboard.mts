@@ -16,6 +16,7 @@ import { toNodeHandler } from "../packages/sdk/src/node.ts";
 import { RUNLIGHT_ICON } from "../packages/sdk/src/routes.ts";
 import { sqlite } from "../packages/sdk/src/stores/sqlite.ts";
 import type { SessionRow } from "../packages/sdk/src/store.ts";
+import { AI_AGENTS } from "../packages/sdk/src/data/agents.ts";
 
 const PORT = Number(process.env.PORT ?? 4800);
 const FILE = process.env.RUNLIGHT_DEV_DB ?? new URL("../data/dev.db", import.meta.url).pathname;
@@ -153,7 +154,7 @@ async function seed() {
   ];
   const languages: Array<[string, number]> = [["en-US", 40], ["en-GB", 12], ["en-CA", 12], ["de-DE", 6], ["fr-FR", 5], ["nl-NL", 3], ["ja-JP", 2]];
   const hours: Array<[number, number]> = Array.from({ length: 24 }, (_, h) => [h, 1 + 4 * Math.exp(-((h - 14) ** 2) / 18)]);
-  const agents: Array<[string, number]> = [["ChatGPT-User", 6], ["Claude-User", 3], ["Perplexity-User", 2], ["GPTBot", 8], ["ClaudeBot", 6], ["PerplexityBot", 3], ["CCBot", 2]];
+  const agents: Array<[string, number]> = [["ChatGPT-User", 6], ["Claude-User", 3], ["Perplexity-User", 2], ["GPTBot", 8], ["ClaudeBot", 6], ["PerplexityBot", 3], ["CCBot", 2], ["meta-externalagent", 3], ["Bytespider", 1]];
 
   const now = Date.now();
   const startDay = now - DAYS * 86_400_000;
@@ -214,7 +215,10 @@ async function seed() {
       const ts = dayStart + Math.floor(Math.random() * 86_400_000);
       if (ts > now) continue;
       const name = pick(agents);
-      await store.insertEvent({ site: "default", ts, kind: "fetch", visitor: "", session: "", pageview: "", path: pick(pages), hostname: "joncphillips.com", title: "", name, props: null, engagedMs: 0, scroll: null, link: "" });
+      // Agents whose company publishes addresses mostly check out, with the odd impostor; the rest stay claimed.
+      const listed = AI_AGENTS.find((a) => a.name === name)?.ranges;
+      const title = listed ? (Math.random() < 0.9 ? "verified" : "mismatch") : "";
+      await store.insertEvent({ site: "default", ts, kind: "fetch", visitor: "", session: "", pageview: "", path: pick(pages), hostname: "joncphillips.com", title, name, props: null, engagedMs: 0, scroll: null, link: "" });
     }
   }
   await store.db.run("COMMIT");

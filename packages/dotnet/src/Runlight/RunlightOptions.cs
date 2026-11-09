@@ -155,6 +155,13 @@ public sealed class RunlightOptions
     /// </summary>
     public bool LocalInstalls { get; init; }
 
+    /// <summary>
+    /// Downloads the address lists AI companies publish, at most once a day during the scheduled check, so
+    /// requests that name an agent are checked against current addresses. Default false: the lists that came
+    /// with this version are used, and Runlight makes no requests of its own for them.
+    /// </summary>
+    public bool UpdateAgentRanges { get; init; }
+
     /// <summary>The clock, in epoch milliseconds. For tests.</summary>
     public Func<long>? Now { get; init; }
 

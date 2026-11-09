@@ -221,6 +221,10 @@ type BreakdownRow struct {
 	// VisitDuration is the mean engaged time per visit, milliseconds, for visit dimensions.
 	VisitDuration *int64 `json:"visitDuration,omitempty"`
 	Fetches       *int64 `json:"fetches,omitempty"`
+	// Claimed is, for AI agents, true for fetches whose address was not found in the list the agent's
+	// company publishes, or could not be checked, so the name rests on the user agent alone. An agent can
+	// have a row of each.
+	Claimed *bool `json:"claimed,omitempty"`
 }
 
 // ValueCount is a value and how many visitors it had.

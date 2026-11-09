@@ -150,6 +150,10 @@ public final class Runlight
    *       trying a hub and an app on one machine. Default false: otherwise anyone who can add a
    *       site could have this server ask services on its own machine, so other installs must be
    *       public https addresses.
+   *   <li>updateAgentRanges: downloads the address lists AI companies publish, at most once a day
+   *       during the scheduled check, so requests that name an agent are checked against current
+   *       addresses. Default false: the lists that came with this version are used, and Runlight
+   *       makes no requests of its own for them.
    *   <li>now: the clock in milliseconds. For tests.
    *   <li>fetcher: the Fetcher every outgoing request goes through. Default {@link JdkFetcher}.
    * </ul>
@@ -163,6 +167,7 @@ public final class Runlight
     public Object trustProxy;
     public Object rateLimit = 120L;
     public boolean localInstalls;
+    public boolean updateAgentRanges;
     public String linkPath = "/go";
     public Object mail;
     public List<String> mailServices;
@@ -209,6 +214,11 @@ public final class Runlight
 
     public Options localInstalls(boolean value) {
       localInstalls = value;
+      return this;
+    }
+
+    public Options updateAgentRanges(boolean value) {
+      updateAgentRanges = value;
       return this;
     }
 
@@ -272,6 +282,15 @@ public final class Runlight
 
   /** Every outgoing request goes through it. */
   public final Fetcher fetcher;
+
+  /** Whether the scheduled check downloads the AI agents' address lists once a day. */
+  public final boolean updateAgentRanges;
+
+  /**
+   * The agents' address lists in use: downloaded ones from the database when there are any, else
+   * those that came with this version.
+   */
+  private volatile Map<String, List<String>> agentRanges = AgentCheck.bundled();
 
   /**
    * Where routes() serves the dashboard and API, which a link domain leaves alone, without repeats.
@@ -433,6 +452,7 @@ public final class Runlight
             : Transports.SERVICES.stream().filter(s -> offered.contains(s.get("id"))).toList();
     String secretFromEnv = Env.get("RUNLIGHT_SECRET");
     this.localInstalls = options.localInstalls;
+    this.updateAgentRanges = options.updateAgentRanges;
     this.secret =
         options.secret != null
             ? options.secret
@@ -2561,6 +2581,18 @@ public final class Runlight
    * or now when it is null.
    */
   public boolean observe(Request request, Double at) {
+    return observe(request, at, Map.of());
+  }
+
+  /**
+   * {@link #observe(Request, Double)} with the request's context: ip, the connection's address, as
+   * for tracker hits, or agentIp, the address a log reader or plugin reports for the agent.
+   *
+   * <p>The request's address (from agentIp when it is given, else the connection or a trusted proxy
+   * header, as for tracker hits) is checked against the list the agent's company publishes and then
+   * dropped: only "verified", "mismatch", or "" is kept with the fetch.
+   */
+  public boolean observe(Request request, Double at, Map<String, Object> context) {
     try {
       if (!request.method().equals("GET")) {
         return false;
@@ -2615,8 +2647,10 @@ public final class Runlight
               Js.slice(url.pathname, 0, 1000),
               "hostname",
               Sources.stripWww(url.hostname),
+              // A fetch keeps the result of the address check in title: "verified", "mismatch",
+              // or "" when there was nothing to check against. The address itself is not kept.
               "title",
-              "",
+              AgentCheck.checkAgent(agent, agentAddress(request, context), agentRanges),
               "name",
               agent.get("name"),
               "props",
@@ -2633,6 +2667,16 @@ public final class Runlight
       log("Runlight: could not record an AI agent fetch " + error.getMessage());
       return false;
     }
+  }
+
+  /** The address an agent's request is checked from: agentIp when given, else the client's. */
+  private String agentAddress(Request request, Map<String, Object> context) {
+    Map<String, Object> given = context == null ? Map.of() : context;
+    if (given.get("agentIp") instanceof String reported) {
+      return reported;
+    }
+    String ip = clientIp(request, given);
+    return ip == null ? "" : ip;
   }
 
   /**
@@ -2684,6 +2728,7 @@ public final class Runlight
     } finally {
       sitesLock.unlock();
     }
+    refreshAgentRanges();
     salts.clear();
     Set<String> zones = new LinkedHashSet<>();
     for (Map<String, Object> site : sites()) {
@@ -2712,6 +2757,67 @@ public final class Runlight
     }
     buildRollups();
     return Json.object("ok", true, "reports", sendReports());
+  }
+
+  /**
+   * How often the scheduled check downloads the agents' address lists, when updateAgentRanges is
+   * on.
+   */
+  private static final long AGENT_RANGES_EVERY_MS = 86_400_000L;
+
+  /**
+   * Uses the agents' address lists downloaded by any process sharing this database, and downloads
+   * them again when updateAgentRanges is on and the last try was a day ago or more. A list that
+   * cannot be fetched or read keeps the copy it replaces; a failed day is not retried until the
+   * next day.
+   */
+  private void refreshAgentRanges() {
+    try {
+      String stored = store.setting("agent-ranges");
+      Long savedAt = null;
+      Map<String, List<String>> saved = new LinkedHashMap<>();
+      if (stored != null) {
+        Json.Parsed parsed = Json.tryParse(stored);
+        if (parsed.ok() && parsed.value() instanceof Map<?, ?> value) {
+          Object lists = value.get("lists");
+          if (lists instanceof Map<?, ?> byUrl) {
+            for (Map.Entry<?, ?> entry : byUrl.entrySet()) {
+              List<String> prefixes = AgentCheck.readPrefixes(entry.getValue());
+              if (prefixes != null) {
+                saved.put(String.valueOf(entry.getKey()), prefixes);
+              }
+            }
+          }
+          // Number(at) || 0, as the TypeScript reads it.
+          double at = Js.toNumber(value.get("at"));
+          savedAt = Double.isNaN(at) ? 0L : (long) at;
+        }
+      }
+      long now = now();
+      if (updateAgentRanges && (savedAt == null || now - savedAt >= AGENT_RANGES_EVERY_MS)) {
+        for (String url : AgentCheck.bundled().keySet()) {
+          List<String> fresh = AgentCheck.downloadRangeList(fetcher, url);
+          if (fresh != null) {
+            saved.put(url, fresh);
+          }
+        }
+        Map<String, Object> lists = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : saved.entrySet()) {
+          lists.put(entry.getKey(), new ArrayList<Object>(entry.getValue()));
+        }
+        store.setSetting("agent-ranges", Json.stringify(Json.object("at", now, "lists", lists)));
+      }
+      Map<String, List<String>> inUse = new LinkedHashMap<>(AgentCheck.bundled());
+      for (Map.Entry<String, List<String>> entry : saved.entrySet()) {
+        inUse.put(entry.getKey(), List.copyOf(entry.getValue()));
+      }
+      // Kept as they are while unchanged, so their parsed prefixes are reused.
+      if (!inUse.equals(agentRanges)) {
+        agentRanges = Collections.unmodifiableMap(inUse);
+      }
+    } catch (RuntimeException error) {
+      log("Runlight: could not update the AI agents' address lists " + error.getMessage());
+    }
   }
 
   /**

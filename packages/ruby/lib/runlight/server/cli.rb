@@ -24,8 +24,12 @@ module Runlight
         Add --config <file> to read settings from a config.rb other than the
         project folder's. Settings are read from the environment first and then
         config.rb: PORT, HOST, DATA_DIR, DATABASE_URL, RUNLIGHT_SECRET,
-        RUNLIGHT_TOKEN, RUNLIGHT_URL, TRUST_PROXY, RUNLIGHT_GEO, CRON_SECRET, and
-        RUNLIGHT_OBSERVE_KEY.
+        RUNLIGHT_TOKEN, RUNLIGHT_URL, TRUST_PROXY, RUNLIGHT_GEO, CRON_SECRET,
+        RUNLIGHT_OBSERVE_KEY, and RUNLIGHT_AGENT_RANGES.
+
+        RUNLIGHT_AGENT_RANGES=off stops the daily download of the address lists AI
+        companies publish, which AI agent fetches are checked against; the lists that
+        came with this version are used instead.
 
         The server runs the scheduled check every five minutes. To run it from
         cron as well, or for a server that is not always running:

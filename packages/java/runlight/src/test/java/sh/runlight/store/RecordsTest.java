@@ -454,9 +454,9 @@ class RecordsTest extends StoreTestCase {
     }
     assertJson(
         List.of(
-            Json.object("value", "ClaudeBot", "visitors", 0, "fetches", 2),
-            Json.object("value", "GPTBot", "visitors", 0, "fetches", 2),
-            Json.object("value", "Amazonbot", "visitors", 0, "fetches", 1)),
+            Json.object("value", "ClaudeBot", "visitors", 0, "fetches", 2, "claimed", true),
+            Json.object("value", "GPTBot", "visitors", 0, "fetches", 2, "claimed", true),
+            Json.object("value", "Amazonbot", "visitors", 0, "fetches", 1, "claimed", true)),
         store.breakdown(today(), "ai_agent", 10, 0));
     assertJson(
         List.of(Json.object("value", "/a", "visitors", 0, "fetches", 2)),

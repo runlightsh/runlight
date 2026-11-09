@@ -13,6 +13,8 @@
  *   TRUST_PROXY       unset believes forwarded addresses only from a private network; "false" never,
  *                     "true" from anywhere, or the one header a CDN sets, such as cf-connecting-ip
  *   RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
+ *   RUNLIGHT_AGENT_RANGES  on (the default) downloads the AI agents' published address lists daily; off
+ *                     keeps the lists that came with this version
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
@@ -28,6 +30,12 @@ import { VERSION } from "./version.js";
 import { createMonitoring } from "./monitoring.js";
 
 const env = (name: string) => process.env[name]?.trim() || undefined;
+
+function agentRangesFrom(value: string | undefined): boolean {
+  if (value === undefined || value === "on") return true;
+  if (value === "off") return false;
+  throw new Error("Set RUNLIGHT_AGENT_RANGES to on or off");
+}
 
 const HELP = `Runlight ${VERSION}, privacy friendly web analytics for any number of sites.
 
@@ -52,6 +60,9 @@ RUNLIGHT_GEO picks where locations come from when no platform header gives
 them. It is city by default, which downloads DB-IP's free city database into
 DATA_DIR and refreshes it each month. Set it to country for a smaller file, to
 off, or to the path of your own MMDB file.
+RUNLIGHT_AGENT_RANGES=off stops the daily download of the address lists AI
+companies publish, which AI agent fetches are checked against; the lists that
+came with this version are used instead.
 
 Docs: https://runlight.sh/docs/server/
 `;
@@ -189,6 +200,7 @@ async function main(): Promise<void> {
     secret: secretFor(dataDir),
     ...(env("RUNLIGHT_TOKEN") ? { token: env("RUNLIGHT_TOKEN") } : {}),
     trustProxy: trustProxyFrom(env("TRUST_PROXY")),
+    updateAgentRanges: agentRangesFrom(env("RUNLIGHT_AGENT_RANGES")),
   });
 
   if (command === "password") {

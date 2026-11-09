@@ -58,6 +58,8 @@ module Runlight
       #   written in setup.txt, for the page that asks for it.
       # - cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
       # - observeKey: one key for every site's AI agent reports.
+      # - updateAgentRanges: download the address lists AI companies publish once a day, to check AI agent fetches
+      #   against. Default false; Config turns it on unless RUNLIGHT_AGENT_RANGES is off.
       def initialize(options)
         options = Options.normalize(options)
         @store = options["store"]
@@ -80,6 +82,7 @@ module Runlight
         core["trustProxy"] = @trust_proxy unless @trust_proxy.nil?
         core["geo"] = options["geo"] unless options["geo"].nil?
         core["fetcher"] = options["fetcher"] unless options["fetcher"].nil?
+        core["updateAgentRanges"] = options["updateAgentRanges"] ? true : false
         @runlight = rl = Core.new(core)
 
         # Accounts, shared with apps that turn them on. The first one is made with the one-time code, or with the

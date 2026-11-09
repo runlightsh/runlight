@@ -74,6 +74,18 @@ final class CliTest extends TestCase
         } catch (\RuntimeException $error) {
             $this->assertStringContainsString('not "maybe"', $error->getMessage());
         }
+        // The AI agents' address lists are downloaded unless RUNLIGHT_AGENT_RANGES is off; anything else is refused.
+        foreach (['' => true, 'on' => true, 'off' => false] as $given => $read) {
+            $this->configure($given === '' ? [] : ['RUNLIGHT_AGENT_RANGES' => $given]);
+            $this->assertSame($read, (new Config($this->root))->agentRanges(), "RUNLIGHT_AGENT_RANGES=$given");
+        }
+        $this->configure(['RUNLIGHT_AGENT_RANGES' => 'yes']);
+        try {
+            (new Config($this->root))->agentRanges();
+            $this->fail('RUNLIGHT_AGENT_RANGES=yes is refused');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('Set RUNLIGHT_AGENT_RANGES to on or off', $error->getMessage());
+        }
         $this->configure(['RUNLIGHT_URL' => 'https://stats.example.com', 'TRUST_PROXY' => 'cf-connecting-ip', 'RUNLIGHT_GEO' => 'off']);
         $this->assertSame("{$this->root}/runlight-data", $config->dataDir());
         $this->assertSame(0700, fileperms($config->dataDir()) & 0777, 'the data folder is private');
@@ -154,7 +166,8 @@ final class CliTest extends TestCase
 
     public function testMigrateCronAndUnknownCommands(): void
     {
-        $this->configure(['RUNLIGHT_GEO' => 'off']);
+        // No downloads from a test: location data and the AI agents' address lists stay off.
+        $this->configure(['RUNLIGHT_GEO' => 'off', 'RUNLIGHT_AGENT_RANGES' => 'off']);
         [$code, $out] = $this->cli('migrate');
         $this->assertSame(0, $code);
         $this->assertSame("Runlight's tables are up to date in {$this->root}/runlight-data/runlight.db.\n", $out);

@@ -75,10 +75,18 @@ defmodule Runlight do
       false: otherwise anyone who can add a site could have this server ask
       services on its own machine, so other installs must be public https
       addresses.
+    * `:update_agent_ranges` - downloads the address lists AI companies
+      publish, at most once a day during the scheduled check, so requests
+      that name an agent are checked against current addresses. Default
+      false: the lists that came with this version are used, and Runlight
+      makes no requests of its own for them. Lists another process sharing
+      the database downloaded are used either way.
     * `:now` - a function answering epoch milliseconds, for tests.
     * `:name` - the instance's name, default `Runlight`.
   """
 
+  alias Runlight.AgentCheck
+  alias Runlight.Assets
   alias Runlight.Crypto
   alias Runlight.Hash
   alias Runlight.Http.Headers
@@ -115,6 +123,7 @@ defmodule Runlight do
     :secret,
     :fetcher,
     :local_installs,
+    :update_agent_ranges,
     :table
   ]
 
@@ -130,6 +139,8 @@ defmodule Runlight do
   @rollup_delay_ms 2 * 3_600_000
   # The longest a tracker hit waits for the tables while another process creates or upgrades them.
   @tracker_wait_ms 10_000
+  # How often the scheduled check downloads the agents' address lists, when update_agent_ranges is on.
+  @agent_ranges_every_ms 86_400_000
   # The most a connected install's list of sites may weigh; a real one is a few kilobytes.
   @remote_max_bytes 2 * 1024 * 1024
   # Read one byte past it, so an answer that long reads as too long rather than as unreachable.
@@ -191,6 +202,9 @@ defmodule Runlight do
     per_minute = Keyword.get(opts, :rate_limit, 120)
     table = State.new()
     State.put(table, :configured, configured)
+    # The agents' address lists in use, parsed: downloaded ones from the database when there are any, else those
+    # that came with this version.
+    State.put(table, :agent_ranges, compile_ranges(Assets.agent_range_lists()))
 
     # false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
     limit =
@@ -222,6 +236,7 @@ defmodule Runlight do
       secret: Keyword.get(opts, :secret) || env("RUNLIGHT_SECRET") || env("RUNLIGHT_TOKEN"),
       fetcher: Keyword.get(opts, :fetcher) || (&Runlight.Fetch.httpc/2),
       local_installs: Keyword.get(opts, :local_installs, false) == true,
+      update_agent_ranges: Keyword.get(opts, :update_agent_ranges, false) == true,
       table: table
     }
   end
@@ -1894,9 +1909,14 @@ defmodule Runlight do
   Records a request from a known AI agent. Call it from middleware for every
   page request (see `Runlight.Plug.Observer`); it ignores everything else and
   never raises. `at` is when the page was served, for a log reader.
+
+  The request's address (its `remote_address` or a trusted proxy header, as
+  for tracker hits, or `agent_ip:` when a log reader or plugin reports it)
+  is checked against the list the agent's company publishes and then
+  dropped: only "verified", "mismatch", or "" is kept with the fetch.
   """
-  @spec observe(t(), Request.t(), number() | nil) :: boolean()
-  def observe(rl, %Request{} = request, at \\ nil) do
+  @spec observe(t(), Request.t(), number() | nil, keyword()) :: boolean()
+  def observe(rl, %Request{} = request, at \\ nil, opts \\ []) do
     with "GET" <- request.method,
          agent when agent != nil <- Ua.ai_agent(Request.header(request, "user-agent") || ""),
          url = Url.new(request.url),
@@ -1919,7 +1939,9 @@ defmodule Runlight do
         pageview: "",
         path: JS.slice(url.pathname, 0, 1000),
         hostname: Sources.strip_www(url.hostname),
-        title: "",
+        # A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when there was
+        # nothing to check against. The address itself is not kept.
+        title: AgentCheck.check_agent(agent, agent_ip(rl, request, opts), State.get(rl.table, :agent_ranges, %{})),
         name: agent.name,
         props: JS.obj(company: agent.company, kind: agent.kind),
         engaged_ms: 0,
@@ -1937,6 +1959,87 @@ defmodule Runlight do
       Logger.error("Runlight: could not record an AI agent fetch #{Exception.message(error)}")
       false
   end
+
+  # The address an agent's fetch is checked from: the one a report names, else the request's own.
+  defp agent_ip(rl, request, opts) do
+    case Keyword.get(opts, :agent_ip) do
+      nil -> client_ip(rl, request)
+      ip -> ip
+    end
+  end
+
+  defp compile_ranges(lists), do: Map.new(lists, fn {url, list} -> {url, AgentCheck.compile(list)} end)
+
+  # Uses the agents' address lists downloaded by any process sharing this database, and downloads them again when
+  # update_agent_ranges is on and the last try was a day ago or more. A list that cannot be fetched or read keeps
+  # the copy it replaces; a failed day is not retried until the next day.
+  defp refresh_agent_ranges(rl) do
+    saved = saved_agent_ranges(Store.setting(rl.store, "agent-ranges"))
+
+    saved =
+      if rl.update_agent_ranges and (saved == nil or ranges_due?(now(rl), saved.at)) do
+        lists =
+          Enum.reduce(Assets.agent_range_urls(), if(saved, do: saved.lists, else: Object.new()), fn url, lists ->
+            case AgentCheck.download_range_list(rl.fetcher, url) do
+              nil -> lists
+              fresh -> Object.put(lists, url, fresh)
+            end
+          end)
+
+        saved = %{at: now(rl), lists: lists}
+        Store.set_setting(rl.store, "agent-ranges", JS.stringify(JS.obj(at: saved.at, lists: lists)))
+        saved
+      else
+        saved
+      end
+
+    lists = Map.merge(Assets.agent_range_lists(), if(saved, do: Map.new(Object.to_list(saved.lists)), else: %{}))
+    State.put(rl.table, :agent_ranges, compile_ranges(lists))
+    :ok
+  rescue
+    error ->
+      Logger.error("Runlight: could not update the AI agents' address lists #{Exception.message(error)}")
+      :ok
+  end
+
+  # The saved lists as `%{at, lists}`, each list read as a download is, or nil when there are none to read.
+  defp saved_agent_ranges(nil), do: nil
+
+  defp saved_agent_ranges(stored) do
+    case JS.parse(stored) do
+      {:ok, nil} ->
+        nil
+
+      {:ok, parsed} ->
+        lists =
+          case JS.prop(parsed, "lists") do
+            %Object{} = o -> Object.to_list(o)
+            list when is_list(list) -> list |> Enum.with_index() |> Enum.map(fn {l, i} -> {Integer.to_string(i), l} end)
+            _ -> []
+          end
+
+        lists =
+          Enum.reduce(lists, Object.new(), fn {url, list}, out ->
+            entries =
+              if is_list(list),
+                do: Enum.map(list, &if(JS.string(&1) =~ ":", do: JS.obj(ipv6Prefix: &1), else: JS.obj(ipv4Prefix: &1)))
+
+            case AgentCheck.read_range_list(JS.obj(prefixes: entries)) do
+              nil -> out
+              prefixes -> Object.put(out, url, prefixes)
+            end
+          end)
+
+        %{at: JS.or_else(JS.number(JS.prop(parsed, "at")), 0), lists: lists}
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  defp ranges_due?(_now, :infinity), do: false
+  defp ranges_due?(_now, :neg_infinity), do: true
+  defp ranges_due?(now, at), do: now - at >= @agent_ranges_every_ms
 
   @doc """
   Gathers planner statistics again if the events have outgrown them, at most
@@ -1975,6 +2078,7 @@ defmodule Runlight do
 
     # A name or timezone changed in the dashboard by another process reaches this one too.
     State.put(rl.table, :overrides, Store.site_overrides(rl.store))
+    refresh_agent_ranges(rl)
     State.delete_all(rl.table, :salts)
     now = now(rl)
     for timezone <- sites(rl) |> Enum.map(& &1["timezone"]) |> Enum.uniq(), do: current_salts(rl, now, timezone)

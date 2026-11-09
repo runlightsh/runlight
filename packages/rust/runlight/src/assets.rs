@@ -1,4 +1,5 @@
-//! The dashboard, its locales and map, the tracker, and the element picker:
+//! The dashboard, its locales and map, the tracker, the element picker, and
+//! the AI agents' address lists:
 //! the TypeScript SDK's built files, copied into assets/ by
 //! scripts/rust-assets.mts, so this crate serves the very same bytes.
 
@@ -18,6 +19,8 @@ pub const TRACKER: &str = include_str!("../assets/tracker.js");
 pub const PICKER: &str = include_str!("../assets/picker.js");
 /// The picker's relay page script, which hands a pick to the dashboard tab that asked for it.
 pub const PICK_RELAY: &str = include_str!("../assets/pick-return.js");
+/// The address lists AI companies publish for their agents, as this version came with them.
+pub const AGENT_RANGES_JSON: &str = include_str!("../assets/agent-ranges.json");
 
 const BUILD: &str = include_str!("../assets/build.json");
 const LOCALES_JSON: &str = include_str!("../assets/locales.json");

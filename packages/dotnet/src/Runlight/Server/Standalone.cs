@@ -52,6 +52,9 @@ public sealed class StandaloneOptions
     public string? CronSecret { get; init; }
 
     public string? ObserveKey { get; init; }
+
+    /// <summary>Download the address lists AI companies publish once a day, to check AI agent fetches against.</summary>
+    public bool UpdateAgentRanges { get; init; }
 }
 
 /// <summary>
@@ -109,6 +112,7 @@ public sealed partial class Standalone : IAsyncDisposable
             Now = _now,
             Geo = options.Geo,
             Fetcher = options.Fetcher,
+            UpdateAgentRanges = options.UpdateAgentRanges,
         });
 
         // Accounts, shared with apps that turn them on. The first one is made with the one-time code, or with the

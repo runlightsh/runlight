@@ -36,7 +36,7 @@ final class Agents
     private const S = '[^' . Js::SPACE . ']';
 
     // host? ip - user [time] "METHOD /path HTTP/x" status bytes "referrer" "user agent"
-    private const COMBINED = '/^(?:(' . self::S . '+) )?' . self::S . '+ ' . self::S . '+ ' . self::S . '+ \[([^\]]+)\] "(' . self::S . '+) (' . self::S . '+)[^"]*" ([0-9]{3}) ' . self::S . '+ "(?:[^"\\\\]|\\\\[^\n\r\x{2028}\x{2029}])*" "((?:[^"\\\\]|\\\\[^\n\r\x{2028}\x{2029}])*)"/u';
+    private const COMBINED = '/^(?:(' . self::S . '+) )?(' . self::S . '+) ' . self::S . '+ ' . self::S . '+ \[([^\]]+)\] "(' . self::S . '+) (' . self::S . '+)[^"]*" ([0-9]{3}) ' . self::S . '+ "(?:[^"\\\\]|\\\\[^\n\r\x{2028}\x{2029}])*" "((?:[^"\\\\]|\\\\[^\n\r\x{2028}\x{2029}])*)"/u';
 
     /** A request line and status, in a line that might be a combined log line without its host. */
     private const REQUEST = '/"' . self::S . '+ \/' . self::S . '* [^"]*" [0-9]{3}/u';
@@ -119,7 +119,7 @@ final class Agents
      * One log line as a page fetch, or null. `$site` is the address pages live at
      * (https://example.com), for formats that do not record the host.
      *
-     * @return array{method: mixed, url: string, status: int|float, userAgent: string, at: int|float}|null
+     * @return array{method: mixed, url: string, status: int|float, userAgent: string, at: int|float, ip: string}|null
      */
     public static function parseLine(string $line, ?string $site = null): ?array
     {
@@ -153,7 +153,11 @@ final class Agents
                 if ($url === null) {
                     return null;
                 }
-                return ['method' => $method, 'url' => $url, 'status' => Js::number(self::either(self::at($entry, 'status'), 0)), 'userAgent' => Js::string($ua), 'at' => $at];
+                // client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the connection's.
+                $client = self::at($request, 'client_ip');
+                $remote = self::at($request, 'remote_ip');
+                $ip = is_string($client) ? $client : (is_string($remote) ? $remote : '');
+                return ['method' => $method, 'url' => $url, 'status' => Js::number(self::either(self::at($entry, 'status'), 0)), 'userAgent' => Js::string($ua), 'at' => $at, 'ip' => $ip];
             } catch (\JsonException|\TypeError) {
                 return null;
             }
@@ -167,15 +171,15 @@ final class Agents
         if ($base === null || $base === '') {
             return null;
         }
-        $url = self::pageUrl($m[4], $base);
-        return $url !== null ? ['method' => $m[3], 'url' => $url, 'status' => (int) $m[5], 'userAgent' => str_replace('\\"', '"', $m[6]), 'at' => self::logTime($m[2])] : null;
+        $url = self::pageUrl($m[5], $base);
+        return $url !== null ? ['method' => $m[4], 'url' => $url, 'status' => (int) $m[6], 'userAgent' => str_replace('\\"', '"', $m[7]), 'at' => self::logTime($m[3]), 'ip' => $m[2]] : null;
     }
 
     /**
      * The lines worth sending: GETs that succeeded, from known AI agents.
      *
      * @param (callable(): int)|null $now epoch milliseconds, for a line whose time cannot be read
-     * @return array{url: string, userAgent: string, at: int|float}|null
+     * @return array{url: string, userAgent: string, at: int|float, ip?: string}|null
      */
     public static function agentFetch(string $line, ?string $site = null, ?callable $now = null): ?array
     {
@@ -183,7 +187,11 @@ final class Agents
         if ($hit === null || $hit['method'] !== 'GET' || $hit['status'] < 200 || $hit['status'] >= 400 || Ua::aiAgent($hit['userAgent']) === null) {
             return null;
         }
-        return ['url' => $hit['url'], 'userAgent' => $hit['userAgent'], 'at' => is_finite((float) $hit['at']) ? $hit['at'] : ($now ?? self::clock(...))()];
+        $fetch = ['url' => $hit['url'], 'userAgent' => $hit['userAgent'], 'at' => is_finite((float) $hit['at']) ? $hit['at'] : ($now ?? self::clock(...))()];
+        if ($hit['ip'] !== '') {
+            $fetch['ip'] = $hit['ip'];
+        }
+        return $fetch;
     }
 
     private static function clock(): int
@@ -194,7 +202,7 @@ final class Agents
     /**
      * Sends one batch of fetches to /api/observe and returns how many Runlight kept.
      *
-     * @param list<array{url: string, userAgent: string, at: int|float}> $fetches
+     * @param list<array{url: string, userAgent: string, at: int|float, ip?: string}> $fetches
      */
     private static function send(array $options, Fetcher $fetcher, array $fetches): int|float
     {

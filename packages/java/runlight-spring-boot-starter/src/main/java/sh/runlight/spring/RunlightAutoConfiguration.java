@@ -76,6 +76,7 @@ public class RunlightAutoConfiguration {
       options.site(properties.getSite().toMap());
     }
     options.managedSites(properties.isManagedSites());
+    options.updateAgentRanges(properties.isUpdateAgentRanges());
     if (properties.getSecret() != null && !properties.getSecret().isBlank()) {
       options.secret(properties.getSecret());
     }

@@ -30,7 +30,7 @@ final class Cli
         project folder's. Settings are the standalone drop-in's, read from the
         environment first and then config.php: DATA_DIR, DATABASE_URL,
         RUNLIGHT_SECRET, RUNLIGHT_TOKEN, RUNLIGHT_URL, TRUST_PROXY, RUNLIGHT_GEO,
-        CRON_SECRET, and RUNLIGHT_OBSERVE_KEY.
+        CRON_SECRET, RUNLIGHT_OBSERVE_KEY, and RUNLIGHT_AGENT_RANGES.
 
         Run the check every five minutes from cron:
           */5 * * * * cd /path/to/project && vendor/bin/runlight cron

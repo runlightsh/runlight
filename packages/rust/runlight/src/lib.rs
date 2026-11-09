@@ -12,6 +12,7 @@ use std::pin::Pin;
 pub mod accounts;
 #[cfg(feature = "tower")]
 pub mod adapters;
+pub mod agentcheck;
 pub mod assets;
 pub mod assistant;
 pub mod brand;

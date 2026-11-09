@@ -28,9 +28,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 import sh.runlight.Fixtures;
 import sh.runlight.Js;
 import sh.runlight.Json;
+import sh.runlight.RecordingFetcher;
 import sh.runlight.Runlight;
 import sh.runlight.http.Headers;
 import sh.runlight.http.Request;
+import sh.runlight.http.Response;
 import sh.runlight.store.Databases;
 import sh.runlight.store.SqlStore;
 import sh.runlight.store.Stores;
@@ -441,11 +443,13 @@ class IngestTest {
             "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0)"));
     assertFalse(fetch.test("/", Harness.CHROME_MAC));
     Map<String, Object> today = t.today();
+    // With no address to check, the names rest on the user agent alone.
     assertEquals(
         loose(
             Json.array(
-                Json.object("value", "ChatGPT-User", "visitors", 0L, "fetches", 1L),
-                Json.object("value", "ClaudeBot", "visitors", 0L, "fetches", 1L))),
+                Json.object(
+                    "value", "ChatGPT-User", "visitors", 0L, "fetches", 1L, "claimed", true),
+                Json.object("value", "ClaudeBot", "visitors", 0L, "fetches", 1L, "claimed", true))),
         loose(t.store().breakdown(today, "ai_agent", 10, 0)));
     assertEquals(
         loose(Json.array(Json.object("value", "/blog/post", "visitors", 0L, "fetches", 2L))),
@@ -469,6 +473,136 @@ class IngestTest {
 
   private interface BiPredicate {
     boolean test(String path, String ua);
+  }
+
+  private static final String GPTBOT =
+      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)";
+
+  /** A GET of example.com/post that names an agent, from an address when one is given. */
+  private static Request agentRequest(String ua, String ip) {
+    Headers headers = Headers.of("user-agent", ua, "host", "example.com");
+    if (ip != null) {
+      headers.set("x-forwarded-for", ip);
+    }
+    return new Request("https://example.com/post", "GET", headers, "");
+  }
+
+  private static List<String> fetchTitles(Harness t) {
+    List<String> titles = new ArrayList<>();
+    for (Map<String, Object> row :
+        t.store().db().all("SELECT title FROM rl_events WHERE kind = 'fetch'")) {
+      titles.add((String) row.get("title"));
+    }
+    titles.sort(String::compareTo);
+    return titles;
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void anAiAgentsAddressIsCheckedAgainstItsCompanysListAndOnlyTheAnswerIsKept(String kind) {
+    Harness t = new Harness(kind);
+    String meta =
+        "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)";
+    t.rl.observe(agentRequest(GPTBOT, "20.171.206.17")); // in OpenAI's published GPTBot list
+    t.rl.observe(agentRequest(GPTBOT, "20.171.206.18"));
+    t.rl.observe(agentRequest(GPTBOT, "198.51.100.23")); // says GPTBot, comes from elsewhere
+    t.rl.observe(agentRequest(GPTBOT, null)); // no address to check
+    t.rl.observe(agentRequest(meta, "157.240.0.1")); // Meta publishes no list
+    // A log reader's or plugin's report names the agent's address itself; it never stands in for
+    // the reporter's.
+    t.rl.observe(
+        new Request(
+            "https://example.com/post",
+            "GET",
+            Headers.of("user-agent", GPTBOT, "x-forwarded-for", "198.51.100.40"),
+            ""),
+        null,
+        Map.of("agentIp", "20.171.206.99"));
+
+    assertEquals(
+        loose(
+            Json.array(
+                Json.object("value", "GPTBot", "visitors", 0L, "fetches", 3L, "claimed", false),
+                Json.object("value", "GPTBot", "visitors", 0L, "fetches", 2L, "claimed", true),
+                Json.object(
+                    "value",
+                    "meta-externalagent",
+                    "visitors",
+                    0L,
+                    "fetches",
+                    1L,
+                    "claimed",
+                    true))),
+        loose(t.store().breakdown(t.today(), "ai_agent", 10, 0)));
+    assertEquals(List.of("", "", "mismatch", "verified", "verified", "verified"), fetchTitles(t));
+    String dump = Json.stringify(t.store().db().all("SELECT * FROM rl_events"));
+    for (String ip :
+        List.of(
+            "20.171.206.17", "198.51.100.23", "157.240.0.1", "198.51.100.40", "20.171.206.99")) {
+      assertFalse(dump.contains(ip), "no address: " + ip);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void updateAgentRangesDownloadsTheListsOnceADayKeepsAGoodCopyAndSharesIt(String kind) {
+    List<String> asked = new ArrayList<>();
+    Response[] answer = {null};
+    java.util.function.Supplier<Response> good =
+        () ->
+            Response.json(
+                Json.object("prefixes", Json.array(Json.object("ipv4Prefix", "192.0.2.0/24"))));
+    RecordingFetcher fetcher =
+        new RecordingFetcher(
+            (url, init) -> {
+              asked.add(url);
+              return answer[0] != null ? answer[0] : good.get();
+            });
+    Harness t = new Harness(kind, new Runlight.Options().updateAgentRanges(true).fetcher(fetcher));
+    t.now = utc(2026, 11, 8, 12);
+    t.rl.check();
+    assertTrue(asked.contains("https://openai.com/gptbot.json"));
+    assertEquals("Runlight (+https://runlight.sh)", fetcher.inits.get(0).headers.get("user-agent"));
+    assertEquals(15_000L, fetcher.inits.get(0).timeoutMs);
+    assertEquals(4_000_000L, fetcher.inits.get(0).maxBytes);
+    int firstRound = asked.size();
+    t.rl.observe(agentRequest(GPTBOT, "192.0.2.7")); // in the downloaded list
+    // In the bundled list only, which the download replaced.
+    t.rl.observe(agentRequest(GPTBOT, "20.171.206.17"));
+    t.advance(Harness.HOUR);
+    t.rl.check();
+    assertEquals(firstRound, asked.size(), "not again within the day");
+
+    t.advance(DAY);
+    answer[0] = new Response("<html>maintenance</html>", 200);
+    t.rl.check();
+    assertEquals(firstRound * 2, asked.size(), "a day later it tries again");
+    t.rl.observe(agentRequest(GPTBOT, "192.0.2.8")); // the bad download kept the good copy
+
+    // Another process sharing the database uses the lists without downloading them.
+    RecordingFetcher otherFetcher = new RecordingFetcher();
+    Runlight other =
+        new Runlight(
+            new Runlight.Options()
+                .store(t.store())
+                .site(Map.of())
+                .fetcher(otherFetcher)
+                .now(() -> t.now));
+    other.check();
+    assertEquals(firstRound * 2, asked.size());
+    assertEquals(0, otherFetcher.requests.size());
+    other.observe(agentRequest(GPTBOT, "192.0.2.9"));
+
+    assertEquals(List.of("mismatch", "verified", "verified", "verified"), fetchTitles(t));
+  }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void withoutUpdateAgentRangesRunlightNeverDownloadsTheLists(String kind) {
+    RecordingFetcher fetcher = new RecordingFetcher((url, init) -> new Response("{}", 200));
+    Harness t = new Harness(kind, new Runlight.Options().fetcher(fetcher));
+    t.rl.check();
+    assertEquals(0, fetcher.requests.size());
   }
 
   @ParameterizedTest

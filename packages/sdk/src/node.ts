@@ -223,7 +223,7 @@ export function shortLinks(runlight: Runlight): (req: IncomingMessage, res: Serv
 export function observer(runlight: Runlight): (req: IncomingMessage, res: ServerResponse, next: NodeNext) => void {
   return (req, _res, next) => {
     if (req.method === "GET") {
-      void runlight.observe(new Request(toUrl(req as NodeRequest), { headers: headersOf(req) }));
+      void runlight.observe(new Request(toUrl(req as NodeRequest), { headers: headersOf(req) }), undefined, { ip: req.socket?.remoteAddress ?? "" });
     }
     next();
   };

@@ -3432,14 +3432,16 @@ public final class Routes {
       return r;
     }
     Map<String, Object> body = asMap(read);
-    // One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+    // One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log
+    // reader. ip is the address the agent's request came from, checked against its company's list
+    // and then dropped.
     Object fetches = Js.get(body, "fetches");
     boolean batch = fetches instanceof List<?>;
     List<?> list = batch ? (List<?>) fetches : List.of(body);
     if (list.size() > 500) {
       return coded("Send at most 500 fetches at a time", "observe_many", 413);
     }
-    record Page(Url page, String userAgent, Double at) {}
+    record Page(Url page, String userAgent, Double at, String ip) {}
     List<Page> pages = new ArrayList<>();
     for (Object item : list) {
       Function<String, Object> field =
@@ -3455,11 +3457,13 @@ public final class Routes {
               ? n.doubleValue()
               : at instanceof String s ? sh.runlight.importers.Http.parseDate(s) : Double.NaN;
       Object agent = field.apply("userAgent");
+      Object ip = field.apply("ip");
       pages.add(
           new Page(
               page,
               Js.slice(agent == null || agent == Json.UNDEFINED ? "" : Js.string(agent), 0, 500),
-              Double.isFinite(when) ? when : null));
+              Double.isFinite(when) ? when : null,
+              ip instanceof String address ? Js.slice(address, 0, 100) : ""));
     }
     rl.init();
     List<Page> keep = pages;
@@ -3480,11 +3484,13 @@ public final class Routes {
       }
     }
     long recorded = 0;
+    // A fetch reported without its address cannot be checked; it is never checked against the
+    // reporter's own.
     for (Page p : keep) {
       Request fetch =
           new Request(
               p.page().href(), "GET", Headers.of("user-agent", p.userAgent()), new byte[0], "");
-      if (rl.observe(fetch, p.at())) {
+      if (rl.observe(fetch, p.at(), Map.of("agentIp", p.ip()))) {
         recorded++;
       }
     }

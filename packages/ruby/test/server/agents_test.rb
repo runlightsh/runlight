@@ -82,7 +82,7 @@ class ServerAgentsTest < Minitest::Test
 
   def test_log_lines_nginx_and_apache_combined_a_vhost_column_and_caddys_json
     assert_equal({ "method" => "GET", "url" => "https://example.com/blog/post?x=1", "status" => 200, "userAgent" => GPTBOT,
-                   "at" => utc(2026, 10, 7, 17, 55, 36) },
+                   "at" => utc(2026, 10, 7, 17, 55, 36), "ip" => "203.0.113.9" },
                  Agents.parse_line(line("/blog/post?x=1", GPTBOT), "https://example.com"))
     assert_nil Agents.parse_line(line("/", GPTBOT)), "with no host anywhere there is no page to name"
     assert_equal "https://blog.example.com/",
@@ -91,7 +91,18 @@ class ServerAgentsTest < Minitest::Test
                           "request" => { "method" => "GET", "host" => "example.com", "uri" => "/docs/", "tls" => {},
                                          "headers" => { "User-Agent" => [CLAUDE] } } })
     assert_equal({ "method" => "GET", "url" => "https://example.com/docs/", "status" => 200, "userAgent" => CLAUDE,
-                   "at" => 1_791_399_336_500 }, Agents.parse_line(caddy))
+                   "at" => 1_791_399_336_500, "ip" => "" }, Agents.parse_line(caddy))
+    # Caddy's client_ip is the visitor after its trusted proxies; remote_ip is the connection.
+    behind_proxy = Json.encode({ "ts" => 1_791_399_336.5, "status" => 200,
+                                 "request" => { "method" => "GET", "host" => "example.com", "uri" => "/", "remote_ip" => "10.0.0.2",
+                                                "client_ip" => "216.73.216.10", "headers" => { "User-Agent" => [CLAUDE] } } })
+    assert_equal "216.73.216.10", Agents.parse_line(behind_proxy)["ip"]
+    direct = Json.encode({ "ts" => 1, "status" => 200,
+                           "request" => { "method" => "GET", "host" => "example.com", "uri" => "/", "remote_ip" => "216.73.216.11", "headers" => {} } })
+    assert_equal "216.73.216.11", Agents.parse_line(direct)["ip"]
+    assert_equal "203.0.113.9", Agents.parse_line(line("/", GPTBOT, 200, "GET", "07/Oct/2026:13:55:36 -0400", "blog.example.com:443"))["ip"],
+                 "after a vhost column"
+    assert_equal "203.0.113.9", Agents.agent_fetch(line("/", GPTBOT), "https://example.com")["ip"], "the address goes along for the check"
     assert_nil Agents.parse_line("not a log line")
     # A target is a path and query on the site, never read as an address: a backslash cannot name another host.
     assert_equal "https://example.com//evil.example/x?y=1",
@@ -375,7 +386,7 @@ class ServerAgentsTest < Minitest::Test
     assert_equal [0, "Sent 1 AI agent fetches from 1 new lines.\n", ""], [code, out, err]
     assert_equal "https://stats.example.com/api/observe", fetcher.requests[0]["url"]
     assert_equal "Bearer rlo_all", fetcher.requests[0]["headers"]["authorization"]
-    assert_equal({ "fetches" => [{ "url" => "https://example.com/a", "userAgent" => GPTBOT, "at" => utc(2026, 10, 7, 17, 55, 36) }] },
+    assert_equal({ "fetches" => [{ "url" => "https://example.com/a", "userAgent" => GPTBOT, "at" => utc(2026, 10, 7, 17, 55, 36), "ip" => "203.0.113.9" }] },
                  Json.decode(fetcher.requests[0]["body"]))
     saved = Json.decode(File.read("#{@dir}/state.json"))
     assert_equal ["ino", "offset", "head", "length"], saved.keys

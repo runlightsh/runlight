@@ -95,13 +95,19 @@ final class AgentsTest extends TestCase
     public function testLogLinesNginxAndApacheCombinedAVhostColumnAndCaddysJson(): void
     {
         self::assertSame(
-            ['method' => 'GET', 'url' => 'https://example.com/blog/post?x=1', 'status' => 200, 'userAgent' => self::GPTBOT, 'at' => self::utc(2026, 10, 7, 17, 55, 36)],
+            ['method' => 'GET', 'url' => 'https://example.com/blog/post?x=1', 'status' => 200, 'userAgent' => self::GPTBOT, 'at' => self::utc(2026, 10, 7, 17, 55, 36), 'ip' => '203.0.113.9'],
             Agents::parseLine(self::line('/blog/post?x=1', self::GPTBOT), 'https://example.com'),
         );
         self::assertNull(Agents::parseLine(self::line('/', self::GPTBOT)), 'with no host anywhere there is no page to name');
         self::assertSame('https://blog.example.com/', Agents::parseLine(self::line('/', self::GPTBOT, 200, 'GET', '07/Oct/2026:13:55:36 -0400', 'blog.example.com:443'))['url']);
         $caddy = Json::encode(['ts' => 1791399336.5, 'status' => 200, 'request' => ['method' => 'GET', 'host' => 'example.com', 'uri' => '/docs/', 'tls' => Json::object(), 'headers' => ['User-Agent' => [self::CLAUDE]]]]);
-        self::assertSame(['method' => 'GET', 'url' => 'https://example.com/docs/', 'status' => 200, 'userAgent' => self::CLAUDE, 'at' => 1791399336500], Agents::parseLine($caddy));
+        self::assertSame(['method' => 'GET', 'url' => 'https://example.com/docs/', 'status' => 200, 'userAgent' => self::CLAUDE, 'at' => 1791399336500, 'ip' => ''], Agents::parseLine($caddy));
+        // Caddy's client_ip is the visitor after its trusted proxies; remote_ip is the connection.
+        $behindProxy = Json::encode(['ts' => 1791399336.5, 'status' => 200, 'request' => ['method' => 'GET', 'host' => 'example.com', 'uri' => '/', 'remote_ip' => '10.0.0.2', 'client_ip' => '216.73.216.10', 'headers' => ['User-Agent' => [self::CLAUDE]]]]);
+        self::assertSame('216.73.216.10', Agents::parseLine($behindProxy)['ip']);
+        self::assertSame('216.73.216.11', Agents::parseLine(Json::encode(['ts' => 1, 'status' => 200, 'request' => ['method' => 'GET', 'host' => 'example.com', 'uri' => '/', 'remote_ip' => '216.73.216.11', 'headers' => Json::object()]]))['ip']);
+        self::assertSame('203.0.113.9', Agents::parseLine(self::line('/', self::GPTBOT, 200, 'GET', '07/Oct/2026:13:55:36 -0400', 'blog.example.com:443'))['ip'], 'after a vhost column');
+        self::assertSame('203.0.113.9', Agents::agentFetch(self::line('/', self::GPTBOT), 'https://example.com')['ip'] ?? null, 'the address goes along for the check');
         self::assertNull(Agents::parseLine('not a log line'));
         // A target is a path and query on the site, never read as an address: a backslash cannot name another host.
         self::assertSame('https://example.com//evil.example/x?y=1', Agents::parseLine(self::line('/\\evil.example/x?y=1', self::GPTBOT), 'https://example.com')['url']);
@@ -434,7 +440,7 @@ final class AgentsTest extends TestCase
         self::assertSame([0, "Sent 1 AI agent fetches from 1 new lines.\n", ''], [$code, $out, $err]);
         self::assertSame('https://stats.example.com/api/observe', $fetcher->requests[0]['url']);
         self::assertSame('Bearer rlo_all', $fetcher->requests[0]['headers']['authorization']);
-        self::assertSame(['fetches' => [['url' => 'https://example.com/a', 'userAgent' => self::GPTBOT, 'at' => self::utc(2026, 10, 7, 17, 55, 36)]]], Json::decode($fetcher->requests[0]['body'], true));
+        self::assertSame(['fetches' => [['url' => 'https://example.com/a', 'userAgent' => self::GPTBOT, 'at' => self::utc(2026, 10, 7, 17, 55, 36), 'ip' => '203.0.113.9']]], Json::decode($fetcher->requests[0]['body'], true));
         $saved = Json::decode((string) file_get_contents("{$this->dir}/state.json"), true);
         self::assertSame(['ino', 'offset', 'head', 'length'], array_keys($saved));
         self::assertSame(filesize($log), $saved['offset']);

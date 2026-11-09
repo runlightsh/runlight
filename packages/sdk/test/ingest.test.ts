@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
+import { runlight } from "../src/index.js";
 import { SAFARI_IPHONE, STORES, cleanup, setup as setupFor, type StoreKind } from "./helpers.js";
 
 after(cleanup);
@@ -226,14 +227,99 @@ test("AI agents are recorded as fetches by observe()", async () => {
   await fetch("/logo.png", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0)");
   await fetch("/", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36");
   const agents = (await t.get("/api/breakdown?period=today&dimension=ai_agent")).rows;
+  // With no address to check, the names rest on the user agent alone.
   assert.deepEqual(agents, [
-    { value: "ChatGPT-User", visitors: 0, fetches: 1 },
-    { value: "ClaudeBot", visitors: 0, fetches: 1 },
+    { value: "ChatGPT-User", visitors: 0, fetches: 1, claimed: true },
+    { value: "ClaudeBot", visitors: 0, fetches: 1, claimed: true },
   ]);
   const pages = (await t.get("/api/breakdown?period=today&dimension=ai_page")).rows;
   assert.deepEqual(pages, [{ value: "/blog/post", visitors: 0, fetches: 2 }]);
   const { stats } = await t.get("/api/stats?period=today");
   assert.equal(stats.visitors, 0, "fetches are not visits");
+});
+
+test("an AI agent's address is checked against its company's list, and only the answer is kept", async () => {
+  const t = setup();
+  const GPTBOT = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)";
+  const META = "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)";
+  const fetch = (ua: string, ip?: string) => t.rl.observe(new Request("https://example.com/post", { headers: { "user-agent": ua, host: "example.com", ...(ip ? { "x-forwarded-for": ip } : {}) } }));
+  await fetch(GPTBOT, "20.171.206.17"); // in OpenAI's published GPTBot list
+  await fetch(GPTBOT, "20.171.206.18");
+  await fetch(GPTBOT, "198.51.100.23"); // says GPTBot, comes from elsewhere
+  await fetch(GPTBOT); // no address to check
+  await fetch(META, "157.240.0.1"); // Meta publishes no list
+  // A log reader's or plugin's report names the agent's address itself; it never stands in for the reporter's.
+  await t.rl.observe(new Request("https://example.com/post", { headers: { "user-agent": GPTBOT, "x-forwarded-for": "198.51.100.40" } }), undefined, { agentIp: "20.171.206.99" });
+
+  const agents = (await t.get("/api/breakdown?period=today&dimension=ai_agent")).rows;
+  assert.deepEqual(agents, [
+    { value: "GPTBot", visitors: 0, fetches: 3, claimed: false },
+    { value: "GPTBot", visitors: 0, fetches: 2, claimed: true },
+    { value: "meta-externalagent", visitors: 0, fetches: 1, claimed: true },
+  ]);
+  const titles = (await t.rl.store.db.all<{ title: string }>("SELECT title FROM rl_events WHERE kind = 'fetch'")).map((r) => r.title).sort();
+  assert.deepEqual(titles, ["", "", "mismatch", "verified", "verified", "verified"]);
+  const dump = JSON.stringify(await t.rl.store.db.all("SELECT * FROM rl_events"));
+  for (const ip of ["20.171.206.17", "198.51.100.23", "157.240.0.1", "198.51.100.40", "20.171.206.99"]) assert.ok(!dump.includes(ip), `no address: ${ip}`);
+});
+
+// These replace globalThis.fetch, which the ClickHouse store itself talks through, so they run once, on SQLite.
+if (kind === "sqlite") test("updateAgentRanges downloads the lists once a day, keeps a good copy over a bad download, and shares it through the database", async () => {
+  let now = Date.UTC(2026, 10, 8, 12);
+  const asked: string[] = [];
+  let answer: (url: string) => Response = () => Response.json({ prefixes: [{ ipv4Prefix: "192.0.2.0/24" }] });
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    asked.push(url);
+    return answer(url);
+  }) as typeof fetch;
+  try {
+    const t = setup({ updateAgentRanges: true, now: () => now });
+    const GPTBOT = "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)";
+    const fetchFrom = (ip: string) => t.rl.observe(new Request("https://example.com/post", { headers: { "user-agent": GPTBOT, host: "example.com", "x-forwarded-for": ip } }));
+    await t.rl.check();
+    assert.ok(asked.includes("https://openai.com/gptbot.json"));
+    const firstRound = asked.length;
+    await fetchFrom("192.0.2.7"); // in the downloaded list
+    await fetchFrom("20.171.206.17"); // in the bundled list only, which the download replaced
+    now += 3_600_000;
+    await t.rl.check();
+    assert.equal(asked.length, firstRound, "not again within the day");
+
+    now += 86_400_000;
+    answer = () => new Response("<html>maintenance</html>", { status: 200 });
+    await t.rl.check();
+    assert.equal(asked.length, firstRound * 2, "a day later it tries again");
+    await fetchFrom("192.0.2.8"); // the bad download kept the good copy
+
+    // Another process sharing the database uses the lists without downloading them.
+    const other = runlight({ store: t.rl.store, site: {}, now: () => now });
+    await other.check();
+    assert.equal(asked.length, firstRound * 2);
+    await other.observe(new Request("https://example.com/post", { headers: { "user-agent": GPTBOT, host: "example.com", "x-forwarded-for": "192.0.2.9" } }));
+
+    const titles = (await t.rl.store.db.all<{ title: string }>("SELECT title FROM rl_events WHERE kind = 'fetch'")).map((r) => r.title).sort();
+    assert.deepEqual(titles, ["mismatch", "verified", "verified", "verified"]);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+if (kind === "sqlite") test("without updateAgentRanges, Runlight never downloads the lists", async () => {
+  const real = globalThis.fetch;
+  let asked = 0;
+  globalThis.fetch = (async () => {
+    asked++;
+    return new Response("{}");
+  }) as typeof fetch;
+  try {
+    const t = setup();
+    await t.rl.check();
+    assert.equal(asked, 0);
+  } finally {
+    globalThis.fetch = real;
+  }
 });
 
 test("several sites in one install, told apart by hostname", async () => {

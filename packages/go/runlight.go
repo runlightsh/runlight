@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"runlight.sh/go/internal/assets"
 	"runlight.sh/go/internal/assistant"
 	"runlight.sh/go/internal/js"
 	"runlight.sh/go/internal/mail"
@@ -114,6 +115,12 @@ type Options struct {
 	// services on its own machine, so other installs must be public https
 	// addresses.
 	LocalInstalls bool
+	// UpdateAgentRanges downloads the address lists AI companies publish, at
+	// most once a day during the scheduled check, so requests that name an
+	// agent are checked against current addresses. Default false: the lists
+	// that came with this version are used, and Runlight makes no requests of
+	// its own for them.
+	UpdateAgentRanges bool
 	// Logf reports what goes wrong where nothing can answer for it. nil logs to standard error.
 	Logf func(format string, args ...any)
 }
@@ -270,7 +277,11 @@ type Runlight struct {
 	// that the default trust did not believe, and been warned about once.
 	warnDirect atomic.Bool
 	// observing counts AI agent fetches the Observer is still recording.
-	observing atomic.Int32
+	observing         atomic.Int32
+	updateAgentRanges bool
+	// agentRanges is the agents' address lists in use: downloaded ones from the database when there are
+	// any, else those that came with this version.
+	agentRanges atomic.Pointer[rangeLists]
 
 	// busy counts work running after the answer, which Idle waits for. A
 	// WaitGroup cannot take an Add while a Wait is going on, and requests
@@ -321,21 +332,22 @@ func New(options Options) (*Runlight, error) {
 		return nil, errors.New(`Runlight: pass a store, such as runlight.NewStore(runlight.SQLite(db))`)
 	}
 	r := &Runlight{
-		Store:         options.Store,
-		ManagedSites:  options.ManagedSites,
-		LocalInstalls: options.LocalInstalls,
-		now:           options.Now,
-		fetcher:       options.Fetcher,
-		logf:          options.Logf,
-		geo:           options.Geo,
-		mailCode:      options.Mail,
-		appMailer:     options.AppMailer,
-		turns:         map[string]*turn{},
-		overrides:     map[string]*js.Object{},
-		remotes:       map[string]Remote{},
-		remoteSeen:    map[string]RemoteInfo{},
-		routeBases:    map[string]bool{},
-		salts:         map[string]salts{},
+		Store:             options.Store,
+		ManagedSites:      options.ManagedSites,
+		LocalInstalls:     options.LocalInstalls,
+		updateAgentRanges: options.UpdateAgentRanges,
+		now:               options.Now,
+		fetcher:           options.Fetcher,
+		logf:              options.Logf,
+		geo:               options.Geo,
+		mailCode:          options.Mail,
+		appMailer:         options.AppMailer,
+		turns:             map[string]*turn{},
+		overrides:         map[string]*js.Object{},
+		remotes:           map[string]Remote{},
+		remoteSeen:        map[string]RemoteInfo{},
+		routeBases:        map[string]bool{},
+		salts:             map[string]salts{},
 	}
 	if r.now == nil {
 		r.now = func() int64 { return time.Now().UnixMilli() }
@@ -343,6 +355,7 @@ func New(options Options) (*Runlight, error) {
 	if r.fetcher == nil {
 		r.fetcher = web.HTTPFetcher{}
 	}
+	r.agentRanges.Store(&bundledRanges)
 	if r.logf == nil {
 		logger := log.New(os.Stderr, "", 0)
 		r.logf = logger.Printf
@@ -2133,8 +2146,23 @@ var pageExtension = regexp.MustCompile(`\.([A-Za-z0-9]+)$`)
 // for every page request; it ignores everything else and never fails. at is
 // when a log says the page was served, or nil for now. Agents do not run
 // JavaScript, so the tracker cannot see them.
+//
+// The request's address (ClientIP, as for tracker hits) is checked against
+// the list the agent's company publishes and then dropped: only "verified",
+// "mismatch", or "" is kept with the fetch.
 func (r *Runlight) Observe(ctx context.Context, request *Request, at *float64) bool {
-	ok, err := r.observe(ctx, request, at)
+	return r.observeLogged(ctx, request, at, nil)
+}
+
+// ObserveReport is Observe for a fetch a log reader or plugin reports: ip is
+// the address the agent's request came from, "" when the report has none,
+// and the request's own address (the reporter's) is never checked in its place.
+func (r *Runlight) ObserveReport(ctx context.Context, request *Request, at *float64, ip string) bool {
+	return r.observeLogged(ctx, request, at, &ip)
+}
+
+func (r *Runlight) observeLogged(ctx context.Context, request *Request, at *float64, agentIP *string) bool {
+	ok, err := r.observe(ctx, request, at, agentIP)
 	if err != nil {
 		// Analytics must never break the page it watches, but a failure should still be seen.
 		r.logf("Runlight: could not record an AI agent fetch %v", err)
@@ -2143,7 +2171,7 @@ func (r *Runlight) Observe(ctx context.Context, request *Request, at *float64) b
 	return ok
 }
 
-func (r *Runlight) observe(ctx context.Context, request *Request, at *float64) (bool, error) {
+func (r *Runlight) observe(ctx context.Context, request *Request, at *float64, agentIP *string) (bool, error) {
 	if request.Method != "GET" {
 		return false, nil
 	}
@@ -2185,8 +2213,17 @@ func (r *Runlight) observe(ctx context.Context, request *Request, at *float64) (
 	if finite && *at <= float64(now) {
 		ts = int64(math.Floor(*at))
 	}
+	ip := ""
+	if agentIP != nil {
+		ip = *agentIP
+	} else {
+		ip = r.ClientIP(request)
+	}
+	// A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when there was
+	// nothing to check against. The address itself is not kept.
+	title := checkCompiled(agent, ip, *r.agentRanges.Load())
 	return true, r.Store.InsertEvent(ctx, EventRow{Site: site.ID, Ts: ts, Kind: "fetch", Path: head16(u.Pathname, 1000), Hostname: StripWww(u.Hostname),
-		Name: agent.Name, Props: js.NewObject("company", agent.Company, "kind", agent.Kind)})
+		Title: title, Name: agent.Name, Props: js.NewObject("company", agent.Company, "kind", agent.Kind)})
 }
 
 // CheckResult is what a scheduled check did.
@@ -2253,6 +2290,9 @@ func (r *Runlight) runCheck(ctx context.Context) (CheckResult, error) {
 	}
 	r.mu.Lock()
 	r.overrides = overrides
+	r.mu.Unlock()
+	r.refreshAgentRanges(ctx)
+	r.mu.Lock()
 	r.salts = map[string]salts{}
 	r.mu.Unlock()
 	seen := map[string]bool{}
@@ -2291,4 +2331,66 @@ func (r *Runlight) runCheck(ctx context.Context) (CheckResult, error) {
 		return CheckResult{}, err
 	}
 	return CheckResult{OK: true, Reports: reports}, nil
+}
+
+// agentRangesEvery is how often the scheduled check downloads the agents' address lists, when
+// UpdateAgentRanges is on.
+const agentRangesEvery = 86_400_000
+
+// agentRangesTimeout is how long one list's download may take.
+var agentRangesTimeout = 15 * time.Second
+
+// refreshAgentRanges uses the agents' address lists downloaded by any process sharing this database, and
+// downloads them again when UpdateAgentRanges is on and the last try was a day ago or more. A list that
+// cannot be fetched or read keeps the copy it replaces; a failed day is not retried until the next day.
+func (r *Runlight) refreshAgentRanges(ctx context.Context) {
+	stored, has, err := r.Store.Setting(ctx, "agent-ranges")
+	if err != nil {
+		r.logf("Runlight: could not update the AI agents' address lists %v", err)
+		return
+	}
+	var saved map[string][]string
+	savedAt := 0.0
+	if has {
+		if parsed, err := js.Parse(stored); err == nil && parsed != nil {
+			saved = map[string][]string{}
+			if o, ok := parsed.(*js.Object); ok {
+				if n := js.ToNumber(o.Value("at")); !math.IsNaN(n) {
+					savedAt = n
+				}
+				if lists, ok := o.Value("lists").(*js.Object); ok {
+					lists.Each(func(url string, list any) {
+						if prefixes, ok := rangeListOf(list); ok {
+							saved[url] = prefixes
+						}
+					})
+				}
+			}
+		}
+	}
+	if r.updateAgentRanges && (saved == nil || float64(r.now())-savedAt >= agentRangesEvery) {
+		lists := map[string][]string{}
+		for url, list := range saved {
+			lists[url] = list
+		}
+		for _, url := range assets.AgentRangeOrder {
+			if fresh, ok := downloadRangeList(ctx, r.fetcher, url, agentRangesTimeout); ok {
+				lists[url] = fresh
+			}
+		}
+		saved = lists
+		value := js.Stringify(js.NewObject("at", r.now(), "lists", lists))
+		if err := r.Store.SetSetting(ctx, "agent-ranges", &value); err != nil {
+			r.logf("Runlight: could not update the AI agents' address lists %v", err)
+			return
+		}
+	}
+	inUse := rangeLists{}
+	for url, list := range bundledRanges {
+		inUse[url] = list
+	}
+	for url, list := range compileRanges(saved) {
+		inUse[url] = list
+	}
+	r.agentRanges.Store(&inUse)
 }

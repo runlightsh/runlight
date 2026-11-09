@@ -13,6 +13,7 @@ require_relative "runlight/undefined"
 #
 # Every class loads on first use.
 module Runlight
+  autoload :AgentCheck, "runlight/agent_check"
   autoload :Assistant, "runlight/assistant"
   autoload :AssistantError, "runlight/assistant_error"
   autoload :Body, "runlight/body"

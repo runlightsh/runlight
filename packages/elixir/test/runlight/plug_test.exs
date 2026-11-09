@@ -79,6 +79,16 @@ defmodule Runlight.PlugTest do
   defp redirected?(conn),
     do: conn.status in [301, 302, 307, 308] and get_resp_header(conn, "location") == ["https://example.org/deal"]
 
+  test "the observer checks an AI agent from the connection's address, and keeps only the answer" do
+    gptbot = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+    from = fn ip -> call(%{conn(:get, "/post") | remote_ip: ip} |> put_req_header("user-agent", gptbot)) end
+    assert from.({20, 171, 206, 17}).resp_body == "the app"
+    assert from.({198, 51, 100, 23}).resp_body == "the app"
+    rl = Runlight.instance(Runlight.PlugTest.RL)
+    rows = Runlight.Db.all(rl.store.db, "SELECT title FROM rl_events WHERE kind = 'fetch' ORDER BY title", [])
+    assert Enum.map(rows, & &1["title"]) == ["mismatch", "verified"]
+  end
+
   test "the observer answers a link domain before the app and leaves the app's own host to it" do
     link_domain!()
     assert redirected?(Router.call(conn(:get, "/deal") |> on("go.example.org"), Router.init([])))

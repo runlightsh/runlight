@@ -175,6 +175,30 @@ class CliTest {
   }
 
   @Test
+  void theAgentRangesDownloadIsOnUnlessTurnedOffAndAnythingElseIsRefused() throws IOException {
+    configure("RUNLIGHT_GEO=off");
+    try (Config config = new Config(root)) {
+      assertTrue(config.updateAgentRanges());
+      assertTrue(config.options(false).updateAgentRanges, "the server downloads them by default");
+    }
+    configure("RUNLIGHT_GEO=off", "RUNLIGHT_AGENT_RANGES=on");
+    try (Config config = new Config(root)) {
+      assertTrue(config.updateAgentRanges());
+    }
+    configure("RUNLIGHT_GEO=off", "RUNLIGHT_AGENT_RANGES = off");
+    try (Config config = new Config(root)) {
+      assertFalse(config.updateAgentRanges());
+      assertFalse(config.options(false).updateAgentRanges);
+    }
+    configure("RUNLIGHT_GEO=off", "RUNLIGHT_AGENT_RANGES=yes");
+    try (Config config = new Config(root)) {
+      IllegalStateException wrong =
+          assertThrows(IllegalStateException.class, config::updateAgentRanges);
+      assertEquals("Set RUNLIGHT_AGENT_RANGES to on or off", wrong.getMessage());
+    }
+  }
+
+  @Test
   void theSetupCodeIsWrittenDownOnceAndUnlocksTheFirstAccount() throws IOException {
     configure("RUNLIGHT_URL=https://stats.example.com", "RUNLIGHT_GEO=off");
     String text;

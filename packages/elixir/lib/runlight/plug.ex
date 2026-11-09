@@ -389,7 +389,16 @@ if Code.ensure_loaded?(Plug.Conn) do
       host = Enum.find_value(conn.req_headers, conn.host, fn {k, v} -> if k == "host", do: v end)
       query = if conn.query_string == "", do: "", else: "?" <> conn.query_string
       url = "#{Runlight.Plug.scheme(conn)}://#{host}#{conn.request_path}#{query}"
-      Runlight.observe(rl, %Runlight.Http.Request{url: url, method: "GET", headers: conn.req_headers, ref: make_ref()})
+      address = conn.remote_ip |> :inet.ntoa() |> to_string()
+
+      Runlight.observe(rl, %Runlight.Http.Request{
+        url: url,
+        method: "GET",
+        headers: conn.req_headers,
+        remote_address: address,
+        ref: make_ref()
+      })
+
       conn
     end
   end

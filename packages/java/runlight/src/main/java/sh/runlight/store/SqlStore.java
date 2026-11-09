@@ -2843,17 +2843,39 @@ public final class SqlStore implements AutoCloseable {
       Map<String, Object> query, String dimension, int limit, int offset) {
     List<Object> page = list(limit, offset);
     String dialect = db.dialect();
-    if (dimension.equals("ai_agent") || dimension.equals("ai_page")) {
-      String col = dimension.equals("ai_agent") ? "e.name" : "e.path";
+    if (dimension.equals("ai_agent")) {
+      // A fetch's title holds its address check (see Runlight.observe); only "verified" is not
+      // claimed.
+      String claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END";
       List<Map<String, Object>> rows =
           db.all(
-              "SELECT "
-                  + col
-                  + " AS value, COUNT(*) AS fetches FROM rl_events e\n         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'\n"
-                  + "         GROUP BY "
-                  + col
-                  + " ORDER BY fetches DESC, "
-                  + col
+              "SELECT e.name AS value, "
+                  + claimed
+                  + " AS claimed, COUNT(*) AS fetches FROM rl_events e\n         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'\n"
+                  + "         GROUP BY e.name, "
+                  + claimed
+                  + " ORDER BY fetches DESC, e.name"
+                  + textOrder()
+                  + ", claimed LIMIT ? OFFSET ?",
+              concat(list(site(query), from(query), to(query)), page));
+      return map(
+          rows,
+          row ->
+              Json.object(
+                  "value",
+                  text(row.get("value")),
+                  "visitors",
+                  0L,
+                  "fetches",
+                  num(row.get("fetches")),
+                  "claimed",
+                  dnum(row.get("claimed")) == 1));
+    }
+    if (dimension.equals("ai_page")) {
+      List<Map<String, Object>> rows =
+          db.all(
+              "SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e\n         WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'\n"
+                  + "         GROUP BY e.path ORDER BY fetches DESC, e.path"
                   + textOrder()
                   + " LIMIT ? OFFSET ?",
               concat(list(site(query), from(query), to(query)), page));

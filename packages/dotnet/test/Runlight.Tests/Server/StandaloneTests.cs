@@ -15,7 +15,7 @@ namespace Runlight.Tests.Server;
 /// </summary>
 public abstract class ServerTestCase : IAsyncLifetime
 {
-    private static readonly string[] Names = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV", "RUNLIGHT_URL", "RUNLIGHT_GEO", "DATA_DIR", "DATABASE_URL", "TRUST_PROXY", "RUNLIGHT_CONFIG", "PORT", "HOST"];
+    private static readonly string[] Names = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV", "RUNLIGHT_URL", "RUNLIGHT_GEO", "DATA_DIR", "DATABASE_URL", "TRUST_PROXY", "RUNLIGHT_CONFIG", "PORT", "HOST", "RUNLIGHT_AGENT_RANGES"];
     private readonly Dictionary<string, string?> _saved = [];
 
     public virtual ValueTask InitializeAsync()

@@ -1390,10 +1390,11 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       }
       const body = await readJson(request);
       if (body instanceof Response) return body;
-      // One fetch as { url, userAgent, at? }, or up to 500 as { fetches: [...] } from a log reader.
+      // One fetch as { url, userAgent, at?, ip? }, or up to 500 as { fetches: [...] } from a log reader. ip is
+      // the address the agent's request came from, checked against its company's list and then dropped.
       const list = Array.isArray(body.fetches) ? (body.fetches as Array<Record<string, unknown>>) : [body];
       if (list.length > 500) return coded("Send at most 500 fetches at a time", "observe_many", 413);
-      const pages: Array<{ page: URL; userAgent: string; at?: number }> = [];
+      const pages: Array<{ page: URL; userAgent: string; at?: number; ip?: string }> = [];
       for (const item of list) {
         let page: URL;
         try {
@@ -1403,7 +1404,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         }
         if (page.protocol !== "https:" && page.protocol !== "http:") return coded("Send the page's url", "observe_url", 400);
         const at = typeof item.at === "number" ? item.at : typeof item.at === "string" ? Date.parse(item.at) : undefined;
-        pages.push({ page, userAgent: String(item.userAgent ?? "").slice(0, 500), ...(at !== undefined && Number.isFinite(at) ? { at } : {}) });
+        const ip = typeof item.ip === "string" ? item.ip.slice(0, 100) : undefined;
+        pages.push({ page, userAgent: String(item.userAgent ?? "").slice(0, 500), ...(at !== undefined && Number.isFinite(at) ? { at } : {}), ...(ip ? { ip } : {}) });
       }
       await runlight.init();
       let keep = pages;
@@ -1415,7 +1417,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (!Array.isArray(body.fetches) && keep.length === 0) return coded("Unauthorized", "unauthorized", 401);
       }
       let recorded = 0;
-      for (const p of keep) if (await runlight.observe(new Request(p.page, { headers: { "user-agent": p.userAgent } }), p.at)) recorded++;
+      // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
+      for (const p of keep) if (await runlight.observe(new Request(p.page, { headers: { "user-agent": p.userAgent } }), p.at, { agentIp: p.ip ?? "" })) recorded++;
       // A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
       if (!Array.isArray(body.fetches)) return new Response(null, { status: 204 });
       return json({ recorded, skipped: pages.length - recorded });

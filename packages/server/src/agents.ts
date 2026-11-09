@@ -19,6 +19,8 @@ export interface Fetch {
   url: string;
   userAgent: string;
   at: number;
+  /** The address the request came from, sent so the server can check the agent's published list. */
+  ip?: string;
 }
 
 /**
@@ -52,19 +54,23 @@ function logTime(value: string): number {
 }
 
 // host? ip - user [time] "METHOD /path HTTP/x" status bytes "referrer" "user agent"
-const COMBINED = /^(?:(\S+) )?\S+ \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) \S+ "(?:[^"\\]|\\.)*" "((?:[^"\\]|\\.)*)"/;
+const COMBINED = /^(?:(\S+) )?(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) \S+ "(?:[^"\\]|\\.)*" "((?:[^"\\]|\\.)*)"/;
 
 /**
  * One log line as a page fetch, or null. `site` is the address pages live at
  * (https://example.com), for formats that do not record the host.
  */
-export function parseLine(line: string, site?: string): { method: string; url: string; status: number; userAgent: string; at: number } | null {
+export function parseLine(line: string, site?: string): { method: string; url: string; status: number; userAgent: string; at: number; ip: string } | null {
   const text = line.trim();
   if (!text) return null;
   if (text.startsWith("{")) {
     // Caddy: {"ts": 1696..., "request": {"method", "host", "uri", "headers": {"User-Agent": [...]}}, "status": 200}
     try {
-      const entry = JSON.parse(text) as { ts?: number | string; status?: number; request?: { method?: string; host?: string; uri?: string; proto?: string; tls?: unknown; headers?: Record<string, string[]> } };
+      const entry = JSON.parse(text) as {
+        ts?: number | string;
+        status?: number;
+        request?: { method?: string; host?: string; uri?: string; proto?: string; tls?: unknown; headers?: Record<string, string[]>; client_ip?: unknown; remote_ip?: unknown };
+      };
       const request = entry.request;
       if (!request?.uri || !request.method) return null;
       const host = request.host ? `${request.tls ? "https" : site?.startsWith("http://") ? "http" : "https"}://${request.host}` : site;
@@ -73,7 +79,9 @@ export function parseLine(line: string, site?: string): { method: string; url: s
       const at = typeof entry.ts === "number" ? entry.ts * 1000 : Date.parse(String(entry.ts ?? ""));
       const url = pageUrl(request.uri, host);
       if (!url) return null;
-      return { method: request.method, url, status: Number(entry.status ?? 0), userAgent: ua, at };
+      // client_ip is the visitor's address after Caddy's trusted proxies; remote_ip is the connection's.
+      const ip = typeof request.client_ip === "string" ? request.client_ip : typeof request.remote_ip === "string" ? request.remote_ip : "";
+      return { method: request.method, url, status: Number(entry.status ?? 0), userAgent: ua, at, ip };
     } catch {
       return null;
     }
@@ -84,15 +92,15 @@ export function parseLine(line: string, site?: string): { method: string; url: s
   const vhost = m[1] && /[a-z]/i.test(m[1]) && !/^[\d.:]+$/.test(m[1]) ? m[1].replace(/:\d+$/, "") : null;
   const base = vhost ? `https://${vhost}` : site;
   if (!base) return null;
-  const url = pageUrl(m[4]!, base);
-  return url ? { method: m[3]!, url, status: Number(m[5]), userAgent: m[6]!.replace(/\\"/g, '"'), at: logTime(m[2]!) } : null;
+  const url = pageUrl(m[5]!, base);
+  return url ? { method: m[4]!, url, status: Number(m[6]), userAgent: m[7]!.replace(/\\"/g, '"'), at: logTime(m[3]!), ip: m[2]! } : null;
 }
 
 /** The lines worth sending: GETs that succeeded, from known AI agents. */
 export function agentFetch(line: string, site?: string): Fetch | null {
   const hit = parseLine(line, site);
   if (!hit || hit.method !== "GET" || hit.status < 200 || hit.status >= 400 || !aiAgent(hit.userAgent)) return null;
-  return { url: hit.url, userAgent: hit.userAgent, at: Number.isFinite(hit.at) ? hit.at : Date.now() };
+  return { url: hit.url, userAgent: hit.userAgent, at: Number.isFinite(hit.at) ? hit.at : Date.now(), ...(hit.ip ? { ip: hit.ip } : {}) };
 }
 
 export interface AgentsOptions {

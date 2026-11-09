@@ -27,7 +27,8 @@ class RunlightServer:
 
     Options (the TS ServerOptions names): store, secret (signs sessions and encrypts saved keys; keep it stable),
     token (also accepted as a bearer token on the API), url (the dashboard's public address, which can never
-    become a link domain), trustProxy (default True), geo, geoCredit, now, and fetcher. setupCode replaces the
+    become a link domain), trustProxy (default True), geo, geoCredit, updateAgentRanges (download the address lists AI
+    companies publish once a day, to check AI agent fetches against; default False), now, and fetcher. setupCode replaces the
     one-time code made at start, for a server whose code is kept in a file."""
 
     def __init__(self, options: Mapping[str, Any]) -> None:
@@ -51,6 +52,7 @@ class RunlightServer:
             "store": self._store,
             "managedSites": True,
             "secret": options["secret"],
+            "updateAgentRanges": bool(options.get("updateAgentRanges", False)),
             "now": now,
         }
         # Left out when it was not given, so Runlight's default applies: forwarding headers count only from a private address.

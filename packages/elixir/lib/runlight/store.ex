@@ -2421,23 +2421,43 @@ defmodule Runlight.Store do
   def breakdown(store, query, dimension, limit, offset) do
     page = [limit, offset]
 
-    if dimension in ["ai_agent", "ai_page"] do
-      col = if dimension == "ai_agent", do: "e.name", else: "e.path"
+    case dimension do
+      "ai_agent" ->
+        # A fetch's title holds its address check (see Runlight.observe/4); only "verified" is not claimed.
+        claimed = "CASE WHEN e.title = 'verified' THEN 0 ELSE 1 END"
 
-      rows =
-        all(
-          store,
-          """
-          SELECT #{col} AS value, COUNT(*) AS fetches FROM rl_events e
-                 WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
-                 GROUP BY #{col} ORDER BY fetches DESC, #{col}#{text_order(store)} LIMIT ? OFFSET ?\
-          """,
-          [query.site, query.from, query.to] ++ page
+        rows =
+          all(
+            store,
+            """
+            SELECT e.name AS value, #{claimed} AS claimed, COUNT(*) AS fetches FROM rl_events e
+                   WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+                   GROUP BY e.name, #{claimed} ORDER BY fetches DESC, e.name#{text_order(store)}, claimed LIMIT ? OFFSET ?\
+            """,
+            [query.site, query.from, query.to] ++ page
+          )
+
+        Enum.map(
+          rows,
+          &JS.obj(value: str(&1["value"]), visitors: 0, fetches: num(&1["fetches"]), claimed: num(&1["claimed"]) == 1)
         )
 
-      Enum.map(rows, &JS.obj(value: str(&1["value"]), visitors: 0, fetches: num(&1["fetches"])))
-    else
-      rolled_breakdown(store, query, dimension, limit, offset) || raw_breakdown(store, query, dimension, page)
+      "ai_page" ->
+        rows =
+          all(
+            store,
+            """
+            SELECT e.path AS value, COUNT(*) AS fetches FROM rl_events e
+                   WHERE e.site = ? AND e.ts >= ? AND e.ts < ? AND e.kind = 'fetch'
+                   GROUP BY e.path ORDER BY fetches DESC, e.path#{text_order(store)} LIMIT ? OFFSET ?\
+            """,
+            [query.site, query.from, query.to] ++ page
+          )
+
+        Enum.map(rows, &JS.obj(value: str(&1["value"]), visitors: 0, fetches: num(&1["fetches"])))
+
+      _ ->
+        rolled_breakdown(store, query, dimension, limit, offset) || raw_breakdown(store, query, dimension, page)
     end
   end
 

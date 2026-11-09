@@ -88,6 +88,9 @@ public final class Standalone {
    *       when set, has the page that asks for it say the link is in the file setup.txt.
    *   <li>cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
    *   <li>observeKey: one key for every site's AI agent reports.
+   *   <li>updateAgentRanges: download the address lists AI companies publish once a day, to check
+   *       AI agent fetches against. Default false here; {@code runlight serve} turns it on unless
+   *       RUNLIGHT_AGENT_RANGES is off.
    *   <li>now, fetcher: the clock and outgoing requests, for tests.
    * </ul>
    */
@@ -105,6 +108,7 @@ public final class Standalone {
     public String setupWhere;
     public String cronSecret;
     public String observeKey;
+    public boolean updateAgentRanges;
 
     public Options store(SqlStore value) {
       store = value;
@@ -170,6 +174,11 @@ public final class Standalone {
       observeKey = value;
       return this;
     }
+
+    public Options updateAgentRanges(boolean value) {
+      updateAgentRanges = value;
+      return this;
+    }
   }
 
   public final Runlight runlight;
@@ -195,7 +204,12 @@ public final class Standalone {
     this.publicHost = publicUrl != null ? Routes.hostName(publicUrl.host()) : null;
 
     Runlight.Options settings =
-        new Runlight.Options().store(store).managedSites(true).secret(options.secret).now(now);
+        new Runlight.Options()
+            .store(store)
+            .managedSites(true)
+            .secret(options.secret)
+            .updateAgentRanges(options.updateAgentRanges)
+            .now(now);
     // Unset stays unset, so the library's default applies: forwarding headers count only from a
     // private address.
     if (options.trustProxy != null) {

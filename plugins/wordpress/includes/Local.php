@@ -444,9 +444,10 @@ final class Local {
 	 *
 	 * @param string $url   The page the agent fetched.
 	 * @param string $agent The agent's user agent.
+	 * @param string $ip    The agent's address, checked against its company's list and then dropped.
 	 */
-	public static function observe( string $url, string $agent ): void {
+	public static function observe( string $url, string $agent, string $ip = '' ): void {
 		Library::load();
-		self::runlight()->observe( new Request( $url, 'GET', array( 'user-agent' => $agent ) ) );
+		self::runlight()->observe( new Request( $url, 'GET', array( 'user-agent' => $agent ) ), null, array( 'ip' => $ip ) );
 	}
 }

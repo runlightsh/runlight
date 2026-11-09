@@ -121,7 +121,15 @@ defmodule Runlight.PureTest do
           agent = Ua.ai_agent(c["ua"]),
           got =
             JS.obj(
-              agent: agent && JS.obj(name: agent.name, company: agent.company, kind: agent.kind, token: agent.token),
+              agent:
+                agent &&
+                  JS.obj(
+                    name: agent.name,
+                    company: agent.company,
+                    kind: agent.kind,
+                    token: agent.token,
+                    ranges: Map.get(agent, :ranges, :undefined)
+                  ),
               bot: Ua.bot?(c["ua"]),
               client:
                 JS.obj(

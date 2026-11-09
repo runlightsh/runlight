@@ -125,6 +125,25 @@ class ServerCliTest < Minitest::Test
     assert_includes error.message, "must return a Hash of settings"
   end
 
+  def test_the_ai_agents_address_lists_are_downloaded_unless_runlight_agent_ranges_is_off
+    configure({ "RUNLIGHT_GEO" => "off" })
+    assert_equal true, Config.new(@root).agent_ranges, "on by default"
+    server = Config.new(@root).standalone({}, false)
+    assert_equal true, server.runlight.instance_variable_get(:@update_agent_ranges)
+    configure({ "RUNLIGHT_GEO" => "off", "RUNLIGHT_AGENT_RANGES" => "on" })
+    assert_equal true, Config.new(@root).agent_ranges
+    configure({ "RUNLIGHT_GEO" => "off", "RUNLIGHT_AGENT_RANGES" => "off" })
+    assert_equal false, Config.new(@root).agent_ranges
+    server = Config.new(@root).standalone({}, false)
+    assert_equal false, server.runlight.instance_variable_get(:@update_agent_ranges)
+    configure({ "RUNLIGHT_GEO" => "off", "RUNLIGHT_AGENT_RANGES" => "sometimes" })
+    error = assert_raises(RuntimeError) { Config.new(@root).standalone({}, false) }
+    assert_equal "Runlight: set RUNLIGHT_AGENT_RANGES to on or off", error.message
+    # The Standalone server on its own, as the Node one is, leaves them off.
+    standalone = Runlight::Server::Standalone.new({ "store" => Runlight::Stores.sqlite(":memory:"), "secret" => "s" * 32 })
+    assert_equal false, standalone.runlight.instance_variable_get(:@update_agent_ranges)
+  end
+
   def test_the_setup_code_is_written_down_once_and_unlocks_the_first_account
     configure({ "RUNLIGHT_URL" => "https://stats.example.com", "RUNLIGHT_GEO" => "off" })
     config = Config.new(@root)

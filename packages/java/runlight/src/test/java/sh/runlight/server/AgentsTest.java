@@ -203,7 +203,9 @@ class AgentsTest {
                 "userAgent",
                 GPTBOT,
                 "at",
-                utc(2026, 10, 7, 17, 55, 36))),
+                utc(2026, 10, 7, 17, 55, 36),
+                "ip",
+                "203.0.113.9")),
         Json.stringify(Agents.parseLine(line("/blog/post?x=1", GPTBOT), "https://example.com")));
     assertNull(
         Agents.parseLine(line("/", GPTBOT)), "with no host anywhere there is no page to name");
@@ -241,8 +243,63 @@ class AgentsTest {
                 "userAgent",
                 CLAUDE,
                 "at",
-                1791399336500L)),
+                1791399336500L,
+                "ip",
+                "")),
         Json.stringify(Agents.parseLine(caddy)));
+    // Caddy's client_ip is the visitor after its trusted proxies; remote_ip is the connection.
+    String behindProxy =
+        Json.stringify(
+            Json.object(
+                "ts",
+                1791399336.5,
+                "status",
+                200L,
+                "request",
+                Json.object(
+                    "method",
+                    "GET",
+                    "host",
+                    "example.com",
+                    "uri",
+                    "/",
+                    "remote_ip",
+                    "10.0.0.2",
+                    "client_ip",
+                    "216.73.216.10",
+                    "headers",
+                    Json.object("User-Agent", Json.array(CLAUDE)))));
+    assertEquals("216.73.216.10", Agents.parseLine(behindProxy).get("ip"));
+    assertEquals(
+        "216.73.216.11",
+        Agents.parseLine(
+                Json.stringify(
+                    Json.object(
+                        "ts",
+                        1L,
+                        "status",
+                        200L,
+                        "request",
+                        Json.object(
+                            "method",
+                            "GET",
+                            "host",
+                            "example.com",
+                            "uri",
+                            "/",
+                            "remote_ip",
+                            "216.73.216.11",
+                            "headers",
+                            Json.object()))))
+            .get("ip"));
+    assertEquals(
+        "203.0.113.9",
+        Agents.parseLine(line("/", GPTBOT, 200, "GET", TIME, "blog.example.com:443")).get("ip"),
+        "after a vhost column");
+    assertEquals(
+        "203.0.113.9",
+        Agents.agentFetch(line("/", GPTBOT), "https://example.com").get("ip"),
+        "the address goes along for the check");
     assertNull(Agents.parseLine("not a log line"));
     // A target is a path and query on the site, never read as an address: a backslash cannot name
     // another host.
@@ -698,7 +755,9 @@ class AgentsTest {
                         "userAgent",
                         GPTBOT,
                         "at",
-                        utc(2026, 10, 7, 17, 55, 36))))),
+                        utc(2026, 10, 7, 17, 55, 36),
+                        "ip",
+                        "203.0.113.9")))),
         sent.get("body"));
     Map<String, Object> saved = Js.map(Json.parse(Files.readString(dir.resolve("state.json"))));
     assertEquals(List.of("ino", "offset", "head", "length"), List.copyOf(saved.keySet()));

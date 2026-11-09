@@ -1208,7 +1208,8 @@
                 {
                   "value": "GPTBot",
                   "visitors": 0,
-                  "fetches": 1
+                  "fetches": 1,
+                  "claimed": true
                 }
               ]
             }
@@ -48895,6 +48896,81 @@
           }
         },
         {
+          "method": "POST",
+          "path": "/api/observe",
+          "headers": {
+            "authorization": "Bearer observe-install",
+            "content-type": "application/json"
+          },
+          "body": {
+            "url": "https://blog.example.com/v",
+            "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+            "ip": "20.171.206.17"
+          },
+          "expect": {
+            "status": 204
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/observe",
+          "headers": {
+            "authorization": "Bearer observe-install",
+            "content-type": "application/json"
+          },
+          "body": {
+            "fetches": [
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+                "ip": "198.51.100.23"
+              },
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)",
+                "ip": "216.73.216.10"
+              },
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)",
+                "ip": " [::ffff:216.73.216.11] "
+              },
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "Mozilla/5.0 (compatible; CCBot/2.0; +https://commoncrawl.org/faq/)",
+                "ip": "2600:1f28:365:8000::5"
+              },
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)",
+                "ip": "157.240.0.1"
+              },
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+                "ip": "not an address"
+              },
+              {
+                "url": "https://blog.example.com/v",
+                "userAgent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+                "ip": 351391249
+              }
+            ]
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "recorded": 7,
+              "skipped": 0
+            }
+          }
+        },
+        {
           "method": "GET",
           "path": "/api/breakdown?site=blog&period=today&dimension=ai_agent",
           "headers": {
@@ -48920,15 +48996,57 @@
                 {
                   "value": "GPTBot",
                   "visitors": 0,
-                  "fetches": 4
+                  "fetches": 7,
+                  "claimed": true
                 },
                 {
                   "value": "ClaudeBot",
                   "visitors": 0,
-                  "fetches": 1
+                  "fetches": 2,
+                  "claimed": false
+                },
+                {
+                  "value": "CCBot",
+                  "visitors": 0,
+                  "fetches": 1,
+                  "claimed": false
+                },
+                {
+                  "value": "ClaudeBot",
+                  "visitors": 0,
+                  "fetches": 1,
+                  "claimed": true
+                },
+                {
+                  "value": "GPTBot",
+                  "visitors": 0,
+                  "fetches": 1,
+                  "claimed": false
+                },
+                {
+                  "value": "meta-externalagent",
+                  "visitors": 0,
+                  "fetches": 1,
+                  "claimed": true
                 }
               ]
             }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?site=blog&period=today&dimension=ai_agent&format=csv",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/csv",
+              "cache-control": "private, no-store",
+              "content-disposition": "attachment; filename=\"blog-ai_agent-2026-10-06-2026-10-06.csv\""
+            },
+            "text": "value,visitors,fetches,claimed\r\nGPTBot,0,7,true\r\nClaudeBot,0,2,false\r\nCCBot,0,1,false\r\nClaudeBot,0,1,true\r\nGPTBot,0,1,false\r\nmeta-externalagent,0,1,true\r\n"
           }
         },
         {
@@ -48954,6 +49072,11 @@
               },
               "dimension": "ai_page",
               "rows": [
+                {
+                  "value": "/v",
+                  "visitors": 0,
+                  "fetches": 8
+                },
                 {
                   "value": "/a",
                   "visitors": 0,

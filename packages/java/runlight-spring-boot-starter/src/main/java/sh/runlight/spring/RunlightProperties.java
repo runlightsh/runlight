@@ -24,6 +24,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * # where short links on the app's own domain are
  * runlight.link-path=/go
  * runlight.check.every=1m
+ * # download the AI agents' published address lists daily
+ * runlight.update-agent-ranges=true
  * </pre>
  */
 @ConfigurationProperties(prefix = "runlight")
@@ -49,6 +51,7 @@ public class RunlightProperties {
   private String linkPath = "/go";
   private String trustProxy;
   private Integer rateLimit;
+  private boolean updateAgentRanges;
   private String origin;
   private boolean accounts;
   private String cronSecret;
@@ -322,6 +325,21 @@ public class RunlightProperties {
   /** Sets {@link #getRateLimit()}. */
   public void setRateLimit(Integer rateLimit) {
     this.rateLimit = rateLimit;
+  }
+
+  /**
+   * Whether the scheduled check downloads the address lists AI companies publish, at most once a
+   * day, so requests that name an AI agent are checked against current addresses. Default false:
+   * the lists that came with this version are used, and Runlight makes no requests of its own for
+   * them.
+   */
+  public boolean isUpdateAgentRanges() {
+    return updateAgentRanges;
+  }
+
+  /** Sets {@link #isUpdateAgentRanges()}. */
+  public void setUpdateAgentRanges(boolean updateAgentRanges) {
+    this.updateAgentRanges = updateAgentRanges;
   }
 
   /** The address people open the app at, such as {@code https://example.com}. */
