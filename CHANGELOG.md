@@ -9,6 +9,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 - AI agent fetches are checked against the addresses their companies publish: OpenAI, Anthropic, Perplexity, Mistral, DuckDuckGo, and Common Crawl. A fetch from a listed address shows under the agent's name, and any other shows as claimed, such as "GPTBot (claimed)", since only its user agent says who sent it. Agents whose company publishes no list, and fetches recorded before this release, show as claimed. The address is compared and then dropped; only whether it matched is kept, in the fetch's title. An `ai_agent` breakdown row now has `claimed`, so one agent can have two rows.
 - Each release includes the lists. The standalone server downloads fresh copies once a day (`RUNLIGHT_AGENT_RANGES=off` turns that off), and a library install can with `updateAgentRanges: true`, during the scheduled check.
 - `POST /api/observe` takes the agent's address as `ip`, and the log reader and the WordPress, Drupal, and Craft plugins send it. A report without one is counted as claimed; the reporter's own address is never checked.
+- With filters applied, the dashboard pins them in a bar along the top once the stat boxes scroll away, so you can remove, clear, or change them without scrolling back up.
 
 ### Changed
 

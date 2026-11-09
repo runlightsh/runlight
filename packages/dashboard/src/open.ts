@@ -37,10 +37,17 @@ export function fitFrame(): void {
     const data = event.data as { type?: unknown; top?: unknown; height?: unknown } | null;
     if (data?.type !== "runlight:viewport" || typeof data.top !== "number" || typeof data.height !== "number") return;
     if (!Number.isFinite(data.top) || !Number.isFinite(data.height)) return;
-    root.style.setProperty("--frame-top", `${Math.max(0, data.top)}px`);
+    top = Math.max(0, data.top);
+    root.style.setProperty("--frame-top", `${top}px`);
     root.style.setProperty("--frame-height", `${Math.max(0, data.height)}px`);
+    window.dispatchEvent(new Event("runlight:viewport"));
   });
 }
+
+let top = 0;
+
+/** The top of what is on screen, in this page's own coordinates: the slice the admin page reports when framed, or 0. */
+export const viewportTop = (): number => top;
 
 /**
  * What this tab was opened to show, from `?open=`. It is read once: writeUrl never writes it back, so it is
