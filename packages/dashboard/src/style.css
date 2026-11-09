@@ -683,6 +683,63 @@ main {
   cursor: pointer;
 }
 
+/* The filters again, pinned along the top once the headline numbers have scrolled away. */
+.filter-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  background: var(--page);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+  animation: drop 0.15s ease-out;
+}
+
+.framed .filter-bar {
+  top: var(--frame-top, 0);
+}
+
+.filter-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 10px 16px;
+}
+
+.filter-bar .filter-button {
+  flex: none;
+  height: 34px;
+}
+
+/* One line however many filters there are, scrolling sideways on a narrow screen. */
+.filter-bar-chips {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.filter-bar-chips > * {
+  flex: none;
+  white-space: nowrap;
+}
+
+@keyframes drop {
+  from {
+    transform: translateY(-100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .filter-bar {
+    animation: none;
+  }
+}
+
 .failure {
   padding: 12px 16px;
   border: 1px solid var(--down);

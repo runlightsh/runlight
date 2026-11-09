@@ -1,11 +1,11 @@
 import { Loading } from "./loading.js";
 import { Avatar } from "./site-avatar.js";
 import { render } from "preact";
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { ApiError, accounts, api, base, cms, download, embedLive, embedOrigin, forgetReports, install, onEmbedExpired, share, shared, viewParams, type Person, type Realtime, signIn, signOut, type Filter, type Point, type Range, type Site, type Stats, type View } from "./api.js";
 import { Chart, asSeries } from "./chart.js";
 import { change, day, exact } from "./format.js";
-import { FilterDrawer, MAX_FILTERS, fieldName, opName } from "./filters.js";
+import { FilterChips, FilterDrawer, MAX_FILTERS } from "./filters.js";
 import { Icon } from "./icons.js";
 import { LANGUAGES, currentLocale, hasKey, initialLocale, rich, setLocale, t, tn, type Key } from "./i18n.js";
 import { MAX_CHARTED, METRICS, metric, metricHint, metricLabel, type MetricKey } from "./metrics.js";
@@ -13,12 +13,12 @@ import { LinksPanel, Sheet } from "./links.js";
 import { AddSiteForm, AllSites, FirstSite, SiteMenu } from "./sites.js";
 import { AccountSheet } from "./account.js";
 import { AssistantDrawer } from "./assistant.js";
-import { Panel, Rhythm, bounce, label, timeOnPage, type Tab } from "./panel.js";
+import { Panel, Rhythm, bounce, timeOnPage, type Tab } from "./panel.js";
 import { ComparePicker, DEFAULT_PERIOD, PERIODS, Picker, rangeText, type CompareMode } from "./picker.js";
 import { RealtimeModal } from "./realtime.js";
 import { ConversionsPanel } from "./goals.js";
 import { Install, SettingsModal, isSection, type Section } from "./settings.js";
-import { fitFrame, openInTab, opening, openingIn } from "./open.js";
+import { fitFrame, openInTab, opening, openingIn, viewportTop } from "./open.js";
 import { applyTheme, isDark, onThemeChange, setTheme, themeChoice, type ThemeChoice } from "./theme.js";
 import { AI_AGENTS } from "../../sdk/src/data/agents.js";
 import "./style.css";
@@ -201,6 +201,9 @@ function App() {
   // While older visits are still being copied into ClickHouse, the start of the oldest copied so far.
   const [moving, setMoving] = useState<number | null>(null);
   const [filtering, setFiltering] = useState(false);
+  // Once the headline numbers have scrolled away, the filters follow in a bar along the top.
+  const numbers = useRef<HTMLDivElement>(null);
+  const [pinned, setPinned] = useState(false);
   const [asking, setAsking] = useState(() => opening("assistant"));
   // Coming back from connecting another Runlight, the server's redirect asks for settings with ?settings=general.
   const [settingsOpen, setSettingsOpen] = useState<Section | null>(() => {
@@ -307,6 +310,31 @@ function App() {
   }, [view, noSites]);
 
   const update = useCallback((patch: Partial<View>) => setView((v) => ({ ...v, ...patch })), []);
+  useEffect(() => {
+    if (!view.filters.length) return setPinned(false);
+    let queued = false;
+    const check = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        const box = numbers.current?.getBoundingClientRect();
+        // Hidden while waiting for the first visit, the numbers have no height and never count as passed.
+        setPinned(Boolean(box && box.height && box.bottom < viewportTop()));
+      });
+    };
+    check();
+    window.addEventListener("scroll", check, { passive: true });
+    window.addEventListener("resize", check);
+    // Framed in a CMS, the frame never scrolls; the admin page says which slice of it is on screen instead.
+    window.addEventListener("runlight:viewport", check);
+    return () => {
+      window.removeEventListener("scroll", check);
+      window.removeEventListener("resize", check);
+      window.removeEventListener("runlight:viewport", check);
+    };
+  }, [view.filters.length]);
+
   const addFilter = useCallback(
     (dimension: string, value: string) =>
       // Past the most the API applies at once, the oldest filter makes way.
@@ -396,6 +424,11 @@ function App() {
   if (noSites) return <main aria-busy="true" />;
 
   const shownMetrics = METRICS.filter((m) => charted.includes(m.key));
+  const filterIcon = (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2.5 3.5h11M4.5 8h7M6.5 12.5h3" />
+    </svg>
+  );
 
   return (
     <main>
@@ -447,9 +480,7 @@ function App() {
             ) : null}
             {/* Filters open in place even framed in a CMS, since they change the view in that frame. */}
             <button type="button" class={view.filters.length ? "filter-button on" : "filter-button"} onClick={() => setFiltering(true)}>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M2.5 3.5h11M4.5 8h7M6.5 12.5h3" />
-              </svg>
+              {filterIcon}
               {t("filter.button")}
               {view.filters.length ? <span class="count">{view.filters.length}</span> : null}
             </button>
@@ -474,21 +505,7 @@ function App() {
         {waiting || failed ? null : stats && !slow ? <Headline view={view} stats={stats.stats} previous={stats.previous} compare={stats.compare} /> : <p class="headline" role="status" aria-label={t("common.loading")}><span class="headline-placeholder" aria-hidden="true" /></p>}
         {view.filters.length ? (
           <div class="filters">
-            {view.filters.map((f) => (
-              <span class="filter">
-                <span class="filter-dim">{fieldName(f.dimension)}</span>
-                {opName(f.op)} <strong>{label(f.dimension, f.value)}</strong>
-                <button type="button" aria-label={t("filter.remove")} onClick={() => update({ filters: view.filters.filter((x) => x !== f) })}>
-                  ×
-                </button>
-              </span>
-            ))}
-            {view.filters.length > 1 ? (
-              <button type="button" class="clear" onClick={() => update({ filters: [] })}>
-                <Icon name="x" />
-                {t("common.clearAll")}
-              </button>
-            ) : null}
+            <FilterChips filters={view.filters} onChange={(filters) => update({ filters })} />
           </div>
         ) : null}
       </header>
@@ -608,8 +625,23 @@ function App() {
         </section>
       ) : null}
 
+      {view.filters.length && pinned && !waiting ? (
+        <div class="filter-bar">
+          <div class="filter-bar-inner">
+            <button type="button" class="filter-button on" onClick={() => setFiltering(true)}>
+              {filterIcon}
+              {t("filter.button")}
+              <span class="count">{view.filters.length}</span>
+            </button>
+            <div class="filter-bar-chips">
+              <FilterChips filters={view.filters} onChange={(filters) => update({ filters })} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <section class="overview" hidden={waiting} aria-busy={slow}>
-        <div class="metrics">
+        <div class="metrics" ref={numbers}>
           {METRICS.map((m) => {
             const on = charted.includes(m.key);
             const value = stats?.stats[m.key];

@@ -186,3 +186,26 @@ export function FilterDrawer({ view, onApply, onClose }: { view: View; onApply: 
     </div>
   );
 }
+
+/** The filters in force, each with its own remove button, and a way to clear them all when there are several. */
+export function FilterChips({ filters, onChange }: { filters: Filter[]; onChange: (filters: Filter[]) => void }) {
+  return (
+    <>
+      {filters.map((f) => (
+        <span class="filter">
+          <span class="filter-dim">{fieldName(f.dimension)}</span>
+          {opName(f.op)} <strong>{label(f.dimension, f.value)}</strong>
+          <button type="button" aria-label={t("filter.remove")} onClick={() => onChange(filters.filter((x) => x !== f))}>
+            ×
+          </button>
+        </span>
+      ))}
+      {filters.length > 1 ? (
+        <button type="button" class="clear" onClick={() => onChange([])}>
+          <Icon name="x" />
+          {t("common.clearAll")}
+        </button>
+      ) : null}
+    </>
+  );
+}
