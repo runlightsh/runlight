@@ -30,7 +30,9 @@
   var endpoint = base + "e";
   // To the page's own site, JSON, which web application firewalls expect: OWASP's rule set, on many shared
   // hosts, refuses a text/plain body outright. To another site, text/plain, which needs no CORS preflight.
-  var type = new URL(endpoint).origin == loc.origin ? "application/json" : "text/plain";
+  // script.src is absolute and spelled as an origin is, so a prefix match is a same-origin test that, unlike
+  // new URL, cannot throw, even on an inlined copy with no src.
+  var type = endpoint.indexOf(loc.origin + "/") ? "text/plain" : "application/json";
   var site = attr("site");
   var useHash = attr("hash") !== null;
   var manual = attr("manual") !== null;

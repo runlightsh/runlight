@@ -7,6 +7,10 @@
  * The hooks are in \Drupal\runlight\Hook\RunlightHooks. These functions hand
  * over to it on Drupal 10.3 and 11.0; Drupal 11.1 and later call it directly
  * and skip them.
+ *
+ * Each does nothing while the class is not yet a service: right after an
+ * update from 0.4.1 or earlier, the cached list of hooks still names these
+ * functions until caches are rebuilt, and a page should not fail meanwhile.
  */
 
 declare(strict_types=1);
@@ -20,7 +24,7 @@ use Drupal\runlight\Hook\RunlightHooks;
  */
 #[LegacyHook]
 function runlight_help(string $route_name, RouteMatchInterface $route_match): string {
-  return \Drupal::service(RunlightHooks::class)->help($route_name, $route_match);
+  return \Drupal::hasService(RunlightHooks::class) ? \Drupal::service(RunlightHooks::class)->help($route_name, $route_match) : '';
 }
 
 /**
@@ -28,7 +32,9 @@ function runlight_help(string $route_name, RouteMatchInterface $route_match): st
  */
 #[LegacyHook]
 function runlight_page_attachments(array &$attachments): void {
-  \Drupal::service(RunlightHooks::class)->pageAttachments($attachments);
+  if (\Drupal::hasService(RunlightHooks::class)) {
+    \Drupal::service(RunlightHooks::class)->pageAttachments($attachments);
+  }
 }
 
 /**
@@ -36,7 +42,9 @@ function runlight_page_attachments(array &$attachments): void {
  */
 #[LegacyHook]
 function runlight_cron(): void {
-  \Drupal::service(RunlightHooks::class)->cron();
+  if (\Drupal::hasService(RunlightHooks::class)) {
+    \Drupal::service(RunlightHooks::class)->cron();
+  }
 }
 
 /**
@@ -44,5 +52,7 @@ function runlight_cron(): void {
  */
 #[LegacyHook]
 function runlight_mail(string $key, array &$message, array $params): void {
-  \Drupal::service(RunlightHooks::class)->mail($key, $message, $params);
+  if (\Drupal::hasService(RunlightHooks::class)) {
+    \Drupal::service(RunlightHooks::class)->mail($key, $message, $params);
+  }
 }

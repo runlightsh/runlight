@@ -126,4 +126,16 @@ test("visits go as JSON to the page's own site and as text/plain to another, by 
     assert.deepEqual(b.types, [type, type], label);
     assert.deepEqual(b.via, [via, via], label);
   }
+  // Only the page's own origin is the page's own site: not a host that begins with its name, nor another port.
+  for (const src of ["https://app.example.com.other.test/runlight/s.js", "https://app.example.com:8443/runlight/s.js", "http://app.example.com/runlight/s.js"]) {
+    assert.deepEqual(browser("", true, false, { src }).types, ["text/plain"], src);
+  }
+});
+
+test("a copy inlined into the page, with no src, sets up without throwing", () => {
+  // An optimizer that inlines scripts leaves currentScript with an empty src; site code calling runlight() must
+  // still find it.
+  const b = browser("", true, false, { src: "" });
+  assert.equal(typeof b.context.runlight, "function");
+  assert.doesNotThrow(() => (b.context.runlight as (name: string) => void)("Signup"));
 });

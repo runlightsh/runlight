@@ -54,7 +54,7 @@ export function Chart({ points, previous, metrics, interval, timezone, shared, h
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    const observer = new ResizeObserver(([entry]) => entry && setWidth(Math.max(280, entry.contentRect.width)));
+    const observer = new ResizeObserver(([entry]) => entry && setWidth(Math.max(200, entry.contentRect.width)));
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
