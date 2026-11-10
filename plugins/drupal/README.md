@@ -67,6 +67,10 @@ service under Settings, Email service, where you can also choose one in place of
 Drupal's mailer, and go back to it later. After updating the module, run
 `drush cr` so Drupal finds `runlight_mail()`.
 
+The module works with the Redirect module's "Enforce clean and canonical URLs"
+option on: Runlight's paths under /runlight are left out of it, and the rest of
+the site keeps it.
+
 Uninstalling the module drops Runlight's tables, each by name and only this
 site's, or removes its folder, along with its secret, its keys, and what it kept
 in the cache.
