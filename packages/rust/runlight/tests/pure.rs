@@ -260,7 +260,7 @@ fn zones_and_local_times_match_the_sdk() {
         }
     }
     // The fixture came from Node's ICU with time zone data 2025c. The system's database disagrees
-    // wherever a zone's rules changed since (Morocco, British Columbia, Alberta, and Manitoba), so those zones are
+    // wherever a zone's rules changed since (Morocco, British Columbia, Alberta, Manitoba, and Cuba), so those zones are
     // compared only on 2025c.
     if tzdata_version().as_deref() != Some("2025c") {
         failures.retain(|f| !CHANGED_SINCE_2025C.iter().any(|z| f.starts_with(z)));
@@ -272,7 +272,7 @@ fn zones_and_local_times_match_the_sdk() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-const CHANGED_SINCE_2025C: [&str; 13] = [
+const CHANGED_SINCE_2025C: [&str; 15] = [
     "Africa/Casablanca",
     "Africa/El_Aaiun",
     "America/Vancouver",
@@ -286,6 +286,8 @@ const CHANGED_SINCE_2025C: [&str; 13] = [
     "America/Winnipeg",
     "America/Rainy_River",
     "Canada/Central",
+    "America/Havana",
+    "Cuba",
 ];
 
 /// The system's time zone data version, where it says.
