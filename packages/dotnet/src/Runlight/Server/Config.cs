@@ -274,16 +274,26 @@ public sealed partial class Config
     /// </summary>
     public ProxyTrust? TrustProxy()
     {
-        string value = Js.Lower(Get("TRUST_PROXY") ?? "");
+        string given = Get("TRUST_PROXY") ?? "";
+        string value = Js.Lower(given.Trim());
         if (value.Length == 0)
         {
             return null;
         }
-        if (value == "false")
+        if (value is "true" or "1" or "yes" or "on")
+        {
+            return ProxyTrust.FromBoolean(true);
+        }
+        if (value is "false" or "0" or "no" or "off")
         {
             return ProxyTrust.FromBoolean(false);
         }
-        return value is "x-forwarded-for" or "x-real-ip" or "cf-connecting-ip" ? ProxyTrust.FromString(value) : ProxyTrust.FromBoolean(true);
+        if (value is "x-forwarded-for" or "x-real-ip" or "cf-connecting-ip")
+        {
+            return ProxyTrust.FromString(value);
+        }
+        // Anything else is refused, as the other servers refuse it, rather than taken to mean "from anywhere".
+        throw new InvalidOperationException($"Set TRUST_PROXY to true, false, or the header your proxy sets (x-forwarded-for, x-real-ip, or cf-connecting-ip), not \"{given}\"");
     }
 
     /// <summary>
