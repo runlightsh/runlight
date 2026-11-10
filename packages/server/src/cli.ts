@@ -15,6 +15,7 @@
  *   RUNLIGHT_GEO      city (the default), country, off, or the path to an MMDB file
  *   RUNLIGHT_AGENT_RANGES  on (the default) downloads the AI agents' published address lists daily; off
  *                     keeps the lists that came with this version
+ *   CRONWATCH_MAIL_TO  with a mail service set up, where alerts about missed or failed upkeep go
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
@@ -63,6 +64,8 @@ off, or to the path of your own MMDB file.
 RUNLIGHT_AGENT_RANGES=off stops the daily download of the address lists AI
 companies publish, which AI agent fetches are checked against; the lists that
 came with this version are used instead.
+CRONWATCH_MAIL_TO, once a mail service is set up in the dashboard, is where
+alerts go when scheduled upkeep is missed, stuck, or fails.
 
 Docs: https://runlight.sh/docs/server/
 `;

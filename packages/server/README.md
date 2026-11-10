@@ -22,6 +22,14 @@ The owner invites other people as admins, members, or viewers, and everyone can 
 
 The [server guide](https://runlight.sh/docs/server/) covers its settings, Postgres, MySQL, and running it behind a proxy.
 
+AI agents such as ChatGPT and Claude run no JavaScript, so a site with only the script tag reports them from its web server's access log, with the site's agents key from Settings, Install:
+
+```bash
+RUNLIGHT_OBSERVE_KEY=rlo_... npx @runlight/server agents --log /var/log/nginx/access.log --to https://stats.example.com
+```
+
+Each fetch is checked against the address list the agent's company publishes, so the log has to record the agent's real address. The server downloads fresh copies of those lists once a day; `RUNLIGHT_AGENT_RANGES=off` keeps the ones that came with the release. The [AI agents guide](https://runlight.sh/docs/ai/) has the details.
+
 Browser favicons, Apple touch icons, and a web manifest are served by the installation itself. Add the dashboard to your phone's home screen to use the Runlight icon. If an existing shortcut shows older artwork, remove that shortcut and add it again after updating the server.
 
 ## Monitor scheduled work

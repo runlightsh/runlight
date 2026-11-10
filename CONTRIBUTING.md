@@ -7,7 +7,7 @@ Bug reports and pull requests are welcome. For anything larger than a fix, open 
 | Folder | What is in it |
 | --- | --- |
 | `packages/sdk` | The library, published as `@runlight/sdk`. |
-| `packages/server` | The standalone server, published as `runlight.sh`. |
+| `packages/server` | The standalone server, published as `@runlight/server`; its command is `runlight.sh`. |
 | `packages/dashboard` | The dashboard, built into the library. |
 | `packages/tracker` | The browser script, built into the library. |
 | `packages/php`, `packages/python`, `packages/ruby`, `packages/go`, `packages/java`, `packages/dotnet`, `packages/elixir`, `packages/rust` | Runlight in each of those languages. |
@@ -44,7 +44,7 @@ npm run release -- X.Y.Z             # bump, check, commit "Release X.Y.Z", tag 
 
 The script bumps every file listed in `VERSIONED` at the top of `scripts/release.mjs`, dates the changelogs' Unreleased sections, and lists any other tracked file that still names the old version. It refreshes `package-lock.json` and each language's copy of the built assets, runs `npm run check` and the build, builds the WordPress zip, and installs the packed npm packages in a scratch project to load every entry point and run `runlight.sh --version`. Set `RUNLIGHT_TEST_PG` and `RUNLIGHT_TEST_MYSQL` first so the check covers both databases. A new folder under `packages/` or `plugins/` needs a row in the script's tables, or the script refuses to run.
 
-It fetches `main` first and refuses unless your `main` is exactly origin's and the tag is not on origin yet. It never pushes or publishes. It prints what to run next, which is `git push --atomic origin main vX.Y.Z` (the commit and the tag go up together, or neither does) and then, only once CI has passed on the release commit, the steps done by hand: `npm publish` for `@runlight/sdk` and `runlight.sh`, in that order, the Ruby gem, and the Go tags. It prints the `gh run list --commit <sha>` and `gh run watch --exit-status` commands to wait with; the Ruby (`ruby.yml`) and Go (`go.yml`) workflows must pass too. The tag starts the workflows below, and each one waits for CI to pass on the tagged commit (`ci-passed.yml`) and does nothing until its switch is set.
+It fetches `main` first and refuses unless your `main` is exactly origin's and the tag is not on origin yet. It never pushes or publishes. It prints what to run next, which is `git push --atomic origin main vX.Y.Z` (the commit and the tag go up together, or neither does) and then, only once CI has passed on the release commit, the steps done by hand: `npm publish` for `@runlight/sdk` and `@runlight/server`, in that order, the Ruby gem, and the Go tags. It prints the `gh run list --commit <sha>` and `gh run watch --exit-status` commands to wait with; the Ruby (`ruby.yml`) and Go (`go.yml`) workflows must pass too. The tag starts the workflows below, and each one waits for CI to pass on the tagged commit (`ci-passed.yml`) and does nothing until its switch is set.
 
 | Workflow | What it does | Switch |
 | --- | --- | --- |
