@@ -61,6 +61,21 @@ export function rowLabel(dimension: string, row: Row): string {
   return row.claimed ? t("ai.claimed", { name: text }) : text;
 }
 
+// Slides a key's tip sideways, as it opens, to stay within the key's row: on a phone a
+// key near the right edge would otherwise push its tip off the screen.
+function fitTip(event: Event) {
+  const button = event.currentTarget as HTMLElement;
+  const tip = button.querySelector<HTMLElement>(".hover-tip");
+  const row = button.closest<HTMLElement>(".mix-key");
+  if (!tip || !row) return;
+  button.style.setProperty("--tip-shift", "0px");
+  const box = tip.getBoundingClientRect();
+  const bounds = row.getBoundingClientRect();
+  let shift = Math.min(0, bounds.right - box.right);
+  if (box.left + shift < bounds.left) shift = bounds.left - box.left;
+  button.style.setProperty("--tip-shift", `${shift}px`);
+}
+
 function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number; note?: string }> }) {
   const id = useId();
   const total = parts.reduce((sum, p) => sum + p.n, 0);
@@ -78,7 +93,7 @@ function Mix({ parts }: { parts: Array<{ name: string; n: number; slot: number; 
             <span class={`swatch s${p.slot}`} />
             {p.name}
             {p.note ? (
-              <button type="button" class="mix-help has-tip" aria-label={p.name} aria-describedby={`${id}-${i}`}>
+              <button type="button" class="mix-help has-tip" aria-label={p.name} aria-describedby={`${id}-${i}`} onPointerEnter={fitTip} onFocus={fitTip}>
                 ?
                 <span class="hover-tip" role="tooltip" id={`${id}-${i}`}>
                   {p.note}
