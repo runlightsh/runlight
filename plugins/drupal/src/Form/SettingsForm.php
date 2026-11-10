@@ -25,17 +25,17 @@ final class SettingsForm extends ConfigFormBase {
   /**
    * Runlight in this Drupal.
    */
-  private Local $local;
+  protected Local $local;
 
   /**
    * Where Runlight runs, and its address and keys.
    */
-  private Setup $setup;
+  protected Setup $setup;
 
   /**
    * Connecting to a Runlight elsewhere.
    */
-  private Connect $connect;
+  protected Connect $connect;
 
   /**
    * {@inheritdoc}

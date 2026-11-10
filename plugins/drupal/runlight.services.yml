@@ -42,6 +42,18 @@ services:
       - '@language_manager'
     tags:
       - { name: needs_destruction }
+  # The module's hooks. Named by its class, as Drupal 11.1 and later find hook
+  # classes; runlight.local is made only when a hook needs it.
+  Drupal\runlight\Hook\RunlightHooks:
+    class: Drupal\runlight\Hook\RunlightHooks
+    arguments:
+      - '@config.factory'
+      - '@runlight.setup'
+      - !service_closure '@runlight.local'
+      - '@router.admin_context'
+      - '@current_user'
+      - '@current_route_match'
+      - '@request_stack'
   # After the paths are decoded (1000), before aliases (100), so an alias never
   # shadows Runlight's paths while it runs here, and only then.
   runlight.path_processor:

@@ -6,7 +6,7 @@
   "homepage": "https://runlight.sh/docs/drupal/",
   "require": {
     "php": ">=8.2",
-    "drupal/core": "^10.3 || ^11",
+    "drupal/core": "^10.3 || ^11 || ^12",
     "runlight/runlight": "^0.4.1"
   }
 }
