@@ -1115,7 +1115,9 @@ h2 .aside {
   background: var(--c);
 }
 
+/* Clipped sideways so a closed tip, still laid out, never widens the page on a phone. */
 .mix-key {
+  overflow-x: clip;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
@@ -1158,13 +1160,14 @@ h2 .aside {
 
 /* The keys sit near the panel's left edge, so the tip opens to the right of its "?" rather than centred on it. */
 .mix-help.has-tip .hover-tip {
-  left: -9px;
+  left: calc(-9px + var(--tip-shift, 0px));
+  max-width: min(240px, calc(100vw - 48px));
   text-align: left;
   transform: translate(0, 4px);
 }
 
 .mix-help.has-tip .hover-tip::after {
-  left: 15px;
+  left: calc(15px - var(--tip-shift, 0px));
 }
 
 .mix-help.has-tip:hover .hover-tip,
