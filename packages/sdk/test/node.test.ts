@@ -152,6 +152,46 @@ test("a body that fails before its first byte is a 500, and one that fails partw
   }
 });
 
+test("the Node adapter reads a body a parser skipped, and uses one a parser read", async () => {
+  const seen: string[] = [];
+  const handler = toNodeHandler(async (request) => {
+    seen.push(await request.text());
+    return new Response("{}", { headers: { "content-type": "application/json" } });
+  });
+  const visit = JSON.stringify({ n: "pageview", u: "https://example.com/" });
+  const server = createServer((req, res) => {
+    const parsed = req as typeof req & { body?: unknown };
+    if (req.headers["x-parser"] === "skipped") {
+      // As Express 4's parsers leave a request of a type they do not handle: an empty object, the body unread.
+      parsed.body = {};
+      void handler(req, res);
+    } else {
+      // As a parser that read the body leaves it: the stream used up, the body parsed.
+      let text = "";
+      req.on("data", (chunk) => (text += chunk));
+      req.on("end", () => {
+        parsed.body = JSON.parse(text);
+        void handler(req, res);
+      });
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    for (const parser of ["skipped", "read"]) {
+      for (const type of ["text/plain", "application/json"]) {
+        const response = await fetch(`${base}/runlight/e`, { method: "POST", headers: { "content-type": type, "x-parser": parser }, body: visit });
+        assert.equal(response.status, 200);
+      }
+    }
+    const empty = await fetch(`${base}/runlight/e`, { method: "POST", headers: { "content-type": "application/json", "x-parser": "read" }, body: "{}" });
+    assert.equal(empty.status, 200);
+    assert.deepEqual(seen, [visit, visit, visit, visit, "{}"]);
+  } finally {
+    server.close();
+  }
+});
+
 test("readJsonCapped reads a body up to its limit and refuses one past it", async () => {
   assert.deepEqual(await readJsonCapped(new Response('{"sites":[]}'), 1024), { sites: [] });
   await assert.rejects(readJsonCapped(new Response("x".repeat(2048)), 1024), BodyTooLong);
