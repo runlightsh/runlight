@@ -1067,7 +1067,12 @@ impl Routes {
                 ));
             }
             if method != "POST" {
-                return Ok(coded("Method not allowed", "method_not_allowed", 405, None));
+                return Ok(coded(
+                    "Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.",
+                    "method_not_allowed",
+                    405,
+                    None,
+                ));
             }
             if let Err(error) = self.rl().collect(request).await {
                 eprintln!("Runlight: could not record an event {error}");

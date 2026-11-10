@@ -1609,7 +1609,7 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 			return web.NewResponse(204, nil, "access-control-allow-origin", "*", "access-control-allow-methods", "POST", "access-control-max-age", "86400"), nil
 		}
 		if request.Method != "POST" {
-			return Coded("Method not allowed", "method_not_allowed", 405, nil), nil
+			return Coded("Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.", "method_not_allowed", 405, nil), nil
 		}
 		if err := r.Collect(ctx, request); err != nil {
 			r.logf("Runlight: could not record an event %v", err)

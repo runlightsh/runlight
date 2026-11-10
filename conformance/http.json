@@ -5375,6 +5375,144 @@
       ]
     },
     {
+      "name": "a visit sent as JSON and one sent as text both count",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.1",
+            "content-type": "application/json"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/",
+            "i": "pv1"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.1",
+            "content-type": "application/json"
+          },
+          "body": {
+            "k": "event",
+            "u": "https://example.com/",
+            "i": "pv1",
+            "n": "Signup"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "198.51.100.7",
+            "content-type": "text/plain;charset=UTF-8"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/pricing",
+            "i": "pv2"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=today&compare=off",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 2,
+                "visits": 2,
+                "pageviews": 2,
+                "viewsPerVisit": 1,
+                "bounceRate": 0.5,
+                "visitDuration": 0
+              }
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=event",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "event",
+              "rows": [
+                {
+                  "value": "Signup",
+                  "visitors": 1,
+                  "events": 1
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "who may do what",
       "site": {
         "hostnames": [
@@ -5643,7 +5781,7 @@
               "x-content-type-options": "nosniff"
             },
             "body": {
-              "error": "Method not allowed",
+              "error": "Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.",
               "code": "method_not_allowed"
             }
           }
@@ -6942,7 +7080,7 @@
               "x-content-type-options": "nosniff"
             },
             "body": {
-              "error": "Method not allowed",
+              "error": "Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.",
               "code": "method_not_allowed"
             }
           }
@@ -6959,7 +7097,7 @@
               "x-content-type-options": "nosniff"
             },
             "body": {
-              "error": "Method not allowed",
+              "error": "Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.",
               "code": "method_not_allowed"
             }
           }

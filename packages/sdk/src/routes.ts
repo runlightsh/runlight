@@ -2188,7 +2188,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
             headers: { "access-control-allow-origin": "*", "access-control-allow-methods": "POST", "access-control-max-age": "86400" },
           });
         }
-        if (request.method !== "POST") return coded("Method not allowed", "method_not_allowed", 405);
+        if (request.method !== "POST") return coded("Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.", "method_not_allowed", 405);
         try {
           await runlight.collect(request, context);
         } catch (error) {

@@ -95,6 +95,21 @@ const BASICS: Scenario[] = [
     ],
   },
   {
+    // The tracker sends JSON to its own site, which web application firewalls expect, and text/plain to
+    // another, which needs no CORS preflight. Both count the same.
+    name: "a visit sent as JSON and one sent as text both count",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    steps: [
+      hit({ k: "pageview", u: "https://example.com/", i: "pv1" }, "203.0.113.1", CHROME, { "content-type": "application/json" }),
+      hit({ k: "event", u: "https://example.com/", i: "pv1", n: "Signup" }, "203.0.113.1", CHROME, { "content-type": "application/json" }),
+      hit({ k: "pageview", u: "https://example.com/pricing", i: "pv2" }, "198.51.100.7", CHROME, { "content-type": "text/plain;charset=UTF-8" }),
+      get("/api/stats?period=today&compare=off"),
+      get("/api/breakdown?period=today&dimension=event"),
+    ],
+  },
+  {
     name: "who may do what",
     site: { hostnames: ["example.com"], timezone: "UTC" },
     start: Date.UTC(2026, 9, 6, 12, 0),
