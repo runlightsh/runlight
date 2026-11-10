@@ -3,32 +3,48 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { TRACKER } from "../src/generated/tracker.js";
 
-function browser(hook: string, beacon = true, configured = true, stand: { webdriver?: boolean; manual?: boolean; ignored?: boolean } = {}) {
+/** A Blob that keeps its parts and type, so a test can read what the tracker sent and as what. */
+class FakeBlob {
+  constructor(readonly parts: string[], options?: { type?: string }) { this.type = options?.type ?? ""; }
+  type: string;
+}
+const text = (body: string | FakeBlob) => (typeof body === "string" ? body : body.parts.join(""));
+
+function browser(hook: string, beacon: boolean | "throws" = true, configured = true, stand: { webdriver?: boolean; manual?: boolean; ignored?: boolean; src?: string } = {}) {
   const sent: string[] = [];
+  const types: string[] = [];
+  const via: string[] = [];
   const later: Array<() => void> = [];
   const listeners: Record<string, () => void> = {};
   let clock = 1000;
   const location = new URL("https://app.example.com/s/private-token?token=secret#private");
   const context: Record<string, unknown> = {
-    URL, Uint8Array, location, screen: { width: 1200, height: 800 },
+    URL, Uint8Array, crypto: globalThis.crypto, Blob: FakeBlob, location, screen: { width: 1200, height: 800 }, scrollY: 0,
     Date: { now: () => clock },
-    navigator: { language: "en", webdriver: stand.webdriver ?? false, sendBeacon: (_url: string, body: string) => { if (beacon) sent.push(body); return beacon; } },
+    navigator: {
+      language: "en", webdriver: stand.webdriver ?? false,
+      sendBeacon: (_url: string, body: string | FakeBlob) => {
+        if (beacon === "throws") throw new TypeError("not allowed");
+        if (beacon) { sent.push(text(body)); types.push(typeof body === "string" ? "string" : body.type); via.push("beacon"); }
+        return beacon;
+      },
+    },
     localStorage: { getItem: (key: string) => (key === "runlight_ignore" && stand.ignored ? "1" : null), setItem() {}, removeItem() {} },
     history: { pushState(_s: unknown, _t: string, to: string) { location.href = new URL(to, location.href).href; }, replaceState() {} },
     setTimeout: (fn: () => void) => { later.push(fn); },
     document: {
       title: "Private note title", referrer: "https://app.example.com/notes/secret-id?key=secret",
-      currentScript: { src: "https://analytics.example.com/s.js?site=example.com", getAttribute: (key: string) => key === "data-before-send" && configured ? "scrub" : key === "data-site" ? "example.com" : key === "data-manual" && stand.manual ? "" : null },
+      currentScript: { src: stand.src ?? "https://analytics.example.com/s.js?site=example.com", getAttribute: (key: string) => key === "data-before-send" && configured ? "scrub" : key === "data-site" ? "example.com" : key === "data-manual" && stand.manual ? "" : null },
       visibilityState: "visible", hasFocus: () => true, documentElement: { scrollHeight: 1000, scrollTop: 0 },
       addEventListener: (name: string, fn: () => void) => { listeners[name] = fn; },
     },
     addEventListener: (name: string, fn: () => void) => { listeners[name] = fn; },
     innerHeight: 800,
-    fetch: (_url: string, init: { body: string }) => { sent.push(init.body); return Promise.resolve(); },
+    fetch: (_url: string, init: { body: string | FakeBlob }) => { sent.push(text(init.body)); types.push(typeof init.body === "string" ? "string" : init.body.type); via.push("fetch"); return Promise.resolve(); },
   };
   context.window = context;
   runInNewContext(hook + "\n" + TRACKER, context);
-  return { sent, context, leave: () => { clock += 2000; listeners.pagehide!(); }, wait: () => later.splice(0).forEach((fn) => fn()) };
+  return { sent, types, via, context, leave: () => { clock += 2000; listeners.pagehide!(); }, wait: () => later.splice(0).forEach((fn) => fn()) };
 }
 
 test("the before-send hook scrubs pageviews, SPA referrers, events, and engagement on both transports", () => {
@@ -89,4 +105,25 @@ test("a single page app's pageview carries the title the new page sets, not the 
   b.wait();
   const last = JSON.parse(b.sent[b.sent.length - 1]!);
   assert.deepEqual([last.k, new URL(last.u).pathname, last.t], ["pageview", "/pricing", "Pricing"]);
+});
+
+test("visits go as JSON to the page's own site and as text/plain to another, by beacon or else by fetch", () => {
+  // OWASP's rule set, which many shared hosts run, refuses a text/plain body; to another site, text/plain needs
+  // no CORS preflight.
+  const same = { src: "https://app.example.com/runlight/s.js" };
+  for (const [beacon, stand, type, via] of [
+    [true, same, "application/json", "beacon"],
+    [false, same, "application/json", "fetch"],
+    ["throws", same, "application/json", "fetch"],
+    [true, {}, "text/plain", "beacon"],
+    [false, {}, "text/plain", "fetch"],
+    ["throws", {}, "text/plain", "fetch"],
+  ] as const) {
+    const b = browser("", beacon, false, stand);
+    (b.context.runlight as (name: string) => void)("Signup");
+    const label = `${JSON.stringify(stand)} beacon=${beacon}`;
+    assert.deepEqual(b.sent.map((s) => JSON.parse(s).k), ["pageview", "event"], label);
+    assert.deepEqual(b.types, [type, type], label);
+    assert.deepEqual(b.via, [via, via], label);
+  }
 });
