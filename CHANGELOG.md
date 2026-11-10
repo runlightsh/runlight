@@ -2,6 +2,19 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- The .NET standalone server reads `TRUST_PROXY` as every other server does: `true`, `1`, `yes`, or `on` believes forwarded addresses from anywhere, `false`, `0`, `no`, or `off` never, a header name such as `cf-connecting-ip` believes only that header, and anything else is refused at start. Before, only `false` turned it off, so `TRUST_PROXY=off`, `0`, or a typo believed forwarded addresses from anywhere.
+- Visits are counted on hosts that run ModSecurity with the OWASP Core Rule Set, as many cPanel and shared hosts do. The tracker sent each visit as `text/plain`, which the rule set refuses outright (rule 920420), so those sites recorded nothing while the page and the script loaded normally. The tracker now sends visits to its own site as `application/json`, and still sends them to a Runlight on another site as `text/plain`, which needs no CORS preflight. This covers the WordPress, Drupal, and Craft plugins running Runlight on the site itself. Every implementation already counted both the same; a conformance step now holds them to it. Thanks to xmacinfo for tracking this down (https://www.xmacinfo.com/en/blog/runlight-zero-production-when-modsecurity-blocks-beacon-cpanel).
+- A request to `/e` with any method but POST still gets 405, now with a message that a GET there usually means a firewall or proxy replaced the tracker's request with its own error page, rather than a fault in Runlight.
+- The Drupal module's settings form keeps its services in protected properties, so Drupal can save the form between requests, as it does for AJAX, without trying to store the services themselves.
+
+### Added
+
+- The Drupal module supports Drupal 12, tested on 12.0.0-beta2 with PHP 8.5, as well as 11 and 10.3. Its hooks are in a class of their own, which Drupal 11.1 and later call directly; Drupal 10.3 and 11.0 still reach them through `runlight.module`.
+
 ## 0.4.1 - 2026-11-09
 
 ### Fixed

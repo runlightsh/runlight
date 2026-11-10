@@ -18,7 +18,7 @@ Activate the plugin and choose to run Runlight inside WordPress, with nothing el
 
 * It adds Runlight's script (under 2 KB gzipped) to every page, and marks 404 pages so broken links show up.
 * It leaves out administrators' own visits, if you want.
-* It records AI agents such as ChatGPT, Claude, and Perplexity when they fetch your pages to answer someone's question. They run no JavaScript, so no script can see them; the plugin records them on the server, after the page has been sent.
+* It records AI agents such as ChatGPT, Claude, and Perplexity when they fetch your pages to answer someone's question, and crawlers such as GPTBot and ClaudeBot. They run no JavaScript, so no script can see them; the plugin records them on the server, after the page has been sent. A fetch from an address the agent's company publishes shows under the agent's name, and any other shows as claimed.
 * The Runlight item in the admin menu shows this site's numbers in wp-admin, and the full dashboard opens at /runlight on your site, for anyone who can manage options.
 * Goals, funnels, short links, email reports, and imports from Umami, Bitly, and other services are all in the dashboard.
 
@@ -28,7 +28,7 @@ If you already run Runlight elsewhere, as the standalone server or inside an app
 
 = Privacy =
 
-The script sets no cookies and stores nothing in the visitor's browser. Runlight counts a visitor with a hash of a daily salt, your site, their IP address, and their user agent; the address and the user agent are never stored, and the salt is deleted within four days.
+The script sets no cookies and stores nothing in the visitor's browser. Runlight counts a visitor with a hash of a daily salt, your site, their IP address, and their user agent; the address and the user agent are never stored, and the salt is deleted once its day is over, or once the last visit that began that day ends.
 
 = Source code =
 
@@ -138,6 +138,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 6. The settings page sets what Runlight counts.
 
 == Changelog ==
+
+= Unreleased =
+* Visits are counted on hosts that run ModSecurity with the OWASP Core Rule Set, as many shared hosts do. The script sent each visit in a form that rule set refuses, so those sites recorded nothing; it now sends visits to your own site as JSON, which it accepts.
 
 = 0.4.1 =
 * Maintenance release with a fix for the Drupal module. Nothing changes in how the WordPress plugin works.

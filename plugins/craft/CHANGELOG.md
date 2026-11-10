@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Fixed
+- Visits are counted on hosts that run ModSecurity with the OWASP Core Rule Set, as many shared hosts do. The script sent each visit in a form that rule set refuses, so those sites recorded nothing; it now sends visits to your own site as JSON, which it accepts.
+
 ## 0.4.1 - 2026-11-09
 
 ### Changed
