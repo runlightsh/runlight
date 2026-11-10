@@ -39,6 +39,11 @@ if Code.ensure_loaded?(Plug.Conn) do
           parsers: [:urlencoded, :multipart, :json],
           json_decoder: Phoenix.json_library(),
           body_reader: {Runlight.Plug, :body_reader, []}
+
+    The tracker sends each visit as JSON when it posts to the app's own site,
+    so the parsers read those too, and they are counted the same either way.
+    A body that claims to be JSON and is not gets the parsers' own 400 rather
+    than Runlight's 202; the tracker never sends one.
     """
 
     @behaviour Plug
