@@ -56,7 +56,8 @@ async function readBody(req: NodeRequest, limit: number): Promise<string> {
   // A body parser may have read the stream already.
   if (typeof req.body === "string") return req.body;
   if (req.body instanceof Uint8Array) return new TextDecoder().decode(req.body);
-  if (req.body && typeof req.body === "object") return JSON.stringify(req.body);
+  // Express 4's parsers leave an empty object on a request of a type they skip, its body still unread.
+  if (req.body && typeof req.body === "object" && (req.readableEnded || Object.keys(req.body).length > 0)) return JSON.stringify(req.body);
   if (req.readableEnded) return "";
   const chunks: Buffer[] = [];
   let size = 0;

@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- Visits are counted in an Express 4 app with a body parser in front of Runlight, including NestJS before 11, which adds two by default. A parser that skips a request of a type it doesn't handle still sets the request's body to an empty object in Express 4, and Runlight read that instead of the visit, so with `express.json()` every visit sent as `text/plain` was lost, and with `express.urlencoded()` or `express.raw()` every visit was. Runlight now reads the request itself when a parser left it unread. Express 5 was not affected.
+
 ## 0.4.2 - 2026-11-10
 
 ### Fixed
