@@ -139,6 +139,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Maintenance release with a fix for the Drupal module. Nothing changes in how the WordPress plugin works.
+
 = 0.4.0 =
 * AI agents are checked against the addresses their companies publish (OpenAI, Anthropic, Perplexity, Mistral, DuckDuckGo, and Common Crawl). A fetch from a listed address shows under the agent's name, and any other shows as claimed, such as "GPTBot (claimed)". The address is compared, then dropped; only whether it matched is kept.
 * The AI agents panel explains each group in a small "?" tip: a live fetch is an assistant reading the page to answer someone, and a crawl is collected for training or a search index.

@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- The Drupal module works with the Redirect module's "Enforce clean and canonical URLs" option. With it on, Redirect sent every request under /runlight, such as the script at /runlight/s.js, to /runlight itself, so the script, the dashboard, and visit counting answered "Not found". Runlight's paths are now left out of that check, and the rest of the site keeps it. Thanks to xmacinfo for the report (https://www.drupal.org/project/runlight/issues/3636637).
+
 ## 0.4.0 - 2026-11-09
 
 ### Added
