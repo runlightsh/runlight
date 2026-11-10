@@ -3036,7 +3036,7 @@ final class Routes
                 return new Response('', 204, ['access-control-allow-origin' => '*', 'access-control-allow-methods' => 'POST', 'access-control-max-age' => '86400']);
             }
             if ($method !== 'POST') {
-                return self::coded('Method not allowed', 'method_not_allowed', 405);
+                return self::coded('Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.', 'method_not_allowed', 405);
             }
             try {
                 $rl->collect($request, $context);

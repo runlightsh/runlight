@@ -2637,7 +2637,7 @@ class Routes:
             if method == "OPTIONS":
                 return Response(b"", 204, {"access-control-allow-origin": "*", "access-control-allow-methods": "POST", "access-control-max-age": "86400"})
             if method != "POST":
-                return coded("Method not allowed", "method_not_allowed", 405)
+                return coded("Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.", "method_not_allowed", 405)
             try:
                 rl.collect(request, context)
             except Exception as error:  # noqa: BLE001

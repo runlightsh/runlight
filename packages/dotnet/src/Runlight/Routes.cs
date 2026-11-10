@@ -3644,7 +3644,7 @@ public sealed class Routes
             }
             if (method != "POST")
             {
-                return Coded("Method not allowed", "method_not_allowed", 405);
+                return Coded("Method not allowed. The tracker sends visits here with POST; a GET usually means a firewall or proxy replaced the request with its own error page.", "method_not_allowed", 405);
             }
             try
             {
