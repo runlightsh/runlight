@@ -19,13 +19,18 @@
   var w = window;
   var d = document;
   var n = navigator;
+  var loc = location;
   var script = d.currentScript;
   if (!script) return;
 
   var attr = function (name) {
     return script.getAttribute("data-" + name);
   };
-  var endpoint = script.src.replace(/s\.js(\?.*)?$/, "e");
+  var base = script.src.replace(/s\.js(\?.*)?$/, "");
+  var endpoint = base + "e";
+  // To the page's own site, JSON, which web application firewalls expect: OWASP's rule set, on many shared
+  // hosts, refuses a text/plain body outright. To another site, text/plain, which needs no CORS preflight.
+  var type = new URL(endpoint).origin == loc.origin ? "application/json" : "text/plain";
   var site = attr("site");
   var useHash = attr("hash") !== null;
   var manual = attr("manual") !== null;
@@ -40,14 +45,14 @@
   var skip = false;
   var queued = (w.runlight && w.runlight.q) || [];
   var all = "__RUNLIGHT_RULES__";
-  var rules = (typeof all === "object" && (all[site] || all[location.hostname.replace(/^www\./, "")] || all["*"])) || [];
+  var rules = (typeof all === "object" && (all[site] || all[loc.hostname.replace(/^www\./, "")] || all["*"])) || [];
 
   // ?runlight=pick with a ticket, opened from the dashboard, loads the element picker and counts nothing. The
   // dashboard leaves this tab no handle on itself, so the ticket, which the install checks, is what tells.
-  var pick = /[?&]runlight=pick\b/.test(location.search) && /[?&]runlight_ticket=/.test(location.search);
+  var pick = /[?&]runlight=pick\b/.test(loc.search) && /[?&]runlight_ticket=/.test(loc.search);
   if (pick) {
     var picker = d.createElement("script");
-    picker.src = script.src.replace(/s\.js(\?.*)?$/, "pick.js") + location.search;
+    picker.src = base + "pick.js" + loc.search;
     d.head.appendChild(picker);
   }
 
@@ -55,9 +60,10 @@
   // ?runlight=track starts again. The owner's opt-out, never a visitor id.
   var ignored = false;
   try {
-    var flag = /[?&]runlight=(ignore|track)\b/.exec(location.search);
-    if (flag) flag[1] === "ignore" ? localStorage.setItem("runlight_ignore", "1") : localStorage.removeItem("runlight_ignore");
-    ignored = localStorage.getItem("runlight_ignore") === "1";
+    var flag = /[?&]runlight=(ignore|track)\b/.exec(loc.search);
+    var store = localStorage;
+    if (flag) flag[1] === "ignore" ? store.setItem("runlight_ignore", "1") : store.removeItem("runlight_ignore");
+    ignored = store.getItem("runlight_ignore") === "1";
   } catch (e) {}
   // Standing down sends nothing, but the script still sets up, so every call a site makes, runlight.pageview()
   // included, still works.
@@ -75,15 +81,18 @@
         if (!body || body.constructor !== Object) return;
       } catch (e) { return; }
     }
-    var json = JSON.stringify(body);
-    // A string body goes as text/plain, which needs no CORS preflight.
-    if (n.sendBeacon && n.sendBeacon(endpoint, json)) return;
-    if (w.fetch) fetch(endpoint, { method: "POST", body: json, keepalive: true }).catch(function () {});
+    // The Blob's type is the request's content type, for the beacon and for fetch alike. A browser that will
+    // not send it as a beacon, or has none, sends it with fetch.
+    var data = new Blob([JSON.stringify(body)], { type: type });
+    try {
+      if (n.sendBeacon(endpoint, data)) return;
+    } catch (e) {}
+    if (w.fetch) fetch(endpoint, { method: "POST", body: data, keepalive: true }).catch(function () {});
   };
 
   var randomId = function () {
     var bytes = new Uint8Array(6);
-    (w.crypto || {}).getRandomValues ? crypto.getRandomValues(bytes) : bytes.forEach(function (_, i) { bytes[i] = Math.random() * 256; });
+    crypto.getRandomValues(bytes);
     return Array.from(bytes, function (b) { return (b + 256).toString(36).slice(-2); }).join("");
   };
 
@@ -116,19 +125,19 @@
   var measureScroll = function () {
     var el = d.documentElement;
     var total = Math.max(el.scrollHeight, d.body ? d.body.scrollHeight : 0);
-    var seen = (w.scrollY || el.scrollTop) + w.innerHeight;
+    var seen = w.scrollY + w.innerHeight;
     var depth = total > 0 ? Math.min(100, Math.round((seen / total) * 100)) : 100;
     if (depth > scrolled) scrolled = depth;
   };
 
   var currentUrl = function () {
-    var l = location;
-    return l.protocol + "//" + l.host + l.pathname + l.search + (useHash ? l.hash : "");
+    // The page's origin is its scheme and host, never a username or password in the address.
+    return loc.origin + loc.pathname + loc.search + (useHash ? loc.hash : "");
   };
 
   var pageview = function (to) {
     // Listeners pass events; only a string is a URL from runlight.pageview().
-    var url = typeof to == "string" ? new URL(to, location.href).href : currentUrl();
+    var url = typeof to == "string" ? new URL(to, loc.href).href : currentUrl();
     if (url === pageUrl) return;
     var referrer = pageUrl || d.referrer;
     flush();
@@ -150,7 +159,7 @@
       h: screen.height,
       l: n.language,
     });
-    if (notFound) track("404", { path: location.pathname });
+    if (notFound) track("404", { path: loc.pathname });
     notFound = false;
   };
 
@@ -229,7 +238,7 @@
       if (!/^https?:/.test(href)) return;
       if (attr("downloads") !== "false" && downloads.test(link.pathname)) {
         track("File download", { url: href });
-      } else if (attr("outbound") !== "false" && link.host !== location.host) {
+      } else if (attr("outbound") !== "false" && link.host !== loc.host) {
         track("Outbound link", { url: href });
       }
     },
