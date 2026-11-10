@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.4.3 - 2026-11-10
 
 ### Changed
 - Updated the Runlight library to 0.4.3, a maintenance release with a fix for Express apps. Nothing changes in how the Craft plugin works.
