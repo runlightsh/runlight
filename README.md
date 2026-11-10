@@ -52,7 +52,7 @@ Runlight is also available for eight more languages and three CMSs. Each languag
 | --- | --- | --- |
 | PHP | `composer require runlight/runlight` (PHP 8.2 or later) | [PHP](https://runlight.sh/docs/php/) |
 | WordPress | From [WordPress.org](https://wordpress.org/plugins/runlight/): `wp plugin install runlight --activate`, or search for Runlight under Plugins, Add New | [WordPress](https://runlight.sh/docs/wordpress/) |
-| Drupal | From [drupal.org](https://www.drupal.org/project/runlight): `composer require drupal/runlight`, then `drush pm:install runlight` (Drupal 10.3 or 11) | [Drupal](https://runlight.sh/docs/drupal/) |
+| Drupal | From [drupal.org](https://www.drupal.org/project/runlight): `composer require drupal/runlight`, then `drush pm:install runlight` (Drupal 10.3, 11, or 12) | [Drupal](https://runlight.sh/docs/drupal/) |
 | Craft CMS | From the [Plugin Store](https://plugins.craftcms.com/runlight), or `composer require runlight/craft`, then `php craft plugin/install runlight` (Craft 5.3 or later) | [Craft CMS](https://runlight.sh/docs/craft/) |
 | Python | `pip install runlight` (Python 3.11 or later), with the `postgres` or `mysql` extra for those databases | [Python](https://runlight.sh/docs/python/) |
 | Rails | `bundle add runlight`, then `bin/rails generate runlight:install` and `bin/rails db:migrate` (Rails 7.2, 8.0, or 8.1) | [Rails](https://runlight.sh/docs/rails/) |
@@ -67,7 +67,7 @@ The WordPress, Drupal, and Craft plugins add the script to your site and report 
 
 ## Privacy
 
-Runlight never sets a cookie and never stores an IP address or a full user agent. Visitors are counted with a hash whose random salt changes every day and is deleted once its day is over, or once the last visit that began that day ends, so it cannot be reversed. A visitor lasts one day, or until a visit that runs past midnight ends. The hash stays with each visit, but once its salt is gone it cannot be recomputed or matched to anyone's later visits. Page paths, titles, and event properties are kept as your site sends them, so keep personal details out of them. Read [how Runlight counts](https://runlight.sh/docs/privacy/) for the details.
+Runlight never sets a cookie and never stores an IP address or a full user agent. Visitors are counted with a hash whose random salt changes every day and is deleted after its day is over and the last visit that began that day has ended, at the next visit or hourly check, so it cannot be reversed. A visitor lasts one day, or until a visit that runs past midnight ends. The hash stays with each visit, but once its salt is gone it cannot be recomputed or matched to anyone's later visits. Page paths, titles, and event properties are kept as your site sends them, so keep personal details out of them. Read [how Runlight counts](https://runlight.sh/docs/privacy/) for the details.
 
 ## Contributing
 

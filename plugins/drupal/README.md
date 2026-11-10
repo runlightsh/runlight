@@ -13,7 +13,7 @@ friendly analytics with no cookies, kept in your own database.
 
 ## Requirements
 
-Drupal 10.3 or 11, and PHP 8.2 or later. Running Runlight inside the site also
+Drupal 10.3, 11, or 12, and PHP 8.2 or later. Running Runlight inside the site also
 needs the `pdo`, `mbstring`, and `openssl` extensions, and either Drupal's
 database on Postgres, MySQL 8.0.20, or MariaDB 11.4 or later, or else a private
 files folder and `pdo_sqlite`.

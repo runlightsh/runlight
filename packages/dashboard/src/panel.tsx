@@ -68,9 +68,11 @@ function fitTip(event: Event) {
   const tip = button.querySelector<HTMLElement>(".hover-tip");
   const row = button.closest<HTMLElement>(".mix-key");
   if (!tip || !row) return;
+  const bounds = row.getBoundingClientRect();
+  // No wider than the row, which on the narrowest phones is under the tip's usual 240px.
+  tip.style.maxWidth = `${Math.min(240, bounds.width)}px`;
   button.style.setProperty("--tip-shift", "0px");
   const box = tip.getBoundingClientRect();
-  const bounds = row.getBoundingClientRect();
   let shift = Math.min(0, bounds.right - box.right);
   if (box.left + shift < bounds.left) shift = bounds.left - box.left;
   button.style.setProperty("--tip-shift", `${shift}px`);

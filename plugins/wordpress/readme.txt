@@ -28,7 +28,7 @@ If you already run Runlight elsewhere, as the standalone server or inside an app
 
 = Privacy =
 
-The script sets no cookies and stores nothing in the visitor's browser. Runlight counts a visitor with a hash of a daily salt, your site, their IP address, and their user agent; the address and the user agent are never stored, and the salt is deleted once its day is over, or once the last visit that began that day ends.
+The script sets no cookies and stores nothing in the visitor's browser. Runlight counts a visitor with a hash of a daily salt, your site, their IP address, and their user agent; the address and the user agent are never stored, and the salt is deleted after its day is over and the last visit that began that day has ended, at the next visit or hourly check.
 
 = Source code =
 
