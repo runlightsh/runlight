@@ -139,6 +139,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Maintenance release with a fix for Express apps using the Runlight library. Nothing changes in how the WordPress plugin works.
+
 = 0.4.2 =
 * Visits are counted on hosts that run ModSecurity with the OWASP Core Rule Set, as many shared hosts do. The script sent each visit in a form that rule set refuses, so those sites recorded nothing; it now sends visits to your own site as JSON, which it accepts.
 
