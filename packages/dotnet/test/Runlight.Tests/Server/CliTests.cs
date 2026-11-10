@@ -98,6 +98,22 @@ public sealed class CliTests : ServerTestCase
         Environment.SetEnvironmentVariable("TRUST_PROXY", "false");
         Assert.Equal(new ProxyTrust(false, null), Settings().TrustProxy());
 
+        // The words every server takes, in any case and with spaces around them; anything else is refused.
+        foreach (string off in new[] { "0", "no", "off", " FALSE " })
+        {
+            Environment.SetEnvironmentVariable("TRUST_PROXY", off);
+            Assert.Equal(new ProxyTrust(false, null), Settings().TrustProxy());
+        }
+        foreach (string on in new[] { "1", "yes", "on", "True" })
+        {
+            Environment.SetEnvironmentVariable("TRUST_PROXY", on);
+            Assert.Equal(new ProxyTrust(true, null), Settings().TrustProxy());
+        }
+        Environment.SetEnvironmentVariable("TRUST_PROXY", "maybe");
+        var refused = Assert.Throws<InvalidOperationException>(() => Settings().TrustProxy());
+        Assert.Contains("Set TRUST_PROXY to true, false, or the header your proxy sets", refused.Message, StringComparison.Ordinal);
+        Environment.SetEnvironmentVariable("TRUST_PROXY", "false");
+
         Configure(new() { ["RUNLIGHT_URL"] = "https://stats.example.com/dashboard" });
         var e = Assert.Throws<InvalidOperationException>(() => Settings().Url());
         Assert.Contains("set RUNLIGHT_URL to the dashboard's address only", e.Message, StringComparison.Ordinal);
