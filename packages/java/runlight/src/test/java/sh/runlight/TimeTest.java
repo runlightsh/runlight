@@ -129,7 +129,7 @@ class TimeTest {
   /**
    * The fixture came from Node's ICU with time zone data 2025c. The JDK carries its own copy, which
    * may be newer, and disagree wherever a zone's rules changed since: British Columbia, Alberta,
-   * and Manitoba keeping summer time from 2026 on, and Morocco's summer time.
+   * Manitoba, and Cuba keeping summer time from 2026 on, and Morocco's summer time.
    */
   private static final List<String> NEWER_RULES =
       List.of(
@@ -143,7 +143,9 @@ class TimeTest {
           "America/Rainy_River",
           "Canada/Central",
           "Africa/Casablanca",
-          "Africa/El_Aaiun");
+          "Africa/El_Aaiun",
+          "America/Havana",
+          "Cuba");
 
   @Test
   void zones() {
