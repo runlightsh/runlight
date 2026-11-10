@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.4.1
+Stable tag: 0.4.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -139,7 +139,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.4.2 =
 * Visits are counted on hosts that run ModSecurity with the OWASP Core Rule Set, as many shared hosts do. The script sent each visit in a form that rule set refuses, so those sites recorded nothing; it now sends visits to your own site as JSON, which it accepts.
 
 = 0.4.1 =
