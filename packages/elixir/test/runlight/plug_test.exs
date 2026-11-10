@@ -294,6 +294,33 @@ defmodule Runlight.PlugParsedTest do
     assert conn.status == 201, conn.resp_body
   end
 
+  test "a visit the tracker sends as JSON is counted, with the parsers' reader or without" do
+    chrome =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+
+    for {router, path} <- [{Router, "/parsed"}, {Kept, "/kept"}] do
+      body = Jason.encode!(%{"k" => "pageview", "u" => "https://example.com" <> path, "i" => "pv"})
+
+      conn =
+        conn(:post, "/stats/e", body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("user-agent", chrome)
+        |> Map.put(:host, "example.com")
+        |> router.call(router.init([]))
+
+      assert conn.status == 202, path
+    end
+
+    conn =
+      conn(:get, "/stats/api/breakdown?period=today&dimension=page")
+      |> put_req_header("authorization", "Bearer secret")
+      |> Map.put(:host, "example.com")
+      |> Router.call(Router.init([]))
+
+    pages = conn.resp_body |> Jason.decode!() |> Map.fetch!("rows") |> Enum.map(& &1["value"]) |> Enum.sort()
+    assert pages == ["/kept", "/parsed"]
+  end
+
   test "a body that breaks off is refused, not taken for the whole request" do
     for {reason, status} <- [timeout: 408, closed: 400] do
       conn =
