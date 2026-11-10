@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.4.2
+Stable tag: 0.4.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -139,7 +139,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.4.3 =
 * Maintenance release with a fix for Express apps using the Runlight library. Nothing changes in how the WordPress plugin works.
 
 = 0.4.2 =
