@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Updated the Runlight library to 0.4.1, a maintenance release with a fix for the Drupal module. Nothing changes in how the Craft plugin works.
+
 ## 0.4.0 - 2026-11-09
 
 ### Added

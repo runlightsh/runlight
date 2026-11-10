@@ -29,10 +29,15 @@ final class RunlightPaths implements InboundPathProcessorInterface {
    * {@inheritdoc}
    */
   public function processInbound($path, Request $request): string {
-    if (!str_starts_with($path, '/runlight/')) {
+    if (!str_starts_with($path, '/runlight/') || ($this->setup)()->mode() !== 'local') {
       return $path;
     }
-    return ($this->setup)()->mode() === 'local' ? '/runlight' : $path;
+    // The one route's own path is /runlight, so a module that sends each
+    // request to its route's canonical address, such as Redirect with "Enforce
+    // clean and canonical URLs", would send /runlight/s.js there. This keeps
+    // it on the path the browser asked for.
+    $request->attributes->set('_disable_route_normalizer', TRUE);
+    return '/runlight';
   }
 
 }

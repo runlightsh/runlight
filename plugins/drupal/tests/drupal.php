@@ -149,6 +149,12 @@ namespace Drupal\Core {
   }
 }
 
+namespace Drupal\Core\PathProcessor {
+  interface InboundPathProcessorInterface {
+    public function processInbound($path, \Symfony\Component\HttpFoundation\Request $request);
+  }
+}
+
 namespace Drupal\Core\Routing {
   final class TrustedRedirectResponse {
     public function __construct(private string $url) {}

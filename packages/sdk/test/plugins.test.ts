@@ -550,6 +550,49 @@ test("the Drupal module keeps where Runlight runs in state, with settings.php ov
   assert.deepEqual(override, ["rl_env", "", "https://stats.example.com"]);
 });
 
+test("the Drupal module sends every path under /runlight to its one route, out of reach of Redirect's route normalizer", (t) => {
+  const answer = drupalPhp(t, `
+    namespace Symfony\\Component\\HttpFoundation {
+      final class ParameterBag {
+        public array $values = [];
+        public function set(string $key, mixed $value): void { $this->values[$key] = $value; }
+      }
+      class Request {
+        public ParameterBag $attributes;
+        public function __construct() { $this->attributes = new ParameterBag(); }
+      }
+    }
+    namespace DrupalTest {
+      $run = function (string $mode, string $path): array {
+        $config = new ConfigFactory();
+        $config->configs["runlight.settings"] = new Config(["mode" => $mode, "address" => $mode === "remote" ? "https://stats.example.com" : ""]);
+        $setup = new \\Drupal\\runlight\\Setup($config, new State(), new Invalidator());
+        $paths = new \\Drupal\\runlight\\PathProcessor\\RunlightPaths(fn () => $setup);
+        $request = new \\Symfony\\Component\\HttpFoundation\\Request();
+        return [$paths->processInbound($path, $request), $request->attributes->values];
+      };
+      echo json_encode([
+        $run("local", "/runlight/s.js"),
+        $run("local", "/runlight/api/stats"),
+        $run("local", "/node/1"),
+        $run("local", "/runlightish"),
+        $run("remote", "/runlight/s.js"),
+      ]);
+    }
+  `);
+  if (answer === null) return;
+  const off = { _disable_route_normalizer: true };
+  assert.deepEqual(JSON.parse(answer), [
+    ["/runlight", off],
+    ["/runlight", off],
+    // The rest of the site keeps its canonical addresses.
+    ["/node/1", []],
+    ["/runlightish", []],
+    // While Runlight runs elsewhere, /runlight is the site's own, aliases and all.
+    ["/runlight/s.js", []],
+  ]);
+});
+
 test("the Drupal module keeps its tables under Drupal's prefix, beside anyone else's, and drops only its own by name", (t) => {
   const run = (tables: string[], options: { prefix?: string; owner?: string | null; kept?: string; type?: string; version?: string; privatePath?: boolean } = {}) =>
     drupalPhp(t, `
