@@ -40,7 +40,7 @@
     "@cronwatch/sdk": "^0.14.3",
     "@runlight/sdk": "0.4.3",
     "better-sqlite3": "^13.0.3",
-    "mmdb-lib": "^3.0.4",
+    "mmdb-lib": "^3.0.5",
     "mysql2": "^3.24.6",
     "pg": "^8.23.1"
   },

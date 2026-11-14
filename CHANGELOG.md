@@ -2,6 +2,16 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- Two Runlight servers starting at once against one Postgres with ClickHouse turned on no longer risk one of them failing to start. Both could try to create the table that holds visits while ClickHouse is away at the same moment, and Postgres refused the second; it is now created under the same lock as the other tables.
+
+### Changed
+
+- The dashboard is built with Preact 11.2.0. The standalone server reads the location database with mmdb-lib 3.0.5, which no longer runs out of memory on a damaged file.
+
 ## 0.4.3 - 2026-11-10
 
 ### Fixed
