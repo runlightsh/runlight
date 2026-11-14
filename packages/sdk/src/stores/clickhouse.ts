@@ -625,7 +625,10 @@ export class ClickHouseStore extends SqlStore {
   private async makeWaiting(): Promise<void> {
     const dialect = this.db.dialect;
     const id = dialect === "postgres" ? "BIGSERIAL PRIMARY KEY" : dialect === "mysql" ? "BIGINT AUTO_INCREMENT PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
-    await this.db.run(`CREATE TABLE IF NOT EXISTS rl_waiting_hits (id ${id}, at BIGINT NOT NULL, hit ${dialect === "mysql" ? "MEDIUMTEXT" : "TEXT"} NOT NULL)${dialect === "mysql" ? " DEFAULT CHARSET=utf8mb4" : ""}`);
+    const create = (db: Db) => db.run(`CREATE TABLE IF NOT EXISTS rl_waiting_hits (id ${id}, at BIGINT NOT NULL, hit ${dialect === "mysql" ? "MEDIUMTEXT" : "TEXT"} NOT NULL)${dialect === "mysql" ? " DEFAULT CHARSET=utf8mb4" : ""}`);
+    // Under the lock the other tables are made with: two Postgres processes making the same table at once
+    // can both pass IF NOT EXISTS, and the second then fails on its row type.
+    await (this.db.exclusive ? this.db.exclusive(create) : create(this.db));
   }
 
   /** ClickHouse could not be reached, was too busy, ran out of time or memory, or had too many parts to merge. */
