@@ -1,0 +1,92 @@
+# On a Dependabot pull request for npm, rebuilds the files generated from
+# the packages (the dashboard and tracker bundles, each language's copy of
+# them, and the PHP route fixtures that hold their hashes) and commits them
+# to the pull request when they moved. Dependabot cannot run the build, so a
+# bump of preact or esbuild otherwise fails CI on "is stale" every time.
+#
+# Two jobs, so the new packages never run next to the key that can push:
+# build runs them with a read-only token and no secrets, and hands over a
+# patch; push applies it, only if every file it touches is a generated one,
+# and pushes with DEPENDABOT_REBUILD_KEY, a deploy key with write access kept
+# as a Dependabot secret. A push with the job's own token would not start CI
+# on the new commit.
+name: Dependabot rebuild
+
+on:
+  pull_request:
+    paths:
+      - package-lock.json
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      # No install scripts: nothing the build needs compiles at install.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: node --import tsx scripts/php-fixtures-routes.mts
+      - name: Patch of what moved
+        id: diff
+        run: |
+          git diff --binary > rebuild.patch
+          if [ -s rebuild.patch ]; then
+            git diff --stat
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Generated files are up to date."
+          fi
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rebuild
+          path: rebuild.patch
+          retention-days: 1
+
+  push:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          ssh-key: ${{ secrets.DEPENDABOT_REBUILD_KEY }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rebuild
+          path: ${{ runner.temp }}
+      - name: Apply, if it touches generated files only
+        env:
+          PATCH: ${{ runner.temp }}/rebuild.patch
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+            echo "The pull request moved on since the build; its next run rebuilds."
+            exit 0
+          fi
+          allowed='^packages/(sdk/src/generated/|php/tests/fixtures/|php/assets/|python/src/runlight/assets/|ruby/assets/|go/internal/assets/|elixir/priv/assets/|java/runlight/src/main/resources/sh/runlight/assets/|dotnet/src/Runlight/Assets/|rust/runlight/assets/)'
+          bad="$(git apply --numstat "$PATCH" | cut -f3 | grep -Ev "$allowed" || true)"
+          if [ -n "$bad" ]; then
+            echo "The rebuild touched files that are not generated:"
+            echo "$bad"
+            exit 1
+          fi
+          git apply "$PATCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Rebuild the generated files"
+          git push
