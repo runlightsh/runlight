@@ -857,10 +857,12 @@ final class Routes
     }
 
     /**
+     * `$clicks` is for the short link reports, whose "all" reaches back to the oldest click as well as the oldest visit.
+     *
      * @param array<string, mixed> $site
      * @return array{query: array<string, mixed>, range: array<string, mixed>, compared: ?array<string, mixed>}|Response
      */
-    private function readQuery(Url $url, array $site): array|Response
+    private function readQuery(Url $url, array $site, bool $clicks = false): array|Response
     {
         $params = $url->searchParams();
         $filters = [];
@@ -877,7 +879,10 @@ final class Routes
         $now = $this->rl->now();
         $firstDate = null;
         if ($params->get('period') === 'all') {
-            $first = $this->store()->firstSeen($site['id']);
+            $seen = $this->store()->firstSeen($site['id']);
+            // Clicks imported as daily counts belong to no visit, and may be older than any.
+            $clicked = $clicks ? $this->store()->firstClick($site['id']) : null;
+            $first = $seen === null ? $clicked : ($clicked === null ? $seen : min($seen, $clicked));
             if ($first !== null) {
                 $firstDate = Time::localDate((int) $first, $site['timezone']);
             }
@@ -1047,7 +1052,7 @@ final class Routes
 
             if ($path === '/api/links') {
                 if ($request->method === 'GET') {
-                    $read = $this->readQuery($url, $site);
+                    $read = $this->readQuery($url, $site, true);
                     if ($read instanceof Response) {
                         return $read;
                     }
@@ -1120,7 +1125,7 @@ final class Routes
                     if ($link === null || $link['site'] !== $site['id']) {
                         return self::coded('Unknown link', 'unknown_link', 404);
                     }
-                    $read = $this->readQuery($url, $site);
+                    $read = $this->readQuery($url, $site, true);
                     if ($read instanceof Response) {
                         return $read;
                     }

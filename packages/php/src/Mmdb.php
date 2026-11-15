@@ -31,7 +31,10 @@ final class Mmdb
     private readonly int $dataStart;
     private ?int $ipv4Start = null;
 
-    private readonly int $size;
+    /** How many bytes the database is. */
+    public readonly int $size;
+    /** Where the marker that starts the metadata is, counted from the start of the database. */
+    public readonly int $markerAt;
     /** The file read a page at a time, or null when the whole database is in `$bytes`. */
     private readonly ?MmdbFile $file;
 
@@ -48,6 +51,7 @@ final class Mmdb
         if ($at === false) {
             throw new \InvalidArgumentException('Not a MaxMind DB file: no metadata');
         }
+        $this->markerAt = $tailStart + $at;
         $start = $tailStart + $at + strlen(self::METADATA_MARKER);
         [$metadata] = $this->decode($start, $start);
         if (!is_array($metadata) || !isset($metadata['node_count'], $metadata['record_size'], $metadata['ip_version'])) {

@@ -195,61 +195,6 @@ final class CliTest extends TestCase
         $this->assertFileExists("{$this->root}/data/deeper/runlight.db");
     }
 
-    public function testDbIpDownloadsThisMonthOrLastAndKeepsOnlyTheNewest(): void
-    {
-        $db = base64_decode(Fixture::load('geo')['databases'][0]['base64']);
-        $dir = "{$this->root}/geo";
-        $asked = [];
-        $logged = [];
-        $published = ['2026-09'];
-        $download = static function (string $url, string $file) use (&$asked, &$published, $db): bool {
-            $asked[] = $url;
-            preg_match('/lite-(\d{4}-\d{2})\.mmdb\.gz$/', $url, $m);
-            if (!in_array($m[1], $published, true)) {
-                return false;
-            }
-            file_put_contents($file, gzencode($db));
-            return true;
-        };
-        $geo = new DbIp($dir, 'city', $download, static function (string $line) use (&$logged): void {
-            $logged[] = $line;
-        });
-        $this->assertNull($geo->lookup(), 'nothing to look up before the first download');
-
-        $october = 1_791_374_400_000; // 2026-10-07
-        $geo->refresh($october);
-        $this->assertSame(['https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz', 'https://download.db-ip.com/free/dbip-city-lite-2026-09.mmdb.gz'], $asked, "a month's file appears a day or so in, so last month's stands in");
-        $this->assertSame(['Runlight: location data from DB-IP (2026-09) is ready.'], $logged);
-        $this->assertSame("$dir/dbip-city-lite-2026-09.mmdb", $geo->newest());
-        $this->assertNotNull($geo->lookup());
-
-        // The month's file is not out yet, so the next tries wait: five minutes, then twice as long each time.
-        $asked = [];
-        $geo->refresh($october + 4 * 60_000);
-        $this->assertSame([], $asked, 'not asked again within five minutes');
-        $geo->refresh($october + 5 * 60_000);
-        $this->assertSame(['https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz'], $asked);
-        $geo->refresh($october + 14 * 60_000);
-        $this->assertCount(1, $asked, 'then not within ten');
-
-        $published[] = '2026-10';
-        $asked = [];
-        $geo->refresh($october + 15 * 60_000);
-        $this->assertSame(['https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz'], $asked);
-        $this->assertSame(["$dir/dbip-city-lite-2026-10.mmdb"], glob("$dir/*"), 'older releases go');
-        $asked = [];
-        $geo->refresh($october);
-        $this->assertSame([], $asked, 'once this month is there, nothing is fetched');
-
-        // January's fallback is December of the year before, and a broken file is never kept.
-        $broken = new DbIp($dir, 'country', static fn (string $url, string $file): bool => (bool) file_put_contents($file, gzencode('not a database')), static function (string $line) use (&$logged): void {
-            $logged[] = $line;
-        });
-        $broken->refresh(1_798_761_600_000 + 86_400_000); // 2027-01-02
-        $this->assertStringContainsString('dbip-country-lite-2026-12.mmdb.gz', end($logged));
-        $this->assertNull($broken->newest());
-    }
-
     public function testDbIpDiskSaysWhenAFileCannotBeMoved(): void
     {
         $this->expectException(\RuntimeException::class);
@@ -259,7 +204,7 @@ final class CliTest extends TestCase
 
     public function testDbIpWorksItsFilesThroughTheFilesItIsGiven(): void
     {
-        $db = base64_decode(Fixture::load('geo')['databases'][0]['base64']);
+        $db = DbIpTest::mmdb(['database_type' => 'DBIP-Country-Lite']);
         $dir = "{$this->root}/geo";
         // An app's own filesystem layer, here keeping the database in memory once it is opened, as a CMS's may.
         $files = new class implements \Runlight\Server\DbIpFiles {
@@ -278,10 +223,10 @@ final class CliTest extends TestCase
                 return $this->disk->folder($dir);
             }
 
-            public function gunzip(string $from, string $to): void
+            public function gunzip(string $from, string $to, int $max): string
             {
                 $this->done[] = 'gunzip';
-                file_put_contents($to, gzdecode((string) file_get_contents($from)));
+                return $this->disk->gunzip($from, $to, $max);
             }
 
             public function open(string $file): \Runlight\Mmdb
@@ -304,7 +249,7 @@ final class CliTest extends TestCase
         };
         $download = static fn (string $url, string $file): bool => (bool) file_put_contents($file, gzencode($db));
         $geo = new DbIp($dir, 'country', $download, static function (string $line): void {
-        }, $files);
+        }, $files, new \Runlight\Tests\Support\FakeFetcher(static fn (): \Runlight\Http\Response => new \Runlight\Http\Response('', 404)));
         $geo->refresh(1_791_374_400_000); // 2026-10-07
         // Older files go, the download among them, and what is left of the download goes either way.
         $this->assertSame(['folder', 'gunzip', 'open dbip-country-lite-2026-10.mmdb.partial', 'move', 'delete dbip-country-lite-2026-10.mmdb.gz.partial', 'delete dbip-country-lite-2026-10.mmdb.gz.partial', 'delete dbip-country-lite-2026-10.mmdb.partial'], $files->done);

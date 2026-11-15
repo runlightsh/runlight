@@ -1925,6 +1925,13 @@ final class SqlStore
         return $row === null || $row['t'] === null ? null : Sql::num($row['t']);
     }
 
+    /** When the site's oldest short link click is, or null when it has none. Clicks imported as daily counts belong to no visit. */
+    public function firstClick(string $site): int|float|null
+    {
+        $row = $this->db->all("SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'", [$site])[0] ?? null;
+        return $row === null || $row['t'] === null ? null : Sql::num($row['t']);
+    }
+
     /** When the site's first visit was recorded, or null with no data yet. */
     public function firstSeen(string $site): int|float|null
     {

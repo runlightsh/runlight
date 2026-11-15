@@ -362,7 +362,7 @@ final class WebTest extends TestCase
         }
         $held = self::handle($web, self::req('/login', 'POST', $headers, $body));
         $this->assertSame(429, $held->status);
-        $this->assertStringContainsString('Too many tries. Wait fifteen minutes and try again.', $held->text());
+        $this->assertStringContainsString('Too many tries. Try again later.', $held->text());
         $right = (new SearchParams(['email' => 'jon@example.com', 'password' => 'a long password']))->toString();
         $this->assertSame(429, self::handle($web, self::req('/login', 'POST', $headers, $right))->status, 'even the right password waits');
         $this->assertSame(303, self::handle($web, self::req('/login', 'POST', ['x-forwarded-for' => '203.0.113.10'] + $headers, $right))->status, 'another address is not held up');
