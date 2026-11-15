@@ -25,6 +25,13 @@ namespace {
     {
         public static object $app;
         public static array $logged = [];
+        /** The Guzzle client Craft makes, when a test gives one. */
+        public static ?object $client = null;
+
+        public static function createGuzzleClient(array $config = []): object
+        {
+            return self::$client;
+        }
 
         public static function t(string $category, string $message, array $params = []): string
         {

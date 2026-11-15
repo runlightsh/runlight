@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1205,6 +1206,18 @@ test("the Craft plugin keeps rate counts in two cache entries, however many visi
   assert.deepEqual(JSON.parse(answer), { most: 2, refused: 10, after: [] });
 });
 
+test("the WordPress and Craft plugins open the dashboard in the language their admin is read in", () => {
+  // The dashboard reads ?lang= as it loads (packages/dashboard/src/i18n.ts), and takes a locale such as fr_FR or de-CH by its language.
+  const wordpress = readFileSync(WORDPRESS + "includes/Dashboard.php", "utf8");
+  assert.match(wordpress, /\$lang = get_user_locale\(\);/);
+  assert.match(wordpress, /\$address \. '\/\?lang=' \. rawurlencode\( \$lang \)/);
+  assert.match(wordpress, /'&theme=light&lang=' \. rawurlencode\( \$lang \)/);
+  const craft = readFileSync(CRAFT + "src/controllers/DashboardController.php", "utf8");
+  assert.match(craft, /\$lang = rawurlencode\(\(string\) Craft::\$app->language\);/);
+  assert.match(craft, /\$address \. '\/\?lang=' \. \$lang/);
+  assert.match(craft, /\$ticket\['url'\] \. '&lang=' \. \$lang/);
+});
+
 test("every CMS plugin frames the dashboard with the one script in the PHP package", () => {
   const read = (file: string) => readFileSync(new URL(`../../../${file}`, import.meta.url), "utf8");
   const script = read("packages/php/assets/frame.js");
@@ -1279,6 +1292,273 @@ test("the frame script grows the frame, says what is on screen, and listens to i
   assert.equal(frame.style.height, "1501px");
   // No frame on the page, no harm.
   (window.runlightFrame as (frame: unknown) => void)(null);
+});
+
+/**
+ * PHP that makes a small DB-IP database, as packages/server/test/geo.test.ts does: one search tree node whose
+ * records both point at the one data record, so every address finds it, a megabyte of padding, and the metadata.
+ * runlight_test_mmdb(type, built) gives the bytes, and runlight_test_page(release, sha1) DB-IP's download page.
+ */
+const MMDB_PHP = `
+  function runlight_test_mmdb(string $type = "DBIP-Country-Lite", ?int $built = null): string {
+    $text = static fn (string $v): string => chr(0x40 | strlen($v)) . $v;
+    $uint = static fn (int $type, int $v, int $bytes): string => chr(($type << 5) | $bytes) . substr(pack("J", $v), 8 - $bytes);
+    $record = "\\xe1" . $text("country") . "\\xe1" . $text("iso_code") . $text("US");
+    $meta = "\\xe9"
+      . $text("binary_format_major_version") . $uint(5, 2, 1)
+      . $text("binary_format_minor_version") . $uint(5, 0, 1)
+      . $text("build_epoch") . "\\x04\\x02" . pack("N", $built ?? time())
+      . $text("database_type") . $text($type)
+      . $text("description") . "\\xe0"
+      . $text("ip_version") . $uint(5, 6, 1)
+      . $text("languages") . "\\x00\\x04"
+      . $text("node_count") . $uint(6, 1, 1)
+      . $text("record_size") . $uint(5, 24, 1);
+    return "\\x00\\x00\\x11\\x00\\x00\\x11" . str_repeat("\\0", 16) . $record . str_repeat("\\0", 1 << 20) . "\\xab\\xcd\\xefMaxMind.com" . $meta;
+  }
+  function runlight_test_page(string $release, string $sha1): string {
+    return "<dl><dt>MD5SUM</dt><dd class=\\"small\\">" . str_repeat("0", 32) . "</dd><dt>SHA1SUM</dt><dd class=\\"small\\">" . str_repeat("c", 40) . "</dd></dl>"
+      . "<a href='https://download.db-ip.com/free/dbip-country-lite-$release.csv.gz'>CSV</a>"
+      . "<dl><dt>MD5SUM</dt><dd class=\\"small\\">" . str_repeat("1", 32) . "</dd><dt>SHA1SUM</dt><dd class=\\"small\\">$sha1</dd></dl>"
+      . "<a href='https://download.db-ip.com/free/dbip-country-lite-$release.mmdb.gz'>MMDB</a>";
+  }
+`;
+
+test("the WordPress plugin unpacks a location download a piece at a time, and keeps nothing that is cut short, padded, or too big", (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "runlight-wp-gunzip-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const answer = wordpressPhp(t, `
+    ini_set("memory_limit", "1G");
+    foreach (["Storage", "Locations"] as $class) { require ${JSON.stringify(WORDPRESS + "includes/")} . $class . ".php"; }
+    ${MMDB_PHP}
+    $dir = ${JSON.stringify(dir)};
+    $data = runlight_test_mmdb();
+    $gz = gzencode($data);
+    $files = new Runlight\\WordPress\\Locations();
+    $try = static function (string $packed, int $max = 536870912) use ($dir, $files): array {
+      file_put_contents("$dir/in.gz", $packed);
+      @unlink("$dir/out.mmdb");
+      try {
+        $sha1 = $files->gunzip("$dir/in.gz", "$dir/out.mmdb", $max);
+        return [$sha1 === sha1_file("$dir/out.mmdb"), filesize("$dir/out.mmdb")];
+      } catch (RuntimeException $error) {
+        return [$error->getMessage(), file_exists("$dir/out.mmdb")];
+      }
+    };
+    echo json_encode([
+      "whole" => [$try($gz), sha1($data) === (new Runlight\\WordPress\\Locations())->gunzip("$dir/in.gz", "$dir/out.mmdb", 536870912), strlen($data)],
+      "cut short" => [$try(substr($gz, 0, intdiv(strlen($gz), 2))), $try(substr($gz, 0, -1)), $try("")],
+      "bytes after" => [$try($gz . "x"), $try($gz . gzencode("more")), $try($gz . str_repeat("\\0", 70000))],
+      "not gzip" => $try(str_repeat("hello", 1000)),
+      "past the limit it is given" => $try($gz, strlen($data) - 1),
+      "past its own limits" => [$try(gzencode(str_repeat("\\0", 67108865))), $try(random_bytes(33554433))],
+      "opens" => (function () use ($files, $dir, $try, $gz) { $try($gz); return $files->open("$dir/out.mmdb")->get("8.8.8.8"); })(),
+    ]);
+  `);
+  if (answer === null) return;
+  const cut = ["the gzip stream stops before its end", false];
+  const after = ["there is more in it after the end of the gzip stream", false];
+  const out = JSON.parse(answer);
+  assert.deepEqual(out, {
+    whole: [[true, out.whole[2]], true, out.whole[2]],
+    "cut short": [cut, cut, cut],
+    "bytes after": [after, after, after],
+    "not gzip": ["it is not a gzip file", false],
+    "past the limit it is given": [`the location data is more than ${Math.floor((out.whole[2] - 1) / 1048576)} MB`, false],
+    "past its own limits": [["the location data is more than 64 MB", false], ["the location data is more than 32 MB packed", false]],
+    opens: { country: { iso_code: "US" } },
+  });
+  assert.ok(out.whole[2] > 1 << 20);
+});
+
+test("the WordPress plugin's download for location data follows no redirect, takes only a 200 over https, and stops at its limit", (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "runlight-wp-download-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const answer = wordpressPhp(t, `
+    require ${JSON.stringify(WORDPRESS + "includes/Fetcher.php")};
+    $file = ${JSON.stringify(dir)} . "/file.gz";
+    $base = "https://download.db-ip.com/free/";
+    $GLOBALS["wp_test"]["http"] = [
+      $base . "ok" => ["body" => "packed"],
+      $base . "gone" => ["status" => 404, "body" => "Not found"],
+      $base . "moved" => ["status" => 301, "headers" => ["location" => "https://evil.example/file.gz"], "body" => "moved"],
+      $base . "broken" => ["status" => 503, "body" => "later"],
+      $base . "says-long" => ["headers" => ["Content-Length" => "300000000"], "body" => "short"],
+      "http://download.db-ip.com/free/plain" => ["body" => "packed"],
+      "https://db-ip.com/page" => ["body" => "<html>checksums</html>"],
+      "https://db-ip.com/moved" => ["status" => 302, "headers" => ["location" => "https://evil.example/"], "body" => ""],
+      "https://db-ip.com/long" => ["body" => str_repeat("a", 2000)],
+    ];
+    $get = static function (string $url) use ($file): array {
+      @unlink($file);
+      try {
+        return [Runlight\\WordPress\\Fetcher::download($url, $file), file_exists($file) ? file_get_contents($file) : null];
+      } catch (RuntimeException $error) {
+        return [$error->getMessage(), file_exists($file)];
+      }
+    };
+    $out = ["files" => array_map($get, [$base . "ok", $base . "gone", $base . "moved", $base . "broken", $base . "says-long", "http://download.db-ip.com/free/plain", $base . "nowhere"])];
+    // DB-IP's page of checksums goes through the same Fetcher, as the package asks for it.
+    $page = static function (string $url): array {
+      try {
+        $answer = (new Runlight\\WordPress\\Fetcher())->fetch($url, ["redirect" => "manual", "maxBytes" => 1000, "timeoutMs" => 30000, "headers" => ["accept" => "text/html"]]);
+        return [$answer->status, $answer->text()];
+      } catch (Throwable $error) {
+        return [get_class($error)];
+      }
+    };
+    $out["pages"] = array_map($page, ["https://db-ip.com/page", "https://db-ip.com/moved", "https://db-ip.com/long"]);
+    echo json_encode($out);
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), {
+    files: [
+      [true, "packed"],
+      [false, null],
+      ["it answered 301", false],
+      ["it answered 503", false],
+      ["it is more than 256 MB", false],
+      ["it is not an https address", false],
+      ["no network in tests", false],
+    ],
+    pages: [[200, "<html>checksums</html>"], [302, ""], ["Runlight\\Http\\BodyTooLong"]],
+  });
+});
+
+test("the WordPress plugin's zip downloads location data held to DB-IP's checksum, and keeps what it has when a download is wrong", (t) => {
+  const php = spawnSync("php", ["--version"]);
+  if (php.error && !process.env.CI) return t.skip("PHP is not installed");
+  const dir = mkdtempSync(path.join(tmpdir(), "runlight-wp-geo-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const built = execFileSync("php", [WORDPRESS + "build.php", dir], { encoding: "utf8" });
+  const zip = /build: (\S+\.zip)/.exec(built)?.[1];
+  assert.ok(zip, built);
+  execFileSync("php", ["-r", `$z = new ZipArchive(); $z->open($argv[1]); $z->extractTo($argv[2]); $z->close();`, zip, dir]);
+  const env = { ...process.env, RUNLIGHT_WP_PLUGIN: path.join(dir, "runlight"), RUNLIGHT_WP_STATE: path.join(dir, "options"), RUNLIGHT_WP_UPLOADS: path.join(dir, "uploads"), RUNLIGHT_WP_HTTP: dir };
+  const run = (script: string): string => execFileSync("php", ["-r", script], { encoding: "utf8", env });
+  run(`require ${JSON.stringify(WORDPRESS + "tests/wordpress.php")}; update_option("runlight_settings", ["mode" => "local", "locations" => true]); update_option("permalink_structure", "/%postname%/");`);
+  // What DB-IP answers: its page, and this month's file, whose SHA-1 the page gives, or not. Then the hourly upkeep.
+  const serve = (sha1: string, type = '"DBIP-Country-Lite"'): { sha1: string; out: string; files: string[] } => {
+    const made = execFileSync("php", ["-r", `${MMDB_PHP}
+      $dir = $argv[1]; $release = gmdate("Y-m");
+      $data = runlight_test_mmdb(${type});
+      file_put_contents("$dir/file.gz", gzencode($data));
+      file_put_contents("$dir/routes.json", json_encode([
+        "https://db-ip.com/db/download/ip-to-country-lite" => ["body" => runlight_test_page($release, ${sha1})],
+        "https://download.db-ip.com/free/dbip-country-lite-$release.mmdb.gz" => ["file" => "$dir/file.gz"],
+      ]));
+      echo sha1($data);`, dir], { encoding: "utf8", env });
+    // The wait after a refused download would hold the next try back, as it should between real ones.
+    rmSync(path.join(dir, "uploads/runlight/geo/retry-country.json"), { force: true });
+    // The hourly upkeep, from the zip: a class the zip lacks is said by serve.php.
+    const out = run(`$_SERVER["REQUEST_URI"] = "/__check"; define("WP_DEBUG_LOG", true); ini_set("error_log", ${JSON.stringify(path.join(dir, "php.log"))}); require ${JSON.stringify(WORDPRESS + "tests/serve.php")};`);
+    const geo = path.join(dir, "uploads/runlight/geo");
+    return { sha1: made, out, files: existsSync(geo) ? readdirSync(geo).filter((name) => name.endsWith(".mmdb") || name.includes("partial")).sort() : [] };
+  };
+  const release = new Date().toISOString().slice(0, 7);
+  const log = (): string => (existsSync(path.join(dir, "php.log")) ? readFileSync(path.join(dir, "php.log"), "utf8") : "");
+
+  // A file that does not hash to what the page says is refused, and nothing is left behind.
+  const wrong = serve(`str_repeat("a", 40)`);
+  assert.match(wrong.out, /^checked [1-9]/, wrong.out);
+  assert.deepEqual(wrong.files, []);
+  assert.match(log(), new RegExp(`location data was not updated from https://download\\.db-ip\\.com/free/dbip-country-lite-${release}\\.mmdb\\.gz: its SHA-1 is ${wrong.sha1}, and DB-IP publishes a{40}`));
+  // So is one whose checksum matches but which is another kind of database.
+  const other = serve(`sha1($data)`, '"GeoLite2-Country"');
+  assert.deepEqual(other.files, []);
+  assert.match(log(), /it is a (&quot;|")GeoLite2-Country(&quot;|") database/);
+  // The real thing is unpacked, checked, and put in place, and lookups answer from it.
+  const good = serve(`sha1($data)`);
+  assert.match(good.out, /^checked [1-9]/, good.out);
+  assert.deepEqual(good.files, [`dbip-country-lite-${release}.mmdb`]);
+  assert.match(log(), new RegExp(`location data from DB-IP \\(${release}\\) is ready`));
+  assert.doesNotMatch(log(), /could not be checked against/);
+  assert.equal(createHash("sha1").update(readFileSync(path.join(dir, "uploads/runlight/geo", good.files[0]!))).digest("hex"), good.sha1);
+});
+
+/** PHP for a Guzzle client that answers from a list, notes what it was asked, and calls on_headers and progress as Guzzle does. */
+const GUZZLE_PHP = `
+  final class RunlightTestGuzzle implements \\GuzzleHttp\\ClientInterface {
+    public array $asked = [];
+    public function __construct(private array $answers) {}
+    public function getConfig(?string $option = null): mixed { return null; }
+    public function request(string $method, string $url, array $options = []): object {
+      $this->asked[] = [$method, ($options["allow_redirects"] ?? true) === false, ($options["http_errors"] ?? true) === false];
+      $answer = $this->answers[$url] ?? null;
+      if ($answer === null) throw new \\GuzzleHttp\\Exception\\TransferException("could not connect");
+      $response = new class ($answer) {
+        public function __construct(private array $answer) {}
+        public function getStatusCode(): int { return $this->answer["status"] ?? 200; }
+        public function getHeaderLine(string $name): string { return (string) ($this->answer["headers"][strtolower($name)] ?? ""); }
+      };
+      try {
+        ($options["on_headers"])($response);
+        file_put_contents($options["sink"], $answer["body"] ?? "");
+        ($options["progress"])($answer["total"] ?? 0, $answer["arrived"] ?? strlen($answer["body"] ?? ""));
+      } catch (\\Throwable $error) {
+        throw new \\GuzzleHttp\\Exception\\TransferException("An error was encountered during the on_headers event", 0, $error);
+      }
+      return $response;
+    }
+  }
+  function runlight_test_downloads(callable $download, string $file): array {
+    $out = [];
+    foreach (["ok", "gone", "moved", "broken", "says-long", "runs-long", "nowhere"] as $name) {
+      @unlink($file);
+      try {
+        $out[] = [$download("https://download.db-ip.com/free/$name", $file), file_exists($file) ? file_get_contents($file) : null];
+      } catch (\\RuntimeException $error) {
+        $out[] = [$error->getMessage(), file_exists($file)];
+      }
+    }
+    try { $out[] = [$download("http://download.db-ip.com/free/ok", $file), null]; } catch (\\RuntimeException $error) { $out[] = [$error->getMessage(), file_exists($file)]; }
+    return $out;
+  }
+  $base = "https://download.db-ip.com/free/";
+  $client = new RunlightTestGuzzle([
+    $base . "ok" => ["body" => "packed"],
+    $base . "gone" => ["status" => 404, "body" => "Not found"],
+    $base . "moved" => ["status" => 301, "headers" => ["location" => "https://evil.example/file.gz"], "body" => "moved"],
+    $base . "broken" => ["status" => 503, "body" => "later"],
+    $base . "says-long" => ["headers" => ["content-length" => "300000000"], "body" => "short"],
+    $base . "runs-long" => ["body" => "short", "arrived" => 268435457],
+  ]);
+`;
+const DOWNLOADS = [
+  [true, "packed"],
+  [false, null],
+  ["it answered 301", false],
+  ["it answered 503", false],
+  ["it is more than 256 MB", false],
+  ["it is more than 256 MB", false],
+  ["could not connect", false],
+  ["it is not an https address", false],
+];
+
+test("the Drupal module's and the Craft plugin's downloads for location data follow no redirect, take only a 200 over https, and stop at their limit", (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "runlight-cms-download-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const drupal = drupalPhp(t, `
+    namespace {
+      ${GUZZLE_PHP}
+      $fetcher = new Drupal\\runlight\\Fetcher($client);
+      echo json_encode([runlight_test_downloads([$fetcher, "download"], ${JSON.stringify(dir)} . "/drupal.gz"), $client->asked]);
+    }
+  `);
+  if (drupal === null) return;
+  const [files, asked] = JSON.parse(drupal);
+  assert.deepEqual(files, DOWNLOADS);
+  // Every request that went out was told not to follow a redirect, and to hand back an error's status.
+  assert.deepEqual(asked, Array.from({ length: 7 }, () => ["GET", true, true]));
+  const craft = craftPhp(t, `
+    namespace {
+      ${GUZZLE_PHP}
+      \\Craft::$client = $client;
+      echo json_encode([runlight_test_downloads([\\Runlight\\Craft\\Fetcher::class, "download"], ${JSON.stringify(dir)} . "/craft.gz"), $client->asked]);
+    }
+  `);
+  if (craft === null) return;
+  assert.deepEqual(JSON.parse(craft), [DOWNLOADS, Array.from({ length: 7 }, () => ["GET", true, true])]);
 });
 
 test("deleting the WordPress plugin removes what it kept, on every site of a network", (t) => {

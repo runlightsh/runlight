@@ -177,7 +177,19 @@ final class Fetcher implements RunlightFetcher {
   }
 
   /**
+   * The most a download for DB-IP's location data may be.
+   *
+   * 256 MiB, well past the largest file DB-IP sends.
+   */
+  private const MAX_DOWNLOAD = 268435456;
+
+  /**
    * Saves the file at an address, for DB-IP's location data.
+   *
+   * As the package's DbIp asks of a download: only over https, with no
+   * redirect followed, since the file is checked as coming from the address
+   * it was asked for at, only from an answer of 200, and only up to
+   * MAX_DOWNLOAD bytes.
    *
    * @param string $url
    *   The address.
@@ -185,26 +197,51 @@ final class Fetcher implements RunlightFetcher {
    *   Where to save it.
    *
    * @return bool
-   *   Whether it arrived whole.
+   *   TRUE when it arrived whole, FALSE for a 404, since a month's file is
+   *   not there until DB-IP publishes it.
+   *
+   * @throws \RuntimeException
+   *   When anything else goes wrong; its message is the reason DbIp logs.
    */
   public function download(string $url, string $file): bool {
+    $long = 'it is more than ' . intdiv(self::MAX_DOWNLOAD, 1048576) . ' MB';
     try {
-      $answer = $this->httpClient->request('GET', $url, ['timeout' => 300, 'sink' => $file, 'http_errors' => FALSE]);
-      if ($answer->getStatusCode() === 200) {
+      if (strtolower((string) parse_url($url, PHP_URL_SCHEME)) !== 'https') {
+        throw new \RuntimeException('it is not an https address');
+      }
+      $answer = $this->httpClient->request('GET', $url, [
+        'timeout' => 600,
+        'sink' => $file,
+        'http_errors' => FALSE,
+        'allow_redirects' => FALSE,
+        // Stopped as soon as it says, or shows, that it is too long.
+        'on_headers' => static function ($response) use ($long): void {
+          if ((int) $response->getHeaderLine('Content-Length') > self::MAX_DOWNLOAD) {
+            throw new \RuntimeException($long);
+          }
+        },
+        'progress' => static function ($total, $downloaded) use ($long): void {
+          if ($downloaded > self::MAX_DOWNLOAD) {
+            throw new \RuntimeException($long);
+          }
+        },
+      ]);
+      $status = $answer->getStatusCode();
+      if ($status === 200 && (!is_file($file) || filesize($file) <= self::MAX_DOWNLOAD)) {
         return TRUE;
       }
-      $this->logger?->notice('Runlight could not download @url: it answered @code.', [
-        '@url' => $url,
-        '@code' => $answer->getStatusCode(),
-      ]);
+      if ($status !== 404) {
+        throw new \RuntimeException($status === 200 ? $long : "it answered $status");
+      }
     }
     catch (\Throwable $e) {
-      // What arrived goes below, and the release is tried again at the next
-      // cron run.
-      $this->logger?->notice('Runlight could not download @url: @message', [
-        '@url' => $url,
-        '@message' => $e->getMessage(),
-      ]);
+      // What arrived goes, and the release is tried again at a later cron run.
+      if (is_file($file)) {
+        unlink($file);
+      }
+      // Guzzle wraps what on_headers throws; the reason is the one given there.
+      $reason = $e->getPrevious() instanceof \RuntimeException && $e->getPrevious()->getMessage() === $long ? $long : $e->getMessage();
+      throw new \RuntimeException($reason !== '' ? $reason : 'no answer', 0, $e);
     }
     if (is_file($file)) {
       unlink($file);

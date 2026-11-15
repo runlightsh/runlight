@@ -163,26 +163,52 @@ final class Fetcher implements RunlightFetcher {
 		return $response;
 	}
 
+	/** The most a download for DB-IP's location data may be: 256 MiB, well past the largest file DB-IP sends. */
+	private const MAX_DOWNLOAD = 268435456;
+
 	/**
-	 * Saves the file at an address, for DB-IP's location data: whether it
-	 * arrived whole.
+	 * Saves the file at an address, for DB-IP's location data, as the
+	 * package's DbIp asks of a download: only over https, with no redirect
+	 * followed, since the file is checked as coming from the address it was
+	 * asked for at, only from an answer of 200, and only up to MAX_DOWNLOAD
+	 * bytes. A 404 is false, since a month's file is not there until DB-IP
+	 * publishes it; anything else that goes wrong is thrown, and its message is
+	 * the reason DbIp logs.
 	 *
 	 * @param string $url  The address.
 	 * @param string $file Where to save it.
+	 * @throws \RuntimeException When the file did not arrive whole from that address.
 	 */
 	public static function download( string $url, string $file ): bool {
+		if ( 'https' !== strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ) ) {
+			throw new \RuntimeException( 'it is not an https address' );
+		}
 		$response = wp_remote_get(
 			$url,
 			array(
-				'timeout'  => 300,
-				'stream'   => true,
-				'filename' => $file,
+				'timeout'             => 600,
+				'redirection'         => 0,
+				'stream'              => true,
+				'filename'            => $file,
+				// One byte past the limit is enough to know the file is too long.
+				'limit_response_size' => self::MAX_DOWNLOAD + 1,
 			)
 		);
-		if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
-			wp_delete_file( $file );
+		$reason = '';
+		if ( is_wp_error( $response ) ) {
+			$reason = '' !== $response->get_error_message() ? $response->get_error_message() : 'no answer';
+		} elseif ( 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+			$reason = 'it answered ' . (int) wp_remote_retrieve_response_code( $response );
+		} elseif ( (int) wp_remote_retrieve_header( $response, 'content-length' ) > self::MAX_DOWNLOAD || ( is_file( $file ) && filesize( $file ) > self::MAX_DOWNLOAD ) ) {
+			$reason = 'it is more than ' . intdiv( self::MAX_DOWNLOAD, 1048576 ) . ' MB';
+		}
+		if ( '' === $reason ) {
+			return true;
+		}
+		wp_delete_file( $file );
+		if ( 'it answered 404' === $reason ) {
 			return false;
 		}
-		return true;
+		throw new \RuntimeException( esc_html( $reason ) );
 	}
 }

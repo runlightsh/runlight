@@ -135,7 +135,9 @@ final class Local {
 			'country',
 			array( Fetcher::class, 'download' ),
 			null,
-			new Locations()
+			new Locations(),
+			// DB-IP's page of checksums is read through WordPress's HTTP API too.
+			new Fetcher()
 		);
 	}
 

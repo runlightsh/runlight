@@ -402,7 +402,12 @@ final class Local implements DestructableInterface {
       $this->storage->geoFolder(),
       'country',
       [new Fetcher($this->httpClient, $this->logger), 'download'],
-      fn (string $line) => $this->logger->info('@line', ['@line' => $line]),
+      // That a release is ready is news; anything else is a download refused
+      // or one that could not be checked, which an admin should see.
+      fn (string $line) => str_ends_with($line, 'is ready.') ? $this->logger->info('@line', ['@line' => $line]) : $this->logger->warning('@line', ['@line' => $line]),
+      NULL,
+      // DB-IP's page of checksums is read through Drupal's HTTP client too.
+      new Fetcher($this->httpClient, $this->logger),
     );
   }
 

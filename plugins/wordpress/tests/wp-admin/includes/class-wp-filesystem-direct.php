@@ -25,6 +25,10 @@ class WP_Filesystem_Direct extends WP_Filesystem_Base {
 		return true;
 	}
 
+	public function size( $file ) {
+		return @filesize( $file );
+	}
+
 	public function chmod( $file, $mode = false, $recursive = false ) {
 		return chmod( $file, $mode );
 	}

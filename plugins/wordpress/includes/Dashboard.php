@@ -44,9 +44,10 @@ final class Dashboard {
 	 * asked for on every visit to the page and never kept.
 	 *
 	 * @param array{address:string,dashboard_key:string} $settings The plugin's settings.
+	 * @param string                                     $lang     The language the admin reads wp-admin in.
 	 * @return array{url:string,site:string}|string The page to frame and its site, or why there is none.
 	 */
-	private static function ticket( array $settings ) {
+	private static function ticket( array $settings, string $lang ) {
 		$response = wp_remote_post(
 			$settings['address'] . '/api/embed',
 			array(
@@ -74,7 +75,7 @@ final class Dashboard {
 			return sprintf( __( 'Your Runlight would not open the dashboard here: %s', 'runlight' ), $reason );
 		}
 		return array(
-			'url'  => $settings['address'] . '/embed?ticket=' . rawurlencode( $body['ticket'] ) . '&theme=light',
+			'url'  => $settings['address'] . '/embed?ticket=' . rawurlencode( $body['ticket'] ) . '&theme=light&lang=' . rawurlencode( $lang ),
 			'site' => is_string( $body['site'] ?? null ) ? $body['site'] : '',
 		);
 	}
@@ -87,16 +88,18 @@ final class Dashboard {
 		$setup    = admin_url( 'options-general.php?page=runlight' );
 		$local    = 'local' === $settings['mode'];
 		$address  = Settings::address();
+		// The dashboard starts in the language this admin reads wp-admin in, not the browser's.
+		$lang = get_user_locale();
 		// The dashboard lets only its own origin frame it, so wp-admin served from another one, such as www. or http, opens it in a tab.
 		$elsewhere = $local && '' !== $address && self::origin_of( $address ) !== self::admin_origin();
 		if ( $local ) {
 			// Runlight here is on this site, signed in with this login, so the whole dashboard shows, not a share view.
-			$ticket = '' !== $address ? array( 'url' => $address . '/' ) : Library::missing();
-			$full   = '' !== $address ? $address . '/' : '';
+			$ticket = '' !== $address ? array( 'url' => $address . '/?lang=' . rawurlencode( $lang ) ) : Library::missing();
+			$full   = '' !== $address ? $address . '/?lang=' . rawurlencode( $lang ) : '';
 		} else {
-			$ticket = '' !== $address && '' !== $settings['dashboard_key'] ? self::ticket( $settings ) : null;
+			$ticket = '' !== $address && '' !== $settings['dashboard_key'] ? self::ticket( $settings, $lang ) : null;
 			$site   = is_array( $ticket ) && '' !== $ticket['site'] ? $ticket['site'] : $settings['site'];
-			$full   = '' !== $address ? $address . '/' . ( '' !== $site ? '?site=' . rawurlencode( $site ) : '' ) : '';
+			$full   = '' !== $address ? $address . '/?' . ( '' !== $site ? 'site=' . rawurlencode( $site ) . '&' : '' ) . 'lang=' . rawurlencode( $lang ) : '';
 		}
 		?>
 		<div class="wrap runlight-dashboard">

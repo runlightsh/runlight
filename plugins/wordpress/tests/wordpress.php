@@ -280,6 +280,9 @@ function wp_clear_scheduled_hook( $hook, $args = array(), $wp_error = false ): i
 function esc_url_raw( $url, $protocols = null ): string {
 	return (string) $url;
 }
+function esc_html( $text ): string {
+	return htmlspecialchars( (string) $text, ENT_QUOTES );
+}
 function __( $text, $domain = 'default' ): string {
 	return $text;
 }
@@ -299,10 +302,47 @@ class WP_Error {
 		return $this->message;
 	}
 }
-// No HTTP from the tests: every request the plugin makes fails, as it would offline, and is noted.
+// No HTTP from the tests: every request the plugin makes is noted, and fails, as it would offline, unless the
+// test names an answer for its address, in $GLOBALS['wp_test']['http'] or in routes.json in the folder
+// RUNLIGHT_WP_HTTP names: [address => ['status' => 200, 'headers' => [], 'body' => '...' or 'file' => path]].
 function wp_remote_request( $url, $args = array() ) {
 	$GLOBALS['wp_test']['requests'][] = (string) $url;
-	return new WP_Error( 'offline', 'no network in tests' );
+	$folder = (string) getenv( 'RUNLIGHT_WP_HTTP' );
+	$routes = $GLOBALS['wp_test']['http'] ?? ( '' !== $folder ? json_decode( (string) file_get_contents( $folder . '/routes.json' ), true ) : null );
+	if ( ! is_array( $routes ) || ! isset( $routes[ $url ] ) ) {
+		return new WP_Error( 'offline', 'no network in tests' );
+	}
+	$answer = $routes[ $url ];
+	$status = (int) ( $answer['status'] ?? 200 );
+	// WordPress follows redirects unless told not to; here that is a mistake worth seeing.
+	if ( $status >= 300 && $status < 400 && 0 !== ( $args['redirection'] ?? 5 ) ) {
+		return new WP_Error( 'followed', 'the plugin let WordPress follow a redirect' );
+	}
+	$body = isset( $answer['file'] ) ? (string) file_get_contents( $answer['file'] ) : (string) ( $answer['body'] ?? '' );
+	if ( isset( $args['limit_response_size'] ) ) {
+		$body = substr( $body, 0, (int) $args['limit_response_size'] );
+	}
+	if ( ! empty( $args['stream'] ) ) {
+		file_put_contents( $args['filename'], $body );
+		$body = '';
+	}
+	return array(
+		'response' => array( 'code' => $status ),
+		'headers'  => array_change_key_case( (array) ( $answer['headers'] ?? array() ) ),
+		'body'     => $body,
+	);
+}
+function wp_remote_retrieve_response_code( $response ) {
+	return is_array( $response ) ? $response['response']['code'] : '';
+}
+function wp_remote_retrieve_body( $response ) {
+	return is_array( $response ) ? $response['body'] : '';
+}
+function wp_remote_retrieve_headers( $response ) {
+	return is_array( $response ) ? $response['headers'] : array();
+}
+function wp_remote_retrieve_header( $response, $header ) {
+	return is_array( $response ) ? ( $response['headers'][ strtolower( $header ) ] ?? '' ) : '';
 }
 function wp_remote_get( $url, $args = array() ) {
 	return wp_remote_request( $url, $args );

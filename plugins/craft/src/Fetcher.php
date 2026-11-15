@@ -148,17 +148,56 @@ final class Fetcher implements RunlightFetcher
         return false;
     }
 
-    /** Saves the file at an address, for DB-IP's location data: whether it arrived whole. */
+    /** The most a download for DB-IP's location data may be: 256 MiB, well past the largest file DB-IP sends. */
+    private const MAX_DOWNLOAD = 268435456;
+
+    /**
+     * Saves the file at an address, for DB-IP's location data, as the package's DbIp asks of a download: only
+     * over https, with no redirect followed, since the file is checked as coming from the address it was asked
+     * for at, only from an answer of 200, and only up to MAX_DOWNLOAD bytes. A 404 is false, since a month's file
+     * is not there until DB-IP publishes it; anything else that goes wrong is thrown, and its message is the
+     * reason DbIp logs.
+     *
+     * @throws \RuntimeException when the file did not arrive whole from that address
+     */
     public static function download(string $url, string $file): bool
     {
+        $long = 'it is more than ' . intdiv(self::MAX_DOWNLOAD, 1048576) . ' MB';
         try {
-            $answer = Craft::createGuzzleClient()->request('GET', $url, ['sink' => $file, 'timeout' => 300, 'http_errors' => false]);
-            if ($answer->getStatusCode() === 200) {
+            if (strtolower((string) parse_url($url, PHP_URL_SCHEME)) !== 'https') {
+                throw new \RuntimeException('it is not an https address');
+            }
+            $answer = Craft::createGuzzleClient()->request('GET', $url, [
+                'sink' => $file,
+                'timeout' => 600,
+                'http_errors' => false,
+                'allow_redirects' => false,
+                // Stopped as soon as it says, or shows, that it is too long.
+                'on_headers' => static function ($response) use ($long): void {
+                    if ((int) $response->getHeaderLine('Content-Length') > self::MAX_DOWNLOAD) {
+                        throw new \RuntimeException($long);
+                    }
+                },
+                'progress' => static function ($total, $downloaded) use ($long): void {
+                    if ($downloaded > self::MAX_DOWNLOAD) {
+                        throw new \RuntimeException($long);
+                    }
+                },
+            ]);
+            $status = $answer->getStatusCode();
+            if ($status === 200 && (!is_file($file) || filesize($file) <= self::MAX_DOWNLOAD)) {
                 return true;
             }
-            Craft::warning('Runlight could not download location data: it answered ' . $answer->getStatusCode(), 'runlight');
+            if ($status !== 404) {
+                throw new \RuntimeException($status === 200 ? $long : "it answered $status");
+            }
         } catch (\Throwable $e) {
-            Craft::warning('Runlight could not download location data: ' . $e->getMessage(), 'runlight');
+            if (is_file($file)) {
+                @unlink($file);
+            }
+            // Guzzle wraps what on_headers throws; the reason is the one given there.
+            $reason = $e->getPrevious() instanceof \RuntimeException && $e->getPrevious()->getMessage() === $long ? $long : $e->getMessage();
+            throw new \RuntimeException($reason !== '' ? $reason : 'no answer', 0, $e);
         }
         if (is_file($file)) {
             @unlink($file);

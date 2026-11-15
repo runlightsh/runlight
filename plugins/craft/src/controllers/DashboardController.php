@@ -24,12 +24,14 @@ final class DashboardController extends Controller
         $settings = Plugin::getInstance()->getSettings();
         $mode = $settings->getMode();
         $note = null;
+        // The dashboard starts in the language this person reads the Control Panel in, not the browser's.
+        $lang = rawurlencode((string) Craft::$app->language);
         if ($mode === 'local') {
             // Runlight here is on this site, signed in with this login, so the whole dashboard shows, not a share view.
             $address = Local::active() ? Local::address() : '';
-            $frame = $address !== '' ? $address . '/' : Local::missing();
+            $frame = $address !== '' ? $address . '/?lang=' . $lang : Local::missing();
             $hasKey = true;
-            $full = $address !== '' ? $address . '/' : '';
+            $full = $address !== '' ? $address . '/?lang=' . $lang : '';
             if ($address !== '' && !Local::canView()) {
                 $frame = Craft::t('runlight', 'Your account cannot see Runlight’s numbers. An admin can allow it under Users, Permissions, Runlight.');
                 $full = '';
@@ -44,8 +46,8 @@ final class DashboardController extends Controller
             $hasKey = $key !== '';
             $ticket = $address !== '' && $hasKey ? self::ticket($address, $key) : null;
             $site = is_array($ticket) && $ticket['site'] !== '' ? $ticket['site'] : $settings->getSite();
-            $full = $address !== '' ? $address . '/' . ($site !== '' ? '?site=' . rawurlencode($site) : '') : '';
-            $frame = is_array($ticket) ? $ticket['url'] : $ticket;
+            $full = $address !== '' ? $address . '/?' . ($site !== '' ? 'site=' . rawurlencode($site) . '&' : '') . 'lang=' . $lang : '';
+            $frame = is_array($ticket) ? $ticket['url'] . '&lang=' . $lang : $ticket;
         }
         $framed = is_string($frame) && str_starts_with($frame, 'http');
         return $this->renderTemplate('runlight/_dashboard.twig', [

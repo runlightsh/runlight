@@ -173,9 +173,14 @@ final class Local
             Storage::folder() . DIRECTORY_SEPARATOR . 'geo',
             'country',
             [Fetcher::class, 'download'],
+            // That a release is ready is news; anything else is a download refused or one that could not be
+            // checked, which Craft's log should keep outside dev mode too.
             static function (string $line): void {
-                Craft::info($line, 'runlight');
+                str_ends_with($line, 'is ready.') ? Craft::info($line, 'runlight') : Craft::warning($line, 'runlight');
             },
+            null,
+            // DB-IP's page of checksums is read through Craft's HTTP client too.
+            new Fetcher(),
         );
     }
 
