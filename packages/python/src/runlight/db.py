@@ -214,6 +214,9 @@ class SqliteDb(_BaseDb):
                 # Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra
                 # writes, so they do not linger in the file's free space.
                 conn.execute("PRAGMA secure_delete = FAST")
+                # Text SQLite hands back that is not UTF-8 (half a surrogate pair read out of an event's props, as
+                # another implementation's JSON may hold one) reads as U+FFFD, rather than failing the report.
+                conn.text_factory = lambda data: data.decode("utf-8", "replace")
             conn.isolation_level = None
             self._conn = conn
         return self._conn
@@ -620,6 +623,7 @@ class MysqlDb(_NetworkDb):
 
     def _attempt(self, conn: Any, sql: str, params: Sequence[Any], fetch: bool | None) -> Any:
         text = mysql_text(sql, [_param(p) for p in params])
+        backslash_escapes_kept(conn)
         with conn.cursor() as cursor:
             count = cursor.execute(text)
             if fetch is None:
@@ -695,9 +699,31 @@ _NO_BACKSLASH_ESCAPES_OFF = (
 
 def backslash_escapes_on(conn: Any) -> None:
     """Values are written in with backslash escapes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a
-    quote could end the value early. Every connection drops that one mode."""
+    quote could end the value early. Every connection drops that one mode, and notes the session it dropped it
+    in."""
     with conn.cursor() as cursor:
         cursor.execute(_NO_BACKSLASH_ESCAPES_OFF)
+    try:
+        conn._runlight_session = _session_of(conn)
+    except AttributeError:
+        # A connection that takes no notes is asked again before each statement.
+        pass
+
+
+def _session_of(conn: Any) -> Any:
+    """The server's id for a connection's session, which a driver keeps from when it connected, or None for a
+    driver that does not say."""
+    thread_id = getattr(conn, "thread_id", None)
+    return thread_id() if callable(thread_id) else None
+
+
+def backslash_escapes_kept(conn: Any) -> None:
+    """Before a statement with values written in: a connection that has connected again since its mode was set
+    (an app's own, after ping(reconnect=True), say) is a new session, with the server's modes as they come, so the
+    mode is dropped again first. Costs nothing while the session is the same."""
+    session = _session_of(conn)
+    if session is None or getattr(conn, "_runlight_session", None) != session:
+        backslash_escapes_on(conn)
 
 
 def is_mariadb(conn: Any) -> bool:
@@ -832,9 +858,12 @@ def _yes_no(name: str, value: str) -> bool:
 
 
 def postgres_tls(query: dict[str, str]) -> dict[str, str]:
-    """The libpq settings for a Postgres URL's TLS parameters. libpq's own go through as they are; the two that
-    pg, the TypeScript driver, also reads are put in libpq's words: ssl=true (verify the server against the
-    system's certificates) and sslmode=no-verify (encrypt, verify nothing). A sslmode of its own wins over ssl."""
+    """The libpq settings for a Postgres URL's TLS parameters, read as pg, the TypeScript driver, reads them, so one
+    URL is as safe under either. libpq's own go through, but its sslmode of allow, prefer, or require encrypts
+    without checking who answers, where pg checks the server's certificate and its name for each of them. They are
+    checked here too: each becomes verify-full, against the system's certificates unless sslrootcert names a file.
+    ssl=true is the same, and sslmode=no-verify (pg's own word, as libpq's require) is the one way to encrypt and
+    verify nothing, for a server whose certificate cannot be checked. A sslmode of its own wins over ssl."""
     for name in query:
         if name not in _PG_TLS and name != "ssl" and name.lower().startswith("ssl"):
             raise ValueError(f"Runlight: the database URL's {name} is not a setting Runlight knows for Postgres")
@@ -847,6 +876,9 @@ def postgres_tls(query: dict[str, str]) -> dict[str, str]:
                 out.setdefault("sslrootcert", "system")
     if out.get("sslmode") == "no-verify":
         out["sslmode"] = "require"
+    elif out.get("sslmode") in ("allow", "prefer", "require"):
+        out["sslmode"] = "verify-full"
+        out.setdefault("sslrootcert", "system")
     return out
 
 
@@ -992,6 +1024,8 @@ def mysql(url: str, statement_timeout: int = 120_000, max: int = 10) -> MysqlDb:
             autocommit=True,
             connect_timeout=10,
             client_flag=pymysql.constants.CLIENT.IGNORE_SPACE,
+            # Run by the driver each time it connects, again too, so no session ever keeps NO_BACKSLASH_ESCAPES.
+            init_command=_NO_BACKSLASH_ESCAPES_OFF,
             **tls,
         )
         try:

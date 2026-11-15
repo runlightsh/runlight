@@ -22,7 +22,7 @@ from runlight.http import BodyTooLong, FetchError, Headers, Request, Response, S
 FILE = Path(__file__).resolve().parents[4] / "conformance" / "http.json"
 
 # The SHA-256 of http.json's description this runner was written against.
-FORMAT_SHA256 = "d78e8af310f1c99155b84090df4ad252dfe4f78649943b0495a3998354c20134"
+FORMAT_SHA256 = "9084b2fe4e39a473874020a8343a9aa1768f541b09e79b846240331a0b160dfb"
 
 # Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.
 ENV = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV"]
@@ -413,8 +413,10 @@ class Player:
         return out
 
     def _fill_totp(self, text: str, kept: dict) -> str:
-        """{{totp:name}} as the six-digit code for the captured secret at the step's clock, then {{name}}."""
-        out = text
+        """{{totp:name}} as the six-digit code for the captured secret at the step's clock, {{pad:N}} as the letter x
+        N times, then {{name}}."""
+        out = re.sub(r"\{\{pad:([0-9]+)\}\}", lambda m: "x" * int(m.group(1)), text)
+        text = out
         for m in re.finditer(r"\{\{totp:(\w+)\}\}", text):
             from runlight.accounts.auth import totp
 

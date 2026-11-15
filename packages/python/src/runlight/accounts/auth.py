@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "INVITE_MS",
+    "Lockout",
     "MIN_PASSWORD",
     "SESSION_COOKIE",
     "SESSION_MS",
@@ -162,10 +163,13 @@ def recovery_hash(code: str) -> str:
 def match_step(secret: str, code: str, now: int, after: int) -> int | None:
     """The time step a code matches, one step either side for clocks that drift, newer than `after`; else None."""
     current = int(now // STEP_MS)
-    for step in (current, current - 1, current + 1):
-        if step > after and totp(secret, step) == code:
-            return step
-    return None
+    # Every step is worked out and compared in time that does not depend on where the code differs. The current
+    # step is checked last, so it is the one kept if two should match.
+    found = None
+    for step in (current + 1, current - 1, current):
+        if same_text(totp(secret, step), code) and step > after:
+            found = step
+    return found
 
 
 def signature(secret: str, body: str, hash: str) -> str:  # noqa: A002
@@ -177,6 +181,13 @@ def signature(secret: str, body: str, hash: str) -> str:  # noqa: A002
 # What passes for an email address, with JavaScript's \s.
 _NOT_EMAIL = f"[^{_js.WHITESPACE}@<>\"]+"
 EMAIL = re.compile(f"{_NOT_EMAIL}@{_NOT_EMAIL}\\.{_NOT_EMAIL}\\Z")
+# The longest an address can be. Anything longer is refused before the pattern reads it.
+MAX_EMAIL = 320
+
+
+def _is_email(address: str) -> bool:
+    return _js.length(address) <= MAX_EMAIL and bool(EMAIL.match(address))
+
 
 # How long an invite link works.
 INVITE_MS = 7 * 86_400_000
@@ -383,9 +394,14 @@ class Accounts:
         read = _js.string(row["totp_recovery"]) if _js.truthy(row.get("totp_recovery")) else None
         hashes = _recovery_list(row.get("totp_recovery"))
         wanted = recovery_hash(given)
-        if wanted not in hashes:
+        # Every hash is compared, each in time that does not depend on where it differs.
+        at = -1
+        for i, stored in enumerate(hashes):
+            if same_text(_js.string(stored), wanted):
+                at = i
+        if at < 0:
             return False
-        hashes.remove(wanted)
+        del hashes[at]
         # Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used
         # twice.
         return self.store.db.affected("UPDATE rl_users SET totp_recovery = ? WHERE id = ? AND totp_recovery = ?", [_js.dumps(hashes), id, read]) == 1
@@ -537,7 +553,7 @@ class Accounts:
         if site is not None and (not site or role not in ("member", "viewer")):
             raise AccountError("Choose member or viewer for one site", "role_scope")
         address = _js.lower(_js.trim(email))
-        if not EMAIL.match(address):
+        if not _is_email(address):
             raise AccountError("Enter an email address", "email_invalid")
         # The length in UTF-16 units, as TypeScript counts it.
         if _js.length(password) < MIN_PASSWORD:
@@ -592,7 +608,7 @@ class Accounts:
         if site is not None and (not site or role not in ("member", "viewer")):
             raise AccountError("Choose member or viewer for one site", "role_scope")
         address = _js.lower(_js.trim(email))
-        if not EMAIL.match(address):
+        if not _is_email(address):
             raise AccountError("Enter an email address", "email_invalid")
         if self.by_email(address) is not None:
             raise AccountError(f"{address} already has an account", "account_exists", {"email": address})
@@ -729,7 +745,12 @@ class Throttle:
     Some ids come from an address, so none may last past a day: each UTC day
     has its own key, keys older than yesterday are deleted, and counts that ran
     out go when read, when a new count starts, and in the scheduled check. A
-    window that crosses midnight starts again under the new day's key."""
+    window that crosses midnight starts again under the new day's key.
+
+    None of that waits for the scheduled check, which an app may never run. A
+    count that starts sets a timer for when its window ends, which deletes what
+    has run out by then; a process that starts deletes what an earlier one left
+    (Runlight.init()); and so does the first tracker hit of each day."""
 
     _KEY = "throttle-key:"
     # The one key kept before keys were made each day.
@@ -747,6 +768,9 @@ class Throttle:
         self._lock = threading.Lock()
         # Today's key once read, so each count does not read it again.
         self._salts: tuple[str, str] | None = None
+        # The timer that deletes counts once they have run out, while there is one waiting.
+        self._timer: threading.Timer | None = None
+        self._timer_lock = threading.Lock()
 
     @staticmethod
     def _day(now: int) -> str:
@@ -786,6 +810,34 @@ class Throttle:
             ok, entry = _js.try_loads(setting["value"])
             if not ok or not isinstance(entry, dict) or int(_js.number(entry.get("until", 0))) <= now:
                 store.db.run('DELETE FROM rl_settings WHERE "key" = ? AND value = ?', [setting["key"], setting["value"]])
+        # A lockout is kept past its lock, for a week with no try, and then forgotten.
+        for setting in store.settings_starting_with(Lockout._PREFIX):
+            ok, entry = _js.try_loads(setting["value"])
+            if not ok or not isinstance(entry, dict) or int(_js.number(entry.get("forget", 0))) <= now:
+                store.db.run('DELETE FROM rl_settings WHERE "key" = ? AND value = ?', [setting["key"], setting["value"]])
+
+    def _sweep_later(self) -> None:
+        """Sets a timer, if none is waiting, for just after a window from now ends, to delete the counts that have
+        run out by then. It goes on while any are left, so the last count is gone a window after it was made, with
+        no scheduled check and no further sign-in needed."""
+        with self._timer_lock:
+            if self._timer is not None:
+                return
+            timer = threading.Timer(self.window_ms / 1000 + 1, self._swept)
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
+
+    def _swept(self) -> None:
+        with self._timer_lock:
+            self._timer = None
+        try:
+            Throttle.sweep(self.store, self._clock())
+            if self.store.settings_starting_with(self._prefix()):
+                self._sweep_later()
+        except Exception:
+            # A database that is closed or away: the next count, start, or day's first hit deletes them.
+            pass
 
     def _id(self, key: str, now: int) -> str:
         return base64url(hmac("SHA-256", self._salt(now), key))[:22]
@@ -850,6 +902,7 @@ class Throttle:
         taken, made = self._turn(id_, True, step)
         if made:
             self._prune(now)
+            self._sweep_later()
         return taken
 
     def forgive(self, key: str) -> None:
@@ -869,6 +922,7 @@ class Throttle:
         id_ = self._id(key, now)
         if self._turn(id_, True, lambda: self._count(id_, now)):
             self._prune(now)
+            self._sweep_later()
 
     def _count(self, id_: str, now: int) -> bool:
         """Counts a try, and says whether that made a new entry."""
@@ -907,3 +961,101 @@ class Throttle:
 
     def clear(self, key: str) -> None:
         self.store.set_setting(self._prefix() + self._id(key, self._clock()), None)
+
+
+class Lockout(Throttle):
+    """Counts wrong second-factor codes under a key and locks it for longer each time the tries run out: five
+    tries, then fifteen minutes, then thirty, then an hour, doubling up to a day. A right code clears the key, and
+    so does a week with no lock and no try. A lock always ends, at most a day later, so nobody is shut out for
+    good.
+
+    TypeScript keeps these in its process. Here they live in the database's settings, as Throttle's do, so every
+    worker process shares them: "lockout:<name>:<id>" holding {count, until, locks, forget}. A key is an account's
+    id, never an address, so its id is hashed with one key kept for good ("lockout-key") rather than a key for the
+    day: a lock of a day, and the count of locks before it, must outlast midnight."""
+
+    _PREFIX = "lockout:"
+
+    def __init__(
+        self,
+        store: SqlStore,
+        name: str,
+        limit: int = 5,
+        window_ms: int = 15 * 60_000,
+        longest_ms: int = 86_400_000,
+        forget_ms: int = 7 * 86_400_000,
+        clock: Callable[[], int] | None = None,
+    ) -> None:
+        super().__init__(store, name, limit, window_ms, clock)
+        self.longest_ms = longest_ms
+        self.forget_ms = forget_ms
+        self._key: str | None = None
+
+    def _prefix(self) -> str:
+        return f"{self._PREFIX}{self.name}:"
+
+    def _id(self, key: str, now: int) -> str:
+        if self._key is None:
+            from ..hash import random_id
+
+            self._key = self.store.setting_or_add("lockout-key", lambda: random_id(16))
+        return base64url(hmac("SHA-256", self._key, key))[:22]
+
+    def _lock_entry(self, id_: str, now: int) -> dict[str, int] | None:
+        """A key's count while it is remembered. One long forgotten is deleted as it is read."""
+        key = self._prefix() + id_
+        saved = self.store.setting(key)
+        if saved is None:
+            return None
+        ok, entry = _js.try_loads(saved)
+        if not ok or not isinstance(entry, dict) or int(_js.number(entry.get("forget", 0))) <= now:
+            self._drop(key, saved)
+            return None
+        return {name: int(_js.number(entry.get(name, 0))) for name in ("count", "until", "locks", "forget")}
+
+    def blocked(self, key: str, now: int) -> bool:
+        entry = self._lock_entry(self._id(key, now), now)
+        return entry is not None and entry["count"] >= self.limit and entry["until"] > now
+
+    def take(self, key: str, now: int) -> bool:
+        """Counts a try before the code is checked, so a burst cannot get past the limit. False, counting nothing,
+        while the key is locked. The try that uses up the last one starts the lock."""
+        id_ = self._id(key, now)
+
+        def step() -> tuple[bool, bool]:
+            entry = self._lock_entry(id_, now)
+            if entry is not None and entry["count"] >= self.limit and entry["until"] > now:
+                return False, False
+            made = entry is None
+            if entry is None:
+                entry = {"count": 0, "until": now + self.window_ms, "locks": 0, "forget": 0}
+            elif entry["until"] <= now:
+                entry["count"] = 0
+                entry["until"] = now + self.window_ms
+            entry["count"] += 1
+            if entry["count"] >= self.limit:
+                entry["until"] = now + min(self.window_ms * 2 ** entry["locks"], self.longest_ms)
+                entry["locks"] += 1
+            entry["forget"] = entry["until"] + self.forget_ms
+            self._save(id_, entry)
+            return True, made
+
+        taken, made = self._turn(id_, True, step)
+        if made:
+            # Keys are accounts that passed the password step, so there are few; anything long forgotten goes.
+            for setting in self.store.settings_starting_with(self._prefix()):
+                ok, entry = _js.try_loads(setting["value"])
+                # A row just made for its lock, still empty, is another try's to fill.
+                if setting["value"] != "{}" and (not ok or not isinstance(entry, dict) or int(_js.number(entry.get("forget", 0))) <= now):
+                    self._drop(setting["key"], setting["value"])
+        return taken
+
+    def clear(self, key: str) -> None:
+        """Forgets a key, for a code that turned out right."""
+        self.store.set_setting(self._prefix() + self._id(key, self._clock()), None)
+
+    def forgive(self, key: str) -> None:
+        raise NotImplementedError("A lockout is cleared, never forgiven one try")
+
+    def fail(self, key: str, now: int) -> None:
+        self.take(key, now)

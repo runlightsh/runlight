@@ -20,6 +20,10 @@ SHORTENER_DOMAINS = {"bit.ly", "bitly.com", "j.mp", "dub.sh", "dub.co", "dub.lin
 # The most clicks a day one imported link gets from a daily count.
 MAX_DAILY = 10_000
 
+# The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a longer
+# history is left behind, so no source, however much it sends, can fill memory or hold the database.
+MAX_LINK_CLICKS = 100_000
+
 
 def hex_id(value: str, length: int = 24) -> str:
     return sha256(value)[:length]
@@ -73,9 +77,51 @@ def _or_text(value: Any) -> str:
     return "" if value is None or value is _js.UNDEFINED else _js.string(value)
 
 
+# An IPv4 address, or what reads as an IPv6 one, anywhere in a text.
+_ADDRESS = re.compile(r"(^|[^0-9.])[0-9]{1,3}(\.[0-9]{1,3}){3}(?![0-9.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}", re.I | re.ASCII)
+# What a user agent has and a place name does not: a product with its version (Chrome/129), or its usual first words.
+_AGENT = re.compile(r"[a-z]/[0-9]|mozilla|applewebkit", re.I | re.ASCII)
+# A browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user agent.
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9 ._+-]{0,39}\Z")
+_SCREEN = re.compile(r"[0-9]{1,5}x[0-9]{1,5}\Z")
+_LANGUAGE = re.compile(r"[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}\Z")
+
+
+def _named(name: str) -> str:
+    """Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in any
+    column. A name that is not one Runlight knows is kept only when it reads as a name, and nothing else."""
+    text = _js.trim(name)
+    return text if _NAME.match(text) and not _ADDRESS.search(text) else ""
+
+
 def browser(name: str) -> str:
-    """A browser name in Runlight's spelling: a known one, or the name with a capital first letter."""
-    return BROWSERS.get(name.lower(), title(name))
+    """A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for
+    anything else."""
+    found = BROWSERS.get(name.lower())
+    return found if found is not None else title(_named(name))
+
+
+def system(name: str) -> str:
+    """A system name in Runlight's spelling, or a name as given, or none for anything that is not a name."""
+    found = SYSTEMS.get(name.lower())
+    return found if found is not None else _named(name)
+
+
+def place_name(name: str) -> str:
+    """Free text about a place as given, or none when it holds an address or reads as a user agent."""
+    return "" if _ADDRESS.search(name) or _AGENT.search(name) else name
+
+
+def screen_size(value: str) -> str:
+    """A screen as 1440x900, or none."""
+    text = _js.trim(value)
+    return text if _SCREEN.match(text) else ""
+
+
+def language_tag(value: str) -> str:
+    """A language tag such as en or pt-BR, or none."""
+    text = _js.trim(value)
+    return text if _LANGUAGE.match(text) else ""
 
 
 def device(name: str) -> str:
@@ -100,7 +146,9 @@ def write_link(
     Returns a WriteResult: {status: "created" | "skipped" | "failed", clicks, reason?, code?, params?}, the reason
     also as a code and its params, for the dashboard to say in its own words."""
     id = imported_link_id(source, _js.string(foreign["sourceId"]))
-    if runlight.store.link_by_id(id):
+    # Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is left
+    # as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+    if runlight.store.link_exists(id):
         return {"status": "skipped", "clicks": 0}
     slug = _js.string(foreign["slug"])
     taken = runlight.store.link_by_slug(slug)
@@ -139,11 +187,14 @@ def write_link(
         # On a database without transactions (D1), a failed earlier try can have left
         # some of this link's clicks behind. Clear them, then write the link row last,
         # so a link only counts as imported once all of its history is in.
+        # The link has no row (checked above), so these are only ever what such a try left.
         store.db.run("DELETE FROM rl_sessions WHERE id IN (SELECT DISTINCT session FROM rl_events WHERE link = ? AND session <> '')", [id])
         store.db.run("DELETE FROM rl_events WHERE link = ?", [id])
 
         made: set[str] = set()
         for c in history.get("clicks") or []:
+            if clicks >= MAX_LINK_CLICKS:
+                break
             ts = c.get("ts", _js.UNDEFINED)
             if not _js.is_finite(ts):
                 continue
@@ -163,7 +214,7 @@ def write_link(
                 url = Url.parse(f"https://{host}{path or '/' + slug}{search}")
                 page = parse_page(url if url is not None else Url(f"https://{host}/{slug}"))
                 country = _js.slice16(_text(c.get("country")).upper(), 0, 2)
-                raw_region = _text(c.get("region"))
+                raw_region = place_name(_text(c.get("region")))
                 region = _js.slice16((raw_region if "-" in raw_region else f"{country}-{raw_region}").upper(), 0, 10) if raw_region else ""
                 os_name = _text(c.get("os"))
                 store.insert_session(
@@ -181,14 +232,14 @@ def write_link(
                         "utmContent": page["utm"]["content"],
                         "country": country if _COUNTRY.match(country) else "",
                         "region": region if country else "",
-                        "city": _js.slice16(_text(c.get("city")), 0, 100),
+                        "city": _js.slice16(place_name(_text(c.get("city"))), 0, 100),
                         "browser": browser(_text(c.get("browser"))),
                         "browserVersion": "",
-                        "os": SYSTEMS.get(os_name.lower(), _or_text(c.get("os"))),
+                        "os": system(os_name),
                         "osVersion": "",
                         "device": device(_text(c.get("device"))),
-                        "screen": _or_text(c.get("screen")),
-                        "language": _or_text(c.get("language")),
+                        "screen": screen_size(_or_text(c.get("screen"))),
+                        "language": language_tag(_or_text(c.get("language"))),
                     }
                 )
                 store.db.run("UPDATE rl_sessions SET imported = 1 WHERE id = ?", [session])
@@ -209,7 +260,7 @@ def write_link(
             if not _js.is_finite(start) or count <= 0 or math.isnan(count):
                 continue
             # A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-            n = math.floor(min(count, MAX_DAILY))
+            n = min(math.floor(count), MAX_DAILY, MAX_LINK_CLICKS - clicks)
             i = 0
             while i < n:
                 store.insert_event(

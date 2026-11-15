@@ -30,7 +30,7 @@ from .csvvisits import CSV_BATCH, csv_format, csv_hit
 from .http import Http, at, credential, items, parse_date
 from .types import ImportError
 from .umami import at_least, map_key, umami_sign_in
-from .write import BROWSERS, DEVICES, SYSTEMS, hex_id, title
+from .write import DEVICES, browser, hex_id, language_tag, place_name, screen_size, system
 
 DAY = 86_400_000
 # Each step reads at most this many days, or stops after this many events.
@@ -293,6 +293,17 @@ def _from_umami(e: Any, ts: int | float, session: Any) -> dict[str, Any]:
     }
 
 
+_NOT_HOST = re.compile(r"[/?#@\\]")
+
+
+def _valid_host(host: str) -> bool:
+    """Whether a hostname can be the host of an address, and nothing more than a host."""
+    if host == "" or _NOT_HOST.search(host):
+        return False
+    url = Url.parse(f"https://{host}/")
+    return url is not None and url.hostname != ""
+
+
 def _write_event(store: Any, site: dict[str, Any], ns: str, e: dict[str, Any]) -> bool:
     """Writes one imported pageview or event as part of a Runlight visit. Visitors
     are hashed per day from the hit's key, as live visitors are hashed per day,
@@ -308,6 +319,10 @@ def _write_event(store: Any, site: dict[str, Any], ns: str, e: dict[str, Any]) -
     yesterday = hex_id(f"{ns}:{e['key']}:{add_days(day, -1)}", 16)
     hostnames = site.get("hostnames") or []
     host = (e["hostname"] or (hostnames[0] if hostnames else "") or "imported.invalid").lower()
+    # A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one row
+    # under the site's name rather than a failed batch.
+    if not _valid_host(host):
+        host = hostnames[0].lower() if hostnames and _valid_host(hostnames[0]) else "imported.invalid"
     search = "?" + _LEADING_QUESTION.sub("", e["query"]) if e["query"] else ""
     url = Url.parse(f"https://{host}{e['path'] or '/'}{search}")
     page = parse_page(url if url is not None else Url(f"https://{host}/"))
@@ -318,7 +333,7 @@ def _write_event(store: Any, site: dict[str, Any], ns: str, e: dict[str, Any]) -
         store.db.run("DELETE FROM rl_sessions WHERE id = ?", [id])
         referrer = e["referrer"]
         country = _js.slice16((e["country"] or "").upper(), 0, 2)
-        raw_region = e["region"]
+        raw_region = place_name(e["region"])
         region = _js.slice16((raw_region if "-" in raw_region else f"{country}-{raw_region}").upper(), 0, 10) if raw_region else ""
         known = bool(_COUNTRY.match(country))
         store.insert_session(
@@ -336,14 +351,14 @@ def _write_event(store: Any, site: dict[str, Any], ns: str, e: dict[str, Any]) -
                 "utmContent": page["utm"]["content"],
                 "country": country if known else "",
                 "region": region if known else "",
-                "city": _js.slice16(e["city"] or "", 0, 100),
-                "browser": BROWSERS.get((e["browser"] or "").lower(), title(e["browser"] or "")),
+                "city": _js.slice16(place_name(e["city"] or ""), 0, 100),
+                "browser": browser(e["browser"] or ""),
                 "browserVersion": "",
-                "os": SYSTEMS.get((e["os"] or "").lower(), e["os"]),
+                "os": system(e["os"] or ""),
                 "osVersion": "",
                 "device": DEVICES.get((e["device"] or "").lower(), ""),
-                "screen": _js.slice16(e["screen"], 0, 20),
-                "language": _js.slice16(e["language"], 0, 35),
+                "screen": screen_size(e["screen"]),
+                "language": language_tag(e["language"]),
             }
         )
         # No engaged time is known, so duration falls back to first-to-last pageview.

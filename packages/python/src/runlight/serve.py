@@ -18,6 +18,9 @@ MAX_COLLECT_BODY = 16 * 1024
 MAX_BODY = 10 * 1024 * 1024
 
 # Headers about the connection rather than the answer, which PEP 3333 keeps from WSGI apps: there the server decides.
+# Methods no route or link answers, so a request with one is the app's.
+UNSUPPORTED = ("TRACE", "TRACK", "CONNECT")
+
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
 
 
@@ -59,8 +62,35 @@ class Front:
         return list(self.runlight.route_bases) or ["/runlight"]
 
     def link_domain(self, request: Request) -> Response | None:
-        """The answer for a link domain, or None for every other host. Needs no body."""
-        return self.runlight.link_domain_response(request, {"ip": request.remote_address})
+        """The answer for a link domain, or None for every other host. Needs no body. Every request of the app
+        behind comes through here, so nothing in it fails the app's own request: a database that cannot say which
+        domains are link domains leaves them as last read, and is asked again in a few seconds (see
+        Runlight._link_domain_set), and anything else that goes wrong is said, and the request goes on to the app."""
+        if request.method in UNSUPPORTED:
+            return None
+        try:
+            return self.runlight.link_domain_response(request, {"ip": request.remote_address})
+        except Exception as error:
+            print(f"Runlight: could not answer for a link domain, so the request goes on to the app {error!r}", file=sys.stderr)
+            return None
+
+    def no_link_domain(self, request: Request) -> bool:
+        """Whether link_domain() is known to answer None without asking the database: the link domains were read
+        a moment ago (or could not be, and are left alone for a few seconds) and the request's host is not one. An
+        adapter on an event loop asks this first, and only gives link_domain() a thread when it says False."""
+        if request.method in UNSUPPORTED:
+            return True
+        return self.runlight.link_domain_known(request, {"ip": request.remote_address}) is False
+
+    def is_short_link(self, request: Request) -> bool:
+        """Whether a request is a GET of `{linkPath}/{slug}`, which short_link() answers. Reads nothing."""
+        return request.method == "GET" and bool(self._link.match(Url(request.url).pathname))
+
+    def watches(self, request: Request) -> bool:
+        """Whether watch() would look at a request: a GET that names a known AI agent. Reads nothing."""
+        from .ua import ai_agent
+
+        return self.observe and request.method == "GET" and ai_agent(request.headers.get("user-agent") or "") is not None
 
     def short_link(self, request: Request, app_behind: bool) -> Response | None:
         """The answer for a GET of `{linkPath}/{slug}` on the app's own host: the link's redirect. A slug with no
@@ -79,6 +109,8 @@ class Front:
     def owns(self, method: str, path: str) -> bool:
         """Whether a request on the app's own host is Runlight's: under the routes' base. The short-link path is
         short_link()'s to decide."""
+        if method.upper() in UNSUPPORTED:
+            return False
         for base in self.bases():
             if base == "/" or path == base or path.startswith(f"{base}/"):
                 return True
@@ -102,10 +134,19 @@ class Front:
 
 
 def request_url(scheme: str, host: str, raw_path: str) -> str:
-    """The absolute URL a request was for, as `new URL(target, base)` makes it, falling back as the Node adapter
-    does when it cannot be read."""
+    """The absolute URL a request was for, falling back as the Node adapter does when it cannot be read. The host
+    is always the one given: a target that starts with two slashes (or a backslash, which a URL reads as one)
+    would name a host of its own if it were resolved against the base, and the origin with it, so such a target
+    is kept as a path on the host the request came to."""
     target = raw_path if raw_path.startswith("/") else f"/{raw_path}"
-    parsed = Url.parse(target, f"{'https' if scheme == 'https' else 'http'}://{host}")
+    base = Url.parse(f"{'https' if scheme == 'https' else 'http'}://{host}")
+    if base is None:
+        return "http://localhost/"
+    parsed = Url.parse(target, base.href)
+    if parsed is not None and parsed.origin != base.origin:
+        parsed = Url.parse(f"{base.origin}{target}")
+        if parsed is not None and parsed.origin != base.origin:
+            parsed = None
     return parsed.href if parsed is not None else "http://localhost/"
 
 

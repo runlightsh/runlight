@@ -20,8 +20,17 @@ from .data.agents import AI_AGENTS, BOT_PATTERN
 _DOT = "[^\\n\\r\\u2028\\u2029]"
 
 
+# The most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past it is
+# parsed.
+MAX_UA = 512
+
+
+def _cap(value: str) -> str:
+    return _js.slice16(value, 0, MAX_UA) if _js.length(value) > MAX_UA else value
+
+
 def ai_agent(ua: str) -> dict[str, str] | None:
-    lower = ua.lower()
+    lower = _cap(ua).lower()
     for agent in AI_AGENTS:
         if agent["token"] in lower:
             return agent
@@ -32,6 +41,7 @@ _BROWSER_LIKE = re.compile("mozilla|opera", re.IGNORECASE | re.ASCII)
 
 
 def is_bot(ua: str) -> bool:
+    ua = _cap(ua)
     if _js.length(ua) < 20 or not _BROWSER_LIKE.search(ua):
         return True
     return bool(BOT_PATTERN.search(ua))
@@ -51,7 +61,7 @@ BROWSERS: list[tuple[str, re.Pattern[str]]] = [
         ("Instagram", r"Instagram (\d+)"),
         ("Firefox", r"(?:Firefox|FxiOS)/(\d+)"),
         ("Chrome", r"(?:CriOS|Chrome)/(\d+)"),
-        ("Safari", r"Version/(\d+)[\d.]* (?:Mobile/[^" + _js.WHITESPACE + r"]+ )?Safari/"),
+        ("Safari", r"Version/(\d+)(?:\.[\d.]*)? (?:Mobile/[^" + _js.WHITESPACE + r"]+ )?Safari/"),
         ("Internet Explorer", r"(?:MSIE |Trident/" + _DOT + r"*rv:)(\d+)"),
     ]
 ]
@@ -80,6 +90,8 @@ def _unquote(value: str | None) -> str:
 
 def parse_client(ua: str, hints: dict[str, Any] | None = None, screen_width: int | float | None = None) -> dict[str, str]:
     hints = hints or {}
+    ua = _cap(ua)
+    hints = {name: _cap(hints.get(name) or "") for name in ("brands", "mobile", "platform")}
     browser = "Other"
     browser_version = ""
     for name, pattern in BROWSERS:

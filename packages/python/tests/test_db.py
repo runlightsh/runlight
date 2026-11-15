@@ -143,8 +143,17 @@ def test_postgres_url_tls_settings_reach_libpq_or_are_refused() -> None:
     # As pg, the TypeScript driver, reads them.
     assert dbs.postgres_tls({"ssl": "true"}) == {"sslmode": "verify-full", "sslrootcert": "system"}
     assert dbs.postgres_tls({"ssl": "0"}) == {"sslmode": "disable"}
-    assert dbs.postgres_tls({"ssl": "true", "sslmode": "require"}) == {"sslmode": "require"}
+    # libpq's allow, prefer, and require encrypt without checking the server; pg checks it for each, so they are
+    # checked here too, against the system's certificates unless the URL names its own.
+    for mode in ("allow", "prefer", "require"):
+        assert dbs.postgres_tls({"sslmode": mode}) == {"sslmode": "verify-full", "sslrootcert": "system"}, mode
+    assert dbs.postgres_tls({"ssl": "true", "sslmode": "require"}) == {"sslmode": "verify-full", "sslrootcert": "system"}
+    assert dbs.postgres_tls({"sslmode": "require", "sslrootcert": "/ca.pem"}) == {"sslmode": "verify-full", "sslrootcert": "/ca.pem"}
+    assert dbs.postgres_tls({"sslmode": "verify-ca", "sslrootcert": "/ca.pem"}) == {"sslmode": "verify-ca", "sslrootcert": "/ca.pem"}
+    assert dbs.postgres_tls({"sslmode": "disable"}) == {"sslmode": "disable"}
+    # The one way to encrypt and verify nothing is to say so.
     assert dbs.postgres_tls({"sslmode": "no-verify"}) == {"sslmode": "require"}
+    assert dbs.postgres_tls({}) == {}
     with pytest.raises(ValueError, match="sslca"):
         dbs.postgres_tls({"sslca": "/ca.pem"})
     with pytest.raises(ValueError, match="ssl=maybe"):

@@ -74,7 +74,20 @@ RETENTION_MONTHS = [6, 12, 24, 36, 60]
 SESSION_IDLE_MS = 30 * 60 * 1000
 
 # What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets.
-EMAIL = re.compile(f'[^{_js.WHITESPACE}@<>"]+@[^{_js.WHITESPACE}@<>"]+\\.[^{_js.WHITESPACE}@<>"]+\\Z')
+_EMAIL_PATTERN = re.compile(f'[^{_js.WHITESPACE}@<>"]+@[^{_js.WHITESPACE}@<>"]+\\.[^{_js.WHITESPACE}@<>"]+\\Z')
+# The longest an address is read: no real one is longer, and the pattern is slow on a very long string.
+EMAIL_MAX = 320
+
+
+class _Email:
+    """EMAIL.match(value): whether text passes for an email address, read no further than EMAIL_MAX."""
+
+    @staticmethod
+    def match(value: str) -> bool:
+        return _js.length(value) <= EMAIL_MAX and bool(_EMAIL_PATTERN.match(value))
+
+
+EMAIL = _Email()
 
 # Raised whenever what a rolled-up day holds changes. 2: the heatmap counts visits only. 3: a page counts the
 # views that can report time.
@@ -88,6 +101,8 @@ METERED_ROLLUP_BATCH = 4
 ROLLUP_DELAY_MS = 2 * 3_600_000
 # How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on.
 AGENT_RANGES_EVERY_MS = 86_400_000
+# How soon the link domains are asked for again after the database could not give them.
+LINK_DOMAINS_RETRY_MS = 5_000
 # The longest a tracker hit waits for the tables while another process creates or upgrades them.
 TRACKER_WAIT_MS = 10_000
 
@@ -95,7 +110,7 @@ _SITE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z", re.I)
 _DOMAIN = re.compile(r"(?=.{1,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z")
 _BUSY = re.compile(
     r"timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|"
-    r"database is locked",
+    r"database is locked|no database connection came free",
     re.I,
 )
 
@@ -216,6 +231,8 @@ class Runlight:
         # False, 0, or anything that is not a positive number means no limit, never a limit of nothing.
         number = math.nan if per_minute is False else _js.number(per_minute)
         self._limit = RateLimit(int(math.floor(number)) if math.isfinite(number) else sys.maxsize, self.now) if number > 0 else None
+        # AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast.
+        self._fetch_limit = RateLimit(int(math.floor(number * 10)) if math.isfinite(number) else sys.maxsize, self.now) if number > 0 else None
         self._clock: Callable[[], int] = opts.get("now") or _wall_clock
         # Every outgoing request goes through it.
         self.fetcher: Fetcher = opts.get("fetcher") or UrllibFetcher()
@@ -468,6 +485,9 @@ class Runlight:
             for site in self._configured:
                 self.store.upsert_site(site, self.now())
             self._overrides = self.store.site_overrides()
+            # Sign-in counts an earlier process left, made from addresses, go now if they have run out, and the
+            # keys they were hashed with, rather than at a scheduled check an app may never run.
+            self._sweep_throttles()
             # A process starting with a timezone set in code is the newest word on it: if the code changed it,
             # the days built in the old one are cleared here, once, and never by a process still running.
             for site in self.sites:
@@ -674,10 +694,12 @@ class Runlight:
             pass
         want = token_site if token_site else input.get("site", _js.UNDEFINED)
         there = next((s for s in sites if isinstance(s, dict) and s.get("id", _js.UNDEFINED) == want), None) or sites[0]
-        if not isinstance(there, dict):
-            there = {}
+        # Checked before anything is saved: a site there has an id and a name, as text.
+        there_id = there.get("id") if isinstance(there, dict) else None
+        if not isinstance(there_id, str) or not there_id or _js.length(there_id) > 64 or not isinstance(there.get("name"), str):
+            raise SettingsError(f"{url} did not answer like a Runlight install", "connect_not_runlight", {"url": url})
         # An install's answer is read as given: a site without a list of hostnames has none.
-        there_hostnames = [h for h in there.get("hostnames", []) if isinstance(h, str)] if isinstance(there.get("hostnames"), list) else []
+        there_hostnames = [h for h in there.get("hostnames", []) if isinstance(h, str) and h != ""] if isinstance(there.get("hostnames"), list) else []
         # Connecting the same site again (to allow changes, or with a new token) updates it in place.
         for existing, known in list(self._remotes.items()):
             if known["url"] == url and known["site"] == there.get("id"):
@@ -690,7 +712,7 @@ class Runlight:
                 return self.site(existing)  # type: ignore[return-value]
         parsed = Url.parse(url)
         first = there_hostnames[0] if there_hostnames else (parsed.host if parsed else "")
-        host = re.sub(r"[^a-z0-9._-]", "-", first, flags=re.I).lower()
+        host = re.sub(r"\A[^a-z0-9]+", "", re.sub(r"[^a-z0-9._-]", "-", first, flags=re.I), flags=re.I).lower() or "site"
         site_id = _js.slice16(host, 0, 56)
         n = 2
         while self._has_site(site_id):
@@ -698,7 +720,7 @@ class Runlight:
             n += 1
         name = _js.slice16(_js.trim(_js.string(_or(input.get("name"), ""))), 0, 80)
         if not name:
-            name = _js.string(there.get("name", _js.UNDEFINED))
+            name = _js.slice16(_js.trim(there["name"]), 0, 80) or host
         # No hostnames: tracker hits never land on a site that is counted elsewhere.
         timezone = there.get("timezone")
         site = {
@@ -1085,7 +1107,7 @@ class Runlight:
             else:
                 forwarded = h.get(str(self._trust_proxy))
             if forwarded is not None and _js.trim(forwarded):
-                return _js.trim(forwarded)
+                return _bare_address(_js.trim(forwarded))
         return address
 
     def _trusts(self, request: Request, context: Mapping[str, Any] | None = None) -> bool:
@@ -1120,6 +1142,8 @@ class Runlight:
             return cached
         today = self.store.salt(day, random_salt())
         yesterday = self.store.salt_if_exists(add_days(day, -1))
+        # A new day here: what sign-in counts ran out, and the keys older than yesterday's, go with the old salts.
+        self._sweep_throttles()
         salts = {"day": day, "today": today, "yesterday": yesterday}
         # Kept before old salts go, so dropping yesterday's from the store drops it from here too.
         self._salts[timezone] = salts
@@ -1129,6 +1153,17 @@ class Runlight:
             self._salts.pop(timezone, None)
             raise
         return salts
+
+    def _sweep_throttles(self) -> None:
+        """Deletes the sign-in counts that have run out and the keys they were hashed with once older than
+        yesterday (see accounts.auth.Throttle). It only tidies, so a failure is said and never stops a start or a
+        tracker hit. A database opened read-only, with nothing to delete, is never written to."""
+        from .accounts.auth import Throttle
+
+        try:
+            Throttle.sweep(self.store, self.now())
+        except Exception as error:
+            print(f"Runlight: could not clear old sign-in counts {error!r}", file=sys.stderr)
 
     def _drop_old_salts(self, now: int) -> None:
         """Deletes every salt no visit can still use. A day's salt counts visitors while it is that day in a site's
@@ -1163,7 +1198,15 @@ class Runlight:
     # Tracking
 
     def collect(self, request: Request, context: Mapping[str, Any] | None = None) -> None:
-        """Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing raises."""
+        """Handles one tracker request. Never raises: bad input is dropped quietly, and a hit the store could not
+        take is logged."""
+        try:
+            self._take(request, context)
+        except Exception as error:
+            # Analytics must never break the app it counts for.
+            print(f"Runlight: could not record an event {error!r}", file=sys.stderr)
+
+    def _take(self, request: Request, context: Mapping[str, Any] | None = None) -> None:
         from .payload import MAX_BODY, parse_payload
         from .ua import ai_agent, is_bot
 
@@ -1366,9 +1409,17 @@ class Runlight:
         cache = self._link_domain_cache
         if cache is not None and now - cache["at"] < 30_000:
             return cache["domains"]
-        self.init()
-        domains = {d["domain"] for d in self.store.link_domains()}
-        self._link_domain_cache = {"at": now, "domains": domains}
+        try:
+            self.init()
+            domains = {d["domain"] for d in self.store.link_domains()}
+            self._link_domain_cache = {"at": now, "domains": domains}
+        except Exception as error:
+            # Middleware asks on every request to the app, so a database that is down must not take the app down
+            # with it: the domains last read stand (none, when there were none), and it is asked again in a few
+            # seconds.
+            domains = cache["domains"] if cache is not None else set()
+            self._link_domain_cache = {"at": now - 30_000 + LINK_DOMAINS_RETRY_MS, "domains": domains}
+            print(f"Runlight: could not read the link domains {error!r}", file=sys.stderr)
         return domains
 
     def forget_link_domains(self) -> None:
@@ -1388,21 +1439,34 @@ class Runlight:
 
         return handle
 
-    def link_domain_response(self, request: Request, context: Mapping[str, Any] | None = None) -> Response | None:
-        """For middleware: when a request arrives on a link domain added in Settings (such as t.example.com),
-        answers `/{slug}` there with the redirect, and anything else with a 404. None for every other host, so the
-        app carries on as normal, and for the dashboard's own paths, so its owner can always reach it to remove the
-        domain."""
+    def _link_host(self, request: Request, context: Mapping[str, Any] | None = None) -> str:
+        """The host a request came in on, as link domains are kept: no port, no www."""
         from .sources import strip_www
 
-        url = Url(request.url)
         # A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
         given = self._forwarded_host(request, context)
         if given is None:
             given = request.headers.get("host")
         if given is None:
-            given = url.host
-        host = strip_www(_js.trim(given.split(",")[0]).split(":")[0])
+            given = Url(request.url).host
+        return strip_www(_js.trim(given.split(",")[0]).split(":")[0])
+
+    def link_domain_known(self, request: Request, context: Mapping[str, Any] | None = None) -> bool | None:
+        """Whether a request came in on a link domain, as far as the link domains read in the last 30 seconds
+        say, without asking the database: None when they have to be read again. For an adapter on an event loop,
+        which gives link_domain_response() a thread only when this does not say False."""
+        cache = self._link_domain_cache
+        if cache is None or self.now() - cache["at"] >= 30_000:
+            return None
+        return self._link_host(request, context) in cache["domains"]
+
+    def link_domain_response(self, request: Request, context: Mapping[str, Any] | None = None) -> Response | None:
+        """For middleware: when a request arrives on a link domain added in Settings (such as t.example.com),
+        answers `/{slug}` there with the redirect, and anything else with a 404. None for every other host, so the
+        app carries on as normal, and for the dashboard's own paths, so its owner can always reach it to remove the
+        domain."""
+        url = Url(request.url)
+        host = self._link_host(request, context)
         if host not in self._link_domain_set():
             return None
         # Lets the dashboard confirm that requests to this domain reach Runlight.
@@ -1446,7 +1510,14 @@ class Runlight:
         sites = self.sites
         site = self.site(link["site"]) or (sites[0] if sites else None)
         ua = request.headers.get("user-agent") or ""
-        if site is not None and ai_agent(ua) is None and not is_bot(ua) and request.method == "GET":
+        # Past the tracker's limit for one address a click still redirects, and is not counted.
+        if (
+            site is not None
+            and ai_agent(ua) is None
+            and not is_bot(ua)
+            and request.method == "GET"
+            and (self._limit is None or self._limit.allow(self.client_ip(request, context)))
+        ):
             try:
                 now = self.now()
                 first = (request.headers.get("accept-language") or "").split(",")[0].split(";")[0]
@@ -1522,7 +1593,9 @@ class Runlight:
 
         The request's address (the context's `ip` or a trusted proxy header, as for tracker hits, or the context's
         `agentIp` when a log reader or plugin reports it) is checked against the list the agent's company publishes
-        and then dropped: only "verified", "mismatch", or "" is kept with the fetch."""
+        and then dropped: only "verified", "mismatch", or "" is kept with the fetch. The context's `userAgent`
+        stands in for the request's header when given: a log reader gives the user agent as text, since a logged
+        one may not be fit for a header."""
         from .agentcheck import check_agent
         from .sources import strip_www
         from .ua import ai_agent
@@ -1530,7 +1603,9 @@ class Runlight:
         try:
             if request.method != "GET":
                 return False
-            agent = ai_agent(request.headers.get("user-agent") or "")
+            context = context or {}
+            given_agent = context.get("userAgent")
+            agent = ai_agent(str(given_agent) if given_agent is not None else request.headers.get("user-agent") or "")
             if agent is None:
                 return False
             url = Url(request.url)
@@ -1538,14 +1613,18 @@ class Runlight:
             m = re.search(r"\.([a-z0-9]+)\Z", url.pathname, re.I)
             if m and m.group(1).lower() not in ("html", "htm", "md", "txt", "php"):
                 return False
-            host = self._forwarded_host(request)
+            host = self._forwarded_host(request, context)
             if host is None:
                 host = request.headers.get("host")
             if host is None:
                 host = url.hostname
+            host = _js.trim(host.split(",")[0]).split(":")[0]
             self.init()
-            site = self.site_for(host.split(":")[0])
+            site = self.site_for(host)
             if site is None:
+                return False
+            # A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+            if context.get("agentIp") is None and self._fetch_limit is not None and not self._fetch_limit.allow(self.client_ip(request, context)):
                 return False
             # A log reader sends when the page was served. Older than a week is dropped, so a first run over an old
             # log does not land as one spike on today; a time ahead of now counts as now.
@@ -1554,7 +1633,6 @@ class Runlight:
             if finite and at < now - 7 * 86_400_000:  # type: ignore[operator]
                 return False
             ts = int(math.floor(at)) if finite and at <= now else now  # type: ignore[operator, arg-type]
-            context = context or {}
             agent_ip = context.get("agentIp")
             ip = str(agent_ip) if agent_ip is not None else self.client_ip(request, context)
             self.store.insert_event(
@@ -1566,7 +1644,7 @@ class Runlight:
                     "session": "",
                     "pageview": "",
                     "path": _js.slice16(url.pathname, 0, 1000),
-                    "hostname": strip_www(url.hostname),
+                    "hostname": strip_www(host),
                     # A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
                     # there was nothing to check against. The address itself is not kept.
                     "title": check_agent(agent, ip, self.agent_ranges),
@@ -1605,13 +1683,23 @@ class Runlight:
             saved = saved_lists(self.store.setting("agent-ranges"))
             if self._update_agent_ranges and (saved is None or self.now() - saved["at"] >= AGENT_RANGES_EVERY_MS):
                 lists = dict(saved["lists"]) if saved is not None else {}
+                fetched = dict(saved["fetched"]) if saved is not None else {}
                 for url in assets.AGENT_RANGES["lists"]:
                     fresh = download_range_list(self.fetcher, url)
-                    if fresh:
-                        lists[url] = fresh
-                saved = {"at": self.now(), "lists": lists}
+                    if not fresh:
+                        continue
+                    lists[url] = fresh
+                    fetched[url] = self.now()
+                saved = {"at": self.now(), "lists": lists, "fetched": fetched}
                 self.store.set_setting("agent-ranges", _js.dumps(saved))
-            self._agent_ranges = {**assets.AGENT_RANGES["lists"], **(saved["lists"] if saved is not None else {})}
+            # A downloaded list stands in for the one that came with this version only while it is the newer of
+            # the two.
+            from .importers.http import parse_date
+
+            shipped = parse_date(assets.AGENT_RANGES.get("fetchedAt"))
+            shipped = shipped if shipped == shipped else 0
+            newer = {url: ranges for url, ranges in saved["lists"].items() if _or(saved["fetched"].get(url), 0) >= shipped} if saved is not None else {}
+            self._agent_ranges = {**assets.AGENT_RANGES["lists"], **newer}
         except Exception as error:
             print(f"Runlight: could not update the AI agents' address lists {error!r}", file=sys.stderr)
 
@@ -1686,6 +1774,19 @@ class Runlight:
             self.store.optimize(True)
         self.build_rollups()
         return {"ok": True, "reports": self.send_reports()}
+
+
+_BRACKETED = re.compile(r"\[([^\]]*)\](?::[0-9]+)?\Z")
+_V4_PORT = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}:[0-9]+\Z")
+
+
+def _bare_address(value: str) -> str:
+    """A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and
+    "[2001:db8::1]:443" are the address alone."""
+    bracketed = _BRACKETED.match(value)
+    if bracketed:
+        return bracketed.group(1)
+    return value[: value.rindex(":")] if _V4_PORT.match(value) else value
 
 
 def _site_for_among(sites: list[dict[str, Any]], host: str, site_id: str | None = None) -> dict[str, Any] | None:

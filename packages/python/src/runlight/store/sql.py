@@ -290,6 +290,25 @@ def bucket_table(dialect: str, buckets: Sequence[Any]) -> str:
     return f"VALUES {', '.join(rows)}"
 
 
+# Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even number of
+# backslashes. JSON.stringify writes both for a string that holds them, and they are valid JSON.
+PG_UNREADABLE_PROPS = (
+    r"(?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))"
+    r"|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}"
+)
+
+
+def readable_props(dialect: str) -> str:
+    """An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+    escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props, rather
+    than failing every report that reads its event. SQLite reads them as they are."""
+    if dialect == "postgres":
+        return f"(CASE WHEN e.props !~ '{PG_UNREADABLE_PROPS}' THEN e.props END)::jsonb"
+    if dialect == "mysql":
+        return "(CASE WHEN JSON_VALID(e.props) THEN e.props END)"
+    return "e.props"
+
+
 def column(dimension: str) -> str:
     return f"s.{SESSION_DIMENSIONS[dimension]}" if is_session_dimension(dimension) else f"e.{EVENT_DIMENSIONS[dimension]}"
 

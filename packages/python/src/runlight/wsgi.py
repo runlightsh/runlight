@@ -10,6 +10,11 @@ exists, and every request to a link domain added in Settings are Runlight's; eve
 a slug with no link included, so the app's own 404 page answers it, and a page fetched by a known AI agent is
 recorded on the way (observe=False turns that off). Without an app, anything else is a 404.
 The work a request starts after answering (a retention change's deletions) runs once the answer is sent.
+
+WSGI names a header by putting underscores for its dashes, so a server that passes on a header named
+X_Forwarded_For gives it in the same place as X-Forwarded-For, and a client could then add to the address a proxy in
+front wrote. gunicorn, Django's own server, and Runlight's standalone server drop such headers; with another server
+behind a proxy, check that it does too, or have the proxy drop them (nginx does unless told otherwise).
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from .http import Request, Response
-from .serve import HOP_BY_HOP, Front, body_limit, header_pairs, request_url, too_large
+from .serve import HOP_BY_HOP, UNSUPPORTED, Front, body_limit, header_pairs, request_url, too_large
 
 WsgiApp = Callable[[Mapping[str, Any], Callable[..., Any]], Iterable[bytes]]
 
@@ -179,6 +184,8 @@ class RunlightMiddleware:
             self.front.watch(bare)
             if self.app is not None:
                 return self.app(environ, start_response)
+            if method in UNSUPPORTED:
+                return send(Response("", 405), start_response, head)
             return send(Response("Not found", 404, {"content-type": "text/plain; charset=utf-8"}), start_response, head)
         try:
             request = to_request(environ)

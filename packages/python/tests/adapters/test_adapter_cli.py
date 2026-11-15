@@ -119,7 +119,12 @@ def test_the_server_starts_answers_and_stops_on_sigterm(data: Path) -> None:
     import sys
     import urllib.request
 
-    port = 5141
+    import socket
+
+    # A port nothing has, asked of the system, so two runs of the suite at once never want the same one.
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
     env = {**os.environ, "PORT": str(port), "HOST": "127.0.0.1"}
     src = str(Path(cli.__file__).resolve().parents[2])
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
@@ -129,7 +134,7 @@ def test_the_server_starts_answers_and_stops_on_sigterm(data: Path) -> None:
     try:
         assert process.stdout is not None
         first = process.stdout.readline()
-        assert first == f"Runlight {VERSION} is listening on http://127.0.0.1:{port}\n"
+        assert first == f"Runlight {VERSION} is listening on http://127.0.0.1:{port}\n", process.stderr.read() if process.stderr and not first else ""
         assert process.stdout.readline() == f"Data: {data / 'runlight.db'}\n"
         assert "No account yet. Open this link to create the first one:" in process.stdout.readline() + process.stdout.readline()
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as answer:
@@ -183,12 +188,13 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
         with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
             slow.sendall(b"POST / HTTP/1.0\r\nContent-Length: 100\r\n\r\n")
             started = time.monotonic()
-            # Until the server answers: the app's read fails, so it sends an error, if anything, and hangs up.
-            while not select.select([slow], [], [], 0.1)[0] and time.monotonic() - started < 5:
-                slow.sendall(b"x")
+            # Until the server answers: a body this short is waited for with its head, before it gets a thread, so
+            # the server hangs up when the head's time is up (or, on a thread, when the app's read fails).
             try:
+                while not select.select([slow], [], [], 0.1)[0] and time.monotonic() - started < 5:
+                    slow.sendall(b"x")
                 answer = slow.makefile("rb").read()
-            except ConnectionResetError:
+            except (ConnectionResetError, BrokenPipeError):
                 # A byte sent after the server's last read makes its hang-up a reset: hung up all the same.
                 answer = b""
             assert answer == b"" or answer.startswith(b"HTTP/1.0 500")

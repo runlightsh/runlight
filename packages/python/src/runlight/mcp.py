@@ -328,6 +328,9 @@ def _answer(message: Any, read_api: ApiRead) -> Json | None:
         return _rpc_error(id, -32603 if code is None else code, str(error) if _js.truthy(code) else "Internal error")
 
 
+# The most a message or batch may weigh; a real one is a few hundred bytes a call.
+MAX_BODY_BYTES = 1024 * 1024
+
 # The most messages one batch may hold.
 MAX_BATCH = 20
 
@@ -335,6 +338,9 @@ MAX_BATCH = 20
 def mcp_response(request: Request, read_api: ApiRead) -> Response:
     """Answers one POST to the MCP endpoint, already authorised."""
     headers = {"content-type": "application/json; charset=utf-8", "cache-control": "no-store"}
+    # Capped here, since not every host caps a request body before it reaches the app.
+    if _js.number(request.headers.get("content-length") or 0) > MAX_BODY_BYTES or len(request.body()) > MAX_BODY_BYTES:
+        return Response(_js.dumps(_rpc_error(None, -32600, "Send a smaller message")), 413, headers)
     ok, body = _js.try_loads(request.body())
     if not ok or not _js.is_object(body):
         return Response(_js.dumps(_rpc_error(None, -32700, "Send a JSON-RPC message")), 400, headers)

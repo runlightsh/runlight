@@ -96,6 +96,18 @@ class RunlightServer:
             routes["origin"] = self._public_url.origin
         self.routes = rl.routes(routes)
         self._links = rl.link_handler()
+        # A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that
+        # address's tries are all refused until the time is up. A long one cannot be guessed, so nothing is counted
+        # for it and nobody's wrong tries can keep a script that shares their address out.
+        from ..accounts.auth import Throttle
+        from .secret import SHORTEST
+
+        self._guessable = bool(self._token and len(self._token) < SHORTEST)
+        self._guesses = Throttle(self._store, "token", 10, clock=now)
+        self._now = now
+        # A link at one of the server's own paths would open at /go/<slug> and never on a link domain, where the
+        # server's page answers first, so no new link takes one.
+        rl.links.reserved = frozenset(path[1:] for path in SERVER_PATHS)
 
     def _home(self) -> str | None:
         if self._public_url is not None:
@@ -107,18 +119,27 @@ class RunlightServer:
         from ..accounts.crypto import same_text
 
         auth = request.headers.get("authorization") or ""
-        if self._token and auth.lower().startswith("bearer ") and same_text(_js.trim(auth[7:]), self._token):
-            return True
+        given = _js.trim(auth[7:]) if auth.lower().startswith("bearer ") else ""
+        # A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
+        if self._token and given and (not given.startswith("rl_") or self._token.startswith("rl_")):
+            where = self.runlight.client_ip(request, {"ip": request.remote_address}) or "unknown"
+            if not (self._guessable and self._guesses.blocked(where, self._now())):
+                if same_text(given, self._token):
+                    return True
+                if self._guessable:
+                    self._guesses.fail(where, self._now())
         access = self.web.access(request)
         if access is True:
             self._learn_host(request)
         return access
 
     def _host_of(self, request: Request) -> str:
-        """The name a request came in on, read as link domains read it."""
+        """The name a request came in on, read as link domains read it: a proxy's X-Forwarded-Host only where the
+        library believes a proxy's headers at all, so a client that reaches the server straight from the internet
+        cannot name the host itself."""
         from ..routes import host_name
 
-        forwarded = request.headers.get("x-forwarded-host") if self._trust_proxy is not False else None
+        forwarded = self.runlight._forwarded_host(request, {"ip": request.remote_address})
         given = forwarded if forwarded is not None else request.headers.get("host")
         return host_name(given if given is not None else Url(request.url).host)
 

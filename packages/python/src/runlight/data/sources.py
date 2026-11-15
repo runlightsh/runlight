@@ -71,7 +71,7 @@ SOURCES: list[dict[str, Any]] = [
     {"name": "Yahoo Mail", "kind": "email", "hosts": ["mail.yahoo.com"], "aliases": ["yahoomail"]},
     {"name": "Fastmail", "kind": "email", "hosts": ["app.fastmail.com", "fastmail.com"], "aliases": ["fastmail"]},
     {"name": "Proton Mail", "kind": "email", "hosts": ["mail.proton.me"], "aliases": ["protonmail"]},
-    {"name": "Newsletter", "kind": "email", "hosts": [], "aliases": ["newsletter", "email", "e-mail", "mailchimp", "kit", "convertkit", "beehiiv", "buttondown"]},
+    {"name": "Newsletter", "kind": "email", "hosts": [], "aliases": ["newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown"]},
 ]
 # fmt: on
 
@@ -83,6 +83,5 @@ SOURCE_PATTERNS: list[dict[str, Any]] = [
     {"pattern": re.compile(r"(^|\.)convertkit-mail[0-9]*\.com\Z|(^|\.)kit-mail[0-9]*\.com\Z"), "name": "Kit", "kind": "email"},
     {"pattern": re.compile(r"(^|\.)(list-manage|mailchi)\.(com|mp)\Z"), "name": "Mailchimp", "kind": "email"},
     {"pattern": re.compile(r"(^|\.)beehiiv\.com\Z"), "name": "beehiiv", "kind": "email"},
-    {"pattern": re.compile(r"(^|\.)substack\.com\Z"), "name": "Substack", "kind": "email"},
     {"pattern": re.compile(r"^(web)?mail[0-9]*\.|(^|\.)webmail\."), "name": None, "kind": "email"},
 ]

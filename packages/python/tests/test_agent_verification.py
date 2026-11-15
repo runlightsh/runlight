@@ -126,7 +126,7 @@ def test_a_failed_download_with_nothing_saved_still_waits_a_day_and_keeps_the_bu
     rl.check()
     first_round = len(fetcher.requests)
     assert first_round > 0
-    assert json.loads(store.setting("agent-ranges")) == {"at": now[0], "lists": {}}
+    assert json.loads(store.setting("agent-ranges")) == {"at": now[0], "lists": {}, "fetched": {}}
     now[0] += 60_000
     rl.check()
     assert len(fetcher.requests) == first_round

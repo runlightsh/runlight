@@ -145,7 +145,12 @@ def host_name(value: str) -> str:
     """A Host or X-Forwarded-Host value as a bare name: lowercase, with no port, no final dot, and no www."""
     first = _js.trim(value.split(",")[0]).lower()
     name = first[: first.find("]") + 1] if first.startswith("[") else re.sub(r":[0-9]*\Z", "", first)
-    return re.sub(r"^www\.", "", re.sub(r"\.+\Z", "", name))
+    return re.sub(r"^www\.", "", name.rstrip("."))
+
+
+# The longest email address and domain name there can be. Anything longer is refused before a pattern reads it.
+MAX_EMAIL = 320
+MAX_DOMAIN = 253
 
 
 # A domain name, such as go.example.com.
@@ -162,7 +167,7 @@ def _private_name(domain: str) -> bool:
 
 
 def _is_email(value: str) -> bool:
-    return bool(_EMAIL.match(value))
+    return _js.length(value) <= MAX_EMAIL and bool(_EMAIL.match(value))
 
 
 def _entries(value: Any) -> list[tuple[str, Any]]:
@@ -592,7 +597,9 @@ class Routes:
             "runlight": runlight,
             "base": self.base,
             "isOwner": lambda r: self._can_read(r) is True,
-            "isReader": lambda r: (authorize(r) == "read" if authorize is not None else (web.access(r) == "read" if web else False)),
+            # An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+            "isReader": lambda r: self._site_only(r) or (authorize(r) == "read" if authorize is not None else (web.access(r) == "read" if web else False)),
+            "isSiteOnly": self._site_only,
         }
         if self.sign_in:
             oauth["signIn"] = self.sign_in
@@ -631,6 +638,17 @@ class Routes:
 
     def _session_scope(self, request: Request) -> Any:
         return self.web.signed_in(request) if self.web else None
+
+    def _site_only(self, request: Request) -> bool:
+        """Whether a request comes from an account kept to one site."""
+        scoped = self._session_scope(request)
+        return bool(scoped) and scoped.get("site") is not None
+
+    def _restricted(self, request: Request) -> bool:
+        """A hub's manage token and an account kept to one site reach one site's settings and nothing of the
+        install's, so neither is taken at its word about where this app lives: the Host of a request is the
+        caller's to choose."""
+        return request in self.managed or self._site_only(request)
 
     def _can_read(self, request: Request) -> bool | str:
         """Whether this request acts as the owner. "read" is someone signed in who may only read, such as a viewer."""
@@ -702,10 +720,13 @@ class Routes:
         is kept, or the refusal to send."""
         from .safefetch import resolves_privately
 
-        domain = _js.trim(value).lower()
-        domain = re.sub(r"^https?://", "", domain)
+        given = _js.trim(value).lower()
+        if _js.length(given) > MAX_DOMAIN:
+            return coded("That is not a domain name", "domain_invalid", 400)
+        domain = re.sub(r"^https?://", "", given)
         domain = re.sub(f"/{_DOT}*\\Z", "", domain)
-        domain = re.sub(r"\.+\Z", "", domain)
+        # Final dots go one at a time from the end, so a long run of them costs no more than its length.
+        domain = domain.rstrip(".")
         domain = re.sub(r"^www\.", "", domain)
         if not DOMAIN_NAME.match(domain):
             return coded("That is not a domain name", "domain_invalid", 400)
@@ -714,8 +735,8 @@ class Routes:
         # A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
         # The request's own Host is the caller's to choose, so the configured address and the names people signed
         # in from count too. A hub cannot know every name this app answers on, so it adds none until the app knows
-        # its own address.
-        if request in self.managed and not self.origin:
+        # its own address, and neither does an account kept to one site, which has a hub's reach.
+        if self._restricted(request) and not self.origin:
             return self._origin_needed()
         rl = self.rl
         here = [h for h in (request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host) if h]
@@ -1276,7 +1297,8 @@ class Routes:
                     # address the request came to. An address in the body is never used, so whoever adds a report
                     # cannot point its links somewhere else. A report made from a hub needs the configured address,
                     # where its unsubscribe link answers, since the Host its request names is the hub's to choose.
-                    if request in self.managed and not self.origin:
+                    # So does one made by an account kept to one site.
+                    if self._restricted(request) and not self.origin:
                         return self._origin_needed()
                     home = f"{self.origin or url.origin}{self.base}"
                     # A period already due counts as sent, so a report added mid-week first goes out on the next
@@ -1957,6 +1979,10 @@ class Routes:
             hub = self.managed.get(request)
             if hub and rl.store.setting(f"token-origin:{hub['id']}") != origin:
                 return coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403)
+            # An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+            # one the address its request came to.
+            if not hub and self._site_only(request) and origin != (self.origin or url.origin):
+                return coded("Your account can only pick from this dashboard's own address", "pick_own", 403)
             return json({"ticket": self._pick_ticket(origin, site["id"], back)})
 
         if (path == "/api/goals" and method == "POST") or (re.fullmatch(r"/api/goals/[^/]+", path) and method in ("PATCH", "DELETE")):
@@ -2077,7 +2103,7 @@ class Routes:
         recorded = 0
         # A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         for p in keep:
-            if rl.observe(Request(p["page"].href, "GET", {"user-agent": p["userAgent"]}), p.get("at"), {"agentIp": p.get("ip", "")}):
+            if rl.observe(Request(p["page"].href, "GET"), p.get("at"), {"agentIp": p.get("ip", ""), "userAgent": p["userAgent"]}):
                 recorded += 1
         # A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
         if not batch:

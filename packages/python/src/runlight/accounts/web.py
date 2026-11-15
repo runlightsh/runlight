@@ -16,7 +16,7 @@ from typing import Any
 from .. import _js
 from ..messages import accepted_language, translator
 from ..http import Headers, Request, Response, SearchParams, Url
-from .auth import SESSION_COOKIE, SESSION_MS, AccountError, Accounts, Throttle, otpauth_uri
+from .auth import SESSION_COOKIE, SESSION_MS, AccountError, Accounts, Lockout, Throttle, otpauth_uri
 from .crypto import base64url, random_bytes, same_text
 from .pages import (
     AUTH_CSS,
@@ -40,6 +40,21 @@ HTML = {
 }
 
 DEVICE_COOKIE = "runlight_device"
+# The most a sign-in form or an account change may weigh: a few fields, far smaller than this.
+MAX_BODY_BYTES = 64 * 1024
+
+
+class _BodyTooLong(Exception):
+    """A body past MAX_BODY_BYTES, answered with 413."""
+
+
+def _text(request: Request) -> str:
+    """A request's body as text, read no further than MAX_BODY_BYTES. Capped here, since not every host caps a
+    request body before it reaches the app."""
+    if _js.number(request.headers.get("content-length") or 0) > MAX_BODY_BYTES or len(request.body()) > MAX_BODY_BYTES:
+        raise _BodyTooLong()
+    return request.text()
+
 # Who made each token, kept beside it as a setting, so removing someone or making them a viewer deletes them.
 MADE_BY = "token-by:"
 # When each account was last sent a sign-in link, at most one a minute; a setting, so every worker process
@@ -111,7 +126,7 @@ def _body(request: Request) -> dict[str, Any] | None:
     """A JSON body by its media type, which a cross-site form cannot send."""
     if _media_type(request) != "application/json":
         return None
-    ok, parsed = _js.try_loads(request.text())
+    ok, parsed = _js.try_loads(_text(request))
     return parsed if ok and isinstance(parsed, dict) else None
 
 
@@ -158,9 +173,11 @@ class AccountsWeb:
         self.per_address = Throttle(self.store, "address", 10, clock=self.now)
         self.per_account = Throttle(self.store, "account", 50, clock=self.now)
         self.per_ip = Throttle(self.store, "ip", 30, clock=self.now)
-        # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-        # Password re-checks in Account: ten.
-        self.code_tries = Throttle(self.store, "code", 5, clock=self.now)
+        # Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the
+        # tries run out again, up to a day, so guessing on and on gets about five tries a day. A browser that
+        # signed in to the account before counts on its own, so its owner is never held up by others' guesses.
+        # Five tries to confirm the first code. Password re-checks in Account: ten.
+        self.code_tries = Lockout(self.store, "code", 5, clock=self.now)
         self.confirm_tries = Throttle(self.store, "confirm", 5, clock=self.now)
         self.rechecks = Throttle(self.store, "recheck", 10, clock=self.now)
 
@@ -331,7 +348,7 @@ class AccountsWeb:
                     return _html(setup_page(base, {"code": "", "askCode": self.asks_for_token}, lang))
                 return _html(setup_page(base, {"code": code}, lang)) if self._setup_ok(code) else self._setup_locked(lang)
             if method == "POST":
-                form = SearchParams(request.text())
+                form = SearchParams(_text(request))
                 code = form.get("code") or ""
                 if not self._setup_ok(code):
                     if self.asks_for_token:
@@ -372,20 +389,22 @@ class AccountsWeb:
             return self._signed_in_to(request, user, next_)
 
         if path == "/login/code" and method == "POST":
-            form = SearchParams(request.text())
+            form = SearchParams(_text(request))
             next_ = self.safe_next(form.get("next"))
             user = self.accounts.from_pending(form.get("pending") or "", self.now())
             if user is None:
                 return _redirect(f"{base}/login?next={_js.encode_uri_component(next_)}")
-            # Counted before the check, so a burst cannot get past five.
-            if not self.code_tries.take(user["id"], self.now()):
+            # Counted before the check, so a burst cannot get past five. A browser the account signed in from
+            # before has its own count, which only someone holding that browser's mark can use up.
+            tries = f"{user['id']}\ndevice" if self.accounts.trusts_device(_read_cookie(request, DEVICE_COOKIE), user) else user["id"]
+            if not self.code_tries.take(tries, self.now()):
                 return _html(code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": t("error.too_many_tries")}, lang), 429)
             if not self.accounts.check_second_factor(user["id"], form.get("code") or "", self.now()):
                 return _html(
                     code_page(base, {"pending": form.get("pending") or "", "next": next_, "error": t("auth.codeWrong")}, lang),
                     401,
                 )
-            self.code_tries.clear(user["id"])
+            self.code_tries.clear(tries)
             return self._signed_in_to(request, user, next_)
 
         # Signing out ends this browser's session; the account page can end them everywhere.
@@ -400,7 +419,7 @@ class AccountsWeb:
                     return _html(invite_gone_page(base, lang), 410)
                 return _html(invite_page(base, {"code": code, "email": invite["email"], "role": invite["role"], "site": invite.get("site"), "host": url.host}, lang))
             if method == "POST":
-                form = SearchParams(request.text())
+                form = SearchParams(_text(request))
                 code = form.get("code") or ""
                 invite = self.accounts.invite_by_code(code, self.now())
                 if invite is None:
@@ -425,7 +444,7 @@ class AccountsWeb:
         base = self.base
         lang = accepted_language(request)
         t = translator(lang).t
-        form = SearchParams(request.text())
+        form = SearchParams(_text(request))
         email = form.get("email") or ""
         password = form.get("password") or ""
         next_ = self.safe_next(form.get("next"))
@@ -492,6 +511,12 @@ class AccountsWeb:
         return None
 
     def confirm_password(self, request: Request) -> Response | None:
+        try:
+            return self._confirm_password(request)
+        except _BodyTooLong:
+            return _coded("Send a smaller body", "body_too_large", 413)
+
+    def _confirm_password(self, request: Request) -> Response | None:
         user = self.signed_in(request)
         if user is None:
             return _coded("Sign in first", "sign_in", 401)
@@ -693,7 +718,14 @@ class AccountsWeb:
         return {s["key"][len(MADE_BY) :] for s in self.store.settings_starting_with(MADE_BY) if s["value"] == by}
 
     def handle(self, request: Request, path: str, context: Mapping[str, Any] | None = None) -> Response | None:
-        """Answers an account page or API request at a path under the base, or None for anything else."""
+        """Answers an account page or API request at a path under the base, or None for anything else. A body past
+        the cap is refused here."""
+        try:
+            return self._answer(request, path, context)
+        except _BodyTooLong:
+            return _coded("Send a smaller body", "body_too_large", 413)
+
+    def _answer(self, request: Request, path: str, context: Mapping[str, Any] | None = None) -> Response | None:
         context = context or {}
         if path == "/api/account" or path.startswith("/api/account/") or path == "/api/people" or path.startswith("/api/people/") or path.startswith("/api/invites/"):
             return self._api(request, path)

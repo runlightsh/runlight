@@ -35,7 +35,7 @@ from typing import IO, Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from ..env import env_value
-from .secret import secret_in
+from .secret import secret_in, short_warning
 
 HELP = """Runlight {version}, privacy friendly web analytics for any number of sites.
 
@@ -250,7 +250,9 @@ def _password(settings: Settings, email: str | None, out: IO[str]) -> int:
 class _ThreadingServer(WSGIServer):
     """Answers each request on one of a fixed number of threads, so a flood of connections waits its turn rather
     than starting a thread, and holding memory, for every one. A connection takes a thread only once the head of its
-    request has arrived, so ones held open and idle cannot use up the threads and keep everyone else waiting."""
+    request has arrived, and with it the whole of a small body (a tracker hit, a sign-in form), so ones held open
+    and idle, or sending a short body a byte at a time, cannot use up the threads and keep everyone else waiting. A
+    longer body is read on its thread, which it keeps only while it arrives at a fair pace (see _Deadline)."""
 
     threads = 64
     # How long a connection has to send the head of its request before it is closed, without having had a thread.
@@ -259,6 +261,8 @@ class _ThreadingServer(WSGIServer):
     waiting_most = 1024
     # The head is looked at as far as this many bytes; past that the request is the handler's to refuse.
     head_peek = 16 * 1024
+    # A body this long at most is waited for here, with its head, before the request gets a thread.
+    body_peek = 16 * 1024
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -304,14 +308,14 @@ class _ThreadingServer(WSGIServer):
         def look(connection: Any) -> None:
             """Hands the connection to a thread when its head is whole, closes it if it hung up, else keeps it."""
             try:
-                head = connection.recv(self.head_peek, socket.MSG_PEEK)
+                head = connection.recv(self.head_peek + self.body_peek, socket.MSG_PEEK)
             except OSError:
                 close(connection)
                 return
             if not head:
                 # Hung up without a word: nothing to answer.
                 close(connection)
-            elif b"\r\n\r\n" in head or b"\n\n" in head or len(head) >= self.head_peek:
+            elif _arrived(head, self.head_peek, self.body_peek):
                 client = waiting[connection][0]
                 drop(connection)
                 self._pool.submit(self._answer, connection, client)
@@ -367,6 +371,9 @@ class _ThreadingServer(WSGIServer):
 
     def server_close(self) -> None:
         super().server_close()
+        # A server that could not take its port is closed before it was ever set up.
+        if not hasattr(self, "_watcher"):
+            return
         self._closing = True
         try:
             self._wake_write.send(b"x")
@@ -378,24 +385,53 @@ class _ThreadingServer(WSGIServer):
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 
+_HEAD_END = re.compile(rb"\r?\n\r?\n")
+_CONTENT_LENGTH = re.compile(rb"^content-length:[ \t]*([0-9]{1,18})[ \t]*\r?$", re.I | re.M)
+
+
+def _arrived(seen: bytes, head_peek: int, body_peek: int) -> bool:
+    """Whether what has come in on a connection is enough to give it a thread: the head of its request, and the
+    whole body too when the head says it is `body_peek` bytes at most. A head past `head_peek` goes on as it is,
+    for the handler to refuse."""
+    end = _HEAD_END.search(seen, 0, head_peek)
+    if end is None:
+        return len(seen) >= head_peek
+    length = _CONTENT_LENGTH.search(seen, 0, end.start() + 2)
+    if length is None or int(length.group(1)) > body_peek:
+        return True
+    return len(seen) - end.end() >= int(length.group(1))
+
+
 class _Deadline(io.RawIOBase):
     """The connection's reads, each given only the time left before the deadline, so a request that trickles in
-    a byte at a time is cut off as surely as one that stops."""
+    a byte at a time is cut off as surely as one that stops. A request must also keep a fair pace: after `grace`
+    seconds, what has arrived must be at least `pace` bytes for every second since, or the read gives up. So a body
+    sent a few bytes at a time loses its thread within seconds, however long it says it is, rather than keeping it
+    for the whole deadline."""
 
-    def __init__(self, connection: socket.socket, idle: float, deadline: float) -> None:
+    def __init__(self, connection: socket.socket, idle: float, deadline: float, grace: float = 5.0, pace: int = 8 * 1024) -> None:
         self._connection = connection
         self._idle = idle
         self._deadline = deadline
+        self._grace = grace
+        self._pace = pace
+        self._began = time.monotonic()
+        self._read = 0
 
     def readable(self) -> bool:
         return True
 
     def readinto(self, buffer: Any) -> int:
-        left = self._deadline - time.monotonic()
-        if left <= 0:
+        now = time.monotonic()
+        left = self._deadline - now
+        # When what has arrived so far stops being enough, if nothing more comes.
+        fair = self._began + self._grace + self._read / self._pace - now
+        if left <= 0 or fair <= 0:
             raise TimeoutError("The request took too long to arrive")
-        self._connection.settimeout(min(left, self._idle))
-        return self._connection.recv_into(buffer)
+        self._connection.settimeout(min(left, self._idle, fair))
+        count = self._connection.recv_into(buffer)
+        self._read += count
+        return count
 
 
 class _QuietHandler(WSGIRequestHandler):
@@ -403,10 +439,23 @@ class _QuietHandler(WSGIRequestHandler):
     timeout = 30
     # And the whole request, body and all, has this long to arrive.
     request_seconds = 60.0
+    # After this long, a request keeps its thread only while it has sent this many bytes for each second since.
+    grace_seconds = 5.0
+    pace = 8 * 1024
 
     def setup(self) -> None:
         super().setup()
-        self.rfile = io.BufferedReader(_Deadline(self.connection, float(self.timeout), time.monotonic() + self.request_seconds))
+        self.rfile = io.BufferedReader(
+            _Deadline(self.connection, float(self.timeout), time.monotonic() + self.request_seconds, self.grace_seconds, self.pace)
+        )
+
+    def get_environ(self) -> dict[str, Any]:
+        # WSGI names a header by putting underscores for its dashes, so X_Forwarded_For would land in the same
+        # place as X-Forwarded-For, after it, and a client could add to the address a proxy in front wrote. Such
+        # names are dropped, as gunicorn and Django's own server drop them; no browser or proxy sends one.
+        for name in {name for name in self.headers.keys() if "_" in name}:
+            del self.headers[name]
+        return super().get_environ()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass
@@ -417,14 +466,28 @@ def _start(settings: Settings, out: IO[str]) -> int:
 
     server = settings.server()
     server.runlight.init()
+    # Said at every start, loudly, and the server still runs: an install with a short one must keep working.
+    for name in ("RUNLIGHT_SECRET", "RUNLIGHT_TOKEN"):
+        warning = short_warning(name, env_value(name))
+        if warning:
+            print(f"\n{warning}\n", file=sys.stderr)
     port = int(env_value("PORT") or 3000)
     host = env_value("HOST") or "0.0.0.0"
-    httpd = make_server(host, port, wsgi_app(server), server_class=_ThreadingServer, handler_class=_QuietHandler)
+    try:
+        httpd = make_server(host, port, wsgi_app(server), server_class=_ThreadingServer, handler_class=_QuietHandler)
+    except OSError as error:
+        # A port already taken, or an address that cannot be listened on, is said in a line, like any other trouble
+        # at start.
+        raise RuntimeError(f"could not listen on {host}:{port}: {error.strerror or error}") from None
     shown = "localhost" if host in ("0.0.0.0", "::") else host
     out.write(f"Runlight {_version()} is listening on http://{shown}:{port}\n")
     out.write(f"Data: {settings.where()}\n")
-    if server.accounts.count() == 0:
-        out.write(f"\nNo account yet. Open this link to create the first one:\n  http://{shown}:{port}/setup?code={server.setup_code}\n\n")
+    try:
+        if server.accounts.count() == 0:
+            out.write(f"\nNo account yet. Open this link to create the first one:\n  http://{shown}:{port}/setup?code={server.setup_code}\n\n")
+    except Exception as error:
+        # The server is up and answering; only the setup link could not be worked out, which /setup still serves.
+        print(f"Runlight: could not check for a first account {error!r}", file=sys.stderr)
     out.flush()
 
     stop = threading.Event()

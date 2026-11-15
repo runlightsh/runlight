@@ -11,6 +11,19 @@ from pathlib import Path
 SHORTEST = 32
 
 
+def short_warning(name: str, value: str | None) -> str | None:
+    """What to say at start about a secret or token someone set by hand that is short enough to guess, or None. The
+    server still starts, since refusing would stop an install that ran before this was checked."""
+    if value is None or len(value) >= SHORTEST:
+        return None
+    does = (
+        "It signs every session and encrypts the saved mail and assistant keys"
+        if name == "RUNLIGHT_SECRET"
+        else "Anyone who guesses it has the whole API, as the owner"
+    )
+    return f"Runlight: WARNING: {name} is only {len(value)} characters long. {does}. Set it to {SHORTEST} or more random characters, such as the output of: openssl rand -hex 32"
+
+
 def secret_in(data_dir: str | Path) -> str:
     """The secret kept in `data_dir`, made on first run, readable only by this user. Two servers starting at once
     on one folder agree on it: the new secret is written whole to a file of its own, then linked into place, which

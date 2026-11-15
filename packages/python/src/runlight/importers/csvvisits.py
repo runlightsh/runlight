@@ -38,9 +38,20 @@ _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
 _LEADING_QUESTION = re.compile(r"^\?")
 
 
+# The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a date written
+# 20240501 would otherwise land in 1970, and the site's history would begin there.
+CSV_EARLIEST = 946_684_800_000
+
+
 def row_time(row: dict[str, str], format: CsvFormat) -> int | float:
-    """A row's time in milliseconds, or NaN. ISO 8601 with or without a zone, "2024-05-01 12:34:56"
-    (both read as UTC when no zone is given, as Umami writes them), or a Unix time in seconds or milliseconds."""
+    """A row's time in milliseconds, or NaN, as it also is for a time before CSV_EARLIEST. ISO 8601 with or without
+    a zone, "2024-05-01 12:34:56" (both read as UTC when no zone is given, as Umami writes them), or a Unix time in
+    seconds or milliseconds."""
+    ts = _read_time(row, format)
+    return ts if ts >= CSV_EARLIEST else math.nan
+
+
+def _read_time(row: dict[str, str], format: CsvFormat) -> int | float:
     value = row.get("created_at" if format == "umami" else "time")
     text = "" if value is None else _js.trim(value)
     if not text:

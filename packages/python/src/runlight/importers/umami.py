@@ -9,6 +9,7 @@ from typing import Any
 from .. import _js
 from .http import Http, at, credential, defined, either, items, parse_date
 from .types import ImportError
+from .write import MAX_LINK_CLICKS
 
 PAGE = 5
 
@@ -82,6 +83,9 @@ class Umami:
                 body = http.get_json(f"{base}/api{path}&page={page}&pageSize=1000", {"headers": headers})
                 data = items(_js.get(body, "data"))
                 out.extend(data)
+                # No more than a link keeps: a longer history, or a server that never stops, ends here.
+                if len(out) >= MAX_LINK_CLICKS:
+                    return out[:MAX_LINK_CLICKS]
                 if at_least(len(out), _js.get(body, "count")) or len(data) == 0:
                     return out
                 page += 1

@@ -527,7 +527,13 @@ def _js_float(text: str) -> float | int:
 def _js_int(text: str) -> float | int:
     n = int(text)
     # Past 2^53 JavaScript holds the nearest double.
-    return n if abs(n) <= MAX_SAFE_INTEGER else whole(float(n)) if abs(n) < 2**63 else float(n)
+    if abs(n) <= MAX_SAFE_INTEGER:
+        return n
+    try:
+        return whole(float(n)) if abs(n) < 2**63 else float(n)
+    except OverflowError:
+        # Past the largest double JavaScript reads Infinity.
+        return -math.inf if n < 0 else math.inf
 
 
 def loads(text: str | bytes) -> Any:

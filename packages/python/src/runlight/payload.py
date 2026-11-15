@@ -26,7 +26,25 @@ _PAGEVIEW_ID = re.compile(r"[a-z0-9]+\Z", re.IGNORECASE | re.ASCII)
 
 
 def _str(value: Any, max: int) -> str:
+    """A string as it came, cut to `max` UTF-16 units: for a URL, which the parser then encodes."""
     return _js.well_formed(_js.slice16(value, 0, max)) if isinstance(value, str) else ""
+
+
+def tidy(text: str) -> str:
+    """Text as every database can keep it: without U+0000, which Postgres refuses, and with half a surrogate
+    pair (which is no character) as U+FFFD."""
+    return _js.well_formed(text.replace("\0", ""))
+
+
+def clean_text(text: str, max: int) -> str:
+    """Tidied text cut to `max` characters (code points), so a character such as an emoji is never cut in half."""
+    clean = tidy(text)
+    return clean if _js.length(clean) <= max else clean[:max]
+
+
+def _stored(value: Any, max: int) -> str:
+    """A string the tracker sent, as it is stored."""
+    return clean_text(value, max) if isinstance(value, str) else ""
 
 
 def _int(value: Any, lo: int, hi: int) -> int | None:
@@ -44,11 +62,11 @@ def _props(value: Any) -> dict[str, str] | None:
         raw = value[key]
         if count >= MAX_PROPS:
             break
-        k = _str(_js.trim(key), 60)
+        k = clean_text(_js.trim(tidy(key)), 60)
         if not k:
             continue
         if isinstance(raw, str):
-            text = _str(raw, 500)
+            text = clean_text(raw, 500)
         elif _js.is_finite(raw):
             # JSON.parse reads every number as a double, so a long integer is rounded as it is there.
             text = _js.number_text(raw)
@@ -213,7 +231,7 @@ def parse_payload(text: str) -> dict[str, Any] | None:
     if url is None or url.protocol not in ("http:", "https:"):
         return None
 
-    name = _js.trim(_str(body.get("n"), 120))
+    name = _js.trim(_stored(body.get("n"), 120))
     if kind == "event" and not name:
         return None
 
@@ -226,13 +244,13 @@ def parse_payload(text: str) -> dict[str, Any] | None:
     engaged = _int(body.get("e"), 0, MAX_ENGAGED_MS) if kind == "engagement" else 0
     return {
         "kind": kind,
-        "site": _str(body.get("s"), 64),
+        "site": _stored(body.get("s"), 64),
         "url": url,
         "referrer": _str(body.get("r"), 2048),
-        "title": _str(body.get("t"), 500),
+        "title": _stored(body.get("t"), 500),
         "screenWidth": _int(body.get("w"), 0, 20000),
         "screenHeight": _int(body.get("h"), 0, 20000),
-        "language": _str(body.get("l"), 35),
+        "language": _stored(body.get("l"), 35),
         "name": name,
         "props": _link_props(name, _props(body.get("p"))) if kind == "event" else None,
         "pageviewId": pageview_id,

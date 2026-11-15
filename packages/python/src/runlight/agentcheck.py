@@ -9,6 +9,7 @@ The address is only compared, never kept.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -162,13 +163,10 @@ def download_range_list(fetcher: Fetcher, url: str, timeout_ms: int = 15_000) ->
         )
         if not response.ok:
             return None
-        length = _js.number(response.headers.get("content-length") or 0)
-        if length > MAX_LIST_BYTES:
-            return None
-        content = response.content()
-        if len(content) > MAX_LIST_BYTES:
-            return None
-        return read_range_list(_js.loads(content))
+        # Read no further than a list can be, whatever length the reply declares, or when it declares none.
+        from .body import read_text_capped
+
+        return read_range_list(_js.loads(read_text_capped(response, MAX_LIST_BYTES)))
     except Exception:
         return None
 
@@ -205,8 +203,9 @@ def check_agent(agent: Mapping[str, Any], ip: str, lists: Mapping[str, list[str]
 
 
 def saved_lists(stored: str | None) -> dict[str, Any] | None:
-    """The lists saved in the "agent-ranges" setting, {"at", "lists"}, each list read as a download is. None when
-    nothing usable is saved."""
+    """The lists saved in the "agent-ranges" setting, {"at", "lists", "fetched"}, each list read as a download is.
+    `fetched` is when each list was downloaded; a copy saved before it was kept has only `at`, for all of them.
+    None when nothing usable is saved."""
     if not stored:
         return None
     try:
@@ -215,13 +214,19 @@ def saved_lists(stored: str | None) -> dict[str, Any] | None:
         return None
     if parsed is None:
         return None
+    at = _js.number(parsed.get("at")) if isinstance(parsed, dict) else 0
+    at = at if at == at else 0
     lists: dict[str, list[str]] = {}
+    fetched: dict[str, Any] = {}
     raw = parsed.get("lists") if isinstance(parsed, dict) else None
+    times = parsed.get("fetched") if isinstance(parsed, dict) else None
     if isinstance(raw, dict):
         for url, ranges in raw.items():
             entries = [{"ipv6Prefix": p} if ":" in _js.string(p) else {"ipv4Prefix": p} for p in ranges] if isinstance(ranges, list) else None
             prefixes = read_range_list({"prefixes": entries})
-            if prefixes:
-                lists[url] = prefixes
-    at = _js.number(parsed.get("at")) if isinstance(parsed, dict) else 0
-    return {"at": at if at == at else 0, "lists": lists}
+            if not prefixes:
+                continue
+            lists[url] = prefixes
+            when = _js.number(times.get(url, _js.UNDEFINED)) if isinstance(times, dict) else math.nan
+            fetched[url] = when if when == when and when else (0 if _js.truthy(times) else at)
+    return {"at": at, "lists": lists, "fetched": fetched}

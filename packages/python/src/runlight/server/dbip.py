@@ -93,6 +93,11 @@ def _download(url: str, file: str) -> bool:
         return False
 
 
+# How long after a first failed try the next one waits, and the longest any waits.
+FIRST_WAIT = 5 * 60_000
+LONGEST_WAIT = 6 * 3_600_000
+
+
 class DbIp:
     """Keeps a DB-IP database current in `dir` and answers lookups from it, as the TS server's Geo does. `mode` is
     "city" or "country". `lookup` answers nothing until the first file opens, so startup never waits; refresh()
@@ -108,6 +113,9 @@ class DbIp:
         self._fetcher = fetcher
         self._reader: Mmdb | None = None
         self._loaded = ""
+        # After a try that left this month's file missing: how long the next waits, and when it may start.
+        self._wait = 0
+        self._retry_at = 0
         os.makedirs(dir, exist_ok=True)
 
     def lookup(self, ip: str) -> dict[str, Any] | None:
@@ -131,7 +139,10 @@ class DbIp:
         self._loaded = os.path.basename(file)[-12:-5]
 
     def refresh(self, now: int) -> None:
-        """Opens the newest file on disk, then fetches this month's if it is missing. Safe to call often."""
+        """Opens the newest file on disk, then fetches this month's if it is missing. Safe to call often: while the
+        month's file is not published yet, or a download keeps failing, each try waits twice as long as the last,
+        from five minutes up to six hours, so neither DB-IP nor the disk is asked for the whole file every few
+        minutes."""
         current = month(now)
         if self._loaded == current:
             return
@@ -140,7 +151,16 @@ class DbIp:
             self._open(newest)
         if os.path.isfile(self._file(current)):
             return
-        self._fetch(current, now)
+        if now < self._retry_at:
+            return
+        try:
+            self._fetch(current, now)
+        finally:
+            if os.path.isfile(self._file(current)):
+                self._wait = 0
+            else:
+                self._wait = min(self._wait * 2 or FIRST_WAIT, LONGEST_WAIT)
+                self._retry_at = now + self._wait
 
     def _get(self, url: str, file: str) -> bool:
         if self._fetcher is None:

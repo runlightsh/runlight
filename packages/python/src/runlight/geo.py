@@ -18,6 +18,7 @@ from typing import Any
 
 from . import _js
 from .http import Headers
+from .payload import tidy
 
 GeoLookup = Callable[[str], "dict[str, Any] | None"]
 
@@ -51,13 +52,13 @@ def _clean(location: dict[str, Any]) -> dict[str, str]:
         country = ""
     # A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
     # that has no codes ("California") is kept readable, as "US-California".
-    raw = _js.trim(_text(location.get("region")))
+    raw = _js.trim(tidy(_text(location.get("region"))))
     region = raw.upper() if _REGION_CODE.match(raw) else _js.slice16(raw, 0, 80)
     if region and not _REGION_PREFIX.match(region) and country:
         region = f"{country}-{region}"
     if not country:
         region = ""
-    city = _js.slice16(_text(location.get("city")), 0, 100) if country else ""
+    city = _js.slice16(tidy(_text(location.get("city"))), 0, 100) if country else ""
     return {"country": country, "region": region, "city": city}
 
 

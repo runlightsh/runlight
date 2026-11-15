@@ -9,7 +9,10 @@ Requests under the routes' base path (default /runlight), `{linkPath}/{slug}` (d
 and every request to a link domain added in Settings are Runlight's; everything else goes on to the app, a slug
 with no link included, so the app's own 404 page answers it, and a page fetched by a known AI agent is recorded on
 the way (observe=False turns that off). Runlight's work is synchronous, like the database
-drivers it uses, so each of its requests runs in a worker thread and never holds up the event loop.
+drivers it uses, so each of its requests runs in a worker thread and never holds up the event loop. Those threads
+are Runlight's own, a fixed few (`threads`, default 8), so a long report never takes one the app's own code
+would run on. A request that is the app's needs none: whether it is Runlight's is decided on the event loop, and
+only reading the link domains again, every half minute, takes a thread.
 """
 
 from __future__ import annotations
@@ -17,15 +20,25 @@ from __future__ import annotations
 import asyncio
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
-from typing import Any
+from concurrent.futures import Executor, ThreadPoolExecutor
+from typing import Any, TypeVar
 
 from .http import Request, Response
-from .serve import Front, body_limit, header_pairs, request_url, too_large
+from .serve import UNSUPPORTED, Front, body_limit, header_pairs, request_url, too_large
 
 Scope = MutableMapping[str, Any]
 Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
 Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 AsgiApp = Callable[[Scope, Receive, Send], Awaitable[None]]
+T = TypeVar("T")
+
+# The threads Runlight's own work runs on, unless `threads` says another number.
+THREADS = 8
+
+
+async def _in(executor: Executor | None, fn: Callable[..., T], *args: Any) -> T:
+    """Runs fn(*args) on a thread of `executor` (the loop's own without one) and gives its answer."""
+    return await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
 
 
 def _headers(scope: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -95,8 +108,9 @@ async def _read_body(receive: Receive, limit: int) -> bytes | None:
             return b"".join(chunks)
 
 
-async def send_response(send: Send, response: Response, head: bool = False) -> None:
-    """Sends a Response over ASGI, streamed when Runlight streams it (exports)."""
+async def send_response(send: Send, response: Response, head: bool = False, executor: Executor | None = None) -> None:
+    """Sends a Response over ASGI, streamed when Runlight streams it (exports), its pieces read on a thread of
+    `executor`."""
     pairs = header_pairs(response)
     if not response.streamed and not any(name == "content-length" for name, _ in pairs):
         pairs.append(("content-length", str(len(response.content()))))
@@ -110,7 +124,7 @@ async def send_response(send: Send, response: Response, head: bool = False) -> N
         return
     chunks = iter(response.chunks())
     while True:
-        chunk = await asyncio.to_thread(next, chunks, None)
+        chunk = await _in(executor, next, chunks, None)
         if chunk is None:
             break
         await send({"type": "http.response.body", "body": chunk, "more_body": True})
@@ -126,6 +140,7 @@ class RunlightMiddleware:
         runlight: Any = None,
         routes: Any = None,
         observe: bool = True,
+        threads: int = THREADS,
         **routes_options: Any,
     ) -> None:
         if runlight is None:
@@ -135,6 +150,8 @@ class RunlightMiddleware:
         if routes is None:
             routes = runlight.routes(**routes_options)
         self.front = Front(runlight, routes, observe)
+        # Runlight's own threads, apart from the loop's, which the app's code shares.
+        self.executor = ThreadPoolExecutor(max(1, int(threads)), thread_name_prefix="runlight-asgi")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -152,23 +169,28 @@ class RunlightMiddleware:
         method = str(scope.get("method", "GET")).upper()
         head = method == "HEAD"
         bare = to_request(scope)
-        linked = await asyncio.to_thread(self.front.link_domain, bare)
+        front = self.front
+        work = self.executor
+        # A request that is the app's is told apart here, on the event loop, wherever that needs nothing read.
+        linked = None if front.no_link_domain(bare) else await _in(work, front.link_domain, bare)
         if linked is not None:
-            await send_response(send, linked, head)
-            await asyncio.to_thread(self.runlight.idle)
+            await send_response(send, linked, head, work)
+            await _in(work, self.runlight.idle)
             return
-        if method == "GET":
-            short = await asyncio.to_thread(self.front.short_link, bare, self.app is not None)
+        if front.is_short_link(bare):
+            short = await _in(work, front.short_link, bare, self.app is not None)
             if short is not None:
-                await send_response(send, short, head)
-                await asyncio.to_thread(self.runlight.idle)
+                await send_response(send, short, head, work)
+                await _in(work, self.runlight.idle)
                 return
         path = urllib.parse.urlsplit(bare.url).path
-        if not self.front.owns(method, path):
-            if self.front.observe and method == "GET":
-                await asyncio.to_thread(self.front.watch, bare)
+        if not front.owns(method, path):
+            if front.watches(bare):
+                await _in(work, front.watch, bare)
             if self.app is not None:
                 await self.app(scope, receive, send)
+            elif method in UNSUPPORTED:
+                await send_response(send, Response("", 405), head)
             else:
                 await send_response(send, Response("Not found", 404, {"content-type": "text/plain; charset=utf-8"}), head)
             return
@@ -182,10 +204,9 @@ class RunlightMiddleware:
             if read is None:
                 return
             body = read
-        response = await asyncio.to_thread(self.front.answer, to_request(scope, body))
-        await send_response(send, response, head)
-        await asyncio.to_thread(self.runlight.idle)
-
+        response = await _in(work, front.answer, to_request(scope, body))
+        await send_response(send, response, head, work)
+        await _in(work, self.runlight.idle)
 
 def app(runlight: Any, routes: Any = None, **routes_options: Any) -> RunlightMiddleware:
     """Runlight on its own as an ASGI app, such as for uvicorn."""

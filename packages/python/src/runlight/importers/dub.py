@@ -7,6 +7,7 @@ from typing import Any
 from .. import _js
 from .http import Http, HttpError, at, credential, defined, items, parse_date, positive
 from .types import ImportError
+from .write import MAX_LINK_CLICKS
 
 BASE = "https://api.dub.co"
 PAGE = 10
@@ -83,7 +84,8 @@ class Dub:
                                     }
                                 )
                             )
-                        if len(events) < 1000:
+                        # No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+                        if len(events) < 1000 or len(clicks) >= MAX_LINK_CLICKS:
                             break
                         page += 1
                     history = "events"

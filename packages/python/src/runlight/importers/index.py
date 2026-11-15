@@ -39,7 +39,8 @@ def import_step(
     runlight.init()
 
     def known(source_id: Any, slug: Any = None, url: Any = None) -> bool:
-        if runlight.store.link_by_id(imported_link_id(source, _js.string(source_id))):
+        # A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+        if runlight.store.link_exists(imported_link_id(source, _js.string(source_id))):
             return True
         if not _js.truthy(slug) or not _js.truthy(url):
             return False

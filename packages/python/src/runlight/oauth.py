@@ -158,8 +158,13 @@ _LOOPBACK = re.compile(r"http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?/")
 
 
 def _allowed_redirect(value: str) -> bool:
-    """Redirect addresses a client may register: https, or a local app's own loopback address."""
-    return bool(_HTTPS.match(value) or _LOOPBACK.match(value))
+    """Redirect addresses a client may register: https, or a local app's own loopback address, and one that parses
+    as an address at all."""
+    return bool(_HTTPS.match(value) or _LOOPBACK.match(value)) and Url.can_parse(value)
+
+
+# The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.
+MAX_BODY_BYTES = 64 * 1024
 
 
 def resource_metadata_url(origin: str, base: str) -> str:
@@ -207,6 +212,10 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
     base: str = ctx["base"]
     issuer = f"{url.origin}{base}"
     known = path
+    # Capped here, since not every host caps a request body before it reaches the app.
+    if request.method == "POST" and path in ("/oauth/register", "/oauth/authorize", "/oauth/token"):
+        if _js.number(request.headers.get("content-length") or 0) > MAX_BODY_BYTES or len(request.body()) > MAX_BODY_BYTES:
+            return _oauth_error("invalid_request", "Send a smaller body", 413)
     if request.method == "OPTIONS" and (
         known.startswith("/.well-known/oauth-") or known.startswith("/.well-known/openid-configuration") or path.startswith("/oauth/")
     ):
@@ -255,7 +264,8 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         client = found["client"] if found is not None else None
         redirect = form.get("redirect_uri") or ""
         # Without a known client and one of its own addresses there is nowhere safe to send an answer.
-        if client is None or redirect not in client["redirects"]:
+        # An address that does not parse, from an app registered before those were refused, is no address of its own.
+        if client is None or redirect not in client["redirects"] or not Url.can_parse(redirect):
             return page(html("oauth.unregisteredTitle"), f"<p>{html('oauth.startAgain')}</p>", 400)
 
         def back(params: Mapping[str, str]) -> Response:
@@ -296,7 +306,8 @@ def oauth_response(ctx: Mapping[str, Any], request: Request, path: str, url: Url
         if not ctx["isOwner"](request):
             # Someone signed in who may only read would be sent to sign in again and again.
             if ctx.get("isReader") and ctx["isReader"](request):
-                return page(html("oauth.viewerTitle"), f"<p>{html('oauth.viewer', {'app': _esc(name)})}</p>", 403)
+                site_only = ctx["isSiteOnly"](request) if ctx.get("isSiteOnly") else False
+                return page(html("oauth.viewerTitle"), f"<p>{html('oauth.siteAccount' if site_only else 'oauth.viewer', {'app': _esc(name)})}</p>", 403)
             # The site stays, since on the way in it only says which one to offer first.
             kept = SearchParams([(k, v) for k, v in form.items() if k != "decision"])
             here = f"{url.pathname}?{kept.to_string()}"

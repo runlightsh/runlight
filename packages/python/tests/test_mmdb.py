@@ -112,9 +112,25 @@ def test_db_ip_opens_what_is_on_disk_downloads_this_months_release_or_last_month
     assert sorted(os.listdir(tmp_path / "geo")) == ["dbip-city-lite-2026-09.mmdb"], "older releases go"
     assert dbip.lookup("8.8.8.8") == {"country": "US", "region": "CA", "city": "Mountain View"}
 
-    # Last month's file is open, so a later refresh in the same month only looks for this month's again.
+    # Last month's file is open, so a later refresh in the same month only looks for this month's again, and
+    # each try waits twice as long as the last: five minutes, then ten, up to six hours.
     dbip.refresh(now + 60_000)
-    assert len(fetcher.requests) == 3
+    assert len(fetcher.requests) == 2, "not within five minutes of a try that found none"
+    at = now
+    for wait, tries in ((5, 3), (10, 4), (20, 5), (40, 6), (80, 7), (160, 8), (320, 9), (360, 10), (360, 11)):
+        at += wait * 60_000
+        dbip.refresh(at - 1)
+        assert len(fetcher.requests) == tries - 1, f"not before {wait} minutes are up"
+        dbip.refresh(at)
+        assert len(fetcher.requests) == tries
+    assert fetcher.requests[-1]["url"].endswith("dbip-city-lite-2026-10.mmdb.gz")
+    assert dbip._wait == 6 * 3_600_000
+    # A try that gets the month's file starts the wait over.
+    fresh = DbIp(str(tmp_path / "fresh"), "city", said.append, FakeFetcher(lambda url, init: Response("", 404) if "2026-10" in url else Response(gzip.compress(data), 200)))
+    fresh.refresh(now)
+    assert fresh._wait == 5 * 60_000
+    fresh.refresh(now + 31 * 86_400_000)
+    assert fresh._loaded == "2026-11" and fresh._wait == 0
 
     # A new process opens the newest file on disk before it fetches anything.
     other = DbIp(str(tmp_path / "geo"), "city", said.append, FakeFetcher(lambda url, init: Response("", 404)))

@@ -60,6 +60,10 @@ def _default_name(url: str) -> str:
 class Links:
     def __init__(self, runlight: Any) -> None:
         self._runlight = runlight
+        # Slugs no new link may take, for a host whose own pages sit where a link domain's links do: the
+        # standalone server answers /login, /api, and the rest on every name, so a link there would never open on
+        # its own domain.
+        self.reserved: frozenset[str] = frozenset()
 
     def _domain_for(self, site: str, value: Any) -> str:
         domain = strip_www(_js.trim(_text(value)))
@@ -78,10 +82,15 @@ class Links:
             taken = self._runlight.store.link_by_slug(wanted)
             if taken and taken["id"] != except_:
                 raise LinkError(f"/{wanted} is already taken", "link_taken", {"slug": wanted})
+            # A link made before the slug was kept back keeps it.
+            if wanted in self.reserved and not taken:
+                raise LinkError(
+                    f"/{wanted} is one of this server's own pages, so a link there would never open on a link domain", "link_reserved", {"slug": wanted}
+                )
             return wanted
         for _ in range(8):
             slug = random_slug()
-            if not self._runlight.store.link_by_slug(slug):
+            if slug not in self.reserved and not self._runlight.store.link_by_slug(slug):
                 return slug
         raise LinkError("Could not find a free slug; try again", "link_no_slug")
 

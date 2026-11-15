@@ -47,7 +47,8 @@ def _attrs(tag: str) -> dict[str, str]:
     return out
 
 
-_LINK = re.compile(r"<link\b[^>]*>", re.IGNORECASE | re.ASCII)
+# A tag is at most a few thousand characters; the bound keeps a page of unclosed tags from being read over and over.
+_LINK = re.compile(r"<link\b[^<>]{0,4000}>", re.IGNORECASE | re.ASCII)
 _SPACES = re.compile(f"[{_S}]+")
 
 

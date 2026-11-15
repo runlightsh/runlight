@@ -24,7 +24,7 @@ SOCIAL_MEDIUMS = re.compile(
     r"(social|social-network|social-media|sm|social_network|social_media|paid_social|paid-social|paidsocial)\Z"
 )
 
-# Later entries win, as Map.set does: the alias "kit" names Newsletter, not Kit.
+# Later entries win, as Map.set does.
 _by_host: dict[str, dict[str, Any]] = {}
 _by_alias: dict[str, dict[str, Any]] = {}
 for _source in SOURCES:
@@ -35,7 +35,10 @@ for _source in SOURCES:
 
 
 def _clip(value: str | None, max: int = 200) -> str:
-    return _js.slice16(_js.trim(value or ""), 0, max)
+    """A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character."""
+    from .payload import clean_text, tidy
+
+    return clean_text(_js.trim(tidy(value or "")), max)
 
 
 def strip_www(host: str) -> str:

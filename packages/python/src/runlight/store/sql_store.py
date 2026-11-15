@@ -50,7 +50,7 @@ from .sql import (
     VALUES_PER_QUERY,
     as_text,
     bucket_table,
-    code_order,
+    readable_props,
     div,
     escape_like,
     event_kind_table,
@@ -498,8 +498,8 @@ class SqlStore:
         }
 
     def _rolled_breakdown(self, query: dict[str, Any], dimension: str, limit: int, offset: int) -> list[dict[str, Any]] | None:
-        """A breakdown of a visit dimension or of pages from rollups and the visits left over, merged, then sorted and
-        cut to the page asked for."""
+        """A breakdown of a visit dimension or of pages from rollups and the visits left over, merged, sorted, and
+        cut to the page asked for by the database."""
         page = dimension == "page"
         event = dimension == "event"
         if not page and not event and not is_session_dimension(dimension):
@@ -513,87 +513,82 @@ class SqlStore:
             plan = {"days": [], "rest": [(query["from"], query["to"])]}
         if plan is None:
             return None
-        sums: dict[str, dict[str, int | float]] = {}
+        dialect = self.db.dialect()
 
-        def bump(row: dict[str, Any]) -> None:
-            key = _string(row["value"])
-            into = sums.get(key)
-            if into is None:
-                into = {k: 0 for k in _ROLLUP_SUMS}
-                sums[key] = into
-            for k in _ROLLUP_SUMS:
-                into[k] += num(row.get(k))
+        # Each source adds up its own rows by value, and the database adds the sources together, sorts them, and
+        # cuts them to the page asked for, so no more than that page is ever read into memory.
+        def part(value: str, counted: dict[str, str]) -> str:
+            return f"{value} AS value, " + ", ".join(f"{counted.get(c, '0')} AS {c}" for c in _ROLLUP_SUMS)
 
+        parts: list[str] = []
+        params: list[Any] = []
         if plan["days"]:
-            rolled = self.db.all(
-                f"""SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN ({BUILT_DAYS}) GROUP BY value""",
-                [query["site"], dimension, query["site"], query["from"], query["to"]],
-            )
-            for row in rolled:
-                bump(row)
+            parts.append(f"SELECT value, {', '.join(_ROLLUP_SUMS)} FROM rl_rollups WHERE site = ? AND dim = ? AND day IN ({BUILT_DAYS})")
+            params.extend([query["site"], dimension, query["site"], query["from"], query["to"]])
         w = SqlStore._within(plan["rest"])
-        if (page or event) and plan["rest"]:
+        at: list[Any] = []
+
+        def of_rest(kind: str) -> str:
+            return f"FROM {event_kind_table(dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '{kind}' AND e.ts >= ? AND e.ts < ? AND {IS_VISIT} AND {w['sql']}"
+
+        if plan["rest"]:
             # A visit's pageviews and events belong to the day it started, as in the rollups. Bounded by time as
             # well, so the events index finds them (see build_rollup_day).
             lo = min(a for a, _ in plan["rest"])
             hi = max(b for _, b in plan["rest"]) + EVENT_TAIL_MS
-
-            def of_rest(kind: str) -> str:
-                return f"FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '{kind}' AND e.ts >= ? AND e.ts < ? AND {IS_VISIT} AND {w['sql']}"
-
             at = [query["site"], lo, hi, *w["params"]]
             if page:
-                for row in self.db.all(
-                    f"SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, {LIVE_VIEWS} AS views {of_rest('pageview')} GROUP BY e.path",
-                    at,
-                ):
-                    bump(row)
-                for row in self.db.all(
-                    f"""SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest {of_rest('engagement')} GROUP BY e.path, e.pageview) t GROUP BY value""",
-                    at,
-                ):
-                    bump(row)
+                parts.append(f"SELECT {part('e.path', {'visitors': 'COUNT(DISTINCT e.visitor)', 'pageviews': 'COUNT(*)', 'views': LIVE_VIEWS})} {of_rest('pageview')} GROUP BY e.path")
+                params.extend(at)
+            elif event:
+                parts.append(f"SELECT {part('e.name', {'visitors': 'COUNT(DISTINCT e.visitor)', 'events': 'COUNT(*)'})} {of_rest('event')} GROUP BY e.name")
+                params.extend(at)
             else:
-                for row in self.db.all(f"SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events {of_rest('event')} GROUP BY e.name", at):
-                    bump(row)
-        elif page or event:
-            # Every day of the range is built.
-            pass
-        else:
-            col = f"s.{SESSION_DIMENSIONS[dimension]}"
-            for row in self.db.all(
-                f"""SELECT {col} AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-           SUM(CASE WHEN {BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM({DURATION}) AS duration
-         FROM rl_sessions s WHERE s.site = ? AND {IS_VISIT} AND {w['sql']} AND {col} <> '' GROUP BY {col}""",
-                [query["site"], *w["params"]],
-            ):
-                bump(row)
+                col = f"s.{SESSION_DIMENSIONS[dimension]}"
+                counted = {
+                    "visitors": "COUNT(DISTINCT s.visitor)",
+                    "visits": "COUNT(*)",
+                    "pageviews": "SUM(s.pageviews)",
+                    "bounced": f"SUM(CASE WHEN {BOUNCE} THEN 1 ELSE 0 END)",
+                    "duration": f"SUM({DURATION})",
+                }
+                parts.append(f"SELECT {part(col, counted)} FROM rl_sessions s WHERE s.site = ? AND {IS_VISIT} AND {w['sql']} AND {col} <> '' GROUP BY {col}")
+                params.extend([query["site"], *w["params"]])
         entry_exit = dimension in ("entry", "exit")
-        rows = [
-            (value, x)
-            for value, x in sums.items()
-            if (event or value != "") and (x["pageviews"] > 0 if page else x["events"] > 0 if event else x["visits"] > 0)
-        ]
+        order = "n_visits DESC" if entry_exit else "n_visitors DESC, n_events DESC" if event else "n_visitors DESC, n_pageviews DESC" if page else "n_visitors DESC, n_visits DESC"
+        rows = self.db.all(
+            f"""SELECT value, {', '.join(f'SUM({c}) AS n_{c}' for c in _ROLLUP_SUMS)} FROM ({' UNION ALL '.join(parts)}) t
+       {'' if event else "WHERE value <> ''"} GROUP BY value ORDER BY {order}, value{self._text_order} LIMIT ? OFFSET ?""",
+            [*params, limit, offset],
+        )
+        # The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+        rest: dict[str, dict[str, int | float]] = {}
+        if page and plan["rest"] and rows:
+            # Engaged time is added up per pageview first.
+            size = max(1, min(VALUES_PER_QUERY, MAX_PARAMS - len(at) - 4))
 
-        def order(a: tuple[str, dict[str, Any]], b: tuple[str, dict[str, Any]]) -> int | float:
-            (av, x), (bv, y) = a, b
-            if entry_exit:
-                return y["visits"] - x["visits"] or code_order(av, bv)
-            if event:
-                return y["visitors"] - x["visitors"] or y["events"] - x["events"] or code_order(av, bv)
-            if page:
-                return y["visitors"] - x["visitors"] or y["pageviews"] - x["pageviews"] or code_order(av, bv)
-            return y["visitors"] - x["visitors"] or y["visits"] - x["visits"] or code_order(av, bv)
+            def engaged_of(piece: list[str]) -> list[dict[str, Any]]:
+                paths = f" AND e.path IN ({', '.join('?' for _ in piece)})"
+                return self.db.all(
+                    f"""SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest {of_rest('engagement')}{paths}
+                 GROUP BY e.path, e.pageview) t GROUP BY value""",
+                    [*at, *piece],
+                )
 
-        rows.sort(key=functools.cmp_to_key(lambda a, b: _sign(order(a, b))))
+            for row in in_pieces([_string(row["value"]) for row in rows], size, engaged_of):
+                into = rest.setdefault(_string(row["value"]), {"engaged": 0, "scroll_sum": 0, "scroll_n": 0})
+                for k in ("engaged", "scroll_sum", "scroll_n"):
+                    into[k] += num(row.get(k))
         out: list[dict[str, Any]] = []
-        for value, x in rows[offset : offset + limit]:
+        for found in rows:
+            value = _string(found["value"])
+            x = {c: num(found.get(f"n_{c}")) for c in _ROLLUP_SUMS}
             if event:
                 out.append({"value": value, "visitors": x["visitors"], "events": x["events"]})
             elif page:
+                more = rest.get(value, {"engaged": 0, "scroll_sum": 0, "scroll_n": 0})
+                scroll_n = x["scroll_n"] + more["scroll_n"]
                 out.append(
                     {
                         "value": value,
@@ -601,8 +596,8 @@ class SqlStore:
                         "pageviews": x["pageviews"],
                         # Over every pageview that could report its time, counting those that sent none (under a
                         # second) as none.
-                        "timeOnPage": _js.js_round(x["engaged"] / x["views"]) if x["views"] > 0 else 0,
-                        "scrollDepth": _js.js_round(x["scroll_sum"] / x["scroll_n"]) if x["scroll_n"] > 0 else 0,
+                        "timeOnPage": _js.js_round((x["engaged"] + more["engaged"]) / x["views"]) if x["views"] > 0 else 0,
+                        "scrollDepth": _js.js_round((x["scroll_sum"] + more["scroll_sum"]) / scroll_n) if scroll_n > 0 else 0,
                     }
                 )
             else:
@@ -678,7 +673,9 @@ class SqlStore:
 
     def drop_salts_except(self, days: list[str]) -> None:
         """Deletes every salt but those of these days, so the hashes made with them can never be made again."""
-        self.db.run(f"DELETE FROM rl_salts WHERE day NOT IN ({', '.join('?' for _ in days)})", days)
+        # Never a day after the newest of these: a process whose clock is a moment behind must not delete the salt
+        # another has just made for the day that began.
+        self.db.run(f"DELETE FROM rl_salts WHERE day NOT IN ({', '.join('?' for _ in days)}) AND day < ?", [*days, max(days)])
 
     def visit_open(self, sites: list[str], from_: int, to: int, since: int) -> bool:
         """Whether a visit to one of these sites that started in a stretch of time was still going at `since`."""
@@ -803,6 +800,11 @@ class SqlStore:
     def link_by_id(self, id: str) -> dict[str, Any] | None:
         rows = self.db.all("SELECT * FROM rl_links WHERE id = ? AND deleted_at IS NULL LIMIT 1", [id])
         return link_row(rows[0]) if rows else None
+
+    def link_exists(self, id: str) -> bool:
+        """Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id and
+        its clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted."""
+        return len(self.db.all("SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1", [id])) > 0
 
     def insert_link(self, link: dict[str, Any]) -> None:
         self.db.run(
@@ -1166,13 +1168,13 @@ class SqlStore:
         dialect = self.db.dialect()
         if dialect == "postgres":
             return {
-                "sql": "(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)",
+                "sql": f"(CASE WHEN ({readable_props('postgres')} ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN ({readable_props('postgres')} ->> ?)::numeric ELSE 0 END)",
                 "params": [prop, prop],
             }
         path = f'$."{prop}"'
         if dialect == "mysql":
             # As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-            value = "JSON_EXTRACT(e.props, ?)"
+            value = f"JSON_EXTRACT({readable_props('mysql')}, ?)"
             return {
                 "sql": f"""(CASE
           WHEN JSON_TYPE({value}) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN CAST({value} AS DOUBLE)
@@ -1201,13 +1203,13 @@ class SqlStore:
             # Each key as a row of its own, compared and sorted by code point like every other value.
             rows = self.db.all(
                 f"""SELECT j.k AS "key", COUNT(*) AS events FROM {v['from']}
-             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{{}}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE {MYSQL_COLLATION} PATH '$')) j
+             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE({readable_props('mysql')}) = 'OBJECT' THEN e.props ELSE '{{}}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE {MYSQL_COLLATION} PATH '$')) j
              WHERE {where} GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30""",
                 params,
             )
         elif dialect == "postgres":
             rows = self.db.all(
-                f"""SELECT k AS "key", COUNT(*) AS events FROM {v['from']} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{{}}'::jsonb END) AS k
+                f"""SELECT k AS "key", COUNT(*) AS events FROM {v['from']} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof({readable_props('postgres')}) = 'object' THEN {readable_props('postgres')} ELSE '{{}}'::jsonb END) AS k
              WHERE {where} GROUP BY k ORDER BY events DESC, k{self._text_order} LIMIT 30""",
                 params,
             )
@@ -1224,9 +1226,9 @@ class SqlStore:
         dialect = self.db.dialect()
         v = visit_rows(query["filters"], query["site"], query["from"], query["to"], dialect)
         if dialect == "postgres":
-            value = "(e.props::jsonb ->> ?)"
+            value = f"({readable_props('postgres')} ->> ?)"
         elif dialect == "mysql":
-            value = f"(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE {MYSQL_COLLATION})"
+            value = f"(JSON_UNQUOTE(JSON_EXTRACT({readable_props('mysql')}, ?)) COLLATE {MYSQL_COLLATION})"
         else:
             value = "CAST(json_extract(e.props, ?) AS TEXT)"
         path = key if dialect == "postgres" else f'$."{key}"'
