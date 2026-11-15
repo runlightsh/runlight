@@ -953,7 +953,7 @@ class WebTest {
     }
     Response held = handle(web, req("/login", "POST", headers, body));
     assertEquals(429, held.status());
-    assertTrue(held.text().contains("Too many tries. Wait fifteen minutes and try again."));
+    assertTrue(held.text().contains("Too many tries. Try again later."));
     String right = encode("email", "jon@example.com", "password", "a long password");
     assertEquals(
         429,

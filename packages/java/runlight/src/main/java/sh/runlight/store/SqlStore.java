@@ -2713,6 +2713,19 @@ public final class SqlStore implements AutoCloseable {
     return row == null || row.get("t") == null ? null : num(row.get("t"));
   }
 
+  /**
+   * When a site's oldest short link click was, or null with none. Clicks imported as daily counts
+   * belong to no visit, so firstSeen does not reach them.
+   */
+  public Object firstClick(String site) {
+    Map<String, Object> row =
+        first(
+            db.all(
+                "SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'",
+                List.of(site)));
+    return row == null || row.get("t") == null ? null : num(row.get("t"));
+  }
+
   /** Just the visitor count from stats(), in one query, for conversion rates. */
   public Object visitors(Map<String, Object> query) {
     // Built days add up their visitors, as the stats do.

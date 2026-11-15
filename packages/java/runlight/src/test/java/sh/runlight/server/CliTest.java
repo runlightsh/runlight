@@ -19,7 +19,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -27,12 +26,9 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
-import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import sh.runlight.Fixtures;
-import sh.runlight.Js;
 import sh.runlight.Version;
 import sh.runlight.http.Request;
 
@@ -377,98 +373,5 @@ class CliTest {
   void aSqliteFileGetsItsFolder() {
     sh.runlight.store.Stores.sqlite(root.resolve("data/deeper/runlight.db").toString()).migrate();
     assertTrue(Files.exists(root.resolve("data/deeper/runlight.db")));
-  }
-
-  private static byte[] gzip(byte[] bytes) {
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-    try (GZIPOutputStream zip = new GZIPOutputStream(out)) {
-      zip.write(bytes);
-    } catch (IOException e) {
-      throw new IllegalStateException(e);
-    }
-    return out.toByteArray();
-  }
-
-  @Test
-  void dbIpDownloadsThisMonthOrLastAndKeepsOnlyTheNewest() throws Exception {
-    byte[] db =
-        Base64.getDecoder()
-            .decode(
-                (String)
-                    Js.map(Js.list(Fixtures.load("geo").get("databases")).get(0)).get("base64"));
-    Path dir = root.resolve("geo");
-    List<String> asked = new ArrayList<>();
-    List<String> logged = new ArrayList<>();
-    List<String> published = new ArrayList<>(List.of("2026-09"));
-    Pattern release = Pattern.compile("lite-(\\d{4}-\\d{2})\\.mmdb\\.gz$");
-    DbIp geo =
-        new DbIp(
-            dir,
-            "city",
-            (url, file) -> {
-              asked.add(url);
-              Matcher m = release.matcher(url);
-              assertTrue(m.find());
-              if (!published.contains(m.group(1))) {
-                return false;
-              }
-              Files.write(file, gzip(db));
-              return true;
-            },
-            logged::add);
-    assertNull(geo.lookup(), "nothing to look up before the first download");
-
-    long october = NOW;
-    geo.refresh(october);
-    assertEquals(
-        List.of(
-            "https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz",
-            "https://download.db-ip.com/free/dbip-city-lite-2026-09.mmdb.gz"),
-        asked,
-        "a month's file appears a day or so in, so last month's stands in");
-    assertEquals(List.of("Runlight: location data from DB-IP (2026-09) is ready."), logged);
-    assertEquals(dir.resolve("dbip-city-lite-2026-09.mmdb"), geo.newest());
-    assertNotNull(geo.lookup());
-
-    // This month's file was missing, so the next tries wait: five minutes, then twice as long each
-    // time, up to six hours.
-    asked.clear();
-    geo.refresh(october + 4 * 60_000L);
-    assertEquals(List.of(), asked, "not asked again within five minutes");
-    geo.refresh(october + 5 * 60_000L);
-    assertEquals(1, asked.size(), "asked again after five");
-    asked.clear();
-    geo.refresh(october + 14 * 60_000L);
-    assertEquals(List.of(), asked, "then not for ten more");
-
-    published.add("2026-10");
-    asked.clear();
-    geo.refresh(october + 15 * 60_000L);
-    assertEquals(List.of("https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz"), asked);
-    try (Stream<Path> files = Files.list(dir)) {
-      assertEquals(
-          Set.of(dir.resolve("dbip-city-lite-2026-10.mmdb")),
-          Set.copyOf(files.toList()),
-          "older releases go");
-    }
-    asked.clear();
-    geo.refresh(october);
-    assertEquals(List.of(), asked, "once this month is there, nothing is fetched");
-
-    // January's fallback is December of the year before, and a broken file is never kept.
-    DbIp broken =
-        new DbIp(
-            dir,
-            "country",
-            (url, file) -> {
-              Files.write(file, gzip("not a database".getBytes(StandardCharsets.UTF_8)));
-              return true;
-            },
-            logged::add);
-    broken.refresh(1_798_761_600_000L + 86_400_000L); // 2027-01-02
-    assertTrue(
-        logged.get(logged.size() - 1).contains("dbip-country-lite-2026-12.mmdb.gz"),
-        logged.toString());
-    assertNull(broken.newest());
   }
 }

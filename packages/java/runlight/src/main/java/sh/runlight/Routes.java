@@ -1361,6 +1361,14 @@ public final class Routes {
 
   /** The query, range, and comparison a read asks for, or the refusal. */
   private Object readQuery(Url url, Map<String, Object> site) {
+    return readQuery(url, site, false);
+  }
+
+  /**
+   * As {@link #readQuery(Url, Map)}; {@code clicks} is for the short link reports, whose "all"
+   * reaches back to the oldest click as well as the oldest visit.
+   */
+  private Object readQuery(Url url, Map<String, Object> site, boolean clicks) {
     SearchParams params = url.searchParams();
     List<Object> filters = new ArrayList<>();
     if (params.getAll("filter").size() > Query.MAX_FILTERS) {
@@ -1385,7 +1393,13 @@ public final class Routes {
     long now = rl.now();
     String firstDate = null;
     if ("all".equals(params.get("period"))) {
-      Object first = store().firstSeen((String) site.get("id"));
+      Object seen = store().firstSeen((String) site.get("id"));
+      // Clicks imported as daily counts belong to no visit, and may be older than any.
+      Object clicked = clicks ? store().firstClick((String) site.get("id")) : null;
+      Object first =
+          seen == null
+              ? clicked
+              : clicked == null ? seen : (Object) Math.min(Js.asLong(seen), Js.asLong(clicked));
       if (first != null) {
         firstDate = Time.localDate(Js.asLong(first), timezone);
       }
@@ -1656,7 +1670,7 @@ public final class Routes {
 
       if (path.equals("/api/links")) {
         if (method.equals("GET")) {
-          Object read = readQuery(url, site);
+          Object read = readQuery(url, site, true);
           if (read instanceof Response r) {
             return r;
           }
@@ -1750,7 +1764,7 @@ public final class Routes {
           if (link == null || !siteId.equals(link.get("site"))) {
             return coded("Unknown link", "unknown_link", 404);
           }
-          Object read = readQuery(url, site);
+          Object read = readQuery(url, site, true);
           if (read instanceof Response r) {
             return r;
           }
