@@ -429,9 +429,20 @@ def test_one_address_trying_made_up_emails_waits_after_thirty_before_any_passwor
 
     # A right password is taken back, so signing in now and then from a shared address never adds up.
     assert login("jon@example.com", "a long password", "203.0.113.9") == 303
+    import time as _t
+    trace = []
+
+    def seen(label: str) -> None:
+        rows = web.store.settings_starting_with("throttle:ip:")
+        keys = web.store.settings_starting_with("throttle-key:")
+        trace.append(f"{label} t={_t.monotonic():.2f} ip={[r['value'] for r in rows]} salts={[k['key'] for k in keys]}")
+
+    seen("after owner")
     for i in range(30):
         assert login(f"nobody{i}@example.com", "wrong wrong wrong", "203.0.113.9") == 401
-    assert login("someone@example.com", "wrong wrong wrong", "203.0.113.9") == 429
+        seen(f"wrong {i}")
+    status = login("someone@example.com", "wrong wrong wrong", "203.0.113.9")
+    assert status == 429, "\n".join(trace)
     assert login("jon@example.com", "a long password", "203.0.113.9") == 429
     assert login("jon@example.com", "a long password", "203.0.113.10") == 303, "another address is not held up"
 
