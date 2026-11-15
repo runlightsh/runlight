@@ -243,8 +243,8 @@ public sealed class AdapterTests : IAsyncLifetime
 
         // The page comes back while the insert is still held.
         var page = client.SendAsync(Message(HttpMethod.Get, "/blog/hello", null, null, ("user-agent", GptBot)));
-        Assert.Same(page, await Task.WhenAny(page, Task.Delay(TimeSpan.FromSeconds(10))));
-        Assert.Equal("post hello", await (await page).Content.ReadAsStringAsync());
+        var response = await page.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("post hello", await response.Content.ReadAsStringAsync());
         Assert.Empty(await rl.Store.Db.AllAsync("SELECT path FROM rl_events WHERE kind = 'fetch'"));
 
         hold.SetResult();
