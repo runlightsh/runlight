@@ -11,7 +11,8 @@
  * Runlight with inside WordPress.
  * The header's Version, the readme's Stable tag, and the readme's changelog
  * must agree, or the build stops. Entries carry a fixed time, so the same
- * sources give the same zip.
+ * sources give the same zip. Zips of other versions that an earlier build
+ * left in the output directory are removed, so it holds only the current one.
  */
 
 declare(strict_types=1);
@@ -75,7 +76,12 @@ ksort($bundled);
 $out = rtrim($argv[1] ?? "$root/dist", '/');
 @mkdir($out, 0775, true);
 $zipPath = "$out/runlight-$version.zip";
-@unlink($zipPath);
+// Only the build's own: runlight-, a version, and .zip, and nothing else that is kept there.
+foreach (glob("$out/runlight-*.zip") ?: [] as $old) {
+    if (preg_match('/^runlight-\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?\.zip$/D', basename($old))) {
+        @unlink($old);
+    }
+}
 $zip = new ZipArchive();
 if ($zip->open($zipPath, ZipArchive::CREATE) !== true) {
     fwrite(STDERR, "build: cannot write $zipPath\n");

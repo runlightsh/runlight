@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\runlight\StackMiddleware;
 
 use Drupal\runlight\Agents;
+use Drupal\runlight\Local;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
@@ -18,7 +19,9 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
  * even run terminate() for it. The report is sent from a shutdown function,
  * which PHP runs once the response is out (under PHP-FPM, Symfony closes the
  * connection first), so the page is never slowed down. Only known agents'
- * requests are reported, and only for them are Runlight's services made.
+ * requests are reported, only for pages that were served (a 2xx answer, not
+ * a redirect, a missing page, or a refusal), and only for them are Runlight's
+ * services made.
  * When Runlight runs in this Drupal, it records them itself.
  */
 final class AgentObserver implements HttpKernelInterface {
@@ -63,7 +66,7 @@ final class AgentObserver implements HttpKernelInterface {
    */
   public function handle(Request $request, int $type = self::MAIN_REQUEST, bool $catch = TRUE): Response {
     $response = $this->app->handle($request, $type, $catch);
-    if ($type === self::MAIN_REQUEST && $request->isMethod('GET')) {
+    if ($type === self::MAIN_REQUEST && $request->isMethod('GET') && $response->isSuccessful()) {
       $agent = (string) $request->headers->get('User-Agent', '');
       if (Agents::isAgent($agent)) {
         $url = $request->getUri();
@@ -89,9 +92,9 @@ final class AgentObserver implements HttpKernelInterface {
     if ($mode !== 'remote' || $address === '' || $key === '') {
       return;
     }
-    // The agent's address, as Drupal works out a visitor's, goes along to be
-    // checked against its company's list; Runlight keeps only the answer.
-    $ip = (string) $request->getClientIp();
+    // The agent's address, found as a visitor's is, goes along to be checked
+    // against its company's list; Runlight keeps only the answer.
+    $ip = Local::visitorAddress($request);
     /** @var \Drupal\Core\Cache\CacheBackendInterface $cache */
     $cache = ($this->cache)();
     // A Runlight that did not answer is left alone for a minute, so a down
@@ -127,7 +130,7 @@ final class AgentObserver implements HttpKernelInterface {
       if (!$local->active() || $path === $base || str_starts_with($path, $base . '/')) {
         return;
       }
-      $local->observe($url, $agent, (string) $request->getClientIp());
+      $local->observe($url, $agent, Local::visitorAddress($request));
     }
     catch (\Throwable $e) {
       ($this->logger)()->notice('Could not record an AI agent fetch: @message', ['@message' => $e->getMessage()]);

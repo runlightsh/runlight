@@ -41,3 +41,11 @@ function runlight_uninstall(bool $is_syncing): void {
   \Drupal::cache()->deleteMultiple([Cache::COUNTS, Cache::DAY_KEY, AgentObserver::DOWN]);
   \Drupal::service('cache_tags.invalidator')->invalidateTags([Cache::TAG]);
 }
+
+/**
+ * Registers the service that keeps Runlight's paths out of Redirect's reach.
+ */
+function runlight_update_10401(): void {
+  // Nothing to change: Drupal rebuilds its container after an update, which
+  // is what the new service needs.
+}

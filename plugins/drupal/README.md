@@ -52,8 +52,10 @@ choice is made once and kept.
 
 The visitor's address is the one Drupal works out for each request, which
 follows `$settings['reverse_proxy']` and `$settings['reverse_proxy_addresses']`,
-so name the proxies in front of the site there. Rate counts go in Drupal's
-cache.
+so name the proxies in front of the site there; the settings page says when
+one is not named. Behind Cloudflare nothing needs naming: its
+`CF-Connecting-IP` header is believed from Cloudflare's own addresses, and
+from nowhere else. Rate counts go in Drupal's cache.
 
 Run cron hourly: it rolls the day's salts, sends reports, applies retention,
 and builds the daily totals. With Locations on, it also downloads DB-IP's free

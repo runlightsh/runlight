@@ -191,7 +191,16 @@ function wp_test_blog( int $id ): void {
 	$GLOBALS['wp_test']['uploads']                      = $GLOBALS['wp_test']['blogs'][ $id ];
 }
 function is_404(): bool {
+	return ! empty( $GLOBALS['wp_test']['404'] );
+}
+function wp_doing_ajax(): bool {
 	return false;
+}
+function wp_doing_cron(): bool {
+	return false;
+}
+function wp_json_encode( $value, $flags = 0, $depth = 512 ) {
+	return json_encode( $value, $flags, $depth );
 }
 function current_user_can( $capability, ...$args ): bool {
 	return $GLOBALS['wp_test']['can'];
@@ -290,8 +299,9 @@ class WP_Error {
 		return $this->message;
 	}
 }
-// No HTTP from the tests: every request the plugin makes fails, as it would offline.
+// No HTTP from the tests: every request the plugin makes fails, as it would offline, and is noted.
 function wp_remote_request( $url, $args = array() ) {
+	$GLOBALS['wp_test']['requests'][] = (string) $url;
 	return new WP_Error( 'offline', 'no network in tests' );
 }
 function wp_remote_get( $url, $args = array() ) {

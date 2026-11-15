@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Drupal\runlight\Controller;
 
+use Drupal\Component\Render\MarkupInterface;
 use Drupal\Core\Controller\ControllerBase;
+use Drupal\Core\Render\Markup;
 use Drupal\Core\Site\Settings;
 use Drupal\Core\Url;
 use Drupal\runlight\Connect;
@@ -75,7 +77,7 @@ final class DashboardController extends ControllerBase {
     $build['open'] = [
       '#type' => 'link',
       '#title' => $this->t('Open in Runlight'),
-      '#url' => Url::fromUri($address . '/', $site !== '' ? ['query' => ['site' => $site]] : []),
+      '#url' => Url::fromUri($address . '/', ['query' => ($site !== '' ? ['site' => $site] : []) + ['lang' => $this->languageManager()->getCurrentLanguage()->getId()]]),
       '#attributes' => ['class' => ['button', 'button--small'], 'target' => '_blank', 'rel' => 'noopener'],
     ];
     if ($ticket === NULL) {
@@ -85,7 +87,8 @@ final class DashboardController extends ControllerBase {
       return $build;
     }
     if (is_string($ticket)) {
-      return $build + $this->error($ticket, $settings);
+      // Made through t(), which escaped what it put in.
+      return $build + $this->error(Markup::create($ticket), $settings);
     }
     $build['frame'] = $this->frame($ticket['url'], $address);
     return $build;
@@ -108,30 +111,34 @@ final class DashboardController extends ControllerBase {
   private function local(array $build, string $settings): array {
     $missing = $this->local->missing();
     if ($missing !== '') {
-      return $build + $this->error($missing, $settings);
+      // Made through t(), which escaped what it put in, so its code tags are
+      // shown as tags.
+      return $build + $this->error(Markup::create($missing), $settings);
     }
+    // The dashboard starts in the language this page is in, not the browser's.
+    $lang = $this->languageManager()->getCurrentLanguage()->getId();
     $build['open'] = [
       '#type' => 'link',
       '#title' => $this->t('Open in Runlight'),
-      '#url' => Url::fromUri($this->local->address() . '/'),
+      '#url' => Url::fromUri($this->local->address() . '/', ['query' => ['lang' => $lang]]),
       '#attributes' => ['class' => ['button', 'button--small'], 'target' => '_blank', 'rel' => 'noopener'],
     ];
-    $build['frame'] = $this->frame($this->local->address() . '/', $this->local->address(), TRUE);
+    $build['frame'] = $this->frame($this->local->address() . '/?lang=' . rawurlencode($lang), $this->local->address(), TRUE);
     return $build;
   }
 
   /**
    * Why there is no dashboard, with the way to the settings.
    *
-   * @param string $message
-   *   Why.
+   * @param \Drupal\Component\Render\MarkupInterface $message
+   *   Why, as markup that is safe to show.
    * @param string $settings
    *   The settings page's address.
    *
    * @return array<string, mixed>
    *   The render array.
    */
-  private function error(string $message, string $settings): array {
+  private function error(MarkupInterface $message, string $settings): array {
     return [
       'error' => [
         '#theme' => 'status_messages',
@@ -292,7 +299,8 @@ final class DashboardController extends ControllerBase {
     }
     $theme = $this->theme();
     return [
-      'url' => $address . '/embed?ticket=' . rawurlencode($body['ticket']) . ($theme !== '' ? '&theme=' . $theme : ''),
+      // The dashboard starts in the language this page is in, not the browser's.
+      'url' => $address . '/embed?ticket=' . rawurlencode($body['ticket']) . ($theme !== '' ? '&theme=' . $theme : '') . '&lang=' . rawurlencode($this->languageManager()->getCurrentLanguage()->getId()),
       'site' => is_string($body['site'] ?? NULL) ? $body['site'] : '',
     ];
   }

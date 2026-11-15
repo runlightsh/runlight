@@ -25,6 +25,20 @@ namespace {
     }
   });
   $GLOBALS['drupal_test'] = ['settings' => [], 'back' => 'https://cms.example/admin/config/system/runlight/connected', 'invalidated' => []];
+
+  /** Drupal's static container, with only the CSRF tokens: one per value, the same each time here. */
+  final class Drupal {
+    public static function csrfToken(): object {
+      return new class {
+        public function get(string $value = ''): string {
+          return 'token-for-' . $value;
+        }
+        public function validate(string $token, string $value = ''): bool {
+          return hash_equals($this->get($value), $token);
+        }
+      };
+    }
+  }
 }
 
 namespace Psr\Log {
@@ -358,9 +372,15 @@ namespace DrupalTest {
   }
 
   final class Account implements AccountInterface {
-    public function __construct(private int $id = 1) {}
+    public function __construct(private int $id = 1, private array $permissions = []) {}
     public function id(): int {
       return $this->id;
+    }
+    public function isAuthenticated(): bool {
+      return $this->id > 0;
+    }
+    public function hasPermission(string $permission): bool {
+      return in_array($permission, $this->permissions, TRUE);
     }
   }
 

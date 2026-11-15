@@ -155,6 +155,17 @@ namespace craft\web {
             return $this->ip;
         }
 
+        /** Craft's CSRF token for the person signed in, the same each time here. */
+        public function getCsrfToken(): string
+        {
+            return 'craft-csrf-token';
+        }
+
+        public function validateCsrfToken(?string $token = null): bool
+        {
+            return $token !== null && hash_equals($this->getCsrfToken(), $token);
+        }
+
         /** As Craft gives it from trusted hosts: the first address in X-Forwarded-For, else the connection's. */
         public function getUserIP(): ?string
         {
@@ -315,6 +326,11 @@ namespace CraftTest {
         public function getUser(): User
         {
             return $this->user;
+        }
+
+        public function getRequest(): \craft\web\Request
+        {
+            return new \craft\web\Request('https://www.example.com/', [], '203.0.113.9');
         }
 
         public function getPath(): object

@@ -20,13 +20,15 @@ use yii\web\Response;
 /**
  * Runlight answering on the site, when it runs in this Craft site: the
  * dashboard and its API under /runlight, and short links under /go, which
- * the site answers itself when no link has the name.
+ * the site answers itself when no link has the name, from its own template
+ * at that path when there is one.
  *
- * Anyone may reach these, since the tracker posts from every visitor's page,
- * so Craft's CSRF check, whose token Runlight's dashboard has no way to send,
- * is off for them. Runlight's API takes changes only as JSON, which a form on
- * another site cannot send, and only from the site's own pages (Local::sameSite),
- * and it signs people in through Craft's own session.
+ * Anyone may reach these, since the tracker posts from every visitor's page
+ * with no token, so Craft's own CSRF check is off for the controller. A
+ * change in the dashboard is checked in its place (Local::access): it must
+ * come from the site's own pages and carry Craft's CSRF token, which the
+ * dashboard is given and sends back, and Runlight signs people in through
+ * Craft's own session.
  */
 final class ServeController extends Controller
 {
@@ -81,9 +83,15 @@ final class ServeController extends Controller
         }
         // As Runlight's own front controller answers: a link domain, then a short link, then the routes.
         $answer = FrontController::answer(Local::runlight(), Local::routes(), $request);
-        // No link by that name, or a link's path asked for with another method: the page is the site's to answer.
+        // No link by that name, or a link's path asked for with another method: the page is the site's to answer,
+        // with its own template at that path when it has one, as Craft would have without Runlight's rule.
         if ($link && $answer->status === 404) {
             Local::$served = false;
+            $path = $this->request->getPathInfo();
+            $general = Craft::$app->getConfig()->getGeneral();
+            if (!$general->headlessMode && $general->privateTemplateTrigger && Craft::$app->getView()->doesTemplateExist($path, publicOnly: true)) {
+                return Craft::$app->runAction('templates/render', ['template' => $path]);
+            }
             throw new NotFoundHttpException();
         }
         return $this->send($answer);

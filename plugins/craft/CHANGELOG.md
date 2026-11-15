@@ -1,5 +1,18 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Security
+- Changes in the dashboard need the signed-in person's CSRF token and a request that says it comes from the site.
+- A key typed into the settings is no longer shown in the page. Leave the field blank to keep it.
+- Includes the Runlight library's fixes from its review: a request address starting with two slashes can no longer name another host, sign-in and OAuth requests are capped in size, and short link clicks and AI agent fetches are rate limited.
+
+### Fixed
+- A site template under /go still shows when no short link has that name.
+- An AI agent is recorded only for a page that was served, not for a missing page, a redirect, or an error.
+- The site keeps answering its own pages while Runlight's database is down.
+- Pages a browser loads ahead of time are counted only once they are shown, and a page that keeps its filters in the query string no longer counts a pageview for each change.
+
 ## 0.4.3 - 2026-11-10
 
 ### Changed

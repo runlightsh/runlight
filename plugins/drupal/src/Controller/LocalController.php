@@ -8,6 +8,7 @@ use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\PageCache\ResponsePolicy\KillSwitch;
 use Drupal\Core\Url;
 use Drupal\runlight\Local;
+use Drupal\runlight\PathProcessor\RunlightPaths;
 use Runlight\Bridge\HttpFoundation;
 use Runlight\Http\BodyTooLarge;
 use Runlight\Http\Request as RunlightRequest;
@@ -48,7 +49,7 @@ final class LocalController extends ControllerBase {
       throw new NotFoundHttpException();
     }
     $this->killSwitch->trigger();
-    if (rtrim($request->getPathInfo(), '/') === '/runlight/login') {
+    if (rtrim($this->path($request), '/') === '/runlight/login') {
       return $this->signIn($request);
     }
     return $this->answer($request);
@@ -74,12 +75,26 @@ final class LocalController extends ControllerBase {
    */
   private function answer(Request $request): Response {
     try {
-      $ours = Local::visitorRequest($request);
+      $ours = Local::visitorRequest($request, $this->path($request));
     }
     catch (BodyTooLarge) {
       return HttpFoundation::response(RunlightRequest::tooLarge());
     }
-    return HttpFoundation::response(FrontController::answer($this->local->runlight(), $this->local->routes(), $ours));
+    $response = HttpFoundation::response(FrontController::answer($this->local->runlight(), $this->local->routes(), $ours));
+    if ($request->isMethod('GET') && str_starts_with((string) $response->headers->get('Content-Type'), 'text/html')) {
+      $response->setContent(Local::inLanguage((string) $response->getContent(), $this->languageManager()->getCurrentLanguage()->getId()));
+    }
+    return $response;
+  }
+
+  /**
+   * The request's path as Runlight knows it, without a language prefix.
+   *
+   * So /fr/runlight/api/stats is answered as /runlight/api/stats is, and
+   * what Runlight links to stays under /runlight.
+   */
+  private function path(Request $request): string {
+    return RunlightPaths::ours($request->getPathInfo(), fn (): array => RunlightPaths::prefixes($this->config('language.negotiation')->get('url'))) ?? $request->getPathInfo();
   }
 
   /**

@@ -75,6 +75,31 @@ final class Settings extends Model
     }
 
     /**
+     * Whether a key is saved as it was typed, rather than named by an environment variable. The settings
+     * page never shows such a key again; it shows a variable's name.
+     */
+    public static function typed(string $key): bool
+    {
+        return $key !== '' && !str_starts_with($key, '$');
+    }
+
+    /**
+     * Puts back each typed key the settings page sent blank, since the page leaves its field empty: blank
+     * means keep it. A key named by an environment variable is shown, so blanking that one clears it.
+     *
+     * @param array<string,mixed> $before The settings as they were saved before.
+     */
+    public function keepBlankKeys(array $before): void
+    {
+        foreach (['observeKey', 'dashboardKey'] as $name) {
+            $saved = is_string($before[$name] ?? null) ? $before[$name] : '';
+            if ($this->$name === '' && self::typed($saved)) {
+                $this->$name = $saved;
+            }
+        }
+    }
+
+    /**
      * Clears each key that was left as it was when the address now leads somewhere else, so a key
      * meant for one Runlight is never sent to another, such as one at a mistyped address.
      *

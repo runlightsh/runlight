@@ -61,3 +61,10 @@ services:
     arguments: [!service_closure '@runlight.setup']
     tags:
       - { name: path_processor_inbound, priority: 200 }
+  # On every request, where the path processor is only asked the first time
+  # Drupal sees a path.
+  runlight.requests:
+    class: Drupal\runlight\EventSubscriber\RunlightRequests
+    arguments: [!service_closure '@runlight.setup', '@config.factory']
+    tags:
+      - { name: event_subscriber }

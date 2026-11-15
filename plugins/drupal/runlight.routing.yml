@@ -13,7 +13,11 @@ runlight.check:
   methods: [POST]
   requirements:
     _permission: 'administer runlight'
-    _csrf_token: 'TRUE'
+    # The token goes in an X-CSRF-Token header, which the settings page's
+    # script asks /session/token for. A token in the address would reach the
+    # script through drupalSettings, where Drupal leaves its placeholder for
+    # one unfilled.
+    _csrf_request_header_token: 'TRUE'
 
 runlight.dashboard:
   path: '/admin/reports/runlight'

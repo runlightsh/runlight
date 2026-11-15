@@ -42,6 +42,11 @@ final class Local implements DestructableInterface {
   public const SECRET = 'runlight.secret';
 
   /**
+   * Where the dashboard's page starts the element its settings are read from.
+   */
+  private const PAGE_APP = '<div id="app" ';
+
+  /**
    * The state entry holding the host the site was last visited at.
    */
   public const HOST = 'runlight.host';
@@ -50,6 +55,11 @@ final class Local implements DestructableInterface {
    * The state entry holding when the upkeep last finished, or was first due.
    */
   public const CHECKED = 'runlight.checked';
+
+  /**
+   * What the token for changes in Runlight's dashboard is made for.
+   */
+  private const CSRF = 'runlight';
 
   /**
    * This site's id in Runlight, which counts this one site.
@@ -177,14 +187,17 @@ final class Local implements DestructableInterface {
    * The request as Runlight reads it.
    *
    * The URL is the one the browser asked for, escapes and all, and the
-   * visitor's address is the one Drupal works out, which follows its
-   * reverse_proxy settings, since Runlight believes no header itself here. A
-   * hosting platform's location headers, such as Cloudflare's cf-ipcountry,
-   * are believed only when the connection is from one of Cloudflare's own
-   * addresses, or from a reverse proxy Drupal is set to trust.
+   * visitor's address is the one visitorAddress() works out, since Runlight
+   * believes no header itself here. A hosting platform's location headers,
+   * such as Cloudflare's cf-ipcountry, are believed only when the connection
+   * is from one of Cloudflare's own addresses, or from a reverse proxy Drupal
+   * is set to trust.
    *
    * @param \Symfony\Component\HttpFoundation\Request $request
    *   The request Drupal is serving.
+   * @param string|null $path
+   *   The path Runlight is to read, when it is not the request's own: the one
+   *   without the language prefix the request came with.
    *
    * @return \Runlight\Http\Request
    *   Runlight's request.
@@ -192,11 +205,67 @@ final class Local implements DestructableInterface {
    * @throws \Runlight\Http\BodyTooLarge
    *   When the body is past Runlight's limit.
    */
-  public static function visitorRequest(SymfonyRequest $request): Request {
+  public static function visitorRequest(SymfonyRequest $request, ?string $path = NULL): Request {
     $read = HttpFoundation::request($request);
+    $url = $read->url;
+    if ($path !== NULL && $path !== $request->getPathInfo()) {
+      $query = strstr($request->getRequestUri(), '?');
+      $url = $request->getSchemeAndHttpHost() . $request->getBasePath() . $path . ($query === FALSE ? '' : $query);
+    }
     $remote = (string) $request->server->get('REMOTE_ADDR', '');
-    $platform = self::fromCloudflare($remote) || $request->isFromTrustedProxy();
-    return (new Request($read->url, $read->method, $read->headers, $read->text(), (string) $request->getClientIp()))->with(platformHeaders: $platform);
+    $platform = self::fromCloudflare($remote) || self::fromCloudflare((string) $request->getClientIp()) || $request->isFromTrustedProxy();
+    return (new Request($url, $read->method, $read->headers, $read->text(), self::visitorAddress($request)))->with(platformHeaders: $platform);
+  }
+
+  /**
+   * The visitor's address for a request.
+   *
+   * It is the one Drupal works out, which follows its reverse_proxy settings.
+   * When that is one of Cloudflare's own addresses, the request came through
+   * Cloudflare, which names the visitor in CF-Connecting-IP, so that is the
+   * visitor's. The header counts for nothing from any other address, so a
+   * visitor cannot write one of their own.
+   *
+   * @param \Symfony\Component\HttpFoundation\Request $request
+   *   The request Drupal is serving.
+   *
+   * @return string
+   *   The address, or an empty string when there is none to tell.
+   */
+  public static function visitorAddress(SymfonyRequest $request): string {
+    $address = (string) $request->getClientIp();
+    if ($address === '' || !self::fromCloudflare($address)) {
+      return $address;
+    }
+    $visitor = trim((string) $request->headers->get('CF-Connecting-IP', ''));
+    return filter_var($visitor, FILTER_VALIDATE_IP) !== FALSE ? $visitor : $address;
+  }
+
+  /**
+   * Whether a proxy Drupal has not been told about sits in front of the site.
+   *
+   * The connection is from this machine or a private network and carries
+   * X-Forwarded-For, yet reverse_proxy_addresses does not name it. Every
+   * visitor then counts as coming from the proxy's address, so they share one
+   * rate limit and are told apart only by their browsers.
+   *
+   * @param \Symfony\Component\HttpFoundation\Request $request
+   *   The request Drupal is serving.
+   *
+   * @return bool
+   *   TRUE when visitors' addresses are hidden behind such a proxy.
+   */
+  public static function proxyUnnamed(SymfonyRequest $request): bool {
+    $remote = (string) $request->server->get('REMOTE_ADDR', '');
+    if ($remote === '' || $request->isFromTrustedProxy() || (string) $request->headers->get('X-Forwarded-For', '') === '') {
+      return FALSE;
+    }
+    if (filter_var($remote, FILTER_VALIDATE_IP) === FALSE) {
+      return FALSE;
+    }
+    // 100.64.0.0/10, the shared range some hosts' own proxies use, counts too.
+    return filter_var($remote, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === FALSE
+      || (preg_match('/^100\.(\d+)\./', $remote, $shared) && (int) $shared[1] >= 64 && (int) $shared[1] <= 127);
   }
 
   /**
@@ -238,6 +307,29 @@ final class Local implements DestructableInterface {
   }
 
   /**
+   * Tells the dashboard's page which language Drupal is showing.
+   *
+   * The dashboard then starts in it, or in English when it does not have it,
+   * where on its own it would start in the browser's. A language picked in
+   * the dashboard's footer still holds. Any other page is left as it is.
+   *
+   * @param string $page
+   *   A page of Runlight's.
+   * @param string $langcode
+   *   Drupal's code for the language, such as "fr" or "pt-br".
+   *
+   * @return string
+   *   The page, with the language named where the dashboard reads it.
+   */
+  public static function inLanguage(string $page, string $langcode): string {
+    $at = strpos($page, self::PAGE_APP);
+    if ($at === FALSE || !preg_match('/^[A-Za-z0-9_-]{1,32}$/D', $langcode)) {
+      return $page;
+    }
+    return substr_replace($page, self::PAGE_APP . 'data-lang="' . $langcode . '" ', $at, strlen(self::PAGE_APP));
+  }
+
+  /**
    * The path Runlight answers under, after the folder Drupal lives in, if any.
    */
   public function base(): string {
@@ -255,9 +347,10 @@ final class Local implements DestructableInterface {
   /**
    * This site's domains, as Runlight counts them.
    *
-   * Drupal knows its domain only from requests, so the last one a visit came
-   * to is kept for cron, which runs with none. An address such as 127.0.0.1
-   * is no domain, so then any host counts.
+   * Drupal knows its domain only from requests, so the last one someone who
+   * may administer Runlight came to is kept for cron, which runs with none.
+   * A visitor's request never sets it, since a visitor can send any Host. An
+   * address such as 127.0.0.1 is no domain, so then any host counts.
    *
    * @return list<string>
    *   The domain, or none.
@@ -265,7 +358,7 @@ final class Local implements DestructableInterface {
   private function hostnames(): array {
     $request = $this->request();
     $host = PHP_SAPI === 'cli' || $request === NULL ? '' : strtolower($request->getHost());
-    if ($host !== '' && !filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) && $host !== $this->state->get(self::HOST)) {
+    if ($host !== '' && !filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) && $this->currentUser->hasPermission('administer runlight') && $host !== $this->state->get(self::HOST)) {
       $this->state->set(self::HOST, $host);
     }
     if ($host === '') {
@@ -379,6 +472,11 @@ final class Local implements DestructableInterface {
       'cronSecret' => '',
       'observeKey' => '',
       'authorize' => fn (Request $request): bool|string => $this->access($request),
+      // Only for someone signed in: a token needs a session, and a visitor
+      // gets no cookie from Runlight. Drupal's token service is asked for
+      // when it is needed, so this service is built as it was before an
+      // update, whether or not the container has been rebuilt since.
+      'csrf' => fn (): string => $this->currentUser->isAuthenticated() ? \Drupal::csrfToken()->get(self::CSRF) : '',
       'signIn' => $this->base() . '/login',
       'origin' => $request !== NULL ? $request->getSchemeAndHttpHost() : NULL,
       'geoCredit' => $this->locations(),
@@ -390,13 +488,14 @@ final class Local implements DestructableInterface {
    * What the signed-in user may do in Runlight.
    *
    * @param \Runlight\Http\Request $request
-   *   The request, whose changes must come from this site's own pages.
+   *   The request, whose changes must come from this site's own pages, with
+   *   the token Runlight's dashboard was given.
    *
    * @return bool|string
    *   TRUE for an owner, "read" for a reader, FALSE for neither.
    */
   public function access(Request $request): bool|string {
-    if (!self::sameSite($request)) {
+    if (!self::sameSite($request) || !$this->tokened($request)) {
       return FALSE;
     }
     if ($this->currentUser->hasPermission('administer runlight')) {
@@ -406,11 +505,36 @@ final class Local implements DestructableInterface {
   }
 
   /**
+   * Whether a request reads, or else carries this site's token for Runlight.
+   *
+   * The dashboard sends the one it was given in an x-runlight-csrf header
+   * with every change, and the OAuth consent form in its csrf field.
+   *
+   * @param \Runlight\Http\Request $request
+   *   The request.
+   */
+  private function tokened(Request $request): bool {
+    if (in_array($request->method, ['GET', 'HEAD', 'OPTIONS'], TRUE)) {
+      return TRUE;
+    }
+    if (!$this->currentUser->isAuthenticated()) {
+      return FALSE;
+    }
+    $token = (string) $request->headers->get('x-runlight-csrf');
+    if ($token === '' && str_starts_with(strtolower((string) $request->headers->get('content-type')), 'application/x-www-form-urlencoded')) {
+      parse_str($request->text(), $form);
+      $token = is_string($form['csrf'] ?? NULL) ? $form['csrf'] : '';
+    }
+    return $token !== '' && \Drupal::csrfToken()->validate($token, self::CSRF);
+  }
+
+  /**
    * Whether a change comes from a page on the site it is sent to.
    *
    * Drupal's session cookie goes along with a request from any site, so a
    * change is taken only from this site's own pages, as the browser says
-   * where a request comes from. Reading is safe from anywhere.
+   * where a request comes from, and one that does not say is refused. Reading
+   * is safe from anywhere.
    *
    * @param \Runlight\Http\Request $request
    *   The request.
@@ -425,7 +549,7 @@ final class Local implements DestructableInterface {
     }
     $origin = (string) $request->headers->get('origin');
     if ($origin === '') {
-      return TRUE;
+      return FALSE;
     }
     return strtolower((string) parse_url($origin, PHP_URL_HOST)) === strtolower((string) parse_url($request->url, PHP_URL_HOST));
   }

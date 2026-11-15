@@ -12,6 +12,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class Tracker {
+	/** The transient that says a Runlight elsewhere did not answer just now. */
+	private const DOWN = 'runlight_down';
+
 	public static function boot(): void {
 		add_action( 'wp_enqueue_scripts', array( self::class, 'script' ) );
 		add_action( 'template_redirect', array( self::class, 'observe' ) );
@@ -53,7 +56,8 @@ final class Tracker {
 	/**
 	 * Reports a page served to an AI agent. Agents run no JavaScript, so the
 	 * script never sees them. The report goes once the page has been sent, so
-	 * the agent never waits for it, and only for known agents.
+	 * the agent never waits for it, and only for known agents and for pages
+	 * that were served: not a missing page, a redirect, or a refusal.
 	 */
 	public static function observe(): void {
 		$settings = Settings::get();
@@ -64,7 +68,11 @@ final class Tracker {
 		}
 		$method = isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : 'GET';
 		$agent  = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-		if ( 'GET' !== $method || ! Agents::is_agent( $agent ) || is_admin() || wp_doing_ajax() || wp_doing_cron() ) {
+		if ( 'GET' !== $method || ! Agents::is_agent( $agent ) || is_admin() || wp_doing_ajax() || wp_doing_cron() || is_404() ) {
+			return;
+		}
+		// A Runlight that did not answer is left alone for a minute, so a down server never ties up a worker for each agent's fetch.
+		if ( ! $local && false !== get_transient( self::DOWN ) ) {
 			return;
 		}
 		$path = isset( $_SERVER['REQUEST_URI'] ) ? esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '/';
@@ -76,6 +84,11 @@ final class Tracker {
 		add_action(
 			'shutdown',
 			static function () use ( $settings, $local, $url, $agent, $ip ): void {
+				// Whatever the page became since, such as a redirect or an error, only one that was served counts.
+				$status = http_response_code();
+				if ( is_int( $status ) && ( $status < 200 || $status > 299 ) ) {
+					return;
+				}
 				self::report( $local ? null : $settings, $url, $agent, $ip );
 			},
 			PHP_INT_MAX
@@ -119,7 +132,7 @@ final class Tracker {
 			Local::observe( $url, $agent, $ip );
 			return;
 		}
-		wp_remote_post(
+		$response = wp_remote_post(
 			$settings['address'] . '/api/observe',
 			array(
 				'timeout' => 3,
@@ -138,5 +151,8 @@ final class Tracker {
 				),
 			)
 		);
+		if ( is_wp_error( $response ) ) {
+			set_transient( self::DOWN, 1, MINUTE_IN_SECONDS );
+		}
 	}
 }

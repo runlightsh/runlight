@@ -159,13 +159,15 @@ final class Plugin extends BasePlugin
     }
 
     /**
-     * A key saved for one Runlight is never sent to another: when the address changes and a key was
-     * left as it was, the key is cleared, as the WordPress and Drupal plugins do.
+     * A key typed in is never shown again, so one left blank stays as it was saved. And a key saved for one
+     * Runlight is never sent to another: when the address changes and a key was left as it was, the key is
+     * cleared, as the WordPress and Drupal plugins do.
      */
     public function beforeSaveSettings(): bool
     {
         $before = Craft::$app->getProjectConfig()->get(ProjectConfig::PATH_PLUGINS . '.' . $this->handle . '.settings');
         if (!$this->connecting) {
+            $this->getSettings()->keepBlankKeys(is_array($before) ? $before : []);
             $this->getSettings()->forgetKeysIfMoved(is_array($before) ? $before : []);
         }
         return parent::beforeSaveSettings();
@@ -254,7 +256,8 @@ final class Plugin extends BasePlugin
     /**
      * Records a page served to an AI agent. Agents run no JavaScript, so the
      * script never sees them. It runs once the response has been sent, and
-     * only for known agents.
+     * only for known agents and for pages that were served: not a missing
+     * page, a redirect, or a refusal.
      */
     private function observe(): void
     {
@@ -265,7 +268,7 @@ final class Plugin extends BasePlugin
         $local = $settings->getMode() === 'local';
         // Runlight here records them itself, apart from its own pages; another one needs the agents key.
         $ready = $local ? Local::active() && !Local::$served : $settings->getMode() === 'remote' && $settings->getAddress() !== '' && $key !== '';
-        if (!$ready || !$request->getIsGet() || !Agents::isAgent($agent)) {
+        if (!$ready || !$request->getIsGet() || !Agents::isAgent($agent) || !Craft::$app->getResponse()->getIsSuccessful()) {
             return;
         }
         // A Runlight that did not answer is left alone for a minute, so a down server never ties up a worker

@@ -240,6 +240,8 @@ final class Local
             'cronSecret' => '',
             'observeKey' => '',
             'authorize' => static fn (Request $request): bool|string => self::access($request),
+            // Only for someone signed in: Craft keeps a visitor's token in a cookie, and a visitor gets none from Runlight.
+            'csrf' => static fn (): string => Craft::$app->getUser()->getIsGuest() ? '' : (string) Craft::$app->getRequest()->getCsrfToken(),
             'signIn' => self::base() . '/login',
             'origin' => self::origin(),
             'geoCredit' => Plugin::getInstance()->getSettings()->locations,
@@ -257,7 +259,7 @@ final class Local
             return false;
         }
         $user = Craft::$app->getUser();
-        if ($user->getIsGuest()) {
+        if ($user->getIsGuest() || !self::tokened($request)) {
             return false;
         }
         if ($user->getIsAdmin() || $user->checkPermission(self::MANAGE)) {
@@ -274,10 +276,28 @@ final class Local
     }
 
     /**
+     * Whether a request reads, or else carries Craft's CSRF token for the person signed in: the dashboard sends
+     * the one it was given in an x-runlight-csrf header with every change, and the OAuth consent form in its
+     * csrf field. Craft checks it as it checks its own forms', and takes any where the site has turned its CSRF
+     * protection off.
+     */
+    private static function tokened(Request $request): bool
+    {
+        if (in_array($request->method, ['GET', 'HEAD', 'OPTIONS'], true)) {
+            return true;
+        }
+        $token = (string) $request->headers->get('x-runlight-csrf');
+        if ($token === '' && str_starts_with(strtolower((string) $request->headers->get('content-type')), 'application/x-www-form-urlencoded')) {
+            parse_str($request->text(), $form);
+            $token = is_string($form['csrf'] ?? null) ? $form['csrf'] : '';
+        }
+        return $token !== '' && Craft::$app->getRequest()->validateCsrfToken($token);
+    }
+
+    /**
      * Whether a change comes from a page on the site it is sent to. Craft's session cookie goes along with a
-     * request from any site, and Runlight's dashboard has no CSRF token of Craft's to send, so a change is
-     * taken only from this site's own pages, as the browser says where a request comes from. Reading is safe
-     * from anywhere.
+     * request from any site, so a change is taken only from this site's own pages, as the browser says where a
+     * request comes from, and one that does not say is refused. Reading is safe from anywhere.
      */
     public static function sameSite(Request $request): bool
     {
@@ -290,7 +310,7 @@ final class Local
         }
         $origin = (string) $request->headers->get('origin');
         if ($origin === '') {
-            return true;
+            return false;
         }
         return strtolower((string) parse_url($origin, PHP_URL_HOST)) === strtolower((string) parse_url($request->url, PHP_URL_HOST));
     }

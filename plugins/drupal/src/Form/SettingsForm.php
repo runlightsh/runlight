@@ -6,6 +6,7 @@ namespace Drupal\runlight\Form;
 
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Render\Markup;
 use Drupal\Core\Url;
 use Drupal\runlight\Connect;
 use Drupal\runlight\Local;
@@ -118,6 +119,19 @@ final class SettingsForm extends ConfigFormBase {
           '#attributes' => ['class' => ['messages', 'messages--warning']],
         ];
       }
+      // Seen from this request, which comes the way visitors' do.
+      if (Local::proxyUnnamed($this->getRequest())) {
+        $form['proxy'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'div',
+          '#value' => $this->t('A proxy or load balancer in front of this site is not named in settings.php, so every visitor seems to come from its address: they are counted together, and share one limit on how fast visits are taken. Name it with <code>@proxy</code> and <code>@addresses</code>. See <a href=":url" target="_blank" rel="noopener">the docs</a>.', [
+            '@proxy' => "\$settings['reverse_proxy']",
+            '@addresses' => "\$settings['reverse_proxy_addresses']",
+            ':url' => 'https://runlight.sh/docs/drupal/',
+          ]),
+          '#attributes' => ['class' => ['messages', 'messages--warning']],
+        ];
+      }
     }
     // Checked once the page has loaded, so a slow or missing Runlight never
     // holds it up.
@@ -156,7 +170,9 @@ final class SettingsForm extends ConfigFormBase {
         'remote' => $this->t('On a Runlight you run elsewhere'),
       ],
       'local' => [
-        '#description' => $missing !== '' ? $missing : $this->here(),
+        // Both were made through t(), which escaped what it put in, so the
+        // code tags in them are shown as tags.
+        '#description' => Markup::create($missing !== '' ? $missing : $this->here()),
         // Only while it is not chosen already, so a server that changed can
         // still be moved off it.
         '#disabled' => $missing !== '' && $mode !== 'local',

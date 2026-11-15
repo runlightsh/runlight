@@ -139,6 +139,14 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* When a Runlight elsewhere does not answer, AI agent reports pause for a minute, where each request used to wait on it.
+* An AI agent is recorded only for a page that was served, not for a missing page, a redirect, or an error.
+* The site keeps answering its own pages while Runlight's database is down.
+* Pages a browser loads ahead of time are counted only once they are shown, and a page that keeps its filters in the query string no longer counts a pageview for each change.
+* An account kept to one site can no longer change that site's domains with a malformed request, and sign-in and OAuth requests are capped in size.
+* Short link clicks and AI agent fetches are rate limited, as visits are.
+
 = 0.4.3 =
 * Maintenance release with a fix for Express apps using the Runlight library. Nothing changes in how the WordPress plugin works.
 

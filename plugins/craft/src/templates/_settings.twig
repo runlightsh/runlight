@@ -111,18 +111,19 @@
   errors: settings.getErrors('site'),
 }) }}
 
-{# A key typed in is hidden like a password; one named by an environment variable shows the variable, with suggestions. #}
+{# A key typed in is never written back to the page: its field stays empty, and left empty the key is kept
+   (Settings::keepBlankKeys). One named by an environment variable shows the variable, with suggestions. #}
+{% set kept = 'Saved. Leave blank to keep it for this address.'|t('runlight') %}
 {% set observeKey = {
   label: 'Agents key'|t('runlight'),
   instructions: 'Optional. Shown in Runlight under Settings, Install. With it, the plugin reports AI agents such as ChatGPT and Claude reading your pages, which run no JavaScript, so the script cannot see them. The key can report fetches for this site and nothing else. Use an environment variable, such as `$RUNLIGHT_AGENTS_KEY`, which Connect sets up in `.env` itself, to keep it out of project config.'|t('runlight'),
   id: 'observeKey',
   name: 'observeKey',
-  value: settings.observeKey,
 } %}
 {% if settings.observeKey starts with '$' %}
-  {{ forms.autosuggestField(observeKey|merge({ suggestEnvVars: true })) }}
+  {{ forms.autosuggestField(observeKey|merge({ value: settings.observeKey, suggestEnvVars: true })) }}
 {% else %}
-  {{ forms.passwordField(observeKey|merge({ autocomplete: 'off' })) }}
+  {{ forms.passwordField(observeKey|merge({ value: '', placeholder: settings.observeKey ? kept : '', autocomplete: 'off' })) }}
 {% endif %}
 
 {% set dashboardKey = {
@@ -130,12 +131,11 @@
   instructions: 'Optional. Made in Runlight under Settings, Install. With it, the Runlight item in the Control Panel shows this site’s numbers right there, in the same read-only view a share link shows, framed only by this Control Panel. Anyone holding the key can read this site’s dashboard, so keep it as you would a password. Use an environment variable, such as `$RUNLIGHT_DASHBOARD_KEY`, which Connect sets up in `.env` itself, to keep it out of project config.'|t('runlight'),
   id: 'dashboardKey',
   name: 'dashboardKey',
-  value: settings.dashboardKey,
 } %}
 {% if settings.dashboardKey starts with '$' %}
-  {{ forms.autosuggestField(dashboardKey|merge({ suggestEnvVars: true })) }}
+  {{ forms.autosuggestField(dashboardKey|merge({ value: settings.dashboardKey, suggestEnvVars: true })) }}
 {% else %}
-  {{ forms.passwordField(dashboardKey|merge({ autocomplete: 'off' })) }}
+  {{ forms.passwordField(dashboardKey|merge({ value: '', placeholder: settings.dashboardKey ? kept : '', autocomplete: 'off' })) }}
 {% endif %}
 </div>
 
