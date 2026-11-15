@@ -27,6 +27,17 @@ impl Routes {
 
     /// The query a view's URL asks for, or the answer refusing it.
     pub(crate) async fn read_query(&self, url: &Url, site: &SiteRow) -> Result<Result<Read, Response>, Error> {
+        self.read_query_of(url, site, false).await
+    }
+
+    /// As read_query; `clicks` is for the short link reports, whose "all" reaches back to the oldest click as
+    /// well as the oldest visit.
+    pub(crate) async fn read_query_of(
+        &self,
+        url: &Url,
+        site: &SiteRow,
+        clicks: bool,
+    ) -> Result<Result<Read, Response>, Error> {
         let params = url.search_params();
         let raw_filters = params.get_all("filter");
         if raw_filters.len() > MAX_FILTERS {
@@ -53,10 +64,17 @@ impl Routes {
         }
         let now = self.rl().now();
         let mut first_date = None;
-        if params.get("period") == Some("all")
-            && let Some(first) = self.rl().store().first_seen(&site.id).await?
-        {
-            first_date = Some(local_date(first, &site.timezone));
+        if params.get("period") == Some("all") {
+            let seen = self.rl().store().first_seen(&site.id).await?;
+            // Clicks imported as daily counts belong to no visit, and may be older than any.
+            let clicked = if clicks { self.rl().store().first_click(&site.id).await? } else { None };
+            let first = match (seen, clicked) {
+                (Some(seen), Some(clicked)) => Some(seen.min(clicked)),
+                (seen, clicked) => seen.or(clicked),
+            };
+            if let Some(first) = first {
+                first_date = Some(local_date(first, &site.timezone));
+            }
         }
         let input = RangeInput {
             period: params.get("period").map(str::to_string),
@@ -308,7 +326,7 @@ impl Routes {
         }
         if path == "/api/links" {
             if method == "GET" {
-                let read = match self.read_query(url, site).await? {
+                let read = match self.read_query_of(url, site, true).await? {
                     Ok(r) => r,
                     Err(r) => return Ok(r),
                 };
@@ -386,7 +404,7 @@ impl Routes {
                 let Some(link) = link.filter(|l| l.site == site.id) else {
                     return Ok(coded("Unknown link", "unknown_link", 404, None));
                 };
-                let read = match self.read_query(url, site).await? {
+                let read = match self.read_query_of(url, site, true).await? {
                     Ok(r) => r,
                     Err(r) => return Ok(r),
                 };

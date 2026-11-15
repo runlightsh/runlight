@@ -232,7 +232,8 @@ pub trait Db: Send + Sync {
 }
 
 /// SQL written with `?` placeholders and "double quoted" names, with each placeholder outside quotes
-/// filled in by `fill`, as node-postgres and mysql2 send values in the statement's text. For MySQL,
+/// filled in by `fill`: with the placeholder a driver binds its values to (`$1`, or `?` again), which is
+/// what Runlight's own drivers do, so no value is ever part of a statement's text. For MySQL,
 /// a "quoted" name goes in backticks and a backslash inside 'text' is doubled, since MySQL reads it as
 /// an escape where standard SQL takes it literally. Otherwise (Postgres) 'text' with a backslash in it is
 /// written as `E'...'` with the backslash doubled, which reads the same whatever
@@ -291,9 +292,11 @@ pub fn fill_placeholders(
     Ok(out)
 }
 
+/// Not used by Runlight's own drivers, which bind every value; kept for a driver over a client that cannot.
 /// A value as a Postgres literal of unknown type, which the server reads as it reads a parameter
 /// node-postgres sends untyped: `E'...'` text (backslashes and quotes escaped, whatever
 /// standard_conforming_strings says), numbers too, and NULL.
+#[deprecated(note = "Runlight's own drivers bind every value and no longer use this")]
 pub fn postgres_literal(p: &Param) -> String {
     match p {
         Param::Null => "NULL".into(),
@@ -315,9 +318,11 @@ pub fn postgres_literal(p: &Param) -> String {
     }
 }
 
+/// Not used by Runlight's own drivers, which bind every value; kept for a driver over a client that cannot.
 /// A value as a MySQL literal, as mysql2's escape() writes the values Runlight binds, except that a
 /// quote is doubled rather than escaped with a backslash, so a value stays inside its quotes even on a
 /// connection whose sql_mode has NO_BACKSLASH_ESCAPES.
+#[deprecated(note = "Runlight's own drivers bind every value and no longer use this")]
 pub fn mysql_literal(p: &Param) -> String {
     match p {
         Param::Null => "NULL".into(),
@@ -347,6 +352,7 @@ pub fn mysql_literal(p: &Param) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

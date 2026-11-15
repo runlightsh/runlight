@@ -581,3 +581,159 @@ fn round_two_a_wrong_code_locks_for_longer_each_time_the_tries_run_out() {
     }
     assert!(lock.take("u1", now + 1440 * MIN + week + 15 * MIN), "forgotten, so its first lock is fifteen minutes");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_value_is_ever_part_of_a_postgres_statements_text() {
+    let Some((_, url)) = common::kinds().into_iter().find(|(kind, _)| *kind == "postgres") else { return };
+    let fresh = common::fresh("postgres", &url).await;
+    let db = fresh.store.db().clone();
+    // current_query() is the statement as the server received it. A value written into it would show there.
+    let canary = "canary-9f2c' OR '1'='1 \\ $$";
+    let sql = "SELECT current_query() AS q, CAST(? AS TEXT) AS v, CAST(? AS BIGINT) AS n, CAST(? AS TEXT) AS t";
+    let params = || vec![Param::Text(canary.into()), Param::Int(987_654_321_012), Param::Null];
+    let held = db.hold(Hold::Transaction).await.unwrap();
+    for (path, rows) in [
+        ("the pool", db.all(sql, params()).await.unwrap()),
+        ("a held connection", held.all(sql, params()).await.unwrap()),
+    ] {
+        let q = rows[0].text("q");
+        assert!(!q.contains("canary") && !q.contains("987654321012"), "{path}: {q}");
+        assert!(
+            q.contains("CAST($1 AS TEXT)") && q.contains("CAST($2 AS BIGINT)") && q.contains("CAST($3 AS TEXT)"),
+            "{path}: {q}"
+        );
+        assert_eq!((rows[0].text("v").as_str(), rows[0].int("n")), (canary, 987_654_321_012), "{path}");
+        assert!(rows[0].is_null("t"), "{path}");
+    }
+    held.finish(true).await.unwrap();
+    // A statement that changes rows binds its values the same way, and the store's own do too: a setting whose
+    // value would be SQL is kept as the text it is.
+    db.run("CREATE TABLE canaries (q TEXT, v TEXT, n BIGINT, x DOUBLE PRECISION)", vec![]).await.unwrap();
+    let changed = db
+        .run(
+            "INSERT INTO canaries (q, v, n, x) VALUES (current_query(), ?, ?, ?)",
+            vec![Param::Text(canary.into()), Param::Text(" 42 ".into()), Param::Int(7)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+    let rows = db.all("SELECT q, v, n, x FROM canaries", vec![]).await.unwrap();
+    let q = rows[0].text("q");
+    assert!(!q.contains("canary") && q.contains("VALUES (current_query(), $1, $2, $3)"), "{q}");
+    // Text is read as a number where a number is wanted, and a whole number as a fraction, as from node-postgres.
+    assert_eq!((rows[0].text("v").as_str(), rows[0].int("n"), rows[0].num("x")), (canary, 42, 7.0));
+    fresh.store.migrate().await.unwrap();
+    fresh.store.set_setting("canary", Some(canary)).await.unwrap();
+    assert_eq!(fresh.store.setting("canary").await.unwrap().as_deref(), Some(canary));
+    // A value the server cannot read as the type it chose is refused, in its own words, and never sent as text.
+    let refused = db.all("SELECT CAST(? AS BIGINT) AS n", vec![Param::Text("1; DROP TABLE canaries".into())]).await;
+    assert!(refused.unwrap_err().0.contains("invalid input syntax for type bigint"));
+    assert_eq!(db.all("SELECT v FROM canaries", vec![]).await.unwrap().len(), 1);
+    fresh.done().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_value_is_ever_part_of_a_mysql_statements_text() {
+    let Some((_, url)) = common::kinds().into_iter().find(|(kind, _)| *kind == "mysql") else { return };
+    let fresh = common::fresh("mysql", &url).await;
+    let db = fresh.store.db().clone();
+    // A statement whose values are bound is one the server has prepared, and it keeps its text as it was sent,
+    // with each placeholder still in it. (Its process list is no witness: there the server writes the values
+    // back in.) A statement with its values written in is never prepared, and would count none.
+    let canary = "canary-9f2c' OR '1'='1 \\ \" `";
+    let sql = "SELECT (SELECT COUNT(*) FROM performance_schema.prepared_statements_instances \
+               WHERE OWNER_THREAD_ID = PS_CURRENT_THREAD_ID() AND SQL_TEXT LIKE '%CONCAT(?, %' \
+               AND SQL_TEXT NOT LIKE CONCAT('%can', 'ary-9f2c%')) AS q, CONCAT(?, '') AS v, ? + 0 AS n, ? AS t";
+    let params = || vec![Param::Text(canary.into()), Param::Int(987_654_321_012), Param::Null];
+    let held = db.hold(Hold::Transaction).await.unwrap();
+    for (path, rows) in [
+        ("the pool", db.all(sql, params()).await.unwrap()),
+        ("a held connection", held.all(sql, params()).await.unwrap()),
+    ] {
+        assert_eq!(rows[0].int("q"), 1, "{path}");
+        assert_eq!((rows[0].text("v").as_str(), rows[0].int("n")), (canary, 987_654_321_012), "{path}");
+        assert!(rows[0].is_null("t"), "{path}");
+    }
+    held.finish(true).await.unwrap();
+    fresh.store.migrate().await.unwrap();
+    fresh.store.set_setting("canary", Some(canary)).await.unwrap();
+    assert_eq!(fresh.store.setting("canary").await.unwrap().as_deref(), Some(canary));
+    fresh.done().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_statement_kept_from_before_a_column_was_added_is_prepared_again_on_postgres() {
+    let Some((_, url)) = common::kinds().into_iter().find(|(kind, _)| *kind == "postgres") else { return };
+    let fresh = common::fresh("postgres", &url).await;
+    let db = fresh.store.db().clone();
+    db.run("CREATE TABLE widened (a BIGINT)", vec![]).await.unwrap();
+    db.run("INSERT INTO widened (a) VALUES (?)", vec![Param::Int(1)]).await.unwrap();
+    let read = || db.all("SELECT * FROM widened WHERE a = ?", vec![Param::Int(1)]);
+    // Enough reads that every connection the pool has opened has kept the statement.
+    for _ in 0..20 {
+        assert_eq!(read().await.unwrap().len(), 1);
+    }
+    // As a newer version's migration does while this one is still running.
+    db.run("ALTER TABLE widened ADD COLUMN b TEXT NOT NULL DEFAULT 'new'", vec![]).await.unwrap();
+    for _ in 0..20 {
+        assert_eq!(read().await.unwrap()[0].text("b"), "new");
+    }
+    fresh.done().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_postgres_pool_that_keeps_no_statements_binds_its_values_and_leaves_none_on_the_server() {
+    let Some((_, url)) = common::kinds().into_iter().find(|(kind, _)| *kind == "postgres") else { return };
+    let name = format!("rl_rust_{}", runlight::hash::random_id(5));
+    let admin = sqlx::PgPool::connect(&url).await.expect("Postgres");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{name}\""))).execute(&admin).await.expect("a schema");
+    let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+        .expect("a URL")
+        .options([("search_path", name.as_str())])
+        .statement_cache_capacity(0);
+    // One connection, so the count below is of the connection every statement ran on.
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(options).await.expect("Postgres");
+    let store = runlight_sqlx::postgres(pool.clone());
+    let db = store.db().clone();
+    let named =
+        || async { db.all("SELECT COUNT(*) AS n FROM pg_prepared_statements", vec![]).await.unwrap()[0].int("n") };
+    db.run("CREATE TABLE unkept (a BIGINT, b TEXT)", vec![]).await.unwrap();
+    let canary = "canary-9f2c' OR '1'='1 \\ $$";
+    for i in 0..60 {
+        // Each a statement of its own text, as a list of a new length is.
+        let marks = vec!["?"; i % 7 + 1].join(", ");
+        let params: Vec<Param> = (0..=i % 7).map(|n| Param::Int(n as i64)).collect();
+        db.all(&format!("SELECT a FROM unkept WHERE a IN ({marks})"), params).await.unwrap();
+        assert_eq!(
+            db.run("INSERT INTO unkept (a, b) VALUES (?, ?)", vec![Param::Int(i as i64), Param::Text(canary.into())])
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(named().await, 0);
+    // The values were bound here too: the statement the server received holds none of them.
+    let rows = db
+        .all(
+            "SELECT current_query() AS q, b FROM unkept WHERE a = ? AND b = ?",
+            vec![Param::Int(59), Param::Text(canary.into())],
+        )
+        .await
+        .unwrap();
+    let q = rows[0].text("q");
+    assert!(!q.contains("canary") && q.contains("a = $1 AND b = $2"), "{q}");
+    assert_eq!(rows[0].text("b"), canary);
+    // Inside a transaction as well, and the store's own statements.
+    let held = db.hold(Hold::Transaction).await.unwrap();
+    assert_eq!(held.all("SELECT a FROM unkept WHERE a < ?", vec![Param::Int(3)]).await.unwrap().len(), 3);
+    held.finish(true).await.unwrap();
+    store.migrate().await.unwrap();
+    store.set_setting("canary", Some(canary)).await.unwrap();
+    assert_eq!(store.setting("canary").await.unwrap().as_deref(), Some(canary));
+    assert_eq!(named().await, 0);
+    pool.close().await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA \"{name}\" CASCADE")))
+        .execute(&admin)
+        .await
+        .expect("dropped");
+}

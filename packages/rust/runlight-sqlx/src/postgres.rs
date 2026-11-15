@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use runlight::BoxFuture;
-use runlight::store::{
-    Db, DbError, Dialect, Hold, Param, Row, TablesBusyError, fill_placeholders, lock_wait, postgres_literal,
-};
+use runlight::store::{Db, DbError, Dialect, Hold, Param, Row, TablesBusyError, fill_placeholders, lock_wait};
 use sqlx::pool::PoolConnection;
-use sqlx::{AssertSqlSafe, PgPool, Postgres};
+use sqlx::postgres::{PgConnection, PgRow, PgStatement, PgTypeInfo};
+use sqlx::{AssertSqlSafe, Connection, Executor, PgPool, Postgres, SqlSafeStr, Statement};
+
+use crate::pg_bind::arguments;
 use tokio::sync::Mutex;
 
 use crate::rows::{db_error, pg_row};
@@ -17,8 +18,8 @@ use crate::rows::{db_error, pg_row};
 /// Arbitrary but fixed, so every Runlight process takes the same lock to create tables.
 const MIGRATION_LOCK: i64 = 7_331_906;
 
-/// The store's driver over a Postgres pool. Values go in the statement's text as literals of unknown
-/// type, so Postgres infers each one's type as it does for node-postgres's untyped parameters.
+/// The store's driver over a Postgres pool. Every value is a bound parameter, never part of a statement's
+/// text, and Postgres infers each one's type as it does for node-postgres's untyped parameters.
 #[derive(Clone)]
 pub struct PostgresDb {
     pool: PgPool,
@@ -31,8 +32,97 @@ impl PostgresDb {
     }
 }
 
-fn text(sql: &str, params: &[Param]) -> Result<AssertSqlSafe<String>, DbError> {
-    Ok(AssertSqlSafe(fill_placeholders(sql, params, false, postgres_literal)?))
+/// A statement that takes no values, as it is sent: any 'text' in it that holds a backslash written so that it
+/// reads the same whatever standard_conforming_strings says.
+fn plain(sql: &str) -> Result<AssertSqlSafe<String>, DbError> {
+    Ok(AssertSqlSafe(fill_placeholders(sql, &[], false, |_| String::new())?))
+}
+
+/// A statement with each `?` outside quotes numbered ($1, $2, ...), for its values to be bound to. No value is
+/// ever written into the statement's text.
+fn numbered(sql: &str, params: &[Param]) -> Result<String, DbError> {
+    let n = std::cell::Cell::new(0);
+    fill_placeholders(sql, params, false, |_| {
+        n.set(n.get() + 1);
+        format!("${}", n.get())
+    })
+}
+
+/// A statement's rows, on one connection. With values, the statement is prepared with no types named, so the
+/// server chooses each value's type from its place in the statement, as it does for node-postgres, and each
+/// value is bound in the form of the type it was given. sqlx keeps the prepared statement with its connection,
+/// so the types are asked for once. `again` is for a statement outside any transaction: see `stale`.
+async fn rows_on(conn: &mut PgConnection, sql: &str, params: &[Param], again: bool) -> Result<Vec<PgRow>, DbError> {
+    if params.is_empty() {
+        return sqlx::raw_sql(plain(sql)?).fetch_all(conn).await.map_err(db_error);
+    }
+    let sql = numbered(sql, params)?;
+    match bound(conn, &sql, params).await?.fetch_all(&mut *conn).await {
+        Err(e) if stale(&e) => {
+            conn.clear_cached_statements().await.map_err(db_error)?;
+            if !again {
+                return Err(db_error(e));
+            }
+            bound(conn, &sql, params).await?.fetch_all(conn).await.map_err(db_error)
+        }
+        done => done.map_err(db_error),
+    }
+}
+
+/// As `rows_on`, for a statement that changes rows: how many it changed.
+async fn changed_on(conn: &mut PgConnection, sql: &str, params: &[Param], again: bool) -> Result<u64, DbError> {
+    if params.is_empty() {
+        return Ok(sqlx::raw_sql(plain(sql)?).execute(conn).await.map_err(db_error)?.rows_affected());
+    }
+    let sql = numbered(sql, params)?;
+    let done = match bound(conn, &sql, params).await?.execute(&mut *conn).await {
+        Err(e) if stale(&e) => {
+            conn.clear_cached_statements().await.map_err(db_error)?;
+            if !again {
+                return Err(db_error(e));
+            }
+            bound(conn, &sql, params).await?.execute(conn).await
+        }
+        done => done,
+    };
+    Ok(done.map_err(db_error)?.rows_affected())
+}
+
+/// A numbered statement, prepared, with its values bound under the types the server chose.
+/// The connection needs what sqlx's own queries need: one server connection from the statement being
+/// prepared to its values being bound.
+async fn bound(
+    conn: &mut PgConnection,
+    sql: &str,
+    params: &[Param],
+) -> Result<sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments>, DbError> {
+    let statement = conn.prepare(AssertSqlSafe(sql.to_string()).into_sql_str()).await.map_err(db_error)?;
+    let args = arguments(&kinds(&statement), params)?;
+    let query = sqlx::query_with(AssertSqlSafe(sql.to_string()), args);
+    if conn.cached_statements_size() > 0 {
+        return Ok(query);
+    }
+    // A connection that keeps no statements (statement_cache_capacity(0)) has not kept this one either, yet
+    // the server holds it under a name sqlx will never use again. With nothing kept, every named statement on
+    // the connection is such a leftover, so they are all dropped, and the statement runs with no name.
+    sqlx::raw_sql(AssertSqlSafe("DEALLOCATE ALL".to_string())).execute(&mut *conn).await.map_err(db_error)?;
+    Ok(query.persistent(false))
+}
+
+/// Whether Postgres refused a kept statement because a table it reads has changed since it was prepared (a
+/// column added by a newer version's migration, under a SELECT of every column). The connection's kept
+/// statements are dropped, and a statement outside a transaction is run again; inside one the refusal has
+/// already ended the transaction, so it is given back as the error it is.
+fn stale(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(d) if d.code().as_deref() == Some("0A000") && d.message().contains("cached plan"))
+}
+
+/// The types the server chose for a prepared statement's values.
+fn kinds(statement: &PgStatement) -> Vec<PgTypeInfo> {
+    match statement.parameters() {
+        Some(sqlx::Either::Left(kinds)) => kinds.to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 impl Db for PostgresDb {
@@ -42,14 +132,15 @@ impl Db for PostgresDb {
 
     fn all<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
         Box::pin(async move {
-            let rows = sqlx::raw_sql(text(sql, &params)?).fetch_all(&self.pool).await.map_err(db_error)?;
-            rows.iter().map(pg_row).collect()
+            let mut conn = self.pool.acquire().await.map_err(db_error)?;
+            rows_on(&mut conn, sql, &params, true).await?.iter().map(pg_row).collect()
         })
     }
 
     fn run<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<u64, DbError>> {
         Box::pin(async move {
-            Ok(sqlx::raw_sql(text(sql, &params)?).execute(&self.pool).await.map_err(db_error)?.rows_affected())
+            let mut conn = self.pool.acquire().await.map_err(db_error)?;
+            changed_on(&mut conn, sql, &params, true).await
         })
     }
 
@@ -157,8 +248,7 @@ impl Db for Held {
         Box::pin(async move {
             let mut slot = self.conn.lock().await;
             let conn = slot.conn.as_mut().ok_or_else(ended)?;
-            let rows = sqlx::raw_sql(text(sql, &params)?).fetch_all(&mut **conn).await.map_err(db_error)?;
-            rows.iter().map(pg_row).collect()
+            rows_on(conn, sql, &params, false).await?.iter().map(pg_row).collect()
         })
     }
 
@@ -166,7 +256,7 @@ impl Db for Held {
         Box::pin(async move {
             let mut slot = self.conn.lock().await;
             let conn = slot.conn.as_mut().ok_or_else(ended)?;
-            Ok(sqlx::raw_sql(text(sql, &params)?).execute(&mut **conn).await.map_err(db_error)?.rows_affected())
+            changed_on(conn, sql, &params, false).await
         })
     }
 

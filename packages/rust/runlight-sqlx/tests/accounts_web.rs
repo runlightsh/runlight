@@ -196,7 +196,7 @@ async fn without_a_mail_service_or_a_known_address_a_held_up_account_waits() {
         let held =
             app.routes.handle(form("/login", &[("email", "jon@example.com"), ("password", "a long password")])).await;
         assert_eq!(held.status, 429);
-        assert!(held.text().contains("Too many tries. Wait fifteen minutes and try again."));
+        assert!(held.text().contains("Too many tries. Try again later."));
         app.rl.idle().await;
         assert!(app.sent().is_empty());
     }

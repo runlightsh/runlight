@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use runlight::BoxFuture;
-use runlight::store::{
-    Db, DbError, Dialect, Hold, Param, Row, TablesBusyError, fill_placeholders, lock_wait, mysql_literal,
-};
+use runlight::store::{Db, DbError, Dialect, Hold, Param, Row, TablesBusyError, fill_placeholders, lock_wait};
+use sqlx::mysql::{MySqlArguments, MySqlConnection};
 use sqlx::pool::PoolConnection;
 use sqlx::{AssertSqlSafe, MySql, MySqlPool};
 use tokio::sync::Mutex;
@@ -19,8 +18,8 @@ use crate::rows::{db_error, mysql_row};
 const LOCK: &str = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))";
 
 /// The store's driver over a MySQL pool. SQL written for SQLite and Postgres is sent as MySQL reads it:
-/// a "quoted" name in backticks, a backslash inside 'text' doubled, and each value written into the
-/// statement, escaped, as mysql2 fills them in.
+/// a "quoted" name in backticks, a backslash inside 'text' doubled, and every value bound to its
+/// placeholder, never written into the statement.
 #[derive(Clone)]
 pub struct MysqlDb {
     pool: MySqlPool,
@@ -36,11 +35,58 @@ impl MysqlDb {
 /// The session's sql_mode as it was, less NO_BACKSLASH_ESCAPES, wherever it sits in the list.
 const NO_BACKSLASH_ESCAPES_OFF: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))";
 
-/// A statement with its values written in. Values are escaped with backslashes, which a server set to
-/// NO_BACKSLASH_ESCAPES reads as text, so a quote could end the value early: the statement goes after
-/// one that drops that mode from the connection, an app's own pool's too, in the same round trip.
-fn text(sql: &str, params: &[Param]) -> Result<AssertSqlSafe<String>, DbError> {
-    Ok(AssertSqlSafe(format!("{NO_BACKSLASH_ESCAPES_OFF}; {}", fill_placeholders(sql, params, true, mysql_literal)?)))
+/// A statement that takes no values, as it is sent. Its own 'text' has each backslash doubled, which a server
+/// set to NO_BACKSLASH_ESCAPES would read as two, so it goes after a statement that drops that mode from the
+/// connection, an app's own pool's too, in the same round trip.
+fn plain(sql: &str) -> Result<AssertSqlSafe<String>, DbError> {
+    Ok(AssertSqlSafe(format!("{NO_BACKSLASH_ESCAPES_OFF}; {}", fill_placeholders(sql, &[], true, |_| String::new())?)))
+}
+
+/// The values of a statement as the arguments bound to it. No value is ever written into a statement's text.
+fn arguments(params: &[Param]) -> Result<MySqlArguments, DbError> {
+    use sqlx::Arguments;
+    let mut args = MySqlArguments::default();
+    for p in params {
+        match p {
+            Param::Null => args.add(Option::<String>::None),
+            Param::Int(n) => args.add(*n),
+            Param::Float(f) => args.add(*f),
+            Param::Text(s) => args.add(s.as_str()),
+        }
+        .map_err(db_error)?;
+    }
+    Ok(args)
+}
+
+/// A statement with values, ready to run on one connection: its names in backticks, its placeholders left for
+/// the values to be bound to. A backslash in the statement's own 'text' (the escape of a LIKE) is read
+/// as written only without NO_BACKSLASH_ESCAPES, so that mode is dropped from the connection first.
+async fn prepared(conn: &mut MySqlConnection, sql: &str, params: &[Param]) -> Result<AssertSqlSafe<String>, DbError> {
+    if sql.contains('\\') {
+        sqlx::raw_sql(AssertSqlSafe(NO_BACKSLASH_ESCAPES_OFF.to_string()))
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+    }
+    Ok(AssertSqlSafe(fill_placeholders(sql, params, true, |_| "?".to_string())?))
+}
+
+async fn rows_on(conn: &mut MySqlConnection, sql: &str, params: &[Param]) -> Result<Vec<Row>, DbError> {
+    let rows = if params.is_empty() {
+        sqlx::raw_sql(plain(sql)?).fetch_all(conn).await.map_err(db_error)?
+    } else {
+        let statement = prepared(conn, sql, params).await?;
+        sqlx::query_with(statement, arguments(params)?).fetch_all(conn).await.map_err(db_error)?
+    };
+    rows.iter().map(mysql_row).collect()
+}
+
+async fn changed_on(conn: &mut MySqlConnection, sql: &str, params: &[Param]) -> Result<u64, DbError> {
+    if params.is_empty() {
+        return Ok(sqlx::raw_sql(plain(sql)?).execute(conn).await.map_err(db_error)?.rows_affected());
+    }
+    let statement = prepared(conn, sql, params).await?;
+    Ok(sqlx::query_with(statement, arguments(params)?).execute(conn).await.map_err(db_error)?.rows_affected())
 }
 
 async fn exec(conn: &mut PoolConnection<MySql>, sql: &str) -> Result<Vec<Row>, DbError> {
@@ -55,14 +101,15 @@ impl Db for MysqlDb {
 
     fn all<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
         Box::pin(async move {
-            let rows = sqlx::raw_sql(text(sql, &params)?).fetch_all(&self.pool).await.map_err(db_error)?;
-            rows.iter().map(mysql_row).collect()
+            let mut conn = self.pool.acquire().await.map_err(db_error)?;
+            rows_on(&mut conn, sql, &params).await
         })
     }
 
     fn run<'a>(&'a self, sql: &'a str, params: Vec<Param>) -> BoxFuture<'a, Result<u64, DbError>> {
         Box::pin(async move {
-            Ok(sqlx::raw_sql(text(sql, &params)?).execute(&self.pool).await.map_err(db_error)?.rows_affected())
+            let mut conn = self.pool.acquire().await.map_err(db_error)?;
+            changed_on(&mut conn, sql, &params).await
         })
     }
 
@@ -173,8 +220,7 @@ impl Db for Held {
         Box::pin(async move {
             let mut slot = self.conn.lock().await;
             let conn = slot.conn.as_mut().ok_or_else(ended)?;
-            let rows = sqlx::raw_sql(text(sql, &params)?).fetch_all(&mut **conn).await.map_err(db_error)?;
-            rows.iter().map(mysql_row).collect()
+            rows_on(conn, sql, &params).await
         })
     }
 
@@ -182,7 +228,7 @@ impl Db for Held {
         Box::pin(async move {
             let mut slot = self.conn.lock().await;
             let conn = slot.conn.as_mut().ok_or_else(ended)?;
-            Ok(sqlx::raw_sql(text(sql, &params)?).execute(&mut **conn).await.map_err(db_error)?.rows_affected())
+            changed_on(conn, sql, &params).await
         })
     }
 

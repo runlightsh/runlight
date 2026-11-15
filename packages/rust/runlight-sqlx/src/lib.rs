@@ -17,17 +17,20 @@
 //! feature of the crate: `sqlite`, `postgres`, and `mysql` (MySQL 8.0.20 or
 //! MariaDB 11.4 and later).
 //!
-//! Values reach the database as the TypeScript drivers send them. SQLite
-//! binds them typed, as better-sqlite3 does. Postgres and MySQL get them in
-//! the statement's text, as node-postgres's untyped parameters and mysql2's
-//! client-side escaping do, so every statement means the same to the server
-//! as it does from Node: a value Postgres would infer the type of is written
-//! as a literal it infers the type of in the same way.
+//! Every value is a bound parameter on all three databases, never part of
+//! a statement's text. SQLite and MySQL bind each one as the kind of value
+//! it is. Postgres is asked which type it gives each place in a statement,
+//! as it works out for node-postgres's untyped parameters, and each value
+//! is bound as that type, so every statement means the same to the server
+//! as it does from Node. Table and column names are checked and written
+//! into the statement, since a name cannot be bound.
 
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "mysql")]
 mod mysql;
+#[cfg(feature = "postgres")]
+mod pg_bind;
 #[cfg(feature = "postgres")]
 mod postgres;
 mod rows;

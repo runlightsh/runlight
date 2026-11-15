@@ -2224,6 +2224,14 @@ impl SqlStore {
         Ok(row.and_then(|r| r.opt_int("t")))
     }
 
+    /// When a site's oldest short link click was, or `None` with none. Clicks imported as daily counts belong
+    /// to no visit, so first_seen does not reach them.
+    pub async fn first_click(&self, site: &str) -> R<Option<i64>> {
+        let row =
+            self.first("SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'", params![site]).await?;
+        Ok(row.and_then(|r| r.opt_int("t")))
+    }
+
     /// Just the visitor count from stats(), in one query, for conversion rates.
     pub async fn visitors(&self, query: &Query) -> R<f64> {
         // Built days add up their visitors, as the stats do.

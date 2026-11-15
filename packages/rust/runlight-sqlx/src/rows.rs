@@ -58,11 +58,25 @@ fn pg_cell(raw: sqlx::postgres::PgValueRef<'_>) -> Result<Cell, DbError> {
         ("INT2" | "INT4" | "INT8" | "OID", false) => {
             text().trim().parse().map(Cell::Int).unwrap_or_else(|_| Cell::Text(text()))
         }
-        ("FLOAT4", true) => Cell::Float(f64::from(f32::from_be_bytes(bytes.try_into().map_err(|_| bad())?))),
+        // As the text Postgres writes for a REAL, the shortest that reads back the same: 19.99, where widening
+        // the four bytes would give 19.989999771118164.
+        ("FLOAT4", true) => {
+            let single = f32::from_be_bytes(bytes.try_into().map_err(|_| bad())?);
+            Cell::Float(single.to_string().parse().unwrap_or(f64::from(single)))
+        }
         ("FLOAT8", true) => Cell::Float(f64::from_be_bytes(bytes.try_into().map_err(|_| bad())?)),
         ("FLOAT4" | "FLOAT8", false) => Cell::Float(runlight::js::number_of_text(&text())),
         ("BOOL", true) => Cell::Int(i64::from(bytes.first().is_some_and(|b| *b != 0))),
         ("BOOL", false) => Cell::Int(i64::from(bytes.first() == Some(&b't'))),
+        // A statement with bound values answers in binary, and a NUMERIC (a SUM of BIGINTs is one) is read
+        // back as the text Postgres would have sent for it.
+        ("NUMERIC", true) => Cell::Text(crate::pg_bind::numeric_text(bytes).ok_or_else(bad)?),
+        // Its version, then the text.
+        ("JSONB", true) => Cell::Text(String::from_utf8_lossy(bytes.get(1..).unwrap_or(&[])).into_owned()),
+        // Text is the same bytes either way.
+        ("TEXT" | "VARCHAR" | "CHAR" | "NAME" | "UNKNOWN" | "JSON" | "\"CHAR\"", true) => Cell::Text(text()),
+        // Any other type's binary form is not text, and reading it as text would give nonsense.
+        (_, true) => return Err(bad()),
         _ => Cell::Text(text()),
     })
 }
