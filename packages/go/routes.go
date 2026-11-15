@@ -439,7 +439,8 @@ func optionalQuery(u *whatwg.URL, name string) *string {
 	return nil
 }
 
-func (rt *Routes) readQuery(ctx context.Context, u *whatwg.URL, site SiteRow) (*readQuery, *Response, error) {
+// clicks is for the short link reports, whose "all" reaches back to the oldest click as well as the oldest visit.
+func (rt *Routes) readQuery(ctx context.Context, u *whatwg.URL, site SiteRow, clicks ...bool) (*readQuery, *Response, error) {
 	q := u.SearchParams()
 	filters := []Filter{}
 	raws := q.GetAll("filter")
@@ -459,6 +460,16 @@ func (rt *Routes) readQuery(ctx context.Context, u *whatwg.URL, site SiteRow) (*
 		first, err := rt.r.Store.FirstSeen(ctx, site.ID)
 		if err != nil {
 			return nil, nil, err
+		}
+		// Clicks imported as daily counts belong to no visit, and may be older than any.
+		if len(clicks) > 0 && clicks[0] {
+			clicked, err := rt.r.Store.FirstClick(ctx, site.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if clicked != nil && (first == nil || *clicked < *first) {
+				first = clicked
+			}
 		}
 		if first != nil {
 			firstDate = LocalDate(*first, site.Timezone)
@@ -721,7 +732,7 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 	}
 	if path == "/api/links" {
 		if request.Method == "GET" {
-			read, refused, err := rt.readQuery(ctx, u, site)
+			read, refused, err := rt.readQuery(ctx, u, site, true)
 			if err != nil || refused != nil {
 				return refused, err
 			}
@@ -829,7 +840,7 @@ func (rt *Routes) linksRoutes(c *call, path string, u *whatwg.URL, site SiteRow)
 			if link == nil || link.Site != site.ID {
 				return Coded("Unknown link", "unknown_link", 404, nil), nil
 			}
-			read, refused, err := rt.readQuery(ctx, u, site)
+			read, refused, err := rt.readQuery(ctx, u, site, true)
 			if err != nil || refused != nil {
 				return refused, err
 			}

@@ -2173,6 +2173,13 @@ func (s *Store) FirstOwnVisit(ctx context.Context, site string) (*int64, error) 
 	return nullableTime(rows), err
 }
 
+// FirstClick is when the site's oldest short link click was, or nil with none: a click imported as a daily
+// count belongs to no visit, so it may be older than any.
+func (s *Store) FirstClick(ctx context.Context, site string) (*int64, error) {
+	rows, err := s.db.All(ctx, `SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'`, site)
+	return nullableTime(rows), err
+}
+
 // FirstSeen is when the site's first visit was recorded, or nil with no data yet.
 func (s *Store) FirstSeen(ctx context.Context, site string) (*int64, error) {
 	rows, err := s.db.All(ctx, `SELECT MIN(started_at) AS t FROM rl_sessions WHERE site = ?`, site)
