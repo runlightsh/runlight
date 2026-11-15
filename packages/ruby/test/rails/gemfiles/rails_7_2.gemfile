@@ -1,9 +1,0 @@
-# frozen_string_literal: true
-
-# The gem's Gemfile with Rails 7.2, locked on its own. See ../../../Gemfile.
-ENV["RUNLIGHT_RAILS"] = "7.2"
-eval_gemfile File.expand_path("../../../Gemfile", __dir__)
-
-# CI tests Rails 7.2 on Ruby 3.2. irb 1.19 needs prism, and prism 2's prebuilt
-# gems need Ruby 3.3, which Bundler does not step around, so prism stays on 1.x.
-gem "prism", "< 2"

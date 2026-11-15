@@ -55,6 +55,7 @@ module Runlight
   autoload :SettingsError, "runlight/settings_error"
   autoload :Sources, "runlight/sources"
   autoload :TablesBusyError, "runlight/tables_busy_error"
+  autoload :WeakKeys, "runlight/weak_keys"
   autoload :Ua, "runlight/ua"
   autoload :Zip, "runlight/zip"
 

@@ -108,8 +108,6 @@ module Runlight
 
     # Requests from a manage token, already checked against its one site, act as the owner's; requests from a
     # member have full access apart from the install-wide controls. Both are keyed by the request object.
-    WEAK_MAP = defined?(ObjectSpace::WeakKeyMap) ? ObjectSpace::WeakKeyMap : ObjectSpace::WeakMap
-    private_constant :WEAK_MAP
 
     attr_reader :base
 
@@ -117,8 +115,8 @@ module Runlight
       options = Options.normalize(options)
       @rl = runlight
       @options = options
-      @managed = WEAK_MAP.new
-      @members = WEAK_MAP.new
+      @managed = WeakKeys.new
+      @members = WeakKeys.new
       # When each report's last sample went out.
       @sample_sent = {}
       # Each person's questions to the assistant in the last hour, and how many are being answered now.

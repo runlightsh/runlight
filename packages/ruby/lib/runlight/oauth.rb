@@ -40,7 +40,7 @@ module Runlight
     # Each install's per-address count of registrations, kept in this process as TypeScript keeps it and as the
     # tracker's rate limit is: under a key made at start, dropped whole at the end of each minute, and never
     # written anywhere.
-    REGISTRATIONS = defined?(ObjectSpace::WeakKeyMap) ? ObjectSpace::WeakKeyMap.new : ObjectSpace::WeakMap.new
+    REGISTRATIONS = WeakKeys.new
     REGISTRATIONS_LOCK = Mutex.new
 
     CORS = {

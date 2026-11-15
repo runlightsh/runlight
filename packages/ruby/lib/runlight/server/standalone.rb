@@ -33,9 +33,7 @@ module Runlight
       TOO_LARGE = Json.encode({ "error" => "That request is too large" })
       # Shorter than this, a secret or token set by hand is short enough to guess.
       SHORTEST = 32
-      # Where each request came from, as the handler was told, for the routes' callbacks, which get the request alone.
-      CONTEXTS = defined?(ObjectSpace::WeakKeyMap) ? ObjectSpace::WeakKeyMap : ObjectSpace::WeakMap
-      private_constant :TOO_LARGE, :CONTEXTS
+      private_constant :TOO_LARGE
 
       # What to say at start about a secret or token someone set by hand that is short enough to guess, or nil.
       # The server still starts, since refusing would stop an install that ran before this was checked.
@@ -87,7 +85,8 @@ module Runlight
         @public_host = @public_url.nil? ? nil : Routes.host_name(@public_url.host)
         @own_hosts = nil
         @schedule = nil
-        @contexts = CONTEXTS.new
+        # Where each request came from, as the handler was told, for the routes' callbacks, which get the request alone.
+        @contexts = WeakKeys.new
         # A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that
         # address's tries are all refused until the time is up. A long one cannot be guessed, so nothing is counted
         # for it and nobody's wrong tries can keep a script that shares their address out. Counted in this
