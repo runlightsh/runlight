@@ -263,6 +263,8 @@ public sealed class IngestTests : CoreTestCase
         Func<string, Response> answer = _ => Response.JsonOf(new JsObject { ["prefixes"] = new List<object?> { new JsObject { ["ipv4Prefix"] = "192.0.2.0/24" } } });
         var fetcher = new FakeFetcher((url, _) => answer(url));
         var t = await Harness.CreateAsync(kind, fetcher: fetcher, updateAgentRanges: true);
+        // After the day the bundled lists were made, since a download older than those is not used in their place.
+        t.Now = (long)Importers.Http.ParseDate(AgentCheck.BundledFetchedAt) + DAY;
         Task<bool> FetchFrom(Runlight rl, string ip) => rl.ObserveAsync(AgentRequest(GptBot, ip));
         await t.Rl.CheckAsync();
         var asked = fetcher.Requests.Where(r => !r.Url.Contains("/api/", StringComparison.Ordinal)).ToList();
@@ -281,6 +283,7 @@ public sealed class IngestTests : CoreTestCase
         await FetchFrom(t.Rl, "20.171.206.17"); // in the bundled list only, which the download replaced
         var saved = (JsObject)Json.Parse((await t.Store.SettingAsync("agent-ranges"))!)!;
         Assert.Equal(t.Now, saved.Long("at"));
+        Assert.Equal(t.Now, saved.Obj("fetched")!.Long("https://openai.com/gptbot.json"));
         Assert.Equal("[\"192.0.2.0/24\"]", J(saved.Obj("lists")!.Get("https://openai.com/gptbot.json")));
         t.Advance(HOUR);
         await t.Rl.CheckAsync();

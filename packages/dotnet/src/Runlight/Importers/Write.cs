@@ -17,6 +17,12 @@ public static partial class Write
     /// <summary>The most clicks a day one imported link gets from a daily count.</summary>
     private const double MaxDaily = 10_000;
 
+    /// <summary>
+    /// The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a
+    /// longer history is left behind, so no source, however much it sends, can fill memory or hold the database.
+    /// </summary>
+    public const int MaxLinkClicks = 100_000;
+
     /// <summary>Browser names as other tools write them, in Runlight's spelling.</summary>
     public static readonly IReadOnlyDictionary<string, string> Browsers = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -93,11 +99,54 @@ public static partial class Write
     /// <summary>The first letter in upper case, as TS's title() does.</summary>
     public static string Title(string v) => v.Length == 0 ? "" : Js.Upper(Js.Slice(v, 0, 1)) + Js.Slice(v, 1);
 
-    /// <summary>A browser name in Runlight's spelling: a known one, or the name with a capital first letter.</summary>
-    public static string Browser(string name) => Browsers.TryGetValue(Js.Lower(name), out string? known) ? known : Title(name);
+    /// <summary>
+    /// An IPv4 address, or what reads as an IPv6 one, anywhere in a text whose ASCII letters are in lower case.
+    /// JavaScript's (^|[^\d.])\d{1,3}(\.\d{1,3}){3}(?![\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,} with /i, its lookahead
+    /// written as the character it looks for, so the pattern never backtracks.
+    /// </summary>
+    [GeneratedRegex("(^|[^0-9.])[0-9]{1,3}(\\.[0-9]{1,3}){3}(\\z|[^0-9.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex Address();
 
-    /// <summary>A system name in Runlight's spelling, or the name as given.</summary>
-    public static string System(string name) => Systems.TryGetValue(Js.Lower(name), out string? known) ? known : name;
+    /// <summary>What a user agent has and a place name does not: a product with its version (chrome/129), or its usual first words, in lower case.</summary>
+    [GeneratedRegex("[a-z]/[0-9]|mozilla|applewebkit", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex Agent();
+
+    /// <summary>A browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user agent.</summary>
+    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9 ._+-]{0,39}\\z", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex Name();
+
+    [GeneratedRegex("^[0-9]{1,5}x[0-9]{1,5}\\z", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex Screen();
+
+    [GeneratedRegex("^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}\\z", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex Language();
+
+    private static bool HasAddress(string text) => Address().IsMatch(Data.JsPattern.AsciiLower(text));
+
+    /// <summary>
+    /// Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in
+    /// any column. A name that is not one Runlight knows is kept only when it reads as a name, and nothing else.
+    /// </summary>
+    private static string Named(string name)
+    {
+        string text = Js.Trim(name);
+        return Name().IsMatch(text) && !HasAddress(text) ? text : "";
+    }
+
+    /// <summary>A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for anything else.</summary>
+    public static string Browser(string name) => Browsers.TryGetValue(Js.Lower(name), out string? known) ? known : Title(Named(name));
+
+    /// <summary>A system name in Runlight's spelling, or a name as given, or none for anything that is not a name.</summary>
+    public static string System(string name) => Systems.TryGetValue(Js.Lower(name), out string? known) ? known : Named(name);
+
+    /// <summary>Free text about a place as given, or none when it holds an address or reads as a user agent.</summary>
+    public static string PlaceName(string name) => HasAddress(name) || Agent().IsMatch(Data.JsPattern.AsciiLower(name)) ? "" : name;
+
+    /// <summary>A screen as 1440x900, or none.</summary>
+    public static string ScreenSize(string value) => Screen().IsMatch(Js.Trim(value)) ? Js.Trim(value) : "";
+
+    /// <summary>A language tag such as en or pt-BR, or none.</summary>
+    public static string LanguageTag(string value) => Language().IsMatch(Js.Trim(value)) ? Js.Trim(value) : "";
 
     public static string Device(string name) => Devices.TryGetValue(Js.Lower(name), out string? known) ? known : "";
 
@@ -133,7 +182,9 @@ public static partial class Write
         ArgumentNullException.ThrowIfNull(history);
         string sourceId = Js.String(foreign.Get("sourceId"));
         string id = ImportedLinkId(source, sourceId);
-        if (await runlight.Store.LinkByIdAsync(id, cancellationToken).ConfigureAwait(false) != null)
+        // Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+        // left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+        if (await runlight.Store.LinkExistsAsync(id, cancellationToken).ConfigureAwait(false))
         {
             return new JsObject { ["status"] = "skipped", ["clicks"] = 0L };
         }
@@ -200,6 +251,10 @@ public static partial class Write
             var made = new HashSet<string>(StringComparer.Ordinal);
             foreach (var c in (history.Get("clicks") as List<object?> ?? []).OfType<JsObject>())
             {
+                if (clicks >= MaxLinkClicks)
+                {
+                    break;
+                }
                 if (c.Get("ts") is not (long or double) || !double.IsFinite(c.Num("ts")))
                 {
                     continue;
@@ -220,7 +275,7 @@ public static partial class Write
                     var page = Sources.ParsePage(url);
                     var utm = page.Obj("utm")!;
                     string country = Js.Slice(Js.Upper(Str(c, "country")), 0, 2);
-                    string rawRegion = Str(c, "region");
+                    string rawRegion = PlaceName(Str(c, "region"));
                     string region = rawRegion.Length > 0 ? Js.Slice(Js.Upper(rawRegion.Contains('-', StringComparison.Ordinal) ? rawRegion : country + "-" + rawRegion), 0, 10) : "";
                     var row = new JsObject
                     {
@@ -240,14 +295,14 @@ public static partial class Write
                             ["utmContent"] = utm.Get("content"),
                             ["country"] = IsCountry(country) ? country : "",
                             ["region"] = country.Length > 0 ? region : "",
-                            ["city"] = Js.Slice(Str(c, "city"), 0, 100),
+                            ["city"] = Js.Slice(PlaceName(Str(c, "city")), 0, 100),
                             ["browser"] = Browser(Str(c, "browser")),
                             ["browserVersion"] = "",
                             ["os"] = System(Str(c, "os")),
                             ["osVersion"] = "",
                             ["device"] = Device(Str(c, "device")),
-                            ["screen"] = Js.String(c.Get("screen") ?? ""),
-                            ["language"] = Js.String(c.Get("language") ?? ""),
+                            ["screen"] = ScreenSize(Js.String(c.Get("screen") ?? "")),
+                            ["language"] = LanguageTag(Js.String(c.Get("language") ?? "")),
                         });
                     await store.InsertSessionAsync(row, cancellationToken).ConfigureAwait(false);
                     await store.Db.RunAsync("UPDATE rl_sessions SET imported = 1 WHERE id = ?", [session], cancellationToken).ConfigureAwait(false);
@@ -284,7 +339,7 @@ public static partial class Write
                     continue;
                 }
                 // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-                double n = Math.Min(Math.Floor(count), MaxDaily);
+                double n = Math.Min(Math.Min(Math.Floor(count), MaxDaily), MaxLinkClicks - clicks);
                 for (long i = 0; i < n; i++)
                 {
                     await store.InsertEventAsync(new JsObject

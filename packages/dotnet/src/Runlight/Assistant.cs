@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -104,8 +103,6 @@ public static class Assistant
         0x1F85A, 0x1F85F, 0x1F888, 0x1F88F, 0x1F8AE, 0x1F8AF, 0x1F8BC, 0x1F8BF, 0x1F8C2, 0x1F8CF, 0x1F8D9, 0x1F8FF, 0x1F90C, 0x1F93A,
         0x1F93C, 0x1F945, 0x1F947, 0x1F9FF, 0x1FA58, 0x1FA5F, 0x1FA6E, 0x1FAFF, 0x1FC00, 0x1FFFD,
     ];
-
-    private static readonly CompareInfo Collation = CultureInfo.GetCultureInfo("en").CompareInfo;
 
     private static AssistantProvider? Provider(object? id) => Providers.FirstOrDefault(p => id is string s && s == p.Id);
 
@@ -611,5 +608,5 @@ public static class Assistant
     }
 
     /// <summary>a.localeCompare(b) with ICU's default collation, as Node has it.</summary>
-    private static int LocaleCompare(string a, string b) => Math.Sign(Collation.Compare(a, b, CompareOptions.None));
+    private static int LocaleCompare(string a, string b) => Math.Sign(EnglishOrder.Compare(a, b));
 }

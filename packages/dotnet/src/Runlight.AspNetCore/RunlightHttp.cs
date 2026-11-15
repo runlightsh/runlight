@@ -55,23 +55,54 @@ public static class RunlightHttp
     {
         ArgumentNullException.ThrowIfNull(runlight);
         ArgumentNullException.ThrowIfNull(routes);
-        return ServeAsync(context, (request, ip, ct) => FrontController.AnswerAsync(runlight, routes, request, ip, ct), runlight.IdleAsync);
+        return ServeThenAsync(context, (request, ip, ct) => FrontController.AnswerAsync(runlight, routes, request, ip, ct), runlight.IdleSoon);
     }
 
     /// <summary>
     /// Answers a request through <paramref name="handler"/>, with the connection's address as its ip, then runs
-    /// <paramref name="idle"/> once the response has been sent, for the work TS does after answering. A body
-    /// past its limit is a 413; a client that goes away is answered nothing.
+    /// <paramref name="idle"/> once the response has been sent, for the work TS does after answering. It is
+    /// started then and not waited for, since the server reads nothing more from the connection until what it
+    /// waits for there is done. A body past its limit is a 413; a client that goes away is answered nothing.
     /// </summary>
-    public static async Task ServeAsync(HttpContext context, RequestHandler handler, Func<Task>? idle = null)
+    public static Task ServeAsync(HttpContext context, RequestHandler handler, Func<Task>? idle = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(handler);
-        CancellationToken aborted = context.RequestAborted;
-        if (idle != null)
+        return ServeThenAsync(context, handler, idle == null ? null : () => Apart(idle));
+    }
+
+    /// <summary>Runs work apart from any request, with what goes wrong in it said and nothing more.</summary>
+    private static void Apart(Func<Task> work) => _ = Task.Run(async () =>
+    {
+        try
         {
-            // The visitor has the answer by then; whatever is left runs without keeping them waiting.
-            context.Response.OnCompleted(() => idle());
+            await work().ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            await Console.Error.WriteLineAsync("Runlight: " + error.Message).ConfigureAwait(false);
+        }
+    });
+
+    /// <summary>
+    /// Calls <paramref name="after"/> once the response has been sent. It must only start its work, never wait
+    /// for it: ASP.NET Core holds the connection, and the next request on it, until these callbacks return.
+    /// </summary>
+    internal static void After(HttpContext context, Action after) =>
+        context.Response.OnCompleted(() =>
+        {
+            after();
+            return Task.CompletedTask;
+        });
+
+    /// <summary>As <see cref="ServeAsync(HttpContext, RequestHandler, Func{Task}?)"/>, with what to start once the response has been sent.</summary>
+    internal static async Task ServeThenAsync(HttpContext context, RequestHandler handler, Action? after)
+    {
+        CancellationToken aborted = context.RequestAborted;
+        if (after != null)
+        {
+            // The visitor has the answer by then; whatever is left runs without keeping them, or their connection, waiting.
+            After(context, after);
         }
         Request request;
         try
@@ -173,7 +204,16 @@ public static class RunlightHttp
             proto = http.IsHttps ? "https" : "http";
         }
         string host = headers.Get("host") ?? "localhost";
-        return Url.Parse(target.StartsWith('/') ? target : "/" + target, (proto == "https" ? "https" : "http") + "://" + host)?.Href ?? "http://localhost/";
+        // The scheme and host first, alone, and the target written after them: resolved against them instead, a
+        // target that starts with two slashes, or a slash and a backslash, would name a host of its own, and with
+        // it the origin the consent form and the dashboard's links are checked against.
+        var origin = Url.Parse((proto == "https" ? "https" : "http") + "://" + host);
+        if (origin == null || origin.Pathname != "/" || origin.Search.Length > 0 || origin.Hash.Length > 0 || origin.Username.Length > 0 || origin.Password.Length > 0)
+        {
+            return "http://localhost/";
+        }
+        var url = Url.Parse(origin.Origin + (target.StartsWith('/') ? target : "/" + target));
+        return url != null && url.Origin == origin.Origin ? url.Href : "http://localhost/";
     }
 
     /// <summary>The connection's address, an IPv4 address that arrived on an IPv6 socket written as IPv4.</summary>

@@ -294,6 +294,24 @@ public static class Sql
     }
 
     /// <summary>The events table, read through its kind and time index on SQLite, which otherwise reads a site's whole history by path.</summary>
+    /// <summary>
+    /// Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even
+    /// number of backslashes. JSON.stringify writes both for a string that holds them, and they are valid JSON.
+    /// </summary>
+    private const string PgUnreadableProps = """(?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}""";
+
+    /// <summary>
+    /// An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+    /// escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props,
+    /// rather than failing every report that reads its event. SQLite reads them as they are.
+    /// </summary>
+    public static string ReadableProps(string dialect) => dialect switch
+    {
+        "postgres" => "(CASE WHEN e.props !~ '" + PgUnreadableProps + "' THEN e.props END)::jsonb",
+        "mysql" => "(CASE WHEN JSON_VALID(e.props) THEN e.props END)",
+        _ => "e.props",
+    };
+
     public static string EventKindTable(string dialect) => dialect == "sqlite" ? "rl_events e INDEXED BY rl_events_site_kind_ts" : "rl_events e";
 
     /// <summary>Whole-number division, which MySQL's <c>/</c> is not.</summary>

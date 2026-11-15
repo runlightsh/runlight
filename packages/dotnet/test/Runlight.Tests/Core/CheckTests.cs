@@ -249,8 +249,9 @@ public sealed class CheckTests : CoreTestCase
     {
         var t = await Harness.CreateAsync("sqlite", Site("UTC"));
         await t.Rl.InitAsync();
-        await new Throttle(t.Store, "ip", 30).FailAsync("203.0.113.7", t.Now - DAY);
+        // Today's first, since a throttle's first try sweeps what has ended by then, and the check is what is tried here.
         await new Throttle(t.Store, "address", 10).FailAsync("jon@example.com|203.0.113.7", t.Now);
+        await new Throttle(t.Store, "ip", 30).FailAsync("203.0.113.7", t.Now - DAY);
         await t.Store.SetSettingAsync("throttle-key:2026-01-01", "left by a process that stopped");
         Assert.Equal(3, (await t.Store.SettingsStartingWithAsync("throttle-key:")).Count);
         Assert.Equal(2, (await t.Store.SettingsStartingWithAsync("throttle:")).Count);

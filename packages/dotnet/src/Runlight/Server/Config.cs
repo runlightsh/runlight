@@ -207,7 +207,23 @@ public sealed partial class Config
     }
 
     /// <summary>Shorter than any secret this file has ever been given, so a file caught half written is never used.</summary>
-    private const int ShortestSecret = 32;
+    public const int ShortestSecret = 32;
+
+    /// <summary>
+    /// What to say at start about a secret or token someone set by hand that is short enough to guess, or null. The
+    /// server still starts, since refusing would stop an install that ran before this was checked.
+    /// </summary>
+    /// <param name="name">RUNLIGHT_SECRET or RUNLIGHT_TOKEN.</param>
+    /// <param name="value">What it is set to, or null when it is not set.</param>
+    public static string? ShortWarning(string name, string? value)
+    {
+        if (value == null || value.Length >= ShortestSecret)
+        {
+            return null;
+        }
+        string does = name == "RUNLIGHT_SECRET" ? "It signs every session and encrypts the saved mail and assistant keys" : "Anyone who guesses it has the whole API, as the owner";
+        return "Runlight: WARNING: " + name + " is only " + Js.Str(value.Length) + " characters long. " + does + ". Set it to " + Js.Str(ShortestSecret) + " or more random characters, such as the output of: openssl rand -hex 32";
+    }
 
     /// <summary>
     /// The secret kept in <paramref name="dataDir"/>, made on first run. Two servers starting at once on one folder

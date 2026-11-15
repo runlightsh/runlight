@@ -95,7 +95,6 @@ public sealed class Routes
     private static readonly long[] RetentionMonths = [6, 12, 24, 36, 60];
 
     private static readonly Regex PortEnd = R(":[0-9]*\\z");
-    private static readonly Regex DotsEnd = R("\\.+\\z");
     private static readonly Regex Www = R("^www\\.");
     private static readonly Regex DottedQuad = R("(^|\\.)[0-9]{1,3}(\\.[0-9]{1,3}){3}(\\.|\\z)");
     private static readonly Regex PrivateSuffix = R("\\.(internal|intranet|private|local|localhost|localdomain|lan|home|corp|home\\.arpa|arpa|test|invalid|example)\\z");
@@ -239,9 +238,12 @@ public sealed class Routes
             Site = (id, _) => Task.FromResult(runlight.Site(id)),
             IsRemote = (id, _) => Task.FromResult(runlight.Remote(id) != null),
             IsOwner = async (r, ct) => await CanReadAsync(r, ct).ConfigureAwait(false) is true,
-            IsReader = async (r, ct) => authorize != null
-                ? await authorize(r, ct).ConfigureAwait(false) is "read"
-                : web != null && await web.AccessAsync(r, ct).ConfigureAwait(false) is "read",
+            // An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+            IsReader = async (r, ct) => (await SessionScopeAsync(r, ct).ConfigureAwait(false))?.Str("site") != null
+                || (authorize != null
+                    ? await authorize(r, ct).ConfigureAwait(false) is "read"
+                    : web != null && await web.AccessAsync(r, ct).ConfigureAwait(false) is "read"),
+            IsSiteOnly = async (r, ct) => (await SessionScopeAsync(r, ct).ConfigureAwait(false))?.Str("site") != null,
             SignIn = string.IsNullOrEmpty(_signIn) ? null : _signIn,
             AccountOf = _accountOf,
             TokenMade = _tokenMade,
@@ -357,8 +359,14 @@ public sealed class Routes
         {
             name = PortEnd.Replace(first, "");
         }
-        return Www.Replace(DotsEnd.Replace(name, ""), "");
+        return Www.Replace(WithoutFinalDots(name), "");
     }
+
+    /// <summary>Text without its final dots, read from the end, so a long run of dots costs no more than its length.</summary>
+    private static string WithoutFinalDots(string text) => text.TrimEnd('.');
+
+    /// <summary>The longest domain name there can be. Anything longer is refused before a pattern reads it.</summary>
+    private const int MaxDomain = 253;
 
     /// <summary>
     /// Whether a domain name is one kept for private networks or tests, or has
@@ -369,7 +377,7 @@ public sealed class Routes
     private static bool PrivateName(string domain) => DottedQuad.IsMatch(domain) || PrivateSuffix.IsMatch(domain);
 
     /// <summary>What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets.</summary>
-    private static bool IsEmail(string value) => Email.IsMatch(value);
+    private static bool IsEmail(string value) => value.Length <= Runlight.EmailMax && Email.IsMatch(value);
 
     private const long MaxPassThroughBytes = 100L * 1024 * 1024;
 
@@ -757,14 +765,19 @@ public sealed class Routes
     /// </summary>
     private async Task<JsObject?> SessionScopeAsync(Request request, CancellationToken cancellationToken) => _web != null ? await _web.SignedInAsync(request, cancellationToken).ConfigureAwait(false) : null;
 
+    /// <summary>
+    /// A hub's manage token and an account kept to one site reach one site's settings and nothing of the install's,
+    /// so neither is taken at its word about where this app lives: the Host of a request is the caller's to choose.
+    /// </summary>
+    private async Task<bool> RestrictedAsync(Request request, CancellationToken cancellationToken) =>
+        _managed.TryGetValue(request, out _) || (await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false))?.Str("site") != null;
+
     private async Task<object> CanReadAsync(Request request, CancellationToken cancellationToken)
     {
         if (_managed.TryGetValue(request, out _))
         {
             return true;
         }
-        var scoped = await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false);
-        if (scoped?.Str("site") != null && new Url(request.Url).Pathname.Contains("/oauth/", StringComparison.Ordinal)) return false;
         var authorize = _options.Authorize;
         if (authorize != null || _web != null)
         {
@@ -773,6 +786,14 @@ public sealed class Routes
             if (authorize == null && !string.IsNullOrEmpty(_token) && given.Length > 0 && ConstantTimeEqual(given, _token))
             {
                 return true;
+            }
+            // An account kept to one site connects no apps: the path under the base is what counts, so a base
+            // path or a site's own address with /oauth/ in it changes nothing.
+            var scoped = await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false);
+            string pathname = new Url(request.Url).Pathname;
+            if (scoped?.Str("site") != null && pathname.Length >= _base.Length && pathname[_base.Length..].StartsWith("/oauth/", StringComparison.Ordinal))
+            {
+                return false;
             }
             object answer = authorize != null ? await authorize(request, cancellationToken).ConfigureAwait(false) : await _web!.AccessAsync(request, cancellationToken).ConfigureAwait(false);
             // A member changes things like an owner, apart from the few controls AdminOnly names.
@@ -958,23 +979,27 @@ public sealed class Routes
     private async Task<object> CheckLinkDomainAsync(Request request, Url url, string site, string value, CancellationToken cancellationToken)
     {
         string domain = Js.Lower(Js.Trim(value));
+        if (domain.Length > MaxDomain)
+        {
+            return Coded("That is not a domain name", "domain_invalid", 400);
+        }
         domain = HttpPrefix.Replace(domain, "");
         domain = PathAfter.Replace(domain, "", 1);
-        domain = DotsEnd.Replace(domain, "");
+        domain = WithoutFinalDots(domain);
         domain = Www.Replace(domain, "");
         if (!DomainName.IsMatch(domain))
         {
             return Coded("That is not a domain name", "domain_invalid", 400);
         }
-        if (PrivateName(domain) || await Safefetch.ResolvesPrivatelyAsync(domain).ConfigureAwait(false))
+        if (PrivateName(domain) || await Safefetch.ResolvesPrivatelyAsync(domain, cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             return Coded(domain + " is not a public domain name. Use one that browsers anywhere can reach.", "domain_not_public", 400, new JsObject { ["domain"] = domain });
         }
         // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
         // The request's own Host is the caller's to choose, so the configured address and the names people
         // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-        // the app knows its own address.
-        if (_managed.TryGetValue(request, out _) && _origin == null)
+        // the app knows its own address, and neither does an account kept to one site, which has a hub's reach.
+        if (_origin == null && await RestrictedAsync(request, cancellationToken).ConfigureAwait(false))
         {
             return OriginNeeded();
         }
@@ -1066,7 +1091,7 @@ public sealed class Routes
                 // Where the domain should point, for the setup steps: this server's name, and its public addresses
                 // for a bare domain, which takes an A record. A server reached by its address has no name to give.
                 string ownHost = _origin != null ? new Url(_origin).Hostname : url.Hostname;
-                var target = new JsObject { ["host"] = ownHost, ["addresses"] = ToList(await Safefetch.PublicAddressesAsync(ownHost).ConfigureAwait(false)) };
+                var target = new JsObject { ["host"] = ownHost, ["addresses"] = ToList(await Safefetch.PublicAddressesAsync(ownHost, cancellationToken: cancellationToken).ConfigureAwait(false)) };
                 Response Result(string code, string reason, JsObject? parameters = null)
                 {
                     var output = new JsObject { ["domain"] = domain, ["working"] = code.Length == 0, ["reason"] = reason, ["target"] = target };
@@ -1686,8 +1711,9 @@ public sealed class Routes
                     // Links in the email point back to the configured address, or else to this dashboard at the address
                     // the request came to. An address in the body is never used, so whoever adds a report cannot point
                     // its links somewhere else. A report made from a hub needs the configured address, where its
-                    // unsubscribe link answers, since the Host its request names is the hub's to choose.
-                    if (_managed.TryGetValue(request, out _) && _origin == null)
+                    // unsubscribe link answers, since the Host its request names is the hub's to choose. So does one
+                    // made by an account kept to one site.
+                    if (_origin == null && await RestrictedAsync(request, cancellationToken).ConfigureAwait(false))
                     {
                         return OriginNeeded();
                     }
@@ -2679,9 +2705,16 @@ public sealed class Routes
                 back = (address, nonce);
             }
             // A hub's ticket only ever sends to the hub it connected from, never to an origin it names now.
-            if (_managed.TryGetValue(request, out var hub) && await Store.SettingAsync("token-origin:" + hub.Str("id"), cancellationToken).ConfigureAwait(false) != origin)
+            bool viaHub = _managed.TryGetValue(request, out var hub);
+            if (viaHub && await Store.SettingAsync("token-origin:" + hub!.Str("id"), cancellationToken).ConfigureAwait(false) != origin)
             {
                 return Coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403);
+            }
+            // An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+            // one the address its request came to.
+            if (!viaHub && (await SessionScopeAsync(request, cancellationToken).ConfigureAwait(false))?.Str("site") != null && origin != (_origin ?? url.Origin))
+            {
+                return Coded("Your account can only pick from this dashboard's own address", "pick_own", 403);
             }
             return JsonResponse(new JsObject { ["ticket"] = await PickTicketAsync(origin, site.Str("id")!, back, cancellationToken).ConfigureAwait(false) });
         }
@@ -2854,7 +2887,7 @@ public sealed class Routes
         // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         foreach (var p in keep)
         {
-            if (await rl.ObserveAsync(new Request(p.Page.Href, "GET", new Headers { ["user-agent"] = p.UserAgent }), p.At, agentIp: p.Ip ?? "", cancellationToken: cancellationToken).ConfigureAwait(false))
+            if (await rl.ObserveAsync(new Request(p.Page.Href, "GET"), p.At, agentIp: p.Ip ?? "", userAgent: p.UserAgent, cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 recorded++;
             }

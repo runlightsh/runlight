@@ -29,7 +29,7 @@ public sealed record PlayOptions(JsObject Runlight, JsObject Routes, object? Sto
 public sealed class Player
 {
     /// <summary>The SHA-256 of http.json's description this runner was written against.</summary>
-    public const string FormatSha256 = "d78e8af310f1c99155b84090df4ad252dfe4f78649943b0495a3998354c20134";
+    public const string FormatSha256 = "9084b2fe4e39a473874020a8343a9aa1768f541b09e79b846240331a0b160dfb";
 
     /// <summary>Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.</summary>
     public static readonly string[] Env = ["RUNLIGHT_TOKEN", "RUNLIGHT_SECRET", "CRON_SECRET", "RUNLIGHT_OBSERVE_KEY", "NODE_ENV"];
@@ -46,6 +46,7 @@ public sealed class Player
 
     private const RegexOptions Options = RegexOptions.CultureInvariant;
     private static readonly Regex TotpTemplate = new("\\{\\{totp:([A-Za-z0-9_]+)\\}\\}", Options);
+    private static readonly Regex PadTemplate = new("\\{\\{pad:([0-9]+)\\}\\}", Options);
     private static readonly Regex Template = new("\\{\\{([A-Za-z0-9_]+)\\}\\}", Options);
     private static readonly Regex ClearsCookie = new("^[" + JsSpaceChars + "]*max-age=0[" + JsSpaceChars + "]*\\z", Options | RegexOptions.IgnoreCase);
 
@@ -395,9 +396,13 @@ public sealed class Player
         _ => "[object Object]",
     };
 
-    /// <summary>{{totp:name}} as the six-digit code for the captured secret at the step's clock, then {{name}}.</summary>
+    /// <summary>
+    /// {{pad:N}} as the letter x N times, then {{totp:name}} as the six-digit code for the captured secret at the
+    /// step's clock, then {{name}}.
+    /// </summary>
     private string FillTotp(string text, Dictionary<string, string> kept)
     {
+        text = PadTemplate.Replace(text, m => new string('x', int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)));
         string output = text;
         foreach (Match m in TotpTemplate.Matches(text))
         {

@@ -143,6 +143,43 @@ public sealed class DbIp
         {
             return;
         }
+        // While the month's file is not published yet, or a download keeps failing, each try waits twice as long as
+        // the last, from five minutes up to six hours, so neither DB-IP nor the disk is asked for the whole file
+        // every few minutes.
+        if (now < _retryAt)
+        {
+            return;
+        }
+        try
+        {
+            await FetchAsync(current, now, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(File(current)))
+            {
+                _wait = 0;
+            }
+            else
+            {
+                _wait = Math.Min(_wait == 0 ? FirstWaitMs : _wait * 2, LongestWaitMs);
+                _retryAt = now + _wait;
+            }
+        }
+    }
+
+    /// <summary>How long after a first failed try the next one waits, and the longest any waits.</summary>
+    public const long FirstWaitMs = 5 * 60_000;
+
+    public const long LongestWaitMs = 6 * 3_600_000;
+
+    /// <summary>After a try that left this month's file missing: how long the next waits, and when it may start.</summary>
+    private long _wait;
+
+    private long _retryAt;
+
+    private async Task FetchAsync(string current, long now, CancellationToken cancellationToken)
+    {
         try
         {
             Directory.CreateDirectory(_dir);

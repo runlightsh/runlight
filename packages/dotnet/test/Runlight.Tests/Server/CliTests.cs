@@ -330,6 +330,8 @@ public sealed class CliTests : ServerTestCase
         published.Add("2026-10");
         asked.Clear();
         await geo.RefreshAsync(October);
+        Assert.Empty(asked); // this month's file was missing a moment ago, so it is not asked for again yet
+        await geo.RefreshAsync(October + DbIp.FirstWaitMs);
         Assert.Equal(["https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz"], asked);
         Assert.Equal([dir + "/dbip-city-lite-2026-10.mmdb"], Directory.GetFiles(dir).Select(f => dir + "/" + Path.GetFileName(f))); // older releases go
         asked.Clear();

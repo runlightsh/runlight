@@ -498,14 +498,17 @@ public static class Crypto
     public static long? MatchStep(string secret, string code, long now, long after)
     {
         long current = now / StepMs - (now < 0 && now % StepMs != 0 ? 1 : 0);
-        foreach (long step in new[] { current, current - 1, current + 1 })
+        // Every step is worked out and compared in time that does not depend on where the code differs. The
+        // current step is checked last, so it is the one kept if two should match.
+        long? found = null;
+        foreach (long step in new[] { current + 1, current - 1, current })
         {
-            if (step > after && Totp(secret, step) == code)
+            if (SameText(Totp(secret, step), code) && step > after)
             {
-                return step;
+                found = step;
             }
         }
-        return null;
+        return found;
     }
 
     /// <summary>The address an authenticator app reads from the QR code.</summary>

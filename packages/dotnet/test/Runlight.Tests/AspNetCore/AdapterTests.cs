@@ -16,6 +16,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Runlight.AspNetCore;
+using Runlight.Store;
+using Runlight.Tests.Store;
 using Xunit;
 using Response = Runlight.Http.Response;
 
@@ -156,9 +158,119 @@ public sealed class AdapterTests : IAsyncLifetime
         Assert.Equal("the app's home", await client.GetStringAsync("http://example.com/"));
         var post = await client.SendAsync(Message(HttpMethod.Get, "/blog/hello", null, null, ("user-agent", GptBot)));
         Assert.Equal("post hello", await post.Content.ReadAsStringAsync());
+        // Recorded apart from the request, so the page never waits for it.
+        await rl.IdleAsync();
         var fetches = await rl.Store.Db.AllAsync("SELECT path, name FROM rl_events WHERE kind = 'fetch'");
         Assert.Equal("/blog/hello", Assert.Single(fetches).Str("path"));
         Assert.Equal("GPTBot", fetches[0].Str("name"));
+    }
+
+    [Theory]
+    [MemberData(nameof(Ways))]
+    public async Task The_apps_own_pages_answer_while_runlights_database_is_down(bool middleware)
+    {
+        bool down = true;
+        int asked = 0;
+        var watched = new WatchedDb((await Databases.FreshAsync("sqlite")).Db)
+        {
+            Before = (_, _) =>
+            {
+                asked++;
+                return down ? throw new InvalidOperationException("the database is down") : Task.CompletedTask;
+            },
+        };
+        var rl = new Runlight(new RunlightOptions { Store = new SqlStore(watched), Site = new SiteOptions { Name = "Example", Hostnames = ["example.com"] } });
+        await using var app = await AppAsync(rl, middleware);
+        HttpClient client = app.GetTestClient();
+
+        // Runlight cannot say whether this is a link domain, so the request is the app's, not a 500 of Runlight's.
+        Assert.Equal("the app's home", await client.GetStringAsync("http://example.com/"));
+        Assert.Equal("post hello", await client.GetStringAsync("http://example.com/blog/hello"));
+        // The failure is remembered for a moment: the second page did not ask the database again.
+        int after = asked;
+        Assert.Equal("the app's home", await client.GetStringAsync("http://example.com/"));
+        Assert.Equal(after, asked);
+        // Runlight's own routes still say what is wrong with them.
+        Assert.Equal(HttpStatusCode.InternalServerError, (await client.SendAsync(Message(HttpMethod.Get, "/runlight/api/sites", null, null, ("authorization", "Bearer tok")))).StatusCode);
+
+        // Once the database is back, and the moment has passed, everything answers again.
+        down = false;
+        rl.LinkDomainRetryMs = 0;
+        Assert.Equal("the app's home", await client.GetStringAsync("http://example.com/"));
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(Message(HttpMethod.Get, "/runlight/api/sites", null, null, ("authorization", "Bearer tok")))).StatusCode);
+    }
+
+    [Theory]
+    [MemberData(nameof(Ways))]
+    public async Task A_method_no_route_answers_goes_to_the_app(bool middleware)
+    {
+        var rl = await RunlightAsync();
+        WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(rl);
+        await using WebApplication app = builder.Build();
+        if (middleware)
+        {
+            app.UseRunlight(new RoutesOptions { Token = "tok" });
+        }
+        else
+        {
+            app.MapRunlight(new RoutesOptions { Token = "tok" });
+        }
+        app.MapMethods("/", ["TRACE", "TRACK"], () => "the app's own");
+        await app.StartAsync();
+        HttpClient client = app.GetTestClient();
+        foreach (string method in new[] { "TRACE", "TRACK" })
+        {
+            // Even on a name that is a link domain, where every other path would be Runlight's to answer.
+            var answer = await client.SendAsync(Message(new HttpMethod(method), "/", null, "example.com"));
+            Assert.Equal("the app's own", await answer.Content.ReadAsStringAsync());
+        }
+    }
+
+    [Fact]
+    public async Task An_ai_agents_page_does_not_wait_for_its_fetch_to_be_recorded()
+    {
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var watched = new WatchedDb((await Databases.FreshAsync("sqlite")).Db)
+        {
+            Before = (sql, _) => sql.Contains("INSERT INTO rl_events", StringComparison.Ordinal) ? hold.Task : Task.CompletedTask,
+        };
+        var rl = new Runlight(new RunlightOptions { Store = new SqlStore(watched), Site = new SiteOptions { Name = "Example", Hostnames = ["example.com"] } });
+        await using var app = await AppAsync(rl, middleware: false);
+        HttpClient client = app.GetTestClient();
+
+        // The page comes back while the insert is still held.
+        var page = client.SendAsync(Message(HttpMethod.Get, "/blog/hello", null, null, ("user-agent", GptBot)));
+        Assert.Same(page, await Task.WhenAny(page, Task.Delay(TimeSpan.FromSeconds(10))));
+        Assert.Equal("post hello", await (await page).Content.ReadAsStringAsync());
+        Assert.Empty(await rl.Store.Db.AllAsync("SELECT path FROM rl_events WHERE kind = 'fetch'"));
+
+        hold.SetResult();
+        await rl.IdleAsync();
+        Assert.Equal("/blog/hello", Assert.Single(await rl.Store.Db.AllAsync("SELECT path FROM rl_events WHERE kind = 'fetch'")).Str("path"));
+    }
+
+    [Fact]
+    public async Task A_target_that_starts_like_an_address_never_names_the_requests_host()
+    {
+        foreach (string target in new[] { "//evil.example/runlight/oauth/authorize", "/\\evil.example/runlight/oauth/authorize", "/\\/evil.example/x", "///evil.example/x" })
+        {
+            var context = new DefaultHttpContext();
+            context.Request.Method = "POST";
+            context.Request.Headers.Host = "stats.example.com";
+            context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()!.RawTarget = target;
+            var request = await RunlightHttp.ToRequestAsync(context);
+            var url = new Http.Url(request.Url);
+            Assert.Equal("http://stats.example.com", url.Origin);
+            Assert.EndsWith("evil.example" + target[(target.IndexOf("evil.example", StringComparison.Ordinal) + "evil.example".Length)..], url.Pathname, StringComparison.Ordinal);
+        }
+        // A Host that is more than a host is nobody's address.
+        var odd = new DefaultHttpContext();
+        odd.Request.Headers.Host = "stats.example.com/x?y";
+        odd.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()!.RawTarget = "/runlight";
+        Assert.Equal("http://localhost/", (await RunlightHttp.ToRequestAsync(odd)).Url);
     }
 
     [Theory]
@@ -313,6 +425,18 @@ public sealed class AdapterTests : IAsyncLifetime
             await stream.WriteAsync(Encoding.UTF8.GetBytes("second"), ct);
         }, 200, new Http.Headers { ["content-type"] = "text/plain" }))));
         app.Map("/broken", Serve((_, _, _) => Task.FromResult(new Response((_, _) => throw new InvalidOperationException("no body")))));
+        // Work left for after the answer, which takes its time.
+        var working = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool worked = false;
+        RequestHandler answered = (_, _, _) => Task.FromResult(new Response("answered"));
+        Func<Task> after = async () =>
+        {
+            await working.Task;
+            worked = true;
+        };
+        RequestDelegate slow = context => RunlightHttp.ServeAsync(context, answered, after);
+        app.Map("/slow-after", slow);
+        app.MapFallback(Serve((request, _, _) => Task.FromResult(Response.JsonOf(new JsObject { ["url"] = request.Url }))));
         app.Map("/cookies", Serve((_, _, _) =>
         {
             var headers = new Http.Headers();
@@ -344,6 +468,20 @@ public sealed class AdapterTests : IAsyncLifetime
 
             var cookies = await client.GetAsync("http://127.0.0.1:" + KestrelPort + "/cookies");
             Assert.Equal(["a=1; Path=/", "b=2; Path=/"], cookies.Headers.GetValues("Set-Cookie"));
+
+            // A target that starts with two slashes is a path on the Host the request named, never another host.
+            string slashes = await RawAsync("GET //evil.example/echo/x HTTP/1.1\r\nHost: stats.example.com\r\nConnection: close\r\n\r\n");
+            Assert.StartsWith("HTTP/1.1 200", slashes, StringComparison.Ordinal);
+            Assert.Equal("http://stats.example.com//evil.example/echo/x", ((JsObject)Json.Parse(slashes[(slashes.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4)..])!).Str("url"));
+
+            // Work after the answer never holds the connection: the next request on it is answered while the work is
+            // still going. One connection at most, so the second request has to use the first's.
+            using var one = new HttpClient(new SocketsHttpHandler { MaxConnectionsPerServer = 1 }) { Timeout = TimeSpan.FromSeconds(10) };
+            Assert.Equal("answered", await one.GetStringAsync("http://127.0.0.1:" + KestrelPort + "/slow-after"));
+            Assert.Contains("/echo/next", await one.GetStringAsync("http://127.0.0.1:" + KestrelPort + "/echo/next"), StringComparison.Ordinal);
+            Assert.False(worked);
+            working.SetResult();
+            await EventuallyAsync(() => Task.FromResult(worked));
 
             string head = await RawAsync("HEAD /echo/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
             Assert.StartsWith("HTTP/1.1 200", head, StringComparison.Ordinal);

@@ -31,7 +31,11 @@ public static class Icon
     /// <summary>JavaScript's \s, for patterns.</summary>
     private const string Space = "[" + SpaceChars + "]";
 
-    private static readonly Regex LinkTag = new("<" + Letters("link") + "(?![A-Za-z0-9_])[^>]*>", RegexOptions.CultureInvariant);
+    /// <summary>
+    /// A link tag: no "&lt;" or "&gt;" inside, and at most 4,000 characters, as JavaScript's /&lt;link\b[^&lt;&gt;]{0,4000}&gt;/gi.
+    /// The bound keeps a page of unclosed tags from being read over and over, and the pattern never backtracks.
+    /// </summary>
+    private static readonly Regex LinkTag = new("<" + Letters("link") + "(?:[^<>A-Za-z0-9_][^<>]{0,3999})?>", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private static readonly Regex Spaces = new(Space + "+", RegexOptions.CultureInvariant);
 
     /// <summary>One attribute: its name, then any value, double quoted, single quoted, or bare.</summary>

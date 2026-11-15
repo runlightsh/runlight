@@ -37,7 +37,7 @@ public static class Ua
         ("Instagram", R("Instagram ([0-9]+)")),
         ("Firefox", R("(?:Firefox|FxiOS)/([0-9]+)")),
         ("Chrome", R("(?:CriOS|Chrome)/([0-9]+)")),
-        ("Safari", R("Version/([0-9]+)[0-9.]* (?:Mobile/" + NonSpace + "+ )?Safari/")),
+        ("Safari", R("Version/([0-9]+)(?:\\.[0-9.]*)? (?:Mobile/" + NonSpace + "+ )?Safari/")),
         ("Internet Explorer", R("(?:MSIE |Trident/" + Dot + "*rv:)([0-9]+)")),
     ];
 
@@ -59,10 +59,16 @@ public static class Ua
     private static readonly Regex Tablet = R("iPad|Tablet|PlayBook|Silk");
     private static readonly Regex Mobile = R("Mobi|iPhone|iPod|Opera Mini|IEMobile");
 
+    /// <summary>The most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past it is parsed.</summary>
+    public const int MaxUa = 512;
+
+    private static string Cap(string value) => value.Length > MaxUa ? value[..MaxUa] : value;
+
     /// <summary>The AI agent a user agent names, or null.</summary>
     public static JsObject? AiAgent(string ua)
     {
-        string lower = Js.Lower(ua);
+        ArgumentNullException.ThrowIfNull(ua);
+        string lower = Js.Lower(Cap(ua));
         foreach (var agent in Lists.AiAgents)
         {
             if (lower.Contains(agent.Str("token")!, StringComparison.Ordinal))
@@ -75,6 +81,8 @@ public static class Ua
 
     public static bool IsBot(string ua)
     {
+        ArgumentNullException.ThrowIfNull(ua);
+        ua = Cap(ua);
         string lower = JsPattern.AsciiLower(ua);
         if (ua.Length < 20 || (!lower.Contains("mozilla", StringComparison.Ordinal) && !lower.Contains("opera", StringComparison.Ordinal)))
         {
@@ -88,7 +96,9 @@ public static class Ua
     /// <summary>The browser, OS, and device of a user agent, with the client hints and the screen width when there are any.</summary>
     public static JsObject ParseClient(string ua, JsObject? hints = null, double? screenWidth = null)
     {
-        hints ??= new JsObject();
+        ArgumentNullException.ThrowIfNull(ua);
+        ua = Cap(ua);
+        hints = new JsObject { ["brands"] = Cap(hints?.Str("brands") ?? ""), ["mobile"] = Cap(hints?.Str("mobile") ?? ""), ["platform"] = Cap(hints?.Str("platform") ?? "") };
         string browser = "Other";
         string browserVersion = "";
         foreach (var (name, pattern) in Browsers)

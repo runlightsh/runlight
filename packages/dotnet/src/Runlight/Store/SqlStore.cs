@@ -621,101 +621,84 @@ public sealed partial class SqlStore
         {
             return null;
         }
-        // Keyed by value in the order first seen.
-        var sums = new OrderedDictionary<string, Dictionary<string, double>>(StringComparer.Ordinal);
-        void Bump(JsObject row)
-        {
-            string key = Sql.S(row.Get("value"));
-            if (!sums.TryGetValue(key, out var into))
-            {
-                into = SumKeys.ToDictionary(k => k, _ => 0.0, StringComparer.Ordinal);
-                sums[key] = into;
-            }
-            foreach (string k in SumKeys)
-            {
-                into[k] += Sql.Num(row.Get(k));
-            }
-        }
+        // Each source adds up its own rows by value, and the database adds the sources together, sorts them,
+        // and cuts them to the page asked for, so no more than that page is ever read into memory.
+        string Part(string value, Dictionary<string, string> counted) =>
+            value + " AS value, " + string.Join(", ", SumKeys.Select(c => (counted.TryGetValue(c, out string? sql) ? sql : "0") + " AS " + c));
+        var parts = new List<string>();
+        var parameters = new List<object?>();
         if (plan.Days.Count > 0)
         {
-            var rolled = await Db.AllAsync(
-                "SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,\n           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events\n         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (" + Sql.BuiltDays + ") GROUP BY value",
-                A(site, dimension, site, qFrom, qTo),
-                cancellationToken).ConfigureAwait(false);
-            foreach (var row in rolled)
-            {
-                Bump(row);
-            }
+            parts.Add("SELECT value, " + string.Join(", ", SumKeys) + " FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (" + Sql.BuiltDays + ")");
+            parameters.AddRange([site, dimension, site, qFrom, qTo]);
         }
         var w = Within(plan.Rest);
-        if ((page || evt) && plan.Rest.Count > 0)
+        // A visit's pageviews and events belong to the day it started, as in the rollups. Bounded
+        // by time as well, so the events index finds them (see BuildRollupDayAsync).
+        double lo = plan.Rest.Count > 0 ? plan.Rest.Min(r => r.From) : 0;
+        double hi = plan.Rest.Count > 0 ? plan.Rest.Max(r => r.To) + Sql.EventTailMs : 0;
+        string OfRest(string kind) => "FROM " + Sql.EventKindTable(Dialect) + " CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '" + kind + "' AND e.ts >= ? AND e.ts < ? AND " + Sql.IsVisit + " AND " + w.Sql;
+        List<object?> at = [site, lo, hi, .. w.Params];
+        if (plan.Rest.Count > 0)
         {
-            // A visit's pageviews and events belong to the day it started, as in the rollups. Bounded
-            // by time as well, so the events index finds them (see BuildRollupDayAsync).
-            double lo = plan.Rest.Min(r => r.From);
-            double hi = plan.Rest.Max(r => r.To) + Sql.EventTailMs;
-            string OfRest(string kind) => "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '" + kind + "' AND e.ts >= ? AND e.ts < ? AND " + Sql.IsVisit + " AND " + w.Sql;
-            List<object?> at = [site, lo, hi, .. w.Params];
             if (page)
             {
-                foreach (var row in await Db.AllAsync("SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, " + Sql.LiveViews + " AS views " + OfRest("pageview") + " GROUP BY e.path", at, cancellationToken).ConfigureAwait(false))
-                {
-                    Bump(row);
-                }
-                foreach (var row in await Db.AllAsync(
-                    "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (\n             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest " + OfRest("engagement") + " GROUP BY e.path, e.pageview) t GROUP BY value",
-                    at,
-                    cancellationToken).ConfigureAwait(false))
-                {
-                    Bump(row);
-                }
+                parts.Add("SELECT " + Part("e.path", new(StringComparer.Ordinal) { ["visitors"] = "COUNT(DISTINCT e.visitor)", ["pageviews"] = "COUNT(*)", ["views"] = Sql.LiveViews }) + " " + OfRest("pageview") + " GROUP BY e.path");
+                parameters.AddRange(at);
+            }
+            else if (evt)
+            {
+                parts.Add("SELECT " + Part("e.name", new(StringComparer.Ordinal) { ["visitors"] = "COUNT(DISTINCT e.visitor)", ["events"] = "COUNT(*)" }) + " " + OfRest("event") + " GROUP BY e.name");
+                parameters.AddRange(at);
             }
             else
             {
-                foreach (var row in await Db.AllAsync("SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events " + OfRest("event") + " GROUP BY e.name", at, cancellationToken).ConfigureAwait(false))
+                string col = "s." + Query.SessionDimensions[dimension];
+                var counted = new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    Bump(row);
-                }
+                    ["visitors"] = "COUNT(DISTINCT s.visitor)",
+                    ["visits"] = "COUNT(*)",
+                    ["pageviews"] = "SUM(s.pageviews)",
+                    ["bounced"] = "SUM(CASE WHEN " + Sql.Bounce + " THEN 1 ELSE 0 END)",
+                    ["duration"] = "SUM(" + Sql.Duration + ")",
+                };
+                parts.Add("SELECT " + Part(col, counted) + " FROM rl_sessions s WHERE s.site = ? AND " + Sql.IsVisit + " AND " + w.Sql + " AND " + col + " <> '' GROUP BY " + col);
+                parameters.AddRange([site, .. w.Params]);
             }
         }
-        else if (page || evt)
+        if (parts.Count == 0)
         {
-            // Every day of the range is built.
-        }
-        else
-        {
-            string col = "s." + Query.SessionDimensions[dimension];
-            foreach (var row in await Db.AllAsync(
-                "SELECT " + col + " AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,\n           SUM(CASE WHEN " + Sql.Bounce + " THEN 1 ELSE 0 END) AS bounced, SUM(" + Sql.Duration + ") AS duration\n         FROM rl_sessions s WHERE s.site = ? AND " + Sql.IsVisit + " AND " + w.Sql + " AND " + col + " <> '' GROUP BY " + col,
-                [site, .. w.Params],
-                cancellationToken).ConfigureAwait(false))
-            {
-                Bump(row);
-            }
+            return [];
         }
         bool entryExit = dimension is "entry" or "exit";
-        var rows = sums
-            .Where(e => (evt || e.Key.Length > 0) && (page ? e.Value["pageviews"] > 0 : (evt ? e.Value["events"] > 0 : e.Value["visits"] > 0)))
-            .ToList();
-        rows.Sort((p, q) =>
+        string order = entryExit ? "n_visits DESC" : evt ? "n_visitors DESC, n_events DESC" : page ? "n_visitors DESC, n_pageviews DESC" : "n_visitors DESC, n_visits DESC";
+        var rows = await Db.AllAsync(
+            "SELECT value, " + string.Join(", ", SumKeys.Select(c => "SUM(" + c + ") AS n_" + c)) + " FROM (" + string.Join(" UNION ALL ", parts) + ") t\n       "
+                + (evt ? "" : "WHERE value <> ''") + " GROUP BY value ORDER BY " + order + ", value" + TextOrder() + " LIMIT ? OFFSET ?",
+            [.. parameters, limit, offset],
+            cancellationToken).ConfigureAwait(false);
+        // The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+        var rest = new Dictionary<string, (double Engaged, double ScrollSum, double ScrollN)>(StringComparer.Ordinal);
+        if (page && plan.Rest.Count > 0 && rows.Count > 0)
         {
-            var (x, y) = (p.Value, q.Value);
-            double[] order = entryExit ? [y["visits"] - x["visits"]]
-                : evt ? [y["visitors"] - x["visitors"], y["events"] - x["events"]]
-                : page ? [y["visitors"] - x["visitors"], y["pageviews"] - x["pageviews"]]
-                : [y["visitors"] - x["visitors"], y["visits"] - x["visits"]];
-            foreach (double d in order)
+            // Engaged time is added up per pageview first.
+            int size = Math.Max(1, Math.Min(Sql.ValuesPerQuery, Sql.MaxParams - at.Count - 4));
+            var engaged = await Sql.InPiecesAsync(rows.Select(row => Sql.S(row.Get("value"))).ToList(), size, piece => Db.AllAsync(
+                "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (\n                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest " + OfRest("engagement") + " AND e.path IN (" + string.Join(", ", piece.Select(_ => "?")) + ")\n                 GROUP BY e.path, e.pageview) t GROUP BY value",
+                [.. at, .. piece],
+                cancellationToken)).ConfigureAwait(false);
+            foreach (var row in engaged)
             {
-                if (d != 0)
-                {
-                    return d < 0 ? -1 : 1;
-                }
+                string key = Sql.S(row.Get("value"));
+                var into = rest.GetValueOrDefault(key);
+                rest[key] = (into.Engaged + Sql.Num(row.Get("engaged")), into.ScrollSum + Sql.Num(row.Get("scroll_sum")), into.ScrollN + Sql.Num(row.Get("scroll_n")));
             }
-            return Sql.CodeOrder(p.Key, q.Key);
-        });
+        }
         var output = new List<JsObject>();
-        foreach (var (value, x) in rows.Skip(offset).Take(limit))
+        foreach (var found in rows)
         {
+            string value = Sql.S(found.Get("value"));
+            var x = SumKeys.ToDictionary(k => k, k => Sql.Num(found.Get("n_" + k)), StringComparer.Ordinal);
             if (evt)
             {
                 output.Add(new JsObject { ["value"] = value, ["visitors"] = x["visitors"], ["events"] = x["events"] });
@@ -723,14 +706,16 @@ public sealed partial class SqlStore
             }
             if (page)
             {
+                var more = rest.GetValueOrDefault(value);
+                double scrollN = x["scroll_n"] + more.ScrollN;
                 output.Add(new JsObject
                 {
                     ["value"] = value,
                     ["visitors"] = x["visitors"],
                     ["pageviews"] = x["pageviews"],
                     // Over every pageview that could report its time, counting those that sent none (under a second) as none.
-                    ["timeOnPage"] = x["views"] > 0 ? Js.Round(x["engaged"] / x["views"]) : 0.0,
-                    ["scrollDepth"] = x["scroll_n"] > 0 ? Js.Round(x["scroll_sum"] / x["scroll_n"]) : 0.0,
+                    ["timeOnPage"] = x["views"] > 0 ? Js.Round((x["engaged"] + more.Engaged) / x["views"]) : 0.0,
+                    ["scrollDepth"] = scrollN > 0 ? Js.Round((x["scroll_sum"] + more.ScrollSum) / scrollN) : 0.0,
                 });
                 continue;
             }
@@ -821,7 +806,9 @@ public sealed partial class SqlStore
 
     /// <summary>Deletes every salt but those of these days, so the hashes made with them can never be made again.</summary>
     public Task DropSaltsExceptAsync(IReadOnlyList<string> days, CancellationToken cancellationToken = default) =>
-        Db.RunAsync("DELETE FROM rl_salts WHERE day NOT IN (" + string.Join(", ", days.Select(_ => "?")) + ")", [.. days], cancellationToken);
+        // Never a day after the newest of these: a process whose clock is a moment behind must not delete the
+        // salt another has just made for the day that began.
+        Db.RunAsync("DELETE FROM rl_salts WHERE day NOT IN (" + string.Join(", ", days.Select(_ => "?")) + ") AND day < ?", [.. days, days.Max(StringComparer.Ordinal)], cancellationToken);
 
     /// <summary>Whether a visit to one of these sites that started in a stretch of time was still going at <paramref name="since"/>.</summary>
     public async Task<bool> VisitOpenAsync(IReadOnlyList<string> sites, long from, long to, long since, CancellationToken cancellationToken = default)
@@ -982,6 +969,13 @@ public sealed partial class SqlStore
         var row = await Db.FirstAsync("SELECT * FROM rl_links WHERE id = ? AND deleted_at IS NULL LIMIT 1", A(id), cancellationToken).ConfigureAwait(false);
         return row == null ? null : Sql.LinkRow(row);
     }
+
+    /// <summary>
+    /// Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id and
+    /// its clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted.
+    /// </summary>
+    public async Task<bool> LinkExistsAsync(string id, CancellationToken cancellationToken = default) =>
+        (await Db.AllAsync("SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1", A(id), cancellationToken).ConfigureAwait(false)).Count > 0;
 
     public Task InsertLinkAsync(JsObject link, CancellationToken cancellationToken = default) => Db.RunAsync(
         "INSERT INTO rl_links (id, site, domain, slug, name, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

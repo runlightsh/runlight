@@ -79,7 +79,15 @@ public sealed partial class Standalone : IAsyncDisposable
 
     private readonly SqlStore _store;
     private readonly string? _token;
-    private readonly ProxyTrust _trustProxy;
+
+    /// <summary>
+    /// A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that address's
+    /// tries are all refused until the time is up. A long one cannot be guessed, so nothing is counted for it and
+    /// nobody's wrong tries can keep a script that shares their address out.
+    /// </summary>
+    private readonly bool _guessable;
+
+    private readonly Throttle _guesses;
     private readonly Url? _publicUrl;
     private readonly string? _publicHost;
     private readonly Func<long> _now;
@@ -99,7 +107,8 @@ public sealed partial class Standalone : IAsyncDisposable
         _store = options.Store;
         _now = options.Now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _token = !string.IsNullOrEmpty(options.Token) ? options.Token : null;
-        _trustProxy = options.TrustProxy ?? true;
+        _guessable = _token != null && _token.Length < Config.ShortestSecret;
+        _guesses = new Throttle(_store, "bearer", 10);
         _publicUrl = !string.IsNullOrEmpty(options.Url) ? new Url(options.Url) : null;
         _publicHost = _publicUrl != null ? Routes.HostName(_publicUrl.Host) : null;
 
@@ -135,6 +144,9 @@ public sealed partial class Standalone : IAsyncDisposable
             Later = rl.Later,
         });
         Accounts = Web.Accounts;
+        // A link at one of the server's own paths would open at /go/<slug> and never on a link domain, where the
+        // server's page answers first, so no new link takes one.
+        rl.Links.Reserved = new HashSet<string>(ServerPaths.Select(path => path[1..]), StringComparer.Ordinal);
 
         Routes = rl.Routes(new RoutesOptions
         {
@@ -163,9 +175,23 @@ public sealed partial class Standalone : IAsyncDisposable
     private async Task<object> AuthorizeAsync(Request request, CancellationToken cancellationToken)
     {
         string auth = request.Headers.Get("authorization") ?? "";
-        if (_token != null && Js.Lower(auth).StartsWith("bearer ", StringComparison.Ordinal) && Crypto.SameText(Js.Trim(auth[7..]), _token))
+        string given = Js.Lower(auth).StartsWith("bearer ", StringComparison.Ordinal) ? Js.Trim(auth[7..]) : "";
+        // A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
+        if (_token != null && given.Length > 0 && (!given.StartsWith("rl_", StringComparison.Ordinal) || _token.StartsWith("rl_", StringComparison.Ordinal)))
         {
-            return true;
+            string address = Runlight.ClientIp(request, AddressOf(request));
+            string from = address.Length > 0 ? address : "unknown";
+            if (!(_guessable && await _guesses.BlockedAsync(from, _now(), cancellationToken).ConfigureAwait(false)))
+            {
+                if (Crypto.SameText(given, _token))
+                {
+                    return true;
+                }
+                if (_guessable)
+                {
+                    await _guesses.FailAsync(from, _now(), cancellationToken).ConfigureAwait(false);
+                }
+            }
         }
         object access = await Web.AccessAsync(request, cancellationToken).ConfigureAwait(false);
         if (access is true)
@@ -175,12 +201,18 @@ public sealed partial class Standalone : IAsyncDisposable
         return access;
     }
 
-    /// <summary>The name a request came in on, read as link domains read it.</summary>
-    private string HostOf(Request request)
-    {
-        string? forwarded = _trustProxy.On ? request.Headers.Get("x-forwarded-host") : null;
-        return Routes.HostName(forwarded ?? request.Headers.Get("host") ?? new Url(request.Url).Host);
-    }
+    /// <summary>
+    /// The name a request came in on, read as link domains read it: a proxy's X-Forwarded-Host only where the
+    /// library believes a proxy's headers at all, so a client that reaches the server straight from the internet
+    /// cannot name the host itself.
+    /// </summary>
+    private string HostOf(Request request) =>
+        Routes.HostName(Runlight.ForwardedHost(request, AddressOf(request)) ?? request.Headers.Get("host") ?? new Url(request.Url).Host);
+
+    /// <summary>Where each request came from, as the handler was told, for the routes' callbacks, which get the request alone.</summary>
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Request, string> _addresses = [];
+
+    private string? AddressOf(Request request) => _addresses.TryGetValue(request, out string? ip) ? ip : null;
 
     private async Task<List<string>> SavedHostsAsync(CancellationToken cancellationToken)
     {
@@ -243,6 +275,10 @@ public sealed partial class Standalone : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
         string path = new Url(request.Url).Pathname;
+        if (ip != null)
+        {
+            _addresses.AddOrUpdate(request, ip);
+        }
         try
         {
             // The names are read once, so the routes and the emails can ask for them as they answer.

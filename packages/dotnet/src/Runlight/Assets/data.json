@@ -740,8 +740,6 @@
         "email",
         "e-mail",
         "mailchimp",
-        "kit",
-        "convertkit",
         "beehiiv",
         "buttondown"
       ]
@@ -764,12 +762,6 @@
       "source": "(^|\\.)beehiiv\\.com$",
       "flags": "",
       "name": "beehiiv",
-      "kind": "email"
-    },
-    {
-      "source": "(^|\\.)substack\\.com$",
-      "flags": "",
-      "name": "Substack",
       "kind": "email"
     },
     {

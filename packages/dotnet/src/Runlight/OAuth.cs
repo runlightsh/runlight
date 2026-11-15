@@ -60,6 +60,9 @@ public sealed class OAuthContext
     /// <summary>The token the consent form sends back in its csrf field, for the app's own check of where it comes from.</summary>
     public Func<string>? Csrf { get; init; }
 
+    /// <summary>Whether the request comes from an account kept to one site, which connects no apps and is told so in its own words.</summary>
+    public Func<Request, CancellationToken, Task<bool>>? IsSiteOnly { get; init; }
+
     /// <summary>Whether sites are managed in the dashboard, so a CMS plugin may be given a new one.</summary>
     public bool ManagedSites { get; init; }
 
@@ -230,8 +233,17 @@ public static class OAuth
     /// <summary>base64url of SHA-256, as PKCE's S256 method compares.</summary>
     public static string S256(string verifier) => Crypto.Base64url(Crypto.Sha256(verifier));
 
-    /// <summary>Redirect addresses a client may register: https, or a local app's own loopback address.</summary>
-    private static bool AllowedRedirect(string value) => Https.IsMatch(value) || Loopback.IsMatch(value);
+    /// <summary>Redirect addresses a client may register: https, or a local app's own loopback address, and one that parses as an address at all.</summary>
+    private static bool AllowedRedirect(string value) => (Https.IsMatch(value) || Loopback.IsMatch(value)) && Url.CanParse(value);
+
+    /// <summary>The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.</summary>
+    public const int MaxBodyBytes = 64 * 1024;
+
+    /// <summary>Whether a request's body is past the cap, by the length it declares or the length it has.</summary>
+    private static bool TooLarge(Request request) =>
+        request.Bytes().Length > MaxBodyBytes || Js.Number(request.Headers.Get("content-length") ?? "0") > MaxBodyBytes;
+
+    private static Response BodyTooLarge() => OauthError("invalid_request", "Send a smaller body", 413);
 
     /// <summary>The URL that a 401 from the MCP endpoint points clients at, to start OAuth.</summary>
     public static string ResourceMetadataUrl(string origin, string basePath) => origin + basePath + "/.well-known/oauth-protected-resource";
@@ -286,6 +298,11 @@ public static class OAuth
             {
                 return OauthError("invalid_client_metadata", "Too many registrations from this address. Wait a minute and try again.", 429);
             }
+            // Capped here, since not every host caps a request body before it reaches the app.
+            if (TooLarge(request))
+            {
+                return BodyTooLarge();
+            }
             object? body = Js.ParseJson(request.Text(), out object? parsed) ? parsed : null;
             object? uris = body != null && Js.IsObject(body) ? Js.Get(body, "redirect_uris") : null;
             var redirects = new List<string>();
@@ -320,12 +337,17 @@ public static class OAuth
         await ctx.Init(cancellationToken).ConfigureAwait(false);
         var tr = Messages.Translator(Messages.AcceptedLanguage(request));
         string lang = tr.Lang;
+        if (request.Method == "POST" && TooLarge(request))
+        {
+            return BodyTooLarge();
+        }
         var form = request.Method == "POST" ? new SearchParams(request.Text()) : url.SearchParams;
         string clientId = form.Get("client_id") ?? "";
         var client = (await ClientForAsync(ctx, clientId, cancellationToken).ConfigureAwait(false))?.Client;
         string redirect = form.Get("redirect_uri") ?? "";
         // Without a known client and one of its own addresses there is nowhere safe to send an answer.
-        if (client == null || !(client.Get("redirects") is List<object?> registered && registered.Any(r => r is string s && s == redirect)))
+        // An address that does not parse, from an app registered before those were refused, is no address of its own.
+        if (client == null || !(client.Get("redirects") is List<object?> registered && registered.Any(r => r is string s && s == redirect)) || !Url.CanParse(redirect))
         {
             return Page(lang, tr.Html("oauth.unregisteredTitle"), "<p>" + tr.Html("oauth.startAgain") + "</p>", 400);
         }
@@ -386,7 +408,8 @@ public static class OAuth
             // Someone signed in who may only read would be sent to sign in again and again.
             if (ctx.IsReader != null && await ctx.IsReader(request, cancellationToken).ConfigureAwait(false))
             {
-                return Page(lang, tr.Html("oauth.viewerTitle"), "<p>" + tr.Html("oauth.viewer", new JsObject { ["app"] = Esc(name) }) + "</p>", 403);
+                bool siteOnly = ctx.IsSiteOnly != null && await ctx.IsSiteOnly(request, cancellationToken).ConfigureAwait(false);
+                return Page(lang, tr.Html("oauth.viewerTitle"), "<p>" + tr.Html(siteOnly ? "oauth.siteAccount" : "oauth.viewer", new JsObject { ["app"] = Esc(name) }) + "</p>", 403);
             }
             // The site stays, since on the way in it only says which one to offer first.
             var kept = new SearchParams();
@@ -549,6 +572,10 @@ public static class OAuth
     private static async Task<Response> TokenAsync(OAuthContext ctx, Request request, CancellationToken cancellationToken)
     {
         await ctx.Init(cancellationToken).ConfigureAwait(false);
+        if (TooLarge(request))
+        {
+            return BodyTooLarge();
+        }
         string type = (request.Headers.Get("content-type") ?? "").Split(';')[0].Trim();
         var form = type == "application/json" ? JsonForm(request.Text()) : new SearchParams(request.Text());
         if (form.Get("grant_type") != "authorization_code")

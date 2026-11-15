@@ -347,6 +347,10 @@ public static partial class Visits
         };
     }
 
+    /// <summary>Whether a hostname can be the host of an address, and nothing more than a host.</summary>
+    private static bool ValidHost(string host) =>
+        host.Length > 0 && host.IndexOfAny(['/', '?', '#', '@', '\\']) < 0 && Url.Parse("https://" + host + "/") is { Hostname.Length: > 0 };
+
     /// <summary>
     /// Writes one imported pageview or event as part of a Runlight visit. Visitors are hashed per day from the
     /// hit's key, as live visitors are hashed per day, and a hit within thirty minutes of the visitor's last one
@@ -367,6 +371,12 @@ public static partial class Visits
         string yesterday = Write.HexId(ns + ":" + key + ":" + Time.AddDays(day, -1), 16);
         string hostname = e.Str("hostname") ?? "";
         string host = Js.Lower(hostname.Length > 0 ? hostname : (siteHosts.Count > 0 ? siteHosts[0] : "imported.invalid"));
+        // A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
+        // row under the site's name rather than a failed batch.
+        if (!ValidHost(host))
+        {
+            host = siteHosts.Count > 0 && ValidHost(siteHosts[0]) ? Js.Lower(siteHosts[0]) : "imported.invalid";
+        }
         string path = e.Str("path") ?? "";
         string query = e.Str("query") ?? "";
         var url = Url.Parse("https://" + host + (path.Length > 0 ? path : "/") + (query.Length > 0 ? "?" + Write.Query(query) : ""))
@@ -379,7 +389,7 @@ public static partial class Visits
             id = Write.HexId(ns + ":" + key + ":" + Js.Str(ts));
             await store.Db.RunAsync("DELETE FROM rl_sessions WHERE id = ?", [id], cancellationToken).ConfigureAwait(false);
             string country = Js.Slice(Js.Upper(e.Str("country") ?? ""), 0, 2);
-            string rawRegion = e.Str("region") ?? "";
+            string rawRegion = Write.PlaceName(e.Str("region") ?? "");
             string region = rawRegion.Length > 0 ? Js.Slice(Js.Upper(rawRegion.Contains('-', StringComparison.Ordinal) ? rawRegion : country + "-" + rawRegion), 0, 10) : "";
             bool known = Write.IsCountry(country);
             var utm = page.Obj("utm")!;
@@ -401,14 +411,14 @@ public static partial class Visits
                     ["utmContent"] = utm.Get("content"),
                     ["country"] = known ? country : "",
                     ["region"] = known ? region : "",
-                    ["city"] = Js.Slice(e.Str("city") ?? "", 0, 100),
+                    ["city"] = Js.Slice(Write.PlaceName(e.Str("city") ?? ""), 0, 100),
                     ["browser"] = Write.Browser(e.Str("browser") ?? ""),
                     ["browserVersion"] = "",
                     ["os"] = Write.System(e.Str("os") ?? ""),
                     ["osVersion"] = "",
                     ["device"] = Write.Device(e.Str("device") ?? ""),
-                    ["screen"] = Js.Slice(e.Str("screen") ?? "", 0, 20),
-                    ["language"] = Js.Slice(e.Str("language") ?? "", 0, 35),
+                    ["screen"] = Write.ScreenSize(e.Str("screen") ?? ""),
+                    ["language"] = Write.LanguageTag(e.Str("language") ?? ""),
                 });
             await store.InsertSessionAsync(row, cancellationToken).ConfigureAwait(false);
             // No engaged time is known, so duration falls back to first-to-last pageview.

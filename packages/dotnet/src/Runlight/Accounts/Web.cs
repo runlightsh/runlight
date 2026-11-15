@@ -128,9 +128,11 @@ public sealed class Web
     private readonly Throttle _perAccount;
     private readonly Throttle _perIp;
 
-    // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-    // Password re-checks in Account: ten.
-    private readonly Throttle _codeTries;
+    // Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the
+    // tries run out again, up to a day, so guessing on and on gets about five tries a day. A browser that
+    // signed in to the account before counts on its own, so its owner is never held up by others' guesses.
+    // Five tries to confirm the first code. Password re-checks in Account: ten.
+    private readonly Lockout _codeTries;
 
     private readonly Throttle _confirmTries;
     private readonly Throttle _rechecks;
@@ -148,7 +150,7 @@ public sealed class Web
         _perAddress = new Throttle(_store, "address", 10);
         _perAccount = new Throttle(_store, "account", 50);
         _perIp = new Throttle(_store, "ip", 30);
-        _codeTries = new Throttle(_store, "code", 5);
+        _codeTries = new Lockout(_store, "code", 5);
         _confirmTries = new Throttle(_store, "confirm", 5);
         _rechecks = new Throttle(_store, "recheck", 10);
     }
@@ -322,6 +324,27 @@ public sealed class Web
     private static string MediaType(Request request) =>
         Js.Lower(Js.Trim((request.Headers.Get("content-type") ?? "").Split(';')[0]));
 
+    /// <summary>The most a sign-in form or an account change may weigh: a few fields, far smaller than this.</summary>
+    public const int MaxBodyBytes = 64 * 1024;
+
+    /// <summary>Refuses a body past the cap, by the length it declares or the length it has, since not every host caps one before it reaches the app.</summary>
+    private static void Capped(Request request)
+    {
+        if (request.Bytes().Length > MaxBodyBytes || Js.Number(request.Headers.Get("content-length") ?? "0") > MaxBodyBytes)
+        {
+            throw new BodyTooLongException("Body over " + Js.Str(MaxBodyBytes) + " bytes");
+        }
+    }
+
+    /// <summary>A posted form's fields.</summary>
+    private static SearchParams Form(Request request)
+    {
+        Capped(request);
+        return new SearchParams(request.Text());
+    }
+
+    private static Response TooLarge() => Coded("Send a smaller body", "body_too_large", 413);
+
     /// <summary>A JSON body by its media type, which a cross-site form cannot send.</summary>
     private static JsObject? Body(Request request)
     {
@@ -329,6 +352,7 @@ public sealed class Web
         {
             return null;
         }
+        Capped(request);
         return Js.ParseJson(request.Text(), out object? value) && value is JsObject o ? o : null;
     }
 
@@ -534,7 +558,7 @@ public sealed class Web
             }
             if (method == "POST")
             {
-                var form = new SearchParams(request.Text());
+                var form = Form(request);
                 string code = form.Get("code") ?? "";
                 string email = form.Get("email") ?? "";
                 if (!SetupOk(code))
@@ -602,7 +626,7 @@ public sealed class Web
 
         if (path == "/login/code" && method == "POST")
         {
-            var form = new SearchParams(request.Text());
+            var form = Form(request);
             string next = SafeNext(form.Get("next"));
             var user = await Accounts.FromPendingAsync(form.Get("pending") ?? "", Now(), cancellationToken).ConfigureAwait(false);
             if (user == null)
@@ -610,8 +634,10 @@ public sealed class Web
                 return Redirect(b + "/login?next=" + Js.EncodeURIComponent(next));
             }
             string id = user.Str("id")!;
-            // Counted before the check, so a burst cannot get past five.
-            if (!await _codeTries.TakeAsync(id, Now(), cancellationToken).ConfigureAwait(false))
+            // Counted before the check, so a burst cannot get past five. A browser the account signed in from
+            // before has its own count, which only someone holding that browser's mark can use up.
+            string tries = Accounts.TrustsDevice(ReadCookie(request, DeviceCookie), user) ? id + "\ndevice" : id;
+            if (!await _codeTries.TakeAsync(tries, Now(), cancellationToken).ConfigureAwait(false))
             {
                 return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, t.T("error.too_many_tries"), lang), 429);
             }
@@ -619,7 +645,7 @@ public sealed class Web
             {
                 return Html(Pages.CodePage(b, form.Get("pending") ?? "", next, t.T("auth.codeWrong"), lang), 401);
             }
-            await _codeTries.ClearAsync(id, Now(), cancellationToken).ConfigureAwait(false);
+            await _codeTries.ClearAsync(tries, cancellationToken).ConfigureAwait(false);
             return SignedInTo(request, user, next);
         }
 
@@ -641,7 +667,7 @@ public sealed class Web
             }
             if (method == "POST")
             {
-                var form = new SearchParams(request.Text());
+                var form = Form(request);
                 string code = form.Get("code") ?? "";
                 var invite = await Accounts.InviteByCodeAsync(code, Now(), cancellationToken).ConfigureAwait(false);
                 if (invite == null)
@@ -677,7 +703,7 @@ public sealed class Web
         string b = _base;
         string lang = Messages.AcceptedLanguage(request);
         var t = Messages.Translator(lang);
-        var form = new SearchParams(request.Text());
+        var form = Form(request);
         string email = form.Get("email") ?? "";
         string password = form.Get("password") ?? "";
         string next = SafeNext(form.Get("next"));
@@ -785,11 +811,18 @@ public sealed class Web
 
     public async Task<Response?> ConfirmPasswordAsync(Request request, CancellationToken cancellationToken)
     {
-        var user = await SignedInAsync(request, cancellationToken).ConfigureAwait(false);
-        if (user == null) return Coded("Sign in first", "sign_in", 401);
-        var input = Body(request);
-        if (input == null) return Coded("Send JSON", "send_json", 415);
-        return await RecheckAsync(user, input, "password", "Your password is not right", "password_wrong", cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var user = await SignedInAsync(request, cancellationToken).ConfigureAwait(false);
+            if (user == null) return Coded("Sign in first", "sign_in", 401);
+            var input = Body(request);
+            if (input == null) return Coded("Send JSON", "send_json", 415);
+            return await RecheckAsync(user, input, "password", "Your password is not right", "password_wrong", cancellationToken).ConfigureAwait(false);
+        }
+        catch (BodyTooLongException)
+        {
+            return TooLarge();
+        }
     }
 
     /// <summary>Your own account, and for the owner and admins, everyone else's.</summary>
@@ -1104,8 +1137,9 @@ public sealed class Web
     /// </summary>
     public async Task<bool> TokenMadeAsync(JsObject token, string by, CancellationToken cancellationToken = default)
     {
-        string? role = (await Accounts.ByIdAsync(by, cancellationToken).ConfigureAwait(false))?.Str("role");
-        if (role == null || role == "viewer")
+        var user = await Accounts.ByIdAsync(by, cancellationToken).ConfigureAwait(false);
+        // Nor does an account kept to one site, whose token would read every site.
+        if (user == null || user.Str("site") != null || user.Str("role") == "viewer")
         {
             return false;
         }
@@ -1132,6 +1166,18 @@ public sealed class Web
     /// <paramref name="ip"/> is the context's address (the connection's), handed to the Runlight's clientIp.
     /// </summary>
     public async Task<Response?> HandleAsync(Request request, string path, string? ip = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await AnswerAsync(request, path, ip, cancellationToken).ConfigureAwait(false);
+        }
+        catch (BodyTooLongException)
+        {
+            return TooLarge();
+        }
+    }
+
+    private async Task<Response?> AnswerAsync(Request request, string path, string? ip, CancellationToken cancellationToken)
     {
         if (path == "/api/account" || path.StartsWith("/api/account/", StringComparison.Ordinal) || path == "/api/people" || path.StartsWith("/api/people/", StringComparison.Ordinal) || path.StartsWith("/api/invites/", StringComparison.Ordinal))
         {

@@ -25,6 +25,12 @@ public sealed class Links(SqlStore store, Func<long> now, Func<CancellationToken
     public static readonly Regex SlugPattern = new("^[A-Za-z0-9][A-Za-z0-9_-]{0,99}\\z", RegexOptions.CultureInvariant);
     private const string Alphabet = "abcdefghijkmnpqrstuvwxyz23456789";
 
+    /// <summary>
+    /// Slugs no new link may take, for a host whose own pages sit where a link domain's links do: the standalone
+    /// server answers /login, /api, and the rest on every name, so a link there would never open on its own domain.
+    /// </summary>
+    public IReadOnlySet<string> Reserved { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+
     /// <summary>Six characters from an alphabet without look-alikes (no 0/o, 1/l).</summary>
     public static string RandomSlug()
     {
@@ -94,12 +100,17 @@ public sealed class Links(SqlStore store, Func<long> now, Func<CancellationToken
             {
                 throw new LinkError("/" + wanted + " is already taken", "link_taken", new JsObject { ["slug"] = wanted });
             }
+            // A link made before the slug was kept back keeps it.
+            if (Reserved.Contains(wanted) && taken == null)
+            {
+                throw new LinkError("/" + wanted + " is one of this server's own pages, so a link there would never open on a link domain", "link_reserved", new JsObject { ["slug"] = wanted });
+            }
             return wanted;
         }
         for (int i = 0; i < 8; i++)
         {
             string slug = RandomSlug();
-            if (await store.LinkBySlugAsync(slug, cancellationToken).ConfigureAwait(false) == null)
+            if (!Reserved.Contains(slug) && await store.LinkBySlugAsync(slug, cancellationToken).ConfigureAwait(false) == null)
             {
                 return slug;
             }

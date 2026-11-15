@@ -45,6 +45,11 @@ public sealed class Accounts
     /// <summary>What passes for an email address, with JavaScript's \s.</summary>
     private static readonly Regex Email = new("^[^" + Space + "@<>\"]+@[^" + Space + "@<>\"]+\\.[^" + Space + "@<>\"]+\\z", RegexOptions.CultureInvariant);
 
+    /// <summary>The longest an address can be. Anything longer is refused before the pattern reads it.</summary>
+    public const int MaxEmail = 320;
+
+    private static bool IsEmail(string address) => address.Length <= MaxEmail && Email.IsMatch(address);
+
     private static readonly Regex InviteCode = new("^[A-Za-z0-9_-]{20,64}\\z", RegexOptions.CultureInvariant);
 
     /// <summary>A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed.</summary>
@@ -59,6 +64,9 @@ public sealed class Accounts
     private readonly SqlStore _store;
     private readonly string _secret;
     private bool _ready;
+
+    /// <summary>One change to who has an account at a time, in this process.</summary>
+    private readonly SemaphoreSlim _turn = new(1, 1);
 
     public Accounts(SqlStore store, string secret)
     {
@@ -78,8 +86,22 @@ public sealed class Accounts
     /// Changes to who has an account take turns: on Postgres and MySQL across processes, through the database's
     /// lock, so two owners demoting each other at once cannot leave none, and a double-clicked invite makes one.
     /// </summary>
-    private Task<T> TurnAsync<T>(Func<Task<T>> fn, CancellationToken cancellationToken) =>
-        Db.ExclusiveAsync(_ => fn(), cancellationToken);
+    /// <remarks>
+    /// In this process they take turns here first, as TypeScript queues them, since SQLite has no such lock to
+    /// wait on: a sign-in link opened twice at once lets one in, and of two hand-overs at once one sees the other's.
+    /// </remarks>
+    private async Task<T> TurnAsync<T>(Func<Task<T>> fn, CancellationToken cancellationToken)
+    {
+        await _turn.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Db.ExclusiveAsync(_ => fn(), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _turn.Release();
+        }
+    }
 
     private async Task InitAsync(CancellationToken cancellationToken)
     {
@@ -258,7 +280,15 @@ public sealed class Accounts
         string? read = Js.Truthy(row.Get("totp_recovery")) ? Sql.S(row.Get("totp_recovery")) : null;
         var hashes = RecoveryList(row.Get("totp_recovery"));
         string wanted = Crypto.RecoveryHash(given);
-        int at = hashes.FindIndex(h => h is string s && s == wanted);
+        // Every hash is compared, each in time that does not depend on where it differs.
+        int at = -1;
+        for (int i = 0; i < hashes.Count; i++)
+        {
+            if (hashes[i] is string hash && Crypto.SameText(hash, wanted))
+            {
+                at = i;
+            }
+        }
         if (at < 0)
         {
             return false;
@@ -478,7 +508,7 @@ public sealed class Accounts
         await InitAsync(cancellationToken).ConfigureAwait(false);
         if (site != null && (site.Length == 0 || (role != "member" && role != "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
         string address = Js.Lower(Js.Trim(email));
-        if (!Email.IsMatch(address))
+        if (!IsEmail(address))
         {
             throw new AccountError("Enter an email address", "email_invalid");
         }
@@ -548,7 +578,7 @@ public sealed class Accounts
     {
         if (site != null && (site.Length == 0 || (role != "member" && role != "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
         string address = Js.Lower(Js.Trim(email));
-        if (!Email.IsMatch(address))
+        if (!IsEmail(address))
         {
             throw new AccountError("Enter an email address", "email_invalid");
         }

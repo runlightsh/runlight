@@ -120,7 +120,7 @@ public static class Cli
                     await output.WriteAsync(Version.Current + "\n").ConfigureAwait(false);
                     return 0;
                 case "serve":
-                    return await ServeAsync(Settings(), output, now, serve).ConfigureAwait(false);
+                    return await ServeAsync(Settings(), output, error, now, serve).ConfigureAwait(false);
                 case "cron":
                     return await CronAsync(Settings(), error, now).ConfigureAwait(false);
                 case "password":
@@ -160,7 +160,7 @@ public static class Cli
     /// The server, until it is stopped: the setup link said once while there is no account, and the scheduled check
     /// every five minutes.
     /// </summary>
-    private static async Task<int> ServeAsync(Config config, TextWriter output, Func<long> now, Func<Config, Standalone, TextWriter, Task>? serve)
+    private static async Task<int> ServeAsync(Config config, TextWriter output, TextWriter error, Func<long> now, Func<Config, Standalone, TextWriter, Task>? serve)
     {
         if (serve == null)
         {
@@ -168,6 +168,15 @@ public static class Cli
         }
         var server = config.Standalone(now);
         await server.Runlight.InitAsync().ConfigureAwait(false);
+        // Said at every start, loudly, and the server still runs: an install with a short one must keep working.
+        foreach (string name in new[] { "RUNLIGHT_SECRET", "RUNLIGHT_TOKEN" })
+        {
+            string? warning = Config.ShortWarning(name, config.Get(name));
+            if (warning != null)
+            {
+                await error.WriteAsync("\n" + warning + "\n\n").ConfigureAwait(false);
+            }
+        }
         server.Schedule(config);
         try
         {

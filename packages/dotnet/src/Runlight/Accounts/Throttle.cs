@@ -22,6 +22,9 @@ namespace Runlight.Accounts;
 /// key turns over daily: keys older than yesterday are deleted, and expired counts go when they are read
 /// and in the scheduled check, so nothing worked out from an address lasts past a day. A count started
 /// under yesterday's key is still found until its window ends, so midnight does not lift a block.
+/// None of that waits on the scheduled check, which an app may never run: a count taken back to nothing is
+/// deleted at once, every count made sets a sweep in this process for when its window has ended, and the
+/// first try of a process, like a Runlight's start, sweeps what an earlier process left behind.
 /// Reading a count and writing it back take turns: in this process through a lock for the key, and
 /// across processes through the database's lock, so a burst of tries cannot all read the same count.
 /// </remarks>
@@ -46,6 +49,15 @@ public sealed class Throttle
     /// them, then that number plus each count made since, so a sweep runs only when the ceiling can have been passed.
     /// </summary>
     private long _rows = -1;
+
+    /// <summary>1 while a sweep is waiting for the windows of the counts made here to end.</summary>
+    private int _sweepPending;
+
+    /// <summary>1 once this process has swept what an earlier one left behind.</summary>
+    private int _swept;
+
+    /// <summary>How long past a window's end its sweep runs, so the count it is for has surely ended.</summary>
+    private const int SweepMarginMs = 1000;
 
     public Throttle(SqlStore store, string name, int limit = 10, long windowMs = 15 * 60_000)
     {
@@ -112,6 +124,10 @@ public sealed class Throttle
     {
         // The counts live in settings, so the tables come first: a password re-check can be the first thing a new install does.
         await _store.MigrateAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (Interlocked.Exchange(ref _swept, 1) == 0)
+        {
+            await SweepAsync(_store, now, cancellationToken).ConfigureAwait(false);
+        }
         string today = IdWith(await SaltAsync(now, cancellationToken).ConfigureAwait(false), key);
         string? before = await _store.SettingAsync(KeyFor(now - DayMs), cancellationToken).ConfigureAwait(false);
         return (today, string.IsNullOrEmpty(before) ? null : IdWith(before, key));
@@ -226,9 +242,14 @@ public sealed class Throttle
             async () =>
             {
                 var (id, entry) = await FindAsync(ids, now, cancellationToken).ConfigureAwait(false);
-                if (entry != null && entry.Value.Count > 0)
+                if (entry != null && entry.Value.Count > 1)
                 {
                     await SaveAsync(id, (entry.Value.Count - 1, entry.Value.Until), cancellationToken).ConfigureAwait(false);
+                }
+                else if (entry != null)
+                {
+                    // Nothing left to count: the row goes, rather than sit there until something sweeps it.
+                    await _store.SetSettingAsync(Prefix + id, null, cancellationToken).ConfigureAwait(false);
                 }
                 return true;
             },
@@ -251,6 +272,7 @@ public sealed class Throttle
 
     private async Task CountAsync(string id, (long Count, long Until)? entry, long now, CancellationToken cancellationToken)
     {
+        SweepLater(now);
         if (entry == null)
         {
             await SaveAsync(id, (1, now + _windowMs), cancellationToken).ConfigureAwait(false);
@@ -320,8 +342,50 @@ public sealed class Throttle
     /// For the scheduled check: deletes every throttle's counts whose window has ended, and the hashing keys
     /// older than yesterday, so nothing worked out from an address outlasts a day even when no one signs in.
     /// </summary>
-    public static async Task SweepAsync(SqlStore store, long now, CancellationToken cancellationToken = default)
+    public static async Task SweepAsync(SqlStore store, long now, CancellationToken cancellationToken = default) =>
+        await SweepCountsAsync(store, now, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Sets a sweep for when the window of a count made at <paramref name="now"/> has ended, unless one is waiting
+    /// already. It runs in this process on a timer, so the count goes even when nobody signs in again and no
+    /// scheduled check ever runs; while counts are still running after it, it waits a window more.
+    /// </summary>
+    private void SweepLater(long now)
     {
+        if (Interlocked.CompareExchange(ref _sweepPending, 1, 0) != 0)
+        {
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                long at = now;
+                while (true)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(_windowMs + SweepMarginMs)).ConfigureAwait(false);
+                    at += _windowMs + SweepMarginMs;
+                    // Given up before the sweep reads, so a count made from here on sets a sweep of its own.
+                    Volatile.Write(ref _sweepPending, 0);
+                    if (await SweepCountsAsync(_store, at, CancellationToken.None).ConfigureAwait(false) == 0
+                        || Interlocked.CompareExchange(ref _sweepPending, 1, 0) != 0)
+                    {
+                        return;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // A store closed meanwhile has nothing left to sweep; the next process's first try sweeps it.
+                Volatile.Write(ref _sweepPending, 0);
+            }
+        });
+    }
+
+    /// <summary>The sweep, and how many counts are still running after it.</summary>
+    private static async Task<int> SweepCountsAsync(SqlStore store, long now, CancellationToken cancellationToken)
+    {
+        int running = 0;
         foreach (var row in await store.SettingsStartingWithAsync(Counts, cancellationToken).ConfigureAwait(false))
         {
             string value = row.Str("value") ?? "";
@@ -331,7 +395,12 @@ public sealed class Throttle
                 // Only as it was read, so a try counted since, which starts a new window, is kept.
                 await store.Db.RunAsync("DELETE FROM rl_settings WHERE \"key\" = ? AND value = ?", [row.Str("key"), value], cancellationToken).ConfigureAwait(false);
             }
+            else
+            {
+                running++;
+            }
         }
         await DropOldKeysAsync(store, now, cancellationToken).ConfigureAwait(false);
+        return running;
     }
 }

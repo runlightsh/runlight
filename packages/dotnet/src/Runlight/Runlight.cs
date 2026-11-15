@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -43,6 +42,12 @@ public sealed partial class Runlight
     /// <summary>What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets.</summary>
     public static readonly Regex Email = MakeEmail();
 
+    /// <summary>The longest an address is read: no real one is longer, and the pattern is slow on a very long string.</summary>
+    public const int EmailMax = 320;
+
+    /// <summary>Whether text passes for an email address, and is no longer than one can be.</summary>
+    public static bool IsEmail(string value) => value != null && value.Length <= EmailMax && Email.IsMatch(value);
+
     /// <summary>Raised whenever what a rolled-up day holds changes. 2: the heatmap counts visits only. 3: a page counts the views that can report time.</summary>
     private const int RollupVersion = 3;
 
@@ -70,6 +75,9 @@ public sealed partial class Runlight
     private int _warnDirect;
 
     private readonly RateLimit? _limit;
+
+    /// <summary>AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast.</summary>
+    private readonly RateLimit? _fetchLimit;
     private readonly Func<long> _clock;
     private readonly JsObject? _mailInCode;
     private readonly ConcurrentDictionary<string, JsObject> _remoteSeen = new(StringComparer.Ordinal);
@@ -109,7 +117,16 @@ public sealed partial class Runlight
     /// <summary>When statistics were last checked for staleness, which reports do at most hourly.</summary>
     private long _freshenedAt;
 
-    private (long At, HashSet<string> Domains)? _linkDomainCache;
+    /// <summary>The link domains as last read, and when: one object, swapped whole, so a reader never sees half of it.</summary>
+    private sealed record LinkDomains(long At, HashSet<string> Domains);
+
+    private volatile LinkDomains? _linkDomainCache;
+
+    /// <summary>How soon the link domains are asked for again after the database could not give them; a test sets another.</summary>
+    internal int LinkDomainRetryMs { get; set; } = 5000;
+
+    /// <summary>Runs of <see cref="IdleAsync"/> under way, which a later call waits for.</summary>
+    private readonly List<Task> _idling = [];
 
     /// <summary>How often the scheduled check downloads the agents' address lists, when UpdateAgentRanges is on.</summary>
     private const long AgentRangesEveryMs = 86_400_000;
@@ -145,12 +162,13 @@ public sealed partial class Runlight
         // null, 0, or anything that is not a positive number means no limit, never a limit of nothing.
         double perMinute = options.RateLimit ?? double.NaN;
         _limit = !(perMinute > 0) ? null : new RateLimit(perMinute >= long.MaxValue ? long.MaxValue : (long)Math.Floor(perMinute), () => Now());
+        _fetchLimit = _limit == null ? null : new RateLimit(perMinute * 10 >= long.MaxValue ? long.MaxValue : (long)Math.Floor(perMinute * 10), () => Now());
         _clock = options.Now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         Fetcher = options.Fetcher ?? new HttpClientFetcher();
         Links = new Links(Store, Now, InitAsync);
         LinkPath = "/" + EdgeSlashes().Replace(options.LinkPath ?? "/go", "");
         var app = options.Mail?.App;
-        if (app != null && !Email.IsMatch(app.From ?? ""))
+        if (app != null && !IsEmail(app.From ?? ""))
         {
             throw new ArgumentException("Runlight: the app's mailer needs a from address, like reports@example.com", nameof(options));
         }
@@ -347,7 +365,7 @@ public sealed partial class Runlight
             settings[name] = given.Length == 0 && sameConnection ? Js.String(Given(before!, name) ?? "") : given;
         }
         string from = Js.Trim(Js.String(Given(input, "from") ?? ""));
-        if (!Email.IsMatch(from))
+        if (!IsEmail(from))
         {
             throw new MailError("Enter the address reports come from, like reports@example.com", "mail_from", new JsObject());
         }
@@ -359,7 +377,7 @@ public sealed partial class Runlight
         }
         Transports.CheckConfig(config);
         string smtpHost = config.Str("host") ?? "";
-        if (config.Str("service") == "smtp" && smtpHost.Length > 0 && await Safefetch.MetadataHostAsync(smtpHost).ConfigureAwait(false))
+        if (config.Str("service") == "smtp" && smtpHost.Length > 0 && await Safefetch.MetadataHostAsync(smtpHost, cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             throw new MailError(smtpHost + " is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", new JsObject { ["host"] = smtpHost });
         }
@@ -508,7 +526,7 @@ public sealed partial class Runlight
     /// Whether InitAsync finished within <paramref name="ms"/>; false while it is still waiting, such as on another
     /// process creating the tables, which goes on for later callers. Its errors are thrown.
     /// </summary>
-    private async Task<bool> ReadyWithinAsync(int ms, CancellationToken cancellationToken)
+    internal async Task<bool> ReadyWithinAsync(int ms, CancellationToken cancellationToken)
     {
         if (_isReady)
         {
@@ -565,6 +583,16 @@ public sealed partial class Runlight
             {
                 await ZoneChangedAsync(Id(site), Zone(site), CancellationToken.None).ConfigureAwait(false);
             }
+        }
+        // Sign-in counts a process before this one left behind go now, rather than at a scheduled check an app may never run.
+        try
+        {
+            await Accounts.Throttle.SweepAsync(Store, Now()).ConfigureAwait(false);
+            await Accounts.Lockout.SweepAsync(Store, Now()).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A database that cannot be written to, such as one opened only to be read, still starts.
         }
         _isReady = true;
     }
@@ -862,9 +890,14 @@ public sealed partial class Runlight
         {
         }
         object? want = tokenSite.Length > 0 ? tokenSite : input.Prop("site");
-        var there = sites.OfType<JsObject>().FirstOrDefault(s => Same(s.Prop("id"), want)) ?? sites[0] as JsObject ?? new JsObject();
+        var there = sites.OfType<JsObject>().FirstOrDefault(s => Same(s.Prop("id"), want)) ?? sites[0] as JsObject;
+        // Checked before anything is saved: a site there has an id and a name, as text.
+        if (there == null || there.Get("id") is not string { Length: > 0 and <= 64 } || there.Get("name") is not string thereName)
+        {
+            throw new SettingsError(url + " did not answer like a Runlight install", "connect_not_runlight", new JsObject { ["url"] = url });
+        }
         // An install's answer is read as given: a site without a list of hostnames has none.
-        var thereHostnames = there.Get("hostnames") is List<object?> hs ? hs.OfType<string>().ToList() : [];
+        var thereHostnames = there.Get("hostnames") is List<object?> hs ? hs.OfType<string>().Where(h => h.Length > 0).ToList() : [];
         // Connecting the same site again (to allow changes, or with a new token) updates it in place.
         foreach (var (existing, known) in _remotes)
         {
@@ -881,14 +914,25 @@ public sealed partial class Runlight
                 return Site(existing)!;
             }
         }
-        string host = Js.Lower(NotIdChar().Replace(thereHostnames.Count > 0 ? thereHostnames[0] : new Url(url).Host, "-"));
+        string host = Js.Lower(LeadingNotAlphanumeric().Replace(NotIdChar().Replace(thereHostnames.Count > 0 ? thereHostnames[0] : new Url(url).Host, "-"), ""));
+        if (host.Length == 0)
+        {
+            host = "site";
+        }
         string id = Js.Slice(host, 0, 56);
         for (int n = 2; HasSite(id); n++)
         {
             id = Js.Slice(host, 0, 56) + "-" + Js.Str(n);
         }
         string name = Js.Slice(Js.Trim(Js.String(Given(input, "name") ?? "")), 0, 80);
-        name = name.Length > 0 ? name : Js.String(there.Prop("name"));
+        if (name.Length == 0)
+        {
+            name = Js.Slice(Js.Trim(thereName), 0, 80);
+        }
+        if (name.Length == 0)
+        {
+            name = host;
+        }
         // No hostnames: tracker hits never land on a site that is counted elsewhere.
         var row = new JsObject
         {
@@ -915,11 +959,9 @@ public sealed partial class Runlight
         return row.Clone();
     }
 
-    private static readonly System.Globalization.CompareInfo Collation = CultureInfo.GetCultureInfo("en").CompareInfo;
-
     /// <summary>Sites in name order, as TS sorts them with localeCompare (a stable sort).</summary>
     private static List<JsObject> ByName(IEnumerable<JsObject> sites) =>
-        sites.OrderBy(site => site.Str("name") ?? "", Comparer<string>.Create((a, b) => Collation.Compare(a, b, CompareOptions.None))).ToList();
+        sites.OrderBy(site => site.Str("name") ?? "", Comparer<string>.Create(EnglishOrder.Compare)).ToList();
 
     /// <summary>
     /// Adds a site, when sites are managed in the dashboard: one counted here ({ name, hostnames, timezone }),
@@ -1137,8 +1179,59 @@ public sealed partial class Runlight
     /// Runs the work still waiting from earlier calls (<see cref="Later"/> work and a retention change's
     /// deletions). An adapter calls it once the answer is out; the scheduled check and tests wait for it.
     /// </summary>
+    /// <remarks>
+    /// Work another call has already taken and is still doing is waited for too, so once this returns nothing
+    /// queued before the call is still running.
+    /// </remarks>
     public async Task IdleAsync()
     {
+        Task mine;
+        lock (_idling)
+        {
+            // Listed before it takes anything, so whoever finds the queues empty can see who emptied them.
+            mine = DrainAsync();
+            _idling.Add(mine);
+        }
+        try
+        {
+            await mine.ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_idling)
+            {
+                _idling.Remove(mine);
+            }
+        }
+        Task[] others;
+        lock (_idling)
+        {
+            others = [.. _idling];
+        }
+        await Task.WhenAll(others).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts <see cref="IdleAsync"/> apart from the caller when there is work waiting, for an adapter that has just
+    /// sent its answer: the work never holds the connection the answer went out on, as waiting for it there would.
+    /// </summary>
+    internal void IdleSoon()
+    {
+        if (_later.IsEmpty && _pruning.IsEmpty)
+        {
+            return;
+        }
+        _ = Task.Run(IdleAsync);
+    }
+
+    private async Task DrainAsync()
+    {
+        // Apart from the caller from the first step, so a caller that does not wait is never held up.
+        await Task.Yield();
+        lock (_idling)
+        {
+            // Nothing is taken until IdleAsync has listed this run.
+        }
         while (_later.TryDequeue(out var work))
         {
             try
@@ -1304,7 +1397,7 @@ public sealed partial class Runlight
             {
                 throw new SettingsError("Enter the service's address, starting with https://", "assistant_address_bad");
             }
-            if (await Safefetch.MetadataHostAsync(parsed.Hostname).ConfigureAwait(false))
+            if (await Safefetch.MetadataHostAsync(parsed.Hostname, cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 throw new SettingsError(parsed.Hostname + " is a link-local or cloud metadata address, which Runlight never connects to", "address_refused", new JsObject { ["host"] = parsed.Hostname });
             }
@@ -1471,10 +1564,26 @@ public sealed partial class Runlight
                 : (_trustProxy.Header == "x-forwarded-for" ? Last("x-forwarded-for") : h.Get(_trustProxy.Header));
             if (forwarded != null && Js.Trim(forwarded).Length > 0)
             {
-                return Js.Trim(forwarded);
+                return WithoutPort(Js.Trim(forwarded));
             }
         }
         return address;
+    }
+
+    /// <summary>
+    /// A forwarded address without the port some proxies write after it (Azure App Service sends 203.0.113.5:49152,
+    /// and the port changes with every connection): an IPv4 address loses its :port, and an IPv6 address in brackets,
+    /// with a port after them or not, its brackets and port. Anything else is left as written.
+    /// </summary>
+    private static string WithoutPort(string address)
+    {
+        var six = BracketedWithPort().Match(address);
+        if (six.Success)
+        {
+            return six.Groups[1].Value;
+        }
+        var four = Ipv4WithPort().Match(address);
+        return four.Success ? four.Groups[1].Value : address;
     }
 
     /// <summary>
@@ -1571,10 +1680,11 @@ public sealed partial class Runlight
     }
 
     /// <summary>The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.</summary>
-    private string? ForwardedHost(Request request, string? ip = null) => Trusts(request, ip ?? request.RemoteAddress) ? request.Headers.Get("x-forwarded-host") : null;
+    internal string? ForwardedHost(Request request, string? ip = null) => Trusts(request, ip ?? request.RemoteAddress) ? request.Headers.Get("x-forwarded-host") : null;
 
     /// <summary>
-    /// Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing throws.
+    /// Handles one tracker request. It never throws for anything but its caller going away: bad input is dropped
+    /// quietly, and a hit the store could not take is logged.
     /// </summary>
     /// <param name="request">The tracker's POST.</param>
     /// <param name="ip">The connection's address, when the request does not carry it.</param>
@@ -1582,6 +1692,19 @@ public sealed partial class Runlight
     public async Task CollectAsync(Request request, string? ip = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        try
+        {
+            await TakeAsync(request, ip, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // Analytics must never break the app it counts for.
+            await Console.Error.WriteLineAsync("Runlight: could not record an event " + error).ConfigureAwait(false);
+        }
+    }
+
+    private async Task TakeAsync(Request request, string? ip, CancellationToken cancellationToken)
+    {
         double length = Js.Number(request.Headers.Get("content-length") ?? (object)0L);
         if (length > Payload.MaxBody)
         {
@@ -1875,7 +1998,7 @@ public sealed partial class Runlight
     /// <param name="at">When a log reader says the page was served, in epoch milliseconds; now when null.</param>
     /// <param name="cancellationToken">Stops the work.</param>
     public Task<bool> ObserveAsync(Request request, double? at, CancellationToken cancellationToken) =>
-        ObserveAsync(request, at, ip: null, agentIp: null, cancellationToken: cancellationToken);
+        ObserveAsync(request, at, ip: null, agentIp: null, userAgent: null, cancellationToken: cancellationToken);
 
     /// <summary>
     /// Records a request from a known AI agent. Call it from middleware for every page request; it ignores
@@ -1889,8 +2012,12 @@ public sealed partial class Runlight
     /// <param name="at">When a log reader says the page was served, in epoch milliseconds; now when null.</param>
     /// <param name="ip">The connection's address, when the request does not carry it.</param>
     /// <param name="agentIp">The agent's address as a report names it, which takes the place of the request's.</param>
+    /// <param name="userAgent">
+    /// Stands in for the request's User-Agent header when given: a log reader gives the user agent as text,
+    /// since a logged one may not be fit for a header.
+    /// </param>
     /// <param name="cancellationToken">Stops the work.</param>
-    public async Task<bool> ObserveAsync(Request request, double? at = null, string? ip = null, string? agentIp = null, CancellationToken cancellationToken = default)
+    public async Task<bool> ObserveAsync(Request request, double? at = null, string? ip = null, string? agentIp = null, string? userAgent = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         try
@@ -1899,7 +2026,7 @@ public sealed partial class Runlight
             {
                 return false;
             }
-            var agent = Ua.AiAgent(request.Headers.Get("user-agent") ?? "");
+            var agent = Ua.AiAgent(userAgent ?? request.Headers.Get("user-agent") ?? "");
             if (agent == null)
             {
                 return false;
@@ -1911,10 +2038,15 @@ public sealed partial class Runlight
             {
                 return false;
             }
-            string host = ForwardedHost(request) ?? request.Headers.Get("host") ?? url.Hostname;
+            string host = Js.Trim((ForwardedHost(request, ip) ?? request.Headers.Get("host") ?? url.Hostname).Split(',')[0]).Split(':')[0];
             await InitAsync(cancellationToken).ConfigureAwait(false);
-            var site = SiteFor(host.Split(':')[0]);
+            var site = SiteFor(host);
             if (site == null)
+            {
+                return false;
+            }
+            // A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+            if (agentIp == null && _fetchLimit != null && !_fetchLimit.Allow(ClientIp(request, ip)))
             {
                 return false;
             }
@@ -1936,7 +2068,7 @@ public sealed partial class Runlight
                 ["session"] = "",
                 ["pageview"] = "",
                 ["path"] = Js.Slice(url.Pathname, 0, 1000),
-                ["hostname"] = Sources.StripWww(url.Hostname),
+                ["hostname"] = Sources.StripWww(host),
                 // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
                 // there was nothing to check against. The address itself is not kept.
                 ["title"] = AgentCheck.Check(agent, agentIp ?? ClientIp(request, ip), _agentRanges),
@@ -1963,19 +2095,45 @@ public sealed partial class Runlight
     /// saves a query on each tracker hit; a change made here clears it at once, one made by another process
     /// within half a minute.
     /// </summary>
-    private async Task<HashSet<string>> LinkDomainSetAsync(CancellationToken cancellationToken)
+    /// <remarks>
+    /// Middleware asks on every request to the app, so a database that is down must not take the app down with
+    /// it: when the lookup fails, the domains last read stand (none, when there were none), the failure is
+    /// said, and the database is asked again in a few seconds. With <paramref name="waitMs"/>, as middleware
+    /// in front of an app's own pages asks, the tables are waited for only that long, and tables not ready by
+    /// then count the same way, without a word.
+    /// </remarks>
+    private async Task<HashSet<string>> LinkDomainSetAsync(int? waitMs, CancellationToken cancellationToken)
     {
         long now = Now();
         var cache = _linkDomainCache;
-        if (cache != null && now - cache.Value.At < 30_000)
+        if (cache != null && now - cache.At < 30_000)
         {
-            return cache.Value.Domains;
+            return cache.Domains;
         }
-        await InitAsync(cancellationToken).ConfigureAwait(false);
-        var domains = new HashSet<string>(
-            (await Store.LinkDomainsAsync(cancellationToken).ConfigureAwait(false)).Select(d => d.Str("domain")!),
-            StringComparer.Ordinal);
-        _linkDomainCache = (now, domains);
+        HashSet<string> domains;
+        try
+        {
+            if (waitMs == null)
+            {
+                await InitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else if (!await ReadyWithinAsync(waitMs.Value, cancellationToken).ConfigureAwait(false))
+            {
+                domains = cache?.Domains ?? new HashSet<string>(StringComparer.Ordinal);
+                _linkDomainCache = new LinkDomains(now - 30_000 + LinkDomainRetryMs, domains);
+                return domains;
+            }
+            domains = new HashSet<string>(
+                (await Store.LinkDomainsAsync(cancellationToken).ConfigureAwait(false)).Select(d => d.Str("domain")!),
+                StringComparer.Ordinal);
+            _linkDomainCache = new LinkDomains(now, domains);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            domains = cache?.Domains ?? new HashSet<string>(StringComparer.Ordinal);
+            _linkDomainCache = new LinkDomains(now - 30_000 + LinkDomainRetryMs, domains);
+            await Console.Error.WriteLineAsync("Runlight: could not read the link domains " + error.Message).ConfigureAwait(false);
+        }
         return domains;
     }
 
@@ -2002,14 +2160,22 @@ public sealed partial class Runlight
     /// so the app carries on as normal, and for the dashboard's own paths, so its owner can always reach it to
     /// remove the domain.
     /// </summary>
-    public async Task<Response?> LinkDomainResponseAsync(Request request, string? ip = null, CancellationToken cancellationToken = default)
+    public Task<Response?> LinkDomainResponseAsync(Request request, string? ip = null, CancellationToken cancellationToken = default) =>
+        LinkDomainResponseAsync(request, ip, null, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="LinkDomainResponseAsync(Request, string?, CancellationToken)"/>, for middleware that stands in
+    /// front of an app's own pages: the tables are waited for at most <paramref name="waitMs"/>, and a request that
+    /// arrives before they are ready is the app's (null), rather than held until they are.
+    /// </summary>
+    internal async Task<Response?> LinkDomainResponseAsync(Request request, string? ip, int? waitMs, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         var url = new Url(request.Url);
         // A forwarded host only counts behind a proxy that sets it; otherwise any client could pick one.
         string given = ForwardedHost(request, ip) ?? request.Headers.Get("host") ?? url.Host;
         string host = Sources.StripWww(Js.Trim(given.Split(',')[0]).Split(':')[0]);
-        if (!(await LinkDomainSetAsync(cancellationToken).ConfigureAwait(false)).Contains(host))
+        if (!(await LinkDomainSetAsync(waitMs, cancellationToken).ConfigureAwait(false)).Contains(host))
         {
             return null;
         }
@@ -2054,7 +2220,8 @@ public sealed partial class Runlight
         }
         var site = Site(link.Str("site")) ?? Sites().FirstOrDefault();
         string ua = request.Headers.Get("user-agent") ?? "";
-        if (site != null && Ua.AiAgent(ua) == null && !Ua.IsBot(ua) && request.Method == "GET")
+        // Past the tracker's limit for one address a click still redirects, and is not counted.
+        if (site != null && Ua.AiAgent(ua) == null && !Ua.IsBot(ua) && request.Method == "GET" && (_limit == null || _limit.Allow(ClientIp(request, ip))))
         {
             try
             {
@@ -2142,26 +2309,33 @@ public sealed partial class Runlight
         try
         {
             string? stored = await Store.SettingAsync("agent-ranges", cancellationToken).ConfigureAwait(false);
-            (long At, Dictionary<string, IReadOnlyList<string>> Lists)? saved = null;
+            // Fetched is when each list was downloaded; a copy saved before it was kept has only its one time, for all of them.
+            (long At, Dictionary<string, IReadOnlyList<string>> Lists, Dictionary<string, long> Fetched)? saved = null;
             if (stored != null)
             {
                 try
                 {
-                    var parsed = Json.Parse(stored);
+                    var parsed = Json.Parse(stored) as JsObject;
+                    double read = Js.Number(parsed?.Get("at"));
+                    long at = double.IsFinite(read) ? (long)read : 0;
                     var lists = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
-                    if ((parsed as JsObject)?.Get("lists") is JsObject given)
+                    var fetched = new Dictionary<string, long>(StringComparer.Ordinal);
+                    var times = parsed?.Get("fetched") as JsObject;
+                    if (parsed?.Get("lists") is JsObject given)
                     {
                         foreach (var (url, list) in given)
                         {
                             var prefixes = AgentCheck.ReadRangeList(AgentCheck.AsPublished(list as List<object?>));
-                            if (prefixes != null)
+                            if (prefixes == null)
                             {
-                                lists[url] = prefixes;
+                                continue;
                             }
+                            lists[url] = prefixes;
+                            double when = times == null ? double.NaN : Js.Number(times.Get(url));
+                            fetched[url] = double.IsFinite(when) && when != 0 ? (long)when : (times != null ? 0 : at);
                         }
                     }
-                    double at = Js.Number((parsed as JsObject)?.Get("at"));
-                    saved = (double.IsFinite(at) ? (long)at : 0, lists);
+                    saved = (at, lists, fetched);
                 }
                 catch (JsonParseException)
                 {
@@ -2170,28 +2344,41 @@ public sealed partial class Runlight
             if (UpdateAgentRanges && (saved == null || Now() - saved.Value.At >= AgentRangesEveryMs))
             {
                 var lists = saved == null ? new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal) : new Dictionary<string, IReadOnlyList<string>>(saved.Value.Lists, StringComparer.Ordinal);
+                var fetched = saved == null ? new Dictionary<string, long>(StringComparer.Ordinal) : new Dictionary<string, long>(saved.Value.Fetched, StringComparer.Ordinal);
                 foreach (string url in AgentCheck.BundledUrls)
                 {
                     var fresh = await AgentCheck.DownloadRangeListAsync(url, Fetcher, cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (fresh != null)
                     {
                         lists[url] = fresh;
+                        fetched[url] = Now();
                     }
                 }
-                saved = (Now(), lists);
+                saved = (Now(), lists, fetched);
                 var save = new JsObject();
                 foreach (var (url, list) in lists)
                 {
                     save[url] = list.Cast<object?>().ToList();
                 }
-                await Store.SetSettingAsync("agent-ranges", Json.Stringify(new JsObject { ["at"] = saved.Value.At, ["lists"] = save }), cancellationToken).ConfigureAwait(false);
+                var times = new JsObject();
+                foreach (var (url, when) in fetched)
+                {
+                    times[url] = when;
+                }
+                await Store.SetSettingAsync("agent-ranges", Json.Stringify(new JsObject { ["at"] = saved.Value.At, ["lists"] = save, ["fetched"] = times }), cancellationToken).ConfigureAwait(false);
             }
+            // A downloaded list stands in for the one that came with this version only while it is the newer of the two.
+            double shippedAt = Importers.Http.ParseDate(AgentCheck.BundledFetchedAt);
+            long shipped = double.IsFinite(shippedAt) ? (long)shippedAt : 0;
             var inUse = new Dictionary<string, IReadOnlyList<string>>(AgentCheck.Bundled, StringComparer.Ordinal);
             if (saved != null)
             {
                 foreach (var (url, list) in saved.Value.Lists)
                 {
-                    inUse[url] = list;
+                    if (saved.Value.Fetched.GetValueOrDefault(url) >= shipped)
+                    {
+                        inUse[url] = list;
+                    }
                 }
             }
             _agentRanges = inUse;
@@ -2227,6 +2414,7 @@ public sealed partial class Runlight
         await DropOldSaltsAsync(Now(), cancellationToken).ConfigureAwait(false);
         // Sign-in counts worked out from an address go once their window ends, and their hashing keys after a day.
         await Accounts.Throttle.SweepAsync(Store, Now(), cancellationToken).ConfigureAwait(false);
+        await Accounts.Lockout.SweepAsync(Store, Now(), cancellationToken).ConfigureAwait(false);
         // Every site's retention covers any one site's that is still waiting.
         _pruning.Clear();
         await ApplyRetentionAsync(null, cancellationToken).ConfigureAwait(false);
@@ -2310,6 +2498,12 @@ public sealed partial class Runlight
         return new Regex("^" + part + "@" + part + "\\." + part + "\\z", RegexOptions.CultureInvariant);
     }
 
+    [GeneratedRegex("^\\[([^\\]]*)\\](?::[0-9]+)?\\z", RegexOptions.CultureInvariant)]
+    private static partial Regex BracketedWithPort();
+
+    [GeneratedRegex("^([0-9]{1,3}(?:\\.[0-9]{1,3}){3}):[0-9]+\\z", RegexOptions.CultureInvariant)]
+    private static partial Regex Ipv4WithPort();
+
     [GeneratedRegex("^/+|/+\\z", RegexOptions.CultureInvariant)]
     private static partial Regex EdgeSlashes();
 
@@ -2333,6 +2527,9 @@ public sealed partial class Runlight
 
     [GeneratedRegex("[^a-z0-9._-]", RegexOptions.CultureInvariant)]
     private static partial Regex NotLowerIdChar();
+
+    [GeneratedRegex("^[^a-zA-Z0-9]+", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex LeadingNotAlphanumeric();
 
     [GeneratedRegex("\\.([a-zA-Z0-9]+)\\z", RegexOptions.CultureInvariant)]
     private static partial Regex Extension();

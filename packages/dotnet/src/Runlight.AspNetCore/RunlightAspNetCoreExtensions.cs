@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -149,7 +150,7 @@ public static class RunlightAspNetCoreExtensions
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
-        context.Response.OnCompleted(runlight.IdleAsync);
+        RunlightHttp.After(context, runlight.IdleSoon);
         await RunlightHttp.WriteAsync(context, answer, context.RequestAborted).ConfigureAwait(false);
     }
 
@@ -163,18 +164,31 @@ public static class RunlightAspNetCoreExtensions
     /// <summary>
     /// The middleware: a link domain answers whatever the path; a GET for <paramref name="link"/> is answered when
     /// a link has that name; a request <paramref name="owns"/> says is Runlight's is answered; anything else goes
-    /// on, with an AI agent's page fetch recorded first. A short link nobody has goes on to the app too, so its own
-    /// 404 page answers.
+    /// on, with an AI agent's page fetch noted to be recorded apart from it. A short link nobody has goes on to the
+    /// app too, so its own 404 page answers. The app's pages never depend on Runlight's database: a lookup that
+    /// fails, or tables still being made, send the request on to the app.
     /// </summary>
-    private static Func<HttpContext, RequestDelegate, Task> Front(RunlightInstance runlight, Routes routes, bool observe, Regex? link, Func<string, string, bool>? owns) =>
-        async (context, next) =>
+    private static Func<HttpContext, RequestDelegate, Task> Front(RunlightInstance runlight, Routes routes, bool observe, Regex? link, Func<string, string, bool>? owns)
+    {
+        // When a failure was last said, so a database that stays down is said every few seconds, not on every request.
+        long said = long.MinValue;
+        return async (context, next) =>
         {
+            // Methods no route or link answers are the app's.
+            if (context.Request.Method.ToUpperInvariant() is "TRACE" or "TRACK" or "CONNECT")
+            {
+                await next(context).ConfigureAwait(false);
+                return;
+            }
             Request head = RunlightHttp.HeadOf(context);
-            Response? linked;
+            Response? linked = null;
             try
             {
-                linked = await runlight.LinkDomainResponseAsync(head, head.RemoteAddress, context.RequestAborted).ConfigureAwait(false);
-                if (linked == null && link != null && head.Method == "GET" && link.IsMatch(new Url(head.Url).Pathname))
+                // The app's own pages never wait long on Runlight's tables, and never fail with them: whatever goes
+                // wrong in here is said, and the request goes on to the app as if Runlight were not there.
+                linked = await runlight.LinkDomainResponseAsync(head, head.RemoteAddress, runlight.TrackerWait, context.RequestAborted).ConfigureAwait(false);
+                if (linked == null && link != null && head.Method == "GET" && link.IsMatch(new Url(head.Url).Pathname)
+                    && await runlight.ReadyWithinAsync(runlight.TrackerWait, context.RequestAborted).ConfigureAwait(false))
                 {
                     Response followed = await runlight.LinkHandler()(head, head.RemoteAddress, context.RequestAborted).ConfigureAwait(false);
                     linked = followed.Status == 404 ? null : followed;
@@ -186,12 +200,17 @@ public static class RunlightAspNetCoreExtensions
             }
             catch (Exception error)
             {
-                await Console.Error.WriteLineAsync("Runlight: " + error.Message).ConfigureAwait(false);
-                linked = Routes.Coded("Internal error", "internal", 500);
+                long now = Environment.TickCount64;
+                long before = Interlocked.Read(ref said);
+                if ((before == long.MinValue || now - before >= 5000) && Interlocked.CompareExchange(ref said, now, before) == before)
+                {
+                    await Console.Error.WriteLineAsync("Runlight: " + error.Message).ConfigureAwait(false);
+                }
+                linked = null;
             }
             if (linked != null)
             {
-                context.Response.OnCompleted(runlight.IdleAsync);
+                RunlightHttp.After(context, runlight.IdleSoon);
                 await RunlightHttp.WriteAsync(context, linked, context.RequestAborted).ConfigureAwait(false);
                 return;
             }
@@ -200,12 +219,16 @@ public static class RunlightAspNetCoreExtensions
                 await RunlightHttp.ServeAsync(context, runlight, routes).ConfigureAwait(false);
                 return;
             }
-            if (observe && head.Method == "GET")
+            if (observe && head.Method == "GET" && Ua.AiAgent(head.Headers.Get("user-agent") ?? "") != null)
             {
-                await runlight.ObserveAsync(head, cancellationToken: context.RequestAborted).ConfigureAwait(false);
+                // Recorded apart from the request, at the time it came, so the page never waits on the database for it.
+                double at = runlight.Now();
+                runlight.Later(() => runlight.ObserveAsync(head, at, CancellationToken.None));
+                runlight.IdleSoon();
             }
             await next(context).ConfigureAwait(false);
         };
+    }
 
     /// <summary>Several endpoints' conventions as one, so an app adds its own to all of them at once.</summary>
     private sealed class Conventions(IReadOnlyList<IEndpointConventionBuilder> builders) : IEndpointConventionBuilder

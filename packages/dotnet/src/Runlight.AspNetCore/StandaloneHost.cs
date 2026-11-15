@@ -55,7 +55,7 @@ public static class StandaloneHost
         WebApplication app = builder.Build();
         await using (app.ConfigureAwait(false))
         {
-            app.Run(context => RunlightHttp.ServeAsync(context, server.Handler(), server.Runlight.IdleAsync));
+            app.Run(context => RunlightHttp.ServeThenAsync(context, server.Handler(), server.Runlight.IdleSoon));
             await app.StartAsync(stopping).ConfigureAwait(false);
             string shown = host is "0.0.0.0" or "::" or "[::]" ? "localhost" : host;
             await Cli.AnnounceAsync(config, server, "http://" + shown + ":" + Js.Str((long)port), output).ConfigureAwait(false);

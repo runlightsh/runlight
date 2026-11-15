@@ -42,7 +42,7 @@ public static class Geo
         }
         // A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database that has no codes
         // ("California") is kept readable, as "US-California".
-        string raw = Js.Trim(Text(location.Prop("region")));
+        string raw = Js.Trim(Payload.Tidy(Text(location.Prop("region"))));
         string region = Region.IsMatch(raw) ? raw.ToUpperInvariant() : Js.Slice(raw, 0, 80);
         if (region.Length > 0 && !(region.Length >= 3 && IsUpperPair(region[..2]) && region[2] == '-') && country.Length > 0)
         {
@@ -52,7 +52,7 @@ public static class Geo
         {
             region = "";
         }
-        string city = country.Length > 0 ? Js.Slice(Text(location.Prop("city")), 0, 100) : "";
+        string city = country.Length > 0 ? Js.Slice(Payload.Tidy(Text(location.Prop("city"))), 0, 100) : "";
         return new JsObject { ["country"] = country, ["region"] = region, ["city"] = city };
     }
 

@@ -84,7 +84,8 @@ public sealed class Dub(Http? http = null, Func<long>? now = null) : IImporter
                                 ["os"] = Http.Field(click, "os"),
                             }));
                         }
-                        if (events.Count < 1000)
+                        // No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+                        if (events.Count < 1000 || clicks.Count >= Write.MaxLinkClicks)
                         {
                             break;
                         }

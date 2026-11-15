@@ -52,6 +52,18 @@ public static partial class CsvVisits
     /// </summary>
     public static double RowTime(JsObject row, string format)
     {
+        double ts = ReadTime(row, format);
+        return ts >= CsvEarliest ? ts : double.NaN;
+    }
+
+    /// <summary>
+    /// The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a date written
+    /// 20240501 would otherwise land in 1970, and the site's history would begin there.
+    /// </summary>
+    public const long CsvEarliest = 946_684_800_000;
+
+    private static double ReadTime(JsObject row, string format)
+    {
         string text = row.Get(format == "umami" ? "created_at" : "time") is string s ? Js.Trim(s) : "";
         if (text.Length == 0)
         {

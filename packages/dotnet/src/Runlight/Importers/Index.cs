@@ -42,7 +42,8 @@ public static class Index
         var importer = make(new Http(runlight.Fetcher), runlight.Now);
         async Task<bool> Known(string sourceId, string? slug, string? url)
         {
-            if (await runlight.Store.LinkByIdAsync(Write.ImportedLinkId(source, sourceId), cancellationToken).ConfigureAwait(false) != null)
+            // A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+            if (await runlight.Store.LinkExistsAsync(Write.ImportedLinkId(source, sourceId), cancellationToken).ConfigureAwait(false))
             {
                 return true;
             }

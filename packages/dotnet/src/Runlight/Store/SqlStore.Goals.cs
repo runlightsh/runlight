@@ -378,13 +378,13 @@ public sealed partial class SqlStore
     {
         if (Dialect == "postgres")
         {
-            return new SqlPart("(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)", [prop, prop]);
+            return new SqlPart("(CASE WHEN (" + Sql.ReadableProps("postgres") + " ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (" + Sql.ReadableProps("postgres") + " ->> ?)::numeric ELSE 0 END)", [prop, prop]);
         }
         string path = "$.\"" + prop + "\"";
         if (Dialect == "mysql")
         {
             // As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-            string value = "JSON_EXTRACT(e.props, ?)";
+            string value = "JSON_EXTRACT(" + Sql.ReadableProps("mysql") + ", ?)";
             return new SqlPart(
                 "(CASE\n          WHEN JSON_TYPE(" + value + ") IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN CAST(" + value + " AS DOUBLE)\n          WHEN JSON_TYPE(" + value + ") = 'STRING' AND JSON_UNQUOTE(" + value + ") REGEXP '^-?[0-9]+([.][0-9]+)?$' THEN CAST(JSON_UNQUOTE(" + value + ") AS DOUBLE)\n          ELSE 0 END)",
                 [.. Enumerable.Repeat<object?>(path, 5)]);
@@ -406,11 +406,11 @@ public sealed partial class SqlStore
         {
             // Each key as a row of its own, compared and sorted by code point like every other value.
             "mysql" => await Db.AllAsync(
-                "SELECT j.k AS \"key\", COUNT(*) AS events FROM " + v.From + "\n             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE " + Sql.MysqlCollation + " PATH '$')) j\n             WHERE " + where + " GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30",
+                "SELECT j.k AS \"key\", COUNT(*) AS events FROM " + v.From + "\n             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(" + Sql.ReadableProps("mysql") + ") = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE " + Sql.MysqlCollation + " PATH '$')) j\n             WHERE " + where + " GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30",
                 parameters,
                 cancellationToken).ConfigureAwait(false),
             "postgres" => await Db.AllAsync(
-                "SELECT k AS \"key\", COUNT(*) AS events FROM " + v.From + " CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k\n             WHERE " + where + " GROUP BY k ORDER BY events DESC, k" + TextOrder() + " LIMIT 30",
+                "SELECT k AS \"key\", COUNT(*) AS events FROM " + v.From + " CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(" + Sql.ReadableProps("postgres") + ") = 'object' THEN " + Sql.ReadableProps("postgres") + " ELSE '{}'::jsonb END) AS k\n             WHERE " + where + " GROUP BY k ORDER BY events DESC, k" + TextOrder() + " LIMIT 30",
                 parameters,
                 cancellationToken).ConfigureAwait(false),
             _ => await Db.AllAsync(
@@ -427,8 +427,8 @@ public sealed partial class SqlStore
         var v = Sql.VisitRows(Sql.Filters(query), query.Str("site")!, query.Long("from"), query.Long("to"), Dialect);
         string value = Dialect switch
         {
-            "postgres" => "(e.props::jsonb ->> ?)",
-            "mysql" => "(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE " + Sql.MysqlCollation + ")",
+            "postgres" => "(" + Sql.ReadableProps("postgres") + " ->> ?)",
+            "mysql" => "(JSON_UNQUOTE(JSON_EXTRACT(" + Sql.ReadableProps("mysql") + ", ?)) COLLATE " + Sql.MysqlCollation + ")",
             _ => "CAST(json_extract(e.props, ?) AS TEXT)",
         };
         string path = Dialect == "postgres" ? key : "$.\"" + key + "\"";

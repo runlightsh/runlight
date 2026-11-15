@@ -29,7 +29,7 @@ public static class Sources
 
     static Sources()
     {
-        // Later entries win, as Map.set does: the alias "kit" names Newsletter, not Kit.
+        // Later entries win, as Map.set does.
         foreach (var source in Lists.Sources)
         {
             foreach (var host in source.Arr("hosts")!)
@@ -43,7 +43,8 @@ public static class Sources
         }
     }
 
-    private static string Clip(string? value, int max = 200) => Js.Slice(Js.Trim(value ?? ""), 0, max);
+    /// <summary>A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character.</summary>
+    private static string Clip(string? value, int max = 200) => Payload.CleanText(Js.Trim(Payload.Tidy(value ?? "")), max);
 
     public static string StripWww(string host)
     {

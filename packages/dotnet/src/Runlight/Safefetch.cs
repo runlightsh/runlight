@@ -256,7 +256,8 @@ public static partial class Safefetch
     /// </summary>
     /// <param name="host">The host, a name or an address (an IPv6 one in brackets or not).</param>
     /// <param name="lookup">Stands in for DNS in tests.</param>
-    public static async Task<bool> MetadataHostAsync(string host, Func<string, Task<IReadOnlyList<string>>>? lookup = null)
+    /// <param name="cancellationToken">Stops the lookup, which is also given up after <see cref="LookupTimeoutMs"/>.</param>
+    public static async Task<bool> MetadataHostAsync(string host, Func<string, Task<IReadOnlyList<string>>>? lookup = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
         string name = TrailingDots.Replace(Brackets.Replace(Js.Lower(Js.Trim(host)), ""), "");
@@ -270,10 +271,10 @@ public static partial class Safefetch
         }
         try
         {
-            return (await (lookup ?? LookupAsync)(name).ConfigureAwait(false)).Any(MetadataAddress);
+            return (await LookupWithinAsync(name, lookup, cancellationToken).ConfigureAwait(false)).Any(MetadataAddress);
         }
 #pragma warning disable CA1031 // A name that does not resolve is let through, as the TypeScript's catch.
-        catch (Exception)
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
 #pragma warning restore CA1031
         {
             return false;
@@ -284,7 +285,29 @@ public static partial class Safefetch
     /// Every address a name resolves to, v4 and v6, as getaddrinfo() would give them (the hosts
     /// file included). Empty when it does not resolve.
     /// </summary>
-    public static async Task<IReadOnlyList<string>> LookupAsync(string name)
+    public static Task<IReadOnlyList<string>> LookupAsync(string name) => LookupAsync(name, CancellationToken.None);
+
+    /// <summary>The longest a lookup made for a check of its own, with no fetch's time to keep to, may take.</summary>
+    public const int LookupTimeoutMs = 10_000;
+
+    /// <summary>
+    /// A lookup for a check with no fetch behind it: through <paramref name="lookup"/> when a test gives one, else
+    /// the system's resolver, given up after <see cref="LookupTimeoutMs"/> or when the caller goes away.
+    /// </summary>
+    private static async Task<IReadOnlyList<string>> LookupWithinAsync(string name, Func<string, Task<IReadOnlyList<string>>>? lookup, CancellationToken cancellationToken)
+    {
+        if (lookup != null)
+        {
+            return await lookup(name).ConfigureAwait(false);
+        }
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        limit.CancelAfter(LookupTimeoutMs);
+        return await LookupAsync(name, limit.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>As <see cref="LookupAsync(string)"/>, given up when <paramref name="cancellationToken"/> fires.</summary>
+    /// <exception cref="OperationCanceledException">When the token fires first.</exception>
+    public static async Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(name);
         string bare = Brackets.Replace(name, "");
@@ -294,7 +317,7 @@ public static partial class Safefetch
         }
         try
         {
-            var found = await Dns.GetHostAddressesAsync(bare).ConfigureAwait(false);
+            var found = await Dns.GetHostAddressesAsync(bare, cancellationToken).ConfigureAwait(false);
             return found.Select(a => a.IsIPv4MappedToIPv6 ? a.MapToIPv4().ToString() : a.ToString()).Distinct(StringComparer.Ordinal).ToList();
         }
         catch (Exception e) when (e is SocketException or ArgumentException)
@@ -306,15 +329,16 @@ public static partial class Safefetch
     /// <summary>The public addresses a name resolves to, for setting up DNS records. None where it does not resolve.</summary>
     /// <param name="name">The name.</param>
     /// <param name="lookup">Stands in for DNS in tests.</param>
-    public static async Task<IReadOnlyList<string>> PublicAddressesAsync(string name, Func<string, Task<IReadOnlyList<string>>>? lookup = null)
+    /// <param name="cancellationToken">Stops the lookup, which is also given up after <see cref="LookupTimeoutMs"/>.</param>
+    public static async Task<IReadOnlyList<string>> PublicAddressesAsync(string name, Func<string, Task<IReadOnlyList<string>>>? lookup = null, CancellationToken cancellationToken = default)
     {
         IReadOnlyList<string> addresses;
         try
         {
-            addresses = await (lookup ?? LookupAsync)(name).ConfigureAwait(false);
+            addresses = await LookupWithinAsync(name, lookup, cancellationToken).ConfigureAwait(false);
         }
 #pragma warning disable CA1031 // Any failure to resolve means no addresses, as the TypeScript's catch.
-        catch (Exception)
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
 #pragma warning restore CA1031
         {
             return [];
@@ -325,15 +349,16 @@ public static partial class Safefetch
     /// <summary>Whether a name resolves to an address off the public internet. False when it does not resolve.</summary>
     /// <param name="name">The name.</param>
     /// <param name="lookup">Stands in for DNS in tests.</param>
-    public static async Task<bool> ResolvesPrivatelyAsync(string name, Func<string, Task<IReadOnlyList<string>>>? lookup = null)
+    /// <param name="cancellationToken">Stops the lookup, which is also given up after <see cref="LookupTimeoutMs"/>.</param>
+    public static async Task<bool> ResolvesPrivatelyAsync(string name, Func<string, Task<IReadOnlyList<string>>>? lookup = null, CancellationToken cancellationToken = default)
     {
         IReadOnlyList<string> addresses;
         try
         {
-            addresses = await (lookup ?? LookupAsync)(name).ConfigureAwait(false);
+            addresses = await LookupWithinAsync(name, lookup, cancellationToken).ConfigureAwait(false);
         }
 #pragma warning disable CA1031 // Any failure to resolve means it does not resolve privately, as the TypeScript's catch.
-        catch (Exception)
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
 #pragma warning restore CA1031
         {
             return false;
@@ -352,7 +377,6 @@ public static partial class Safefetch
     {
         ArgumentNullException.ThrowIfNull(init);
         ArgumentNullException.ThrowIfNull(fetcher);
-        var lookup = init.Lookup ?? fetcher.LookupAsync;
         string method = init.Method.ToUpperInvariant();
         // Only a GET follows redirects; anything else comes back with the redirect as it is.
         int redirects = method == "GET" ? init.Redirects : 0;
@@ -379,7 +403,10 @@ public static partial class Safefetch
             {
                 // The address checked is the address used: every one the name gives must be public, and the
                 // connection is pinned to them, so a second lookup cannot hand back another.
-                var addresses = await lookup(host).ConfigureAwait(false);
+                // The lookup is part of the fetch: it has the time the fetch has left, and stops when the caller does.
+                var addresses = init.Lookup != null
+                    ? await init.Lookup(host).ConfigureAwait(false)
+                    : await LookupInTimeAsync(fetcher, host, init.TimeoutMs - clock.ElapsedMilliseconds, cancellationToken).ConfigureAwait(false);
                 if (addresses.Count == 0)
                 {
                     throw new FetchException("getaddrinfo ENOTFOUND " + host);
@@ -434,6 +461,28 @@ public static partial class Safefetch
         }
     }
 
+    /// <summary>
+    /// A name looked up within the time a fetch has left. Running out of it is the fetch timing out; the caller
+    /// going away is the caller's own cancellation.
+    /// </summary>
+    private static async Task<IReadOnlyList<string>> LookupInTimeAsync(IFetcher fetcher, string host, long left, CancellationToken cancellationToken)
+    {
+        if (left <= 0)
+        {
+            throw TimedOut();
+        }
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        limit.CancelAfter(TimeSpan.FromMilliseconds(left));
+        try
+        {
+            return await fetcher.LookupAsync(host, limit.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw TimedOut();
+        }
+    }
+
     /// <summary>Headers that describe a body, dropped with it when a redirect turns a request into a GET.</summary>
     private static readonly string[] BodyHeaders = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
 
@@ -479,10 +528,10 @@ public static partial class Safefetch
                 IReadOnlyList<string> addresses;
                 try
                 {
-                    addresses = await fetcher.LookupAsync(name).ConfigureAwait(false);
+                    addresses = await LookupInTimeAsync(fetcher, name, init.TimeoutMs - clock.ElapsedMilliseconds, cancellationToken).ConfigureAwait(false);
                 }
 #pragma warning disable CA1031 // A lookup that fails is a name that does not resolve.
-                catch (Exception)
+                catch (Exception error) when (error is not OperationCanceledException && error is not FetchException { TimedOut: true })
 #pragma warning restore CA1031
                 {
                     addresses = [];
@@ -523,7 +572,7 @@ public static partial class Safefetch
             if (next.Origin != url.Origin)
             {
                 string there = TrailingDots.Replace(Js.Lower(Brackets.Replace(next.Hostname, "")), "");
-                if (await MetadataHostAsync(there, fetcher.LookupAsync).ConfigureAwait(false))
+                if (await MetadataHostAsync(there, fetcher.LookupAsync, cancellationToken).ConfigureAwait(false))
                 {
                     throw new MetadataAddressError(there);
                 }

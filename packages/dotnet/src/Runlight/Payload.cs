@@ -45,7 +45,38 @@ public sealed class Payload
 
     public long? Scroll { get; init; }
 
+    /// <summary>A string as it came, cut to <paramref name="max"/> UTF-16 units: for a URL, which the parser then encodes.</summary>
     private static string Str(object? value, int max) => value is string s ? Js.WellFormed(Js.Slice(s, 0, max)) : "";
+
+    /// <summary>
+    /// Text as every database can keep it: without U+0000, which Postgres refuses, and with half a surrogate pair
+    /// (which is no character) as U+FFFD.
+    /// </summary>
+    public static string Tidy(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return Js.WellFormed(text.Contains('\0', StringComparison.Ordinal) ? text.Replace("\0", "", StringComparison.Ordinal) : text);
+    }
+
+    /// <summary>Tidied text cut to <paramref name="max"/> characters (code points), so a character such as an emoji is never cut in half.</summary>
+    public static string CleanText(string text, int max)
+    {
+        string clean = Tidy(text);
+        if (clean.Length <= max)
+        {
+            return clean;
+        }
+        // Every surrogate left is one of a pair, so a pair is one character and is kept or left whole.
+        int end = 0;
+        for (int count = 0; end < clean.Length && count < max; count++)
+        {
+            end += char.IsHighSurrogate(clean[end]) ? 2 : 1;
+        }
+        return clean[..end];
+    }
+
+    /// <summary>A string the tracker sent, as it is stored.</summary>
+    private static string Stored(object? value, int max) => value is string s ? CleanText(s, max) : "";
 
     private static long? Int(object? value, long min, long max)
     {
@@ -92,7 +123,7 @@ public sealed class Payload
             {
                 break;
             }
-            string k = Js.WellFormed(Js.Slice(Js.Trim(key), 0, 60));
+            string k = CleanText(Js.Trim(Tidy(key)), 60);
             if (k.Length == 0)
             {
                 continue;
@@ -100,7 +131,7 @@ public sealed class Payload
             string text;
             if (raw is string s)
             {
-                text = Js.WellFormed(Js.Slice(s, 0, 500));
+                text = CleanText(s, 500);
             }
             else if (Json.TryNumberOf(raw, out double n) && double.IsFinite(n))
             {
@@ -146,7 +177,7 @@ public sealed class Payload
             return null;
         }
 
-        string name = Js.Trim(Str(body.Get("n"), 120));
+        string name = Js.Trim(Stored(body.Get("n"), 120));
         if (k == "event" && name.Length == 0)
         {
             return null;
@@ -168,13 +199,13 @@ public sealed class Payload
         return new Payload
         {
             Kind = k,
-            Site = Str(body.Get("s"), 64),
+            Site = Stored(body.Get("s"), 64),
             Url = url,
             Referrer = Str(body.Get("r"), 2048),
-            Title = Str(body.Get("t"), 500),
+            Title = Stored(body.Get("t"), 500),
             ScreenWidth = Int(body.Get("w"), 0, 20000),
             ScreenHeight = Int(body.Get("h"), 0, 20000),
-            Language = Str(body.Get("l"), 35),
+            Language = Stored(body.Get("l"), 35),
             Name = name,
             Props = k == "event" ? LinkProps(name, PropsOf(body.Get("p"))) : null,
             PageviewId = pageviewId,

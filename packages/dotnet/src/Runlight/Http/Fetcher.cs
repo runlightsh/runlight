@@ -66,6 +66,12 @@ public interface IFetcher
     /// anything (<see cref="Safefetch.PublicFetchAsync"/>). A fake can stand in for DNS here.
     /// </summary>
     Task<IReadOnlyList<string>> LookupAsync(string name) => Safefetch.LookupAsync(name);
+
+    /// <summary>
+    /// As <see cref="LookupAsync(string)"/>, given up when <paramref name="cancellationToken"/> fires: the time a
+    /// fetch has left, or its caller going away. A fetcher that takes no token is asked without one.
+    /// </summary>
+    Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken) => LookupAsync(name);
 }
 
 /// <summary>No answer came back: refused, timed out, or bad TLS.</summary>

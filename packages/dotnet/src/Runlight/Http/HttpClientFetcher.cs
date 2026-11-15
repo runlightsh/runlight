@@ -149,6 +149,9 @@ public sealed class HttpClientFetcher : IFetcher, IDisposable
         throw last!;
     }
 
+    /// <summary>The system's resolver, given up when the token fires.</summary>
+    public Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken) => Safefetch.LookupAsync(name, cancellationToken);
+
     public async Task<Response> FetchAsync(string url, FetchInit? init = null, CancellationToken cancellationToken = default)
     {
         init ??= new FetchInit();

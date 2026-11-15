@@ -203,7 +203,8 @@ public sealed class OAuthTests : IAsyncLifetime
     public async Task Deeply_nested_or_odd_json_bodies_are_turned_away_without_harm()
     {
         var ctx = await ContextAsync();
-        string deep = new string('[', 100_000) + new string(']', 100_000);
+        // Deep, and still under the cap on an OAuth body, past which the answer is a 413.
+        string deep = new string('[', 10_000) + new string(']', 10_000);
         string deepField = "{\"grant_type\":" + deep + ",\"redirect_uris\":" + deep + "}";
         Assert.Equal(400, (await H(ctx, At("https://x.com/runlight/oauth/token", "POST", JsonType, deepField))).Status);
         Assert.Equal(400, (await H(ctx, At("https://x.com/runlight/oauth/register", "POST", JsonType, deepField), "1.2.3.4")).Status);

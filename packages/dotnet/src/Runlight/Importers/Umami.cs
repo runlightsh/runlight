@@ -82,6 +82,11 @@ public sealed partial class Umami(Http? http = null, Func<long>? now = null) : I
                 var body = (JsObject)(await _http.GetJsonAsync(baseUrl + "/api" + path + "&page=" + Js.Str(page) + "&pageSize=1000", headers, cancellationToken: cancellationToken).ConfigureAwait(false))!;
                 var data = body.Arr("data")!;
                 output.AddRange(data);
+                // No more than a link keeps: a longer history, or a server that never stops, ends here.
+                if (output.Count >= Write.MaxLinkClicks)
+                {
+                    return output.GetRange(0, Write.MaxLinkClicks);
+                }
                 double count = body.Get("count") is { } c ? Js.Num(c) : double.PositiveInfinity;
                 if (output.Count >= count || data.Count == 0)
                 {

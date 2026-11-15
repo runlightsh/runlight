@@ -395,10 +395,18 @@ public static class Mcp
     /// <summary>How many messages of a batch run at once.</summary>
     private const int BatchAtOnce = 4;
 
+    /// <summary>The most a message or batch may weigh; a real one is a few hundred bytes a call.</summary>
+    public const int MaxBodyBytes = 1024 * 1024;
+
     /// <summary>Answers one POST to the MCP endpoint, already authorised.</summary>
     public static async Task<Response> McpResponseAsync(Request request, ApiRead readApi)
     {
         Headers JsonHeaders() => new() { ["content-type"] = "application/json; charset=utf-8", ["cache-control"] = "no-store" };
+        // Capped here, since not every host caps a request body before it reaches the app.
+        if (request.Bytes().Length > MaxBodyBytes || Js.Number(request.Headers.Get("content-length") ?? "0") > MaxBodyBytes)
+        {
+            return new Response(Json.Stringify(RpcError(null, -32600, "Send a smaller message")), 413, JsonHeaders());
+        }
         if (!Js.ParseJson(request.Bytes(), out object? body) || !Js.IsObject(body))
         {
             return new Response(Json.Stringify(RpcError(null, -32700, "Send a JSON-RPC message")), 400, JsonHeaders());
