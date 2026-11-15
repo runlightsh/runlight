@@ -294,10 +294,11 @@ module Runlight
         @set_up[raw] = true if raw
       end
 
-      # Rails 7.2 sets SQLite's busy timeout with busy_timeout, which sleeps in C holding Ruby's global lock. A
+      # SQLite's busy_timeout, as sqlite3 1.x sets it, sleeps in C holding Ruby's global lock. A
       # thread waiting for the file's write lock then stops the thread of the same process that holds it from
       # ever finishing, so the wait runs out and raises "database is locked". busy_handler_timeout= (sqlite3
-      # 2.x, and what Rails 8 uses) waits the same time but lets other threads run.
+      # 2.x, which Rails 8 needs) waits the same time but lets other threads run. Kept for an app that sets up
+      # its own connection the old way.
       def wait_without_the_lock(raw)
         return unless raw.respond_to?(:busy_handler_timeout=)
 

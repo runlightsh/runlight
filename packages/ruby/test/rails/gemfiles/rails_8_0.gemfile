@@ -3,3 +3,8 @@
 # The gem's Gemfile with Rails 8.0, locked on its own. See ../../../Gemfile.
 ENV["RUNLIGHT_RAILS"] = "8.0"
 eval_gemfile File.expand_path("../../../Gemfile", __dir__)
+
+# CI tests Rails 8.0 on Ruby 3.2 as well. irb 1.19 needs prism, and prism 2's
+# prebuilt gems need Ruby 3.3, which Bundler does not step around, so prism
+# stays on 1.x.
+gem "prism", "< 2"

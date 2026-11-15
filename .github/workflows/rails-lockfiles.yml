@@ -1,4 +1,4 @@
-# The three Rails test apps' lockfiles (packages/ruby/test/rails/gemfiles/
+# The Rails test apps' lockfiles (packages/ruby/test/rails/gemfiles/
 # rails_*.gemfile.lock) are what ruby.yml installs, and Dependabot cannot
 # keep them current: it reads a folder's Gemfile or gems.rb and nothing by
 # another name. So once a week this resolves each of them again
@@ -7,7 +7,7 @@
 #
 # Two jobs, as in dependabot-rebuild.yml. "lock" evaluates the Gemfiles and
 # resolves with a read-only token, installs no gem, and hands over a patch;
-# "pull-request" applies it only if it touches those three lockfiles and
+# "pull-request" applies it only if it touches those lockfiles and
 # nothing else, and holds the token that can push the branch and open the
 # pull request.
 #
@@ -44,28 +44,23 @@ jobs:
         with:
           persist-credentials: false
       # Each lockfile is resolved on the oldest Ruby ruby.yml installs it on, so
-      # nothing in it needs a newer one: Rails 7.2 on Ruby 3.2, and the others on
-      # Ruby 3.4, which also installs them on 4.0. No gems are installed:
+      # nothing in it needs a newer one: Rails 8.0 on Ruby 3.2, and Rails 8.1 on
+      # Ruby 3.4, which also installs it on 4.0. No gems are installed:
       # resolving needs none.
       - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
         with:
           ruby-version: "3.2"
           bundler-cache: false
-      - name: bundle lock --update, for Rails 7.2
+      - name: bundle lock --update, for Rails 8.0
         working-directory: packages/ruby
-        run: BUNDLE_GEMFILE=test/rails/gemfiles/rails_7_2.gemfile bundle lock --update
+        run: BUNDLE_GEMFILE=test/rails/gemfiles/rails_8_0.gemfile bundle lock --update
       - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
         with:
           ruby-version: "3.4"
           bundler-cache: false
-      - name: bundle lock --update, for the other Rails series
+      - name: bundle lock --update, for Rails 8.1
         working-directory: packages/ruby
-        run: |
-          for gemfile in test/rails/gemfiles/*.gemfile; do
-            [ "$gemfile" = test/rails/gemfiles/rails_7_2.gemfile ] && continue
-            echo "== $gemfile"
-            BUNDLE_GEMFILE="$gemfile" bundle lock --update
-          done
+        run: BUNDLE_GEMFILE=test/rails/gemfiles/rails_8_1.gemfile bundle lock --update
       - name: Patch of what moved
         id: diff
         run: |

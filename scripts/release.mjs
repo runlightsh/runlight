@@ -71,7 +71,7 @@ export const VERSIONED = [
   { file: "packages/ruby/lib/runlight/version.rb", pattern: /^(\s*GEM_VERSION = ")([^"]+)(")/m },
   { file: "packages/ruby/assets/build.json", pattern: /^( {2}"version": ")([^"]+)(")/m },
   // The Rails test apps' lockfiles name the gem they load from the path.
-  ...["7_2", "8_0", "8_1"].map((rails) => ({ file: `packages/ruby/test/rails/gemfiles/rails_${rails}.gemfile.lock`, pattern: /^( {4}runlight \()([^)]+)(\))$/m })),
+  ...["8_0", "8_1"].map((rails) => ({ file: `packages/ruby/test/rails/gemfiles/rails_${rails}.gemfile.lock`, pattern: /^( {4}runlight \()([^)]+)(\))$/m })),
   // A Go module's version is its tag (see PUBLISH); the constant is what the
   // module reports about itself, kept in step with the tag. build.json is
   // written by scripts/go-assets.mts from the SDK's VERSION.

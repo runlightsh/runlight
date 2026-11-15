@@ -2,7 +2,7 @@
 
 Runlight is privacy friendly web analytics that runs inside your own Ruby app. It counts visitors without cookies and without storing anyone’s IP address. The numbers stay in your database, and the dashboard is served from your domain at `/runlight`.
 
-This gem is the Ruby version of [Runlight](https://runlight.sh). It works in Rails 7.2 or later and in any Rack app on Ruby 3.2 or later, and it can also run on a domain of its own. It answers every request the way the TypeScript library does and uses the same tables, so any of them can read the others’ database.
+This gem is the Ruby version of [Runlight](https://runlight.sh). It works in Rails 8.0 or later and in any Rack app on Ruby 3.2 or later, and it can also run on a domain of its own. It answers every request the way the TypeScript library does and uses the same tables, so any of them can read the others’ database.
 
 ## Rails
 

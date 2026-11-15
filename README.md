@@ -55,7 +55,7 @@ Runlight is also available for eight more languages and three CMSs. Each languag
 | Drupal | From [drupal.org](https://www.drupal.org/project/runlight): `composer require drupal/runlight`, then `drush pm:install runlight` (Drupal 10.3, 11, or 12) | [Drupal](https://runlight.sh/docs/drupal/) |
 | Craft CMS | From the [Plugin Store](https://plugins.craftcms.com/runlight), or `composer require runlight/craft`, then `php craft plugin/install runlight` (Craft 5.3 or later) | [Craft CMS](https://runlight.sh/docs/craft/) |
 | Python | `pip install runlight` (Python 3.11 or later), with the `postgres` or `mysql` extra for those databases | [Python](https://runlight.sh/docs/python/) |
-| Rails | `bundle add runlight`, then `bin/rails generate runlight:install` and `bin/rails db:migrate` (Rails 7.2, 8.0, or 8.1) | [Rails](https://runlight.sh/docs/rails/) |
+| Rails | `bundle add runlight`, then `bin/rails generate runlight:install` and `bin/rails db:migrate` (Rails 8.0 or 8.1) | [Rails](https://runlight.sh/docs/rails/) |
 | Ruby | `bundle add runlight sqlite3` (Ruby 3.2 or later), or `pg`, `trilogy`, or `mysql2` in place of `sqlite3` | [Ruby](https://runlight.sh/docs/ruby/) |
 | Go | `go get runlight.sh/go` (Go 1.25 or later), with `runlight.sh/go/chi` or `runlight.sh/go/echo` for those routers | [Go](https://runlight.sh/docs/go/) |
 | Java | `sh.runlight:runlight` from Maven Central (Java 21 or later), with `runlight-servlet` or `runlight-spring-boot-starter` | [Java](https://runlight.sh/docs/java/) |

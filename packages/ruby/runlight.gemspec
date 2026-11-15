@@ -29,5 +29,5 @@ Gem::Specification.new do |spec|
 
   # The store reads and writes through ActiveRecord, on SQLite, Postgres, MySQL, or MariaDB; the app adds the
   # driver gem (sqlite3, pg, mysql2, or trilogy). ActiveSupport brings tzinfo, which reports use for timezones.
-  spec.add_dependency "activerecord", ">= 7.2", "< 8.2"
+  spec.add_dependency "activerecord", ">= 8.0", "< 8.2"
 end
