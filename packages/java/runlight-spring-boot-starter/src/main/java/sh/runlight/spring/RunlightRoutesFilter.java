@@ -47,7 +47,8 @@ public final class RunlightRoutesFilter implements Filter, Ordered {
     String context = req.getContextPath() == null ? "" : req.getContextPath();
     String uri = req.getRequestURI() == null ? "/" : req.getRequestURI();
     String within = uri.startsWith(context) ? uri.substring(context.length()) : uri;
-    if (!path.isEmpty() && !within.equals(path) && !within.startsWith(path + "/")) {
+    if ((!path.isEmpty() && !within.equals(path) && !within.startsWith(path + "/"))
+        || ServletBridge.unsupported(req)) {
       chain.doFilter(request, response);
       return;
     }

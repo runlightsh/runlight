@@ -73,6 +73,17 @@ public final class Runlight
           "^[^" + Js.SPACE + "@<>\"]+@[^" + Js.SPACE + "@<>\"]+\\.[^" + Js.SPACE + "@<>\"]+\\z");
 
   /**
+   * The longest an address is read: no real one is longer, and the pattern is slow on a very long
+   * string.
+   */
+  public static final int EMAIL_MAX = 320;
+
+  /** Whether text passes for an email address, of at most {@link #EMAIL_MAX} characters. */
+  public static boolean isEmail(String value) {
+    return value != null && value.length() <= EMAIL_MAX && EMAIL.matcher(value).find();
+  }
+
+  /**
    * Raised whenever what a rolled-up day holds changes. 2: the heatmap counts visits only. 3: a
    * page counts the views that can report time.
    */
@@ -323,6 +334,13 @@ public final class Runlight
   private final AtomicBoolean warnDirect;
 
   private final RateLimit limit;
+
+  /**
+   * AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler
+   * reads fast.
+   */
+  private final RateLimit fetchLimit;
+
   private final LongSupplier clock;
   private volatile boolean ready;
 
@@ -338,6 +356,9 @@ public final class Runlight
   private long freshenedAt;
 
   private record LinkDomains(long at, Set<String> domains) {}
+
+  /** How soon the link domains are asked for again after the database could not give them. */
+  static final long LINK_DOMAINS_RETRY_MS = 5_000;
 
   private volatile LinkDomains linkDomainCache;
 
@@ -421,12 +442,16 @@ public final class Runlight
         !(number > 0)
             ? null
             : new RateLimit((long) Math.min(Long.MAX_VALUE, Math.floor(number)), this::now);
+    this.fetchLimit =
+        limit == null
+            ? null
+            : new RateLimit((long) Math.min(Long.MAX_VALUE, Math.floor(number * 10)), this::now);
     this.fetcher = options.fetcher != null ? options.fetcher : new JdkFetcher();
     this.links = new Links(store, this::init, this::now);
     this.linkPath =
         "/" + (options.linkPath == null ? "/go" : options.linkPath).replaceAll("^/+|/+\\z", "");
     if (options.mail instanceof AppMailer app) {
-      if (app.from() == null || !EMAIL.matcher(app.from()).find()) {
+      if (!isEmail(app.from())) {
         throw new IllegalArgumentException(
             "Runlight: the app's mailer needs a from address, like reports@example.com");
       }
@@ -633,7 +658,7 @@ public final class Runlight
           field, given.isEmpty() && sameConnection ? Js.string(orEmpty(before.get(field))) : given);
     }
     String from = Js.trim(Js.string(orEmpty(input.get("from"))));
-    if (!EMAIL.matcher(from).find()) {
+    if (!isEmail(from)) {
       throw new MailError(
           "Enter the address reports come from, like reports@example.com", "mail_from", Map.of());
     }
@@ -1227,12 +1252,22 @@ public final class Runlight
     List<Object> theirs = Js.list(there.get("hostnames"));
     if (theirs != null) {
       for (Object h : theirs) {
-        if (h instanceof String) {
+        if (h instanceof String name && !name.isEmpty()) {
           thereHostnames.add(h);
         }
       }
     }
     Object thereId = there.get("id");
+    // Checked before anything is saved: a site there has an id and a name, as text.
+    if (!(thereId instanceof String theirId)
+        || theirId.isEmpty()
+        || theirId.length() > 64
+        || !(there.get("name") instanceof String)) {
+      throw new SettingsError(
+          url + " did not answer like a Runlight install",
+          "connect_not_runlight",
+          Json.object("url", url));
+    }
     sitesLock.lock();
     try {
       // Connecting the same site again (to allow changes, or with a new token) updates it in
@@ -1269,14 +1304,20 @@ public final class Runlight
                 || c == '-';
         cleaned.append(keep ? c : '-');
       }
-      String host = Js.lower(cleaned.toString());
+      String host = Js.lower(cleaned.toString().replaceFirst("^[^a-zA-Z0-9]+", ""));
+      if (host.isEmpty()) {
+        host = "site";
+      }
       String id = Js.slice(host, 0, 56);
       for (int n = 2; hasSite(id); n++) {
         id = Js.slice(host, 0, 56) + "-" + n;
       }
       String name = Js.slice(Js.trim(Js.string(orEmpty(input.get("name")))), 0, 80);
       if (name.isEmpty()) {
-        name = Js.string(there.containsKey("name") ? there.get("name") : Json.UNDEFINED);
+        name = Js.slice(Js.trim((String) there.get("name")), 0, 80);
+      }
+      if (name.isEmpty()) {
+        name = host;
       }
       // No hostnames: tracker hits never land on a site that is counted elsewhere.
       Object tz = there.get("timezone");
@@ -1931,10 +1972,26 @@ public final class Runlight
         forwarded = h.get(Js.string(trustProxy));
       }
       if (forwarded != null && !Js.trim(forwarded).isEmpty()) {
-        return Js.trim(forwarded);
+        return bareAddress(Js.trim(forwarded));
       }
     }
     return connectionAddress(request, context);
+  }
+
+  private static final Pattern BRACKETED = Pattern.compile("^\\[([^\\]]*)\\](?::\\d+)?\\z");
+  private static final Pattern V4_WITH_PORT =
+      Pattern.compile("^\\d{1,3}(?:\\.\\d{1,3}){3}:\\d+\\z");
+
+  /**
+   * A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and
+   * "[2001:db8::1]:443" are the address alone.
+   */
+  static String bareAddress(String value) {
+    Matcher bracketed = BRACKETED.matcher(value);
+    if (bracketed.find()) {
+      return bracketed.group(1);
+    }
+    return V4_WITH_PORT.matcher(value).find() ? value.substring(0, value.lastIndexOf(':')) : value;
   }
 
   /** The connection's own address: the given ip, or else the request's remoteAddress. */
@@ -2019,6 +2076,13 @@ public final class Runlight
       salts.remove(timezone);
       throw error;
     }
+    // A new day here is also when sign-in counts made from an address go, once their window has
+    // ended, so an app that never runs the scheduled check keeps none past two days.
+    try {
+      Throttle.sweep(store, now);
+    } catch (RuntimeException error) {
+      log("Runlight: could not clear old sign-in counts " + error.getMessage());
+    }
     // As the drop left it, without yesterday's when that went.
     Salts kept = salts.get(timezone);
     return kept != null && kept.day().equals(day) ? kept : fresh;
@@ -2064,22 +2128,29 @@ public final class Runlight
    * The host a proxy says the request was for, read only when proxy headers are trusted, as the
    * client's address is.
    */
-  private String forwardedHost(Request request, Map<String, Object> context) {
+  public String forwardedHost(Request request, Map<String, Object> context) {
     return trusts(request, context) ? request.headers().get("x-forwarded-host") : null;
   }
 
-  /**
-   * Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing
-   * throws.
-   */
+  /** Handles one tracker request. Never throws; bad input is dropped quietly. */
   public void collect(Request request) {
     collect(request, Map.of());
   }
 
   /**
    * Handles one tracker request, with the connection's address when the request does not carry it.
+   * Never throws: bad input is dropped quietly, and a hit the store could not take is logged.
    */
   public void collect(Request request, Map<String, Object> context) {
+    try {
+      take(request, context);
+    } catch (RuntimeException error) {
+      // Analytics must never break the app it counts for.
+      log("Runlight: could not record an event " + error);
+    }
+  }
+
+  private void take(Request request, Map<String, Object> context) {
     String header = request.headers().get("content-length");
     double length = Js.toNumber(header == null ? 0L : header);
     if (length > Payload.MAX_BODY) {
@@ -2334,10 +2405,20 @@ public final class Runlight
     if (cached != null && now - cached.at() < 30_000) {
       return cached.domains();
     }
-    init();
     Set<String> domains = new java.util.HashSet<>();
-    for (Map<String, Object> d : store.linkDomains()) {
-      domains.add((String) d.get("domain"));
+    try {
+      init();
+      for (Map<String, Object> d : store.linkDomains()) {
+        domains.add((String) d.get("domain"));
+      }
+    } catch (RuntimeException error) {
+      // Middleware asks on every request to the app, so a database that is down must not take the
+      // app down with it: the domains last read stand (none, when there were none), and it is asked
+      // again in a few seconds.
+      Set<String> last = cached != null ? cached.domains() : Set.of();
+      linkDomainCache = new LinkDomains(now - 30_000 + LINK_DOMAINS_RETRY_MS, last);
+      log("Runlight: could not read the link domains " + error);
+      return last;
     }
     linkDomainCache = new LinkDomains(now, domains);
     return domains;
@@ -2372,7 +2453,8 @@ public final class Runlight
    * For middleware: when a request arrives on a link domain added in Settings (such as
    * t.example.com), answers /{slug} there with the redirect, and anything else with a 404. Null for
    * every other host, so the app carries on as normal, and for the dashboard's own paths, so its
-   * owner can always reach it to remove the domain.
+   * owner can always reach it to remove the domain. While the database cannot be read, the domains
+   * last read stand, so the app's own pages carry on without it.
    */
   public Response linkDomainResponse(Request request) {
     return linkDomainResponse(request, Map.of());
@@ -2448,7 +2530,12 @@ public final class Runlight
       site = all.isEmpty() ? null : all.get(0);
     }
     String ua = userAgent(request);
-    if (site != null && Ua.aiAgent(ua) == null && !Ua.isBot(ua) && request.method().equals("GET")) {
+    // Past the tracker's limit for one address a click still redirects, and is not counted.
+    if (site != null
+        && Ua.aiAgent(ua) == null
+        && !Ua.isBot(ua)
+        && request.method().equals("GET")
+        && (limit == null || limit.allow(clientIp(request, context)))) {
       try {
         long now = now();
         String accept = request.headers().get("accept-language");
@@ -2597,7 +2684,10 @@ public final class Runlight
       if (!request.method().equals("GET")) {
         return false;
       }
-      Map<String, Object> agent = Ua.aiAgent(userAgent(request));
+      // A log reader gives the user agent as text, since a logged one may not be fit for a header.
+      Map<String, Object> given = context == null ? Map.of() : context;
+      Map<String, Object> agent =
+          Ua.aiAgent(given.get("userAgent") instanceof String ua ? ua : userAgent(request));
       if (agent == null) {
         return false;
       }
@@ -2609,16 +2699,24 @@ public final class Runlight
               .contains(m.group(1).toLowerCase(Locale.ROOT))) {
         return false;
       }
-      String host = forwardedHost(request, Map.of());
-      if (host == null) {
-        host = request.headers().get("host");
+      String named = forwardedHost(request, given);
+      if (named == null) {
+        named = request.headers().get("host");
       }
-      if (host == null) {
-        host = url.hostname;
+      if (named == null) {
+        named = url.hostname;
       }
+      String host = Js.trim(named.split(",", -1)[0]).split(":", -1)[0];
       init();
-      Map<String, Object> site = siteFor(host.split(":", -1)[0]);
+      Map<String, Object> site = siteFor(host);
       if (site == null) {
+        return false;
+      }
+      // A fetch seen as it happens is limited per address, as tracker hits are; a log reader's
+      // report is not.
+      if (!given.containsKey("agentIp")
+          && fetchLimit != null
+          && !fetchLimit.allow(clientIp(request, given))) {
         return false;
       }
       // A log reader sends when the page was served. Older than a week is dropped, so a first run
@@ -2646,7 +2744,7 @@ public final class Runlight
               "path",
               Js.slice(url.pathname, 0, 1000),
               "hostname",
-              Sources.stripWww(url.hostname),
+              Sources.stripWww(host),
               // A fetch keeps the result of the address check in title: "verified", "mismatch",
               // or "" when there was nothing to check against. The address itself is not kept.
               "title",
@@ -2776,21 +2874,30 @@ public final class Runlight
       String stored = store.setting("agent-ranges");
       Long savedAt = null;
       Map<String, List<String>> saved = new LinkedHashMap<>();
+      // When each list was downloaded; a copy saved before that was kept has only at, for all.
+      Map<String, Long> fetched = new LinkedHashMap<>();
       if (stored != null) {
         Json.Parsed parsed = Json.tryParse(stored);
         if (parsed.ok() && parsed.value() instanceof Map<?, ?> value) {
+          // Number(at) || 0, as the TypeScript reads it.
+          double at = Js.toNumber(value.get("at"));
+          savedAt = Double.isNaN(at) ? 0L : (long) at;
+          Map<?, ?> times = value.get("fetched") instanceof Map<?, ?> given ? given : null;
           Object lists = value.get("lists");
           if (lists instanceof Map<?, ?> byUrl) {
             for (Map.Entry<?, ?> entry : byUrl.entrySet()) {
               List<String> prefixes = AgentCheck.readPrefixes(entry.getValue());
-              if (prefixes != null) {
-                saved.put(String.valueOf(entry.getKey()), prefixes);
+              if (prefixes == null) {
+                continue;
               }
+              String url = String.valueOf(entry.getKey());
+              saved.put(url, prefixes);
+              double when = times == null ? Double.NaN : Js.toNumber(times.get(url));
+              fetched.put(
+                  url,
+                  !Double.isNaN(when) && when != 0 ? (long) when : times != null ? 0L : savedAt);
             }
           }
-          // Number(at) || 0, as the TypeScript reads it.
-          double at = Js.toNumber(value.get("at"));
-          savedAt = Double.isNaN(at) ? 0L : (long) at;
         }
       }
       long now = now();
@@ -2803,6 +2910,7 @@ public final class Runlight
           List<String> fresh = AgentCheck.downloadRangeList(fetcher, url);
           if (fresh != null) {
             saved.put(url, fresh);
+            fetched.put(url, now());
           }
         }
         if (!Thread.currentThread().isInterrupted()) {
@@ -2810,12 +2918,26 @@ public final class Runlight
           for (Map.Entry<String, List<String>> entry : saved.entrySet()) {
             lists.put(entry.getKey(), new ArrayList<Object>(entry.getValue()));
           }
-          store.setSetting("agent-ranges", Json.stringify(Json.object("at", now, "lists", lists)));
+          store.setSetting(
+              "agent-ranges",
+              Json.stringify(
+                  Json.object(
+                      "at",
+                      now,
+                      "lists",
+                      lists,
+                      "fetched",
+                      new LinkedHashMap<String, Object>(fetched))));
         }
       }
+      // A downloaded list stands in for the one that came with this version only while it is the
+      // newer of the two.
+      long shipped = AgentCheck.bundledAt();
       Map<String, List<String>> inUse = new LinkedHashMap<>(AgentCheck.bundled());
       for (Map.Entry<String, List<String>> entry : saved.entrySet()) {
-        inUse.put(entry.getKey(), List.copyOf(entry.getValue()));
+        if (fetched.getOrDefault(entry.getKey(), 0L) >= shipped) {
+          inUse.put(entry.getKey(), List.copyOf(entry.getValue()));
+        }
       }
       // Kept as they are while unchanged, so their parsed prefixes are reused.
       if (!inUse.equals(agentRanges)) {

@@ -36,7 +36,13 @@ public final class Icon {
   private static final Map<String, CompletableFuture<Map<String, Object>>> PENDING =
       new ConcurrentHashMap<>();
 
-  private static final Pattern LINK = Pattern.compile("<link\\b[^>]*>", Pattern.CASE_INSENSITIVE);
+  /**
+   * A tag is at most a few thousand characters; the bound keeps a page of unclosed tags from being
+   * read over and over.
+   */
+  private static final Pattern LINK =
+      Pattern.compile("<link\\b[^<>]{0,4000}>", Pattern.CASE_INSENSITIVE);
+
   private static final Pattern SPACES = Pattern.compile("[" + Js.SPACE + "]+");
 
   private static final Pattern ATTRIBUTE =

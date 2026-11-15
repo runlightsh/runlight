@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 import sh.runlight.CodedError.LinkError;
@@ -24,6 +25,13 @@ public final class Links {
   private final SqlStore store;
   private final Runnable init;
   private final LongSupplier now;
+
+  /**
+   * Slugs no new link may take, for a host whose own pages sit where a link domain's links do: the
+   * standalone server answers /login, /api, and the rest on every name, so a link there would never
+   * open on its own domain.
+   */
+  public volatile Set<String> reserved = Set.of();
 
   /**
    * @param store the Runlight's store
@@ -104,11 +112,21 @@ public final class Links {
         throw new LinkError(
             "/" + wanted + " is already taken", "link_taken", Map.of("slug", wanted));
       }
+      // A link made before the slug was kept back keeps it.
+      if (reserved.contains(wanted) && taken == null) {
+        throw new LinkError(
+            "/"
+                + wanted
+                + " is one of this server's own pages, so a link there would never open on a link"
+                + " domain",
+            "link_reserved",
+            Map.of("slug", wanted));
+      }
       return wanted;
     }
     for (int i = 0; i < 8; i++) {
       String slug = randomSlug();
-      if (store.linkBySlug(slug) == null) {
+      if (!reserved.contains(slug) && store.linkBySlug(slug) == null) {
         return slug;
       }
     }

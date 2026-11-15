@@ -166,15 +166,7 @@ public final class Sources {
               "Newsletter",
               "email",
               List.of(),
-              List.of(
-                  "newsletter",
-                  "email",
-                  "e-mail",
-                  "mailchimp",
-                  "kit",
-                  "convertkit",
-                  "beehiiv",
-                  "buttondown")));
+              List.of("newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown")));
 
   /**
    * A host known by its shape, with the name to give it (null for the host itself) and its kind.
@@ -195,7 +187,6 @@ public final class Sources {
           new SourcePattern(
               Pattern.compile("(^|\\.)(list-manage|mailchi)\\.(com|mp)\\z"), "Mailchimp", "email"),
           new SourcePattern(Pattern.compile("(^|\\.)beehiiv\\.com\\z"), "beehiiv", "email"),
-          new SourcePattern(Pattern.compile("(^|\\.)substack\\.com\\z"), "Substack", "email"),
           new SourcePattern(
               Pattern.compile("^(web)?mail\\d*\\.|(^|\\.)webmail\\."), null, "email"));
 

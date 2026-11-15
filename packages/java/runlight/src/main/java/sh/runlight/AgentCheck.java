@@ -318,6 +318,23 @@ public final class AgentCheck {
 
   private static volatile Map<String, List<String>> bundled;
 
+  private static volatile Long bundledAt;
+
+  /**
+   * When the lists that came with this version were fetched, in milliseconds, from the file's
+   * fetchedAt date; 0 when it has none that can be read.
+   */
+  public static long bundledAt() {
+    Long current = bundledAt;
+    if (current == null) {
+      Map<String, Object> file = Js.map(Json.parse(Version.asset("agent-ranges.json")));
+      double at = sh.runlight.importers.Http.parseDate(Js.string(file.get("fetchedAt")));
+      current = Double.isNaN(at) ? 0L : (long) at;
+      bundledAt = current;
+    }
+    return current;
+  }
+
   /**
    * The lists that came with this version, from assets/agent-ranges.json: each list's URL and its
    * prefixes.

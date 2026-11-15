@@ -444,8 +444,17 @@ public final class Player {
     return fill(out, kept);
   }
 
-  /** {{name}} as the value captured earlier, empty when nothing was. */
+  private static final Pattern PAD = Pattern.compile("\\{\\{pad:(\\d+)\\}\\}");
+
+  /**
+   * {{pad:N}} as N letters x, for text past a limit that the file should not hold; then {{name}} as
+   * the value captured earlier, empty when nothing was.
+   */
   private static String fill(String text, Map<String, String> kept) {
+    Matcher pad = PAD.matcher(text);
+    if (pad.find()) {
+      text = pad.replaceAll(found -> "x".repeat(Integer.parseInt(found.group(1))));
+    }
     Matcher m = TEMPLATE.matcher(text);
     StringBuilder out = new StringBuilder();
     while (m.find()) {

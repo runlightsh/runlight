@@ -752,6 +752,43 @@ class ImportStepTest {
                 foreign("z", "fine", "", "", "https://a.com/z"),
                 Json.object())),
         "the same link again");
+
+    // Deleted since it came in: it stays deleted, with the clicks its row still holds.
+    rl.store.deleteLink((String) link.get("id"), NOW);
+    assertNull(rl.store.linkBySlug("fine"));
+    assertTrue(rl.store.linkExists((String) link.get("id")));
+    assertEquals(
+        Json.stringify(Json.object("status", "skipped", "clicks", 0L)),
+        Json.stringify(
+            Write.writeLink(
+                rl,
+                "default",
+                "dub",
+                foreign("z", "fine", "", "", "https://a.com/z"),
+                Json.object("clicks", Json.array(Json.object("ts", 6_000L, "visit", "w"))))));
+    assertNull(rl.store.linkBySlug("fine"));
+    assertEquals(
+        1L,
+        rl.store
+            .db()
+            .all("SELECT COUNT(*) AS n FROM rl_events WHERE link = ?", List.of(link.get("id")))
+            .get(0)
+            .get("n"));
+
+    // A history longer than a link keeps ends at the cap: eleven days of the most a day may hold.
+    List<Object> daily = new ArrayList<>();
+    for (int day = 1; day <= 11; day++) {
+      daily.add(Json.object("day", "2026-09-" + (day < 10 ? "0" : "") + day, "clicks", 50_000L));
+    }
+    Map<String, Object> capped =
+        Write.writeLink(
+            rl,
+            "default",
+            "dub",
+            foreign("big", "big", "", "", "https://a.com/big"),
+            Json.object("daily", daily));
+    assertEquals("created", capped.get("status"));
+    assertEquals((long) Write.MAX_LINK_CLICKS, Js.asLong(capped.get("clicks")));
   }
 
   private static Map<String, Object> foreign(

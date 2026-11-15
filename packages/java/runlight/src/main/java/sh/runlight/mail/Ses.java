@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 import sh.runlight.Hash;
@@ -28,7 +29,7 @@ public final class Ses {
   private Ses() {}
 
   private static final DateTimeFormatter AMZ_DATE =
-      DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+      DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'", Locale.ROOT).withZone(ZoneOffset.UTC);
   private static final Pattern SPACES = Pattern.compile("[" + Js.SPACE + "]+");
   private static final Pattern REGION = Pattern.compile("^[a-z]{2}(-[a-z]+)+-\\d\\z");
 

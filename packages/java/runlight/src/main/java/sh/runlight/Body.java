@@ -1,6 +1,7 @@
 package sh.runlight;
 
 import sh.runlight.http.BodyTooLong;
+import sh.runlight.http.Request;
 import sh.runlight.http.Response;
 
 /**
@@ -11,6 +12,16 @@ import sh.runlight.http.Response;
  */
 public final class Body {
   private Body() {}
+
+  /**
+   * Whether a request's body is past maxBytes, by the length it declares or by what was read. Not
+   * every host caps a request body before it reaches the app, so the routes that take one from
+   * anybody check it themselves.
+   */
+  public static boolean over(Request request, long maxBytes) {
+    return Js.toNumber(request.headers().get("content-length")) > maxBytes
+        || request.bytes().length > maxBytes;
+  }
 
   /** The body as text, up to maxBytes; past that, {@link BodyTooLong}. */
   public static String readTextCapped(Response response, long maxBytes) {

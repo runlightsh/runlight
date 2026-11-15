@@ -51,7 +51,7 @@ public final class Geo {
     }
     // A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
     // that has no codes ("California") is kept readable, as "US-California".
-    String raw = Js.trim(text(location.get("region")));
+    String raw = Js.trim(Payload.tidy(text(location.get("region"))));
     String region = CODE.matcher(raw).matches() ? Js.upper(raw) : Js.slice(raw, 0, 80);
     if (!region.isEmpty() && !PREFIXED.matcher(region).find() && !country.isEmpty()) {
       region = country + "-" + region;
@@ -59,7 +59,8 @@ public final class Geo {
     if (country.isEmpty()) {
       region = "";
     }
-    String city = !country.isEmpty() ? Js.slice(text(location.get("city")), 0, 100) : "";
+    String city =
+        !country.isEmpty() ? Js.slice(Payload.tidy(text(location.get("city"))), 0, 100) : "";
     return Json.object("country", country, "region", region, "city", city);
   }
 

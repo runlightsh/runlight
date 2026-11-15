@@ -62,8 +62,11 @@ public final class Sources {
     return clip(value, 200);
   }
 
+  /**
+   * A query value as it is stored: tidied (a decoded %00 is no text), trimmed, cut by character.
+   */
   private static String clip(String value, int max) {
-    return Js.slice(Js.trim(value == null ? "" : value), 0, max);
+    return Payload.cleanText(Js.trim(Payload.tidy(value == null ? "" : value)), max);
   }
 
   private static final Pattern WWW = Pattern.compile("^www\\.");

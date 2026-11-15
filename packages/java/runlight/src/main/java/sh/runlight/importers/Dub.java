@@ -113,7 +113,9 @@ public final class Dub implements Importer {
                           "browser", Js.get(click, "browser"),
                           "os", Js.get(click, "os"))));
             }
-            if (events.size() < 1000) {
+            // No more than a link keeps: the oldest clicks come first, and a longer history ends
+            // here.
+            if (events.size() < 1000 || clicks.size() >= Write.MAX_LINK_CLICKS) {
               break;
             }
           }

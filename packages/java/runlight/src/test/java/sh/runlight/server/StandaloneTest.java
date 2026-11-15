@@ -2,6 +2,7 @@ package sh.runlight.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashMap;
@@ -512,6 +513,155 @@ class StandaloneTest {
                     json(Json.object("domain", "stats.example.com")),
                     "decoy.example.org"))
             .status());
+  }
+
+  @Test
+  void theServersOwnPagesAreNotOfferedAsLinkSlugs() {
+    Standalone server = make(options -> options.token("t".repeat(40)));
+    Map<String, String> auth =
+        Map.of("authorization", "Bearer " + "t".repeat(40), "content-type", "application/json");
+    server.handle(
+        req(
+            "/api/sites",
+            "POST",
+            auth,
+            json(Json.object("name", "Blog", "hostnames", "blog.example.com")),
+            null));
+    // One made before the slug was kept back keeps it, and can be changed.
+    server.runlight.links.reserved = java.util.Set.of();
+    Map<String, Object> old =
+        server.runlight.links.create(
+            "blog.example.com", Json.object("url", "https://blog.example.com/", "slug", "embed"));
+    server.runlight.links.reserved = java.util.Set.of("login", "api", "embed");
+    for (String slug : List.of("login", "api")) {
+      Response refused =
+          server.handle(
+              req(
+                  "/api/links?site=blog.example.com",
+                  "POST",
+                  auth,
+                  json(Json.object("url", "https://blog.example.com/a", "slug", slug)),
+                  null));
+      assertEquals(400, refused.status(), slug);
+      assertEquals("link_reserved", Js.map(Json.parse(refused.text())).get("code"), slug);
+    }
+    assertEquals(
+        "embed",
+        server
+            .runlight
+            .links
+            .update((String) old.get("id"), Json.object("slug", "embed", "name", "Kept"))
+            .get("slug"));
+    // The server keeps back every page of its own that could be a slug.
+    Standalone fresh = make();
+    for (String slug :
+        List.of(
+            "login",
+            "logout",
+            "setup",
+            "invite",
+            "healthz",
+            "api",
+            "mcp",
+            "e",
+            "embed",
+            "pick-return")) {
+      assertTrue(fresh.runlight.links.reserved.contains(slug), slug);
+    }
+  }
+
+  @Test
+  void aShortTokenIsWarnedAboutAndItsWrongGuessesAreHeldToTenAnAddress() {
+    assertNull(Standalone.shortWarning("RUNLIGHT_TOKEN", null));
+    assertNull(Standalone.shortWarning("RUNLIGHT_SECRET", "s".repeat(32)));
+    assertEquals(
+        "Runlight: WARNING: RUNLIGHT_TOKEN is only 5 characters long. Anyone who guesses it has"
+            + " the whole API, as the owner. Set it to 32 or more random characters, such as the"
+            + " output of: openssl rand -hex 32",
+        Standalone.shortWarning("RUNLIGHT_TOKEN", "short"));
+    assertTrue(
+        Standalone.shortWarning("RUNLIGHT_SECRET", "x")
+            .contains("It signs every session and encrypts the saved mail and assistant keys"));
+
+    Standalone server = make(options -> options.token("short"));
+    java.util.function.BiFunction<String, String, Integer> ask =
+        (token, address) ->
+            server
+                .handle(
+                    req(
+                        "/api/sites",
+                        "GET",
+                        Map.of("authorization", "Bearer " + token, "x-forwarded-for", address)))
+                .status();
+    assertEquals(200, ask.apply("short", "203.0.113.7"));
+    // A token made in Settings is the routes' to check, and never a guess at this one.
+    for (int i = 0; i < 12; i++) {
+      assertEquals(401, ask.apply("rl_" + "0".repeat(40), "203.0.113.7"));
+    }
+    assertEquals(200, ask.apply("short", "203.0.113.7"));
+    for (int i = 0; i < 10; i++) {
+      assertEquals(401, ask.apply("guess" + i, "203.0.113.7"));
+    }
+    assertEquals(401, ask.apply("short", "203.0.113.7"), "refused once ten were wrong");
+    assertEquals(200, ask.apply("short", "198.51.100.4"), "another address is not held up");
+
+    // A long token cannot be guessed, so nothing is counted for it.
+    String token = "t".repeat(40);
+    Standalone strong = make(options -> options.token(token));
+    for (int i = 0; i < 12; i++) {
+      assertEquals(
+          401,
+          strong
+              .handle(
+                  req(
+                      "/api/sites",
+                      "GET",
+                      Map.of("authorization", "Bearer nope" + i, "x-forwarded-for", "203.0.113.7")))
+              .status());
+    }
+    assertEquals(
+        200,
+        strong
+            .handle(
+                req(
+                    "/api/sites",
+                    "GET",
+                    Map.of("authorization", "Bearer " + token, "x-forwarded-for", "203.0.113.7")))
+            .status());
+  }
+
+  @Test
+  void aForwardedHostNamesTheServerOnlyWhereProxyHeadersAreBelieved() {
+    Standalone server = make();
+    server.accounts.setPassword("jon@example.com", "a long password", NOW);
+    String cookie =
+        cookieOf(
+            server.handle(
+                form(
+                    "/login",
+                    fields(
+                        "email", "jon@example.com", "password", "a long password", "next", "/"))));
+    Request direct =
+        req(
+                "/api/sites",
+                "GET",
+                Map.of("cookie", cookie, "x-forwarded-host", "made-up.example.net"))
+            .withRemoteAddress("8.8.8.8");
+    assertEquals(200, server.handle(direct).status());
+    assertEquals(
+        "[\"stats.example.com\"]",
+        server.runlight.store.setting("server-hosts"),
+        "a client straight from the internet does not name the host");
+    Request proxied =
+        req(
+                "/api/sites",
+                "GET",
+                Map.of("cookie", cookie, "x-forwarded-host", "analytics.example.net"))
+            .withRemoteAddress("10.0.0.2");
+    assertEquals(200, server.handle(proxied).status());
+    assertEquals(
+        "[\"stats.example.com\",\"analytics.example.net\"]",
+        server.runlight.store.setting("server-hosts"));
   }
 
   @Test

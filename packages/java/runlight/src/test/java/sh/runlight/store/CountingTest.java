@@ -1050,4 +1050,63 @@ class CountingTest extends StoreTestCase {
     }
     assertEquals(List.of("aaaa"), ids);
   }
+
+  @ParameterizedTest
+  @MethodSource("kinds")
+  void propsADatabaseCannotReadAsJsonCountAsNoPropsRatherThanFailingTheReport(String kind) {
+    SqlStore store = store(kind);
+    long t = NOW - HOUR;
+    Seed.visit(
+        store,
+        "a",
+        "v1",
+        t,
+        Map.of(),
+        rows(
+            row("pageview", "/", t, "a1"),
+            row("event", "Purchase", t + 1, Json.object("plan", "pro", "revenue", 5L)),
+            // Valid JSON as JSON.stringify writes it, which Postgres will not read: an escaped NUL,
+            // and half a surrogate pair, which MySQL refuses too.
+            row("event", "Purchase", t + 2, Json.object("plan", "a\u0000b", "revenue", 7L)),
+            row("event", "Purchase", t + 3, Json.object("plan", "\ud83d", "revenue", "3")),
+            row("event", "Purchase", t + 4, Json.object("plan", "x\\\\u0000", "revenue", 1L))));
+    Map<String, Object> purchase =
+        Goals.goalFrom(
+            Json.object(
+                "name",
+                "Purchase",
+                "kind",
+                "event",
+                "match",
+                "Purchase",
+                "valueMode",
+                "prop",
+                "valueProp",
+                "revenue"),
+            "default",
+            List.of(),
+            NOW,
+            null);
+    store.saveGoal(purchase);
+
+    // How many of the four rows each database reads: all of them, all but the two it refuses, or
+    // all but the half pair.
+    String base = Databases.base(kind);
+    int read = base.equals("sqlite") ? 4 : base.equals("postgres") ? 2 : 3;
+    List<Map<String, Object>> keys = store.eventPropKeys(today(), "Purchase");
+    assertJson(List.of("plan", "revenue"), column(keys, "key"));
+    assertJson(read, keys.get(0).get("events"), "rows whose props were read");
+    List<Object> plans = column(store.eventPropValues(today(), "Purchase", "plan", 10), "value");
+    assertEquals(read, plans.size());
+    assertTrue(plans.contains("pro"));
+    // A backslash before the escape makes it text, not a NUL, which every database reads.
+    assertTrue(plans.contains("x\\\\u0000"));
+    Map<String, Object> totals =
+        store.goalTotalsAll(today(), store.goals("default")).get((String) purchase.get("id"));
+    assertJson(4, totals.get("conversions"), "every event still converts");
+    assertJson(
+        base.equals("sqlite") ? 16 : base.equals("postgres") ? 6 : 13,
+        totals.get("revenue"),
+        "and a row that cannot be read is worth nothing");
+  }
 }

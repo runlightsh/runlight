@@ -100,6 +100,13 @@ public final class OAuth {
     public final Predicate<Request> isOwner;
     public String signIn;
     public Predicate<Request> isReader;
+
+    /**
+     * Whether the request comes from an account kept to one site, which connects no apps and is
+     * told so in its own words.
+     */
+    public Predicate<Request> isSiteOnly;
+
     public Function<Request, String> accountOf;
     public BiPredicate<Map<String, Object>, String> tokenMade;
     public Supplier<String> csrf;
@@ -323,8 +330,14 @@ public final class OAuth {
 
   /** Redirect addresses a client may register: https, or a local app's own loopback address. */
   private static boolean allowedRedirect(String value) {
-    return HTTPS.matcher(value).find() || LOOPBACK.matcher(value).find();
+    return (HTTPS.matcher(value).find() || LOOPBACK.matcher(value).find()) && Url.canParse(value);
   }
+
+  /**
+   * The most an OAuth request's body may be: a registration, a consent form, or a code swap is far
+   * smaller.
+   */
+  public static final long MAX_BODY_BYTES = 64 * 1024;
 
   /** The URL that a 401 from the MCP endpoint points clients at, to start OAuth. */
   public static String resourceMetadataUrl(String origin, String base) {
@@ -350,6 +363,12 @@ public final class OAuth {
    */
   public static Response oauthResponse(
       Context ctx, Request request, String path, Url url, Map<String, Object> context) {
+    // Capped here, since not every host caps a request body before it reaches the app.
+    if (request.method().equals("POST")
+        && path.startsWith("/oauth/")
+        && Body.over(request, MAX_BODY_BYTES)) {
+      return oauthError("invalid_request", "Send a smaller body", 413);
+    }
     Install runlight = ctx.runlight;
     String base = ctx.base;
     String issuer = url.origin() + base;
@@ -449,9 +468,12 @@ public final class OAuth {
     Map<String, Object> client = found == null ? null : found.client();
     String redirect = orEmpty(form.get("redirect_uri"));
     // Without a known client and one of its own addresses there is nowhere safe to send an answer.
+    // An address that does not parse, from an app registered before those were refused, is no
+    // address of its own.
     if (client == null
         || !(client.get("redirects") instanceof List<?> redirects)
-        || !redirects.contains(redirect)) {
+        || !redirects.contains(redirect)
+        || !Url.canParse(redirect)) {
       return page(
           lang,
           t.html("oauth.unregisteredTitle"),
@@ -536,7 +558,13 @@ public final class OAuth {
         return page(
             lang,
             t.html("oauth.viewerTitle"),
-            "<p>" + t.html("oauth.viewer", Map.of("app", esc(name))) + "</p>",
+            "<p>"
+                + t.html(
+                    ctx.isSiteOnly != null && ctx.isSiteOnly.test(request)
+                        ? "oauth.siteAccount"
+                        : "oauth.viewer",
+                    Map.of("app", esc(name)))
+                + "</p>",
             403);
       }
       // The site stays, since on the way in it only says which one to offer first.

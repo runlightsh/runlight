@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -294,23 +295,45 @@ public final class Js {
       return s;
     }
     if (value instanceof List<?> list) {
-      StringBuilder out = new StringBuilder();
-      boolean first = true;
-      for (Object item : list) {
-        if (!first) {
-          out.append(',');
-        }
-        first = false;
-        if (item != null && item != Json.UNDEFINED) {
-          out.append(string(item));
-        }
-      }
-      return out.toString();
+      return joined(list);
     }
     if (value instanceof Map<?, ?>) {
       return "[object Object]";
     }
     return value.toString();
+  }
+
+  /**
+   * An array as String() writes it: its items joined with commas, an array inside it the same way,
+   * and null and undefined as nothing. The arrays open are kept in a list rather than in calls, so
+   * one nested however deep is written without a call for each level.
+   */
+  private static String joined(List<?> list) {
+    StringBuilder out = new StringBuilder();
+    List<Iterator<?>> open = new ArrayList<>();
+    List<Boolean> any = new ArrayList<>();
+    open.add(list.iterator());
+    any.add(false);
+    while (!open.isEmpty()) {
+      int last = open.size() - 1;
+      if (!open.get(last).hasNext()) {
+        open.remove(last);
+        any.remove(last);
+        continue;
+      }
+      Object item = open.get(last).next();
+      if (any.get(last)) {
+        out.append(',');
+      }
+      any.set(last, true);
+      if (item instanceof List<?> inner) {
+        open.add(inner.iterator());
+        any.add(false);
+      } else if (item != null && item != Json.UNDEFINED) {
+        out.append(string(item));
+      }
+    }
+    return out.toString();
   }
 
   /** Math.round: halves go up, toward positive infinity, so -2.5 becomes -2. */

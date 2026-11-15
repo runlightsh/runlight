@@ -75,6 +75,10 @@ public final class Umami implements Importer {
           http.getJson(base + "/api" + path + "&page=" + page + "&pageSize=1000", headers);
       List<Object> data = Js.list(Js.get(body, "data"));
       out.addAll(data);
+      // No more than a link keeps: a longer history, or a server that never stops, ends here.
+      if (out.size() >= Write.MAX_LINK_CLICKS) {
+        return new ArrayList<>(out.subList(0, Write.MAX_LINK_CLICKS));
+      }
       if (out.size() >= Js.toNumber(Js.get(body, "count")) || data.isEmpty()) {
         return out;
       }

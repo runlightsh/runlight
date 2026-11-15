@@ -296,6 +296,14 @@ public final class Cli {
     Standalone.Options options = config.options(true).now(now);
     Standalone server = new Standalone(options);
     server.runlight.init();
+    // Said at every start, loudly, and the server still runs: an install with a short one must keep
+    // working.
+    for (String name : List.of("RUNLIGHT_SECRET", "RUNLIGHT_TOKEN")) {
+      String warning = Standalone.shortWarning(name, config.get(name));
+      if (warning != null) {
+        err.print("\n" + warning + "\n\n");
+      }
+    }
     String portSetting = config.get("PORT");
     int port = (int) Js.toNumber(portSetting == null ? "3000" : portSetting);
     String host = config.get("HOST");

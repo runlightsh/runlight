@@ -12,10 +12,12 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import sh.runlight.Body;
 import sh.runlight.CodedError;
 import sh.runlight.Js;
 import sh.runlight.Json;
 import sh.runlight.Messages;
+import sh.runlight.http.BodyTooLong;
 import sh.runlight.http.Headers;
 import sh.runlight.http.Request;
 import sh.runlight.http.Response;
@@ -114,9 +116,11 @@ public final class Web {
   private final Throttle perAddress;
   private final Throttle perAccount;
   private final Throttle perIp;
-  // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the
-  // first one. Password re-checks in Account: ten.
-  private final Throttle codeTries;
+  // Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each
+  // time the tries run out again, up to a day, so guessing on and on gets about five tries a day. A
+  // browser that signed in to the account before counts on its own, so its owner is never held up
+  // by others' guesses. Five tries to confirm the first code. Password re-checks in Account: ten.
+  private final Lockout codeTries;
   private final Throttle confirmTries;
   private final Throttle rechecks;
 
@@ -146,7 +150,7 @@ public final class Web {
     this.perAddress = new Throttle(store, "address", 10);
     this.perAccount = new Throttle(store, "account", 50);
     this.perIp = new Throttle(store, "ip", 30);
-    this.codeTries = new Throttle(store, "code", 5);
+    this.codeTries = new Lockout(store, "code");
     this.confirmTries = new Throttle(store, "confirm", 5);
     this.rechecks = new Throttle(store, "recheck", 10);
   }
@@ -391,10 +395,36 @@ public final class Web {
     return Js.lower(Js.trim((header == null ? "" : header).split(";", -1)[0]));
   }
 
+  /** The most a sign-in form or an account change may weigh: a few fields, far smaller. */
+  private static final long MAX_BODY_BYTES = 64 * 1024;
+
+  /** A posted form's fields; a body past the cap is refused, as {@link #capped} answers it. */
+  private static SearchParams form(Request request) {
+    if (Body.over(request, MAX_BODY_BYTES)) {
+      throw new BodyTooLong("Body over " + MAX_BODY_BYTES + " bytes");
+    }
+    return new SearchParams(request.text());
+  }
+
+  /**
+   * A body past the cap is refused here, since not every host caps a request body before it reaches
+   * the app.
+   */
+  private static Response capped(Supplier<Response> run) {
+    try {
+      return run.get();
+    } catch (BodyTooLong error) {
+      return coded("Send a smaller body", "body_too_large", 413);
+    }
+  }
+
   /** A JSON body by its media type, which a cross-site form cannot send. */
   private static Map<String, Object> body(Request request) {
     if (!mediaType(request).equals("application/json")) {
       return null;
+    }
+    if (Body.over(request, MAX_BODY_BYTES)) {
+      throw new BodyTooLong("Body over " + MAX_BODY_BYTES + " bytes");
     }
     Json.Parsed parsed = Json.tryParse(request.text());
     return parsed.ok() ? Js.map(parsed.value()) : null;
@@ -596,7 +626,7 @@ public final class Web {
             : setupLocked(lang);
       }
       if (method.equals("POST")) {
-        SearchParams form = new SearchParams(request.text());
+        SearchParams form = form(request);
         String code = formValue(form, "code");
         if (!setupOk(code)) {
           if (asksForToken) {
@@ -680,15 +710,18 @@ public final class Web {
     }
 
     if (path.equals("/login/code") && method.equals("POST")) {
-      SearchParams form = new SearchParams(request.text());
+      SearchParams form = form(request);
       String next = safeNext(form.get("next"));
       Map<String, Object> user = accounts.fromPending(formValue(form, "pending"), now());
       if (user == null) {
         return redirect(base + "/login?next=" + Js.encodeURIComponent(next));
       }
       String id = (String) user.get("id");
-      // Counted before the check, so a burst cannot get past five.
-      if (!codeTries.take(id, now())) {
+      // Counted before the check, so a burst cannot get past five. A browser the account signed in
+      // from before has its own count, which only someone holding that browser's mark can use up.
+      String tries =
+          accounts.trustsDevice(readCookie(request, DEVICE_COOKIE), user) ? id + "\ndevice" : id;
+      if (!codeTries.take(tries, now())) {
         return html(
             Pages.codePage(
                 base,
@@ -716,7 +749,7 @@ public final class Web {
                 lang),
             401);
       }
-      codeTries.clear(id, now());
+      codeTries.clear(tries);
       return signedInTo(request, user, next);
     }
 
@@ -748,7 +781,7 @@ public final class Web {
             : html(Pages.inviteGonePage(base, lang), 410);
       }
       if (method.equals("POST")) {
-        SearchParams form = new SearchParams(request.text());
+        SearchParams form = form(request);
         String code = formValue(form, "code");
         Map<String, Object> invite = accounts.inviteByCode(code, now());
         if (invite == null) {
@@ -796,7 +829,7 @@ public final class Web {
   }
 
   private Response login(Request request, Map<String, Object> context) {
-    SearchParams form = new SearchParams(request.text());
+    SearchParams form = form(request);
     String email = formValue(form, "email");
     String password = formValue(form, "password");
     String next = safeNext(form.get("next"));
@@ -913,11 +946,15 @@ public final class Web {
    * the answer to send.
    */
   public Response confirmPassword(Request request) {
-    var user = signedIn(request);
-    if (user == null) return coded("Sign in first", "sign_in", 401);
-    var input = body(request);
-    if (input == null) return coded("Send JSON", "send_json", 415);
-    return recheck(user, now(), input, "password", "Your password is not right", "password_wrong");
+    return capped(
+        () -> {
+          var user = signedIn(request);
+          if (user == null) return coded("Sign in first", "sign_in", 401);
+          var input = body(request);
+          if (input == null) return coded("Send JSON", "send_json", 415);
+          return recheck(
+              user, now(), input, "password", "Your password is not right", "password_wrong");
+        });
   }
 
   private Response recheck(
@@ -1310,6 +1347,10 @@ public final class Web {
    * @param context what the server knows of the request, such as {ip}
    */
   public Response handle(Request request, String path, Map<String, Object> context) {
+    return capped(() -> answer(request, path, context));
+  }
+
+  private Response answer(Request request, String path, Map<String, Object> context) {
     if (path.equals("/api/account")
         || path.startsWith("/api/account/")
         || path.equals("/api/people")

@@ -584,8 +584,16 @@ public final class Mcp {
   /** The most messages one batch may hold. */
   public static final int MAX_BATCH = 20;
 
+  /** The most a message or batch may weigh; a real one is a few hundred bytes a call. */
+  public static final long MAX_BODY_BYTES = 1024 * 1024;
+
   /** Answers one POST to the MCP endpoint, already authorised. */
   public static Response mcpResponse(Request request, ApiRead readApi) {
+    // Capped here, since not every host caps a request body before it reaches the app.
+    if (Body.over(request, MAX_BODY_BYTES)) {
+      return new Response(
+          Json.stringify(rpcError(null, -32600, "Send a smaller message")), 413, jsonHeaders());
+    }
     Json.Parsed parsed = Json.tryParse(request.text());
     Object body = parsed.ok() ? parsed.value() : Json.UNDEFINED;
     if (!Js.isObject(body)) {

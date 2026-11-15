@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import sh.runlight.Js;
 
@@ -176,7 +177,7 @@ public final class SearchParams {
       } else if (v == ' ') {
         out.append('+');
       } else {
-        out.append(String.format("%%%02X", v));
+        out.append(String.format(Locale.ROOT, "%%%02X", v));
       }
     }
     return out.toString();

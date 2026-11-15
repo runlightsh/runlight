@@ -448,11 +448,15 @@ public final class Routes {
     this.tokensOf = options.tokensOf != null ? options.tokensOf : w != null ? w::tokensOf : null;
     Function<Request, Object> authorize = options.authorize;
     OAuth.Context context = new OAuth.Context(runlight, base, r -> Boolean.TRUE.equals(canRead(r)));
+    // An account kept to one site connects no apps either, so it is told so rather than sent to
+    // sign in again.
+    context.isSiteOnly = this::siteOnly;
     context.isReader =
         r ->
-            authorize != null
-                ? "read".equals(authorize.apply(r))
-                : w != null && "read".equals(w.access(r));
+            siteOnly(r)
+                || (authorize != null
+                    ? "read".equals(authorize.apply(r))
+                    : w != null && "read".equals(w.access(r)));
     if (signIn != null && !signIn.isEmpty()) {
       context.signIn = signIn;
     }
@@ -602,8 +606,23 @@ public final class Routes {
     } else {
       name = first.replaceFirst(":\\d*\\z", "");
     }
-    return name.replaceFirst("\\.+\\z", "").replaceFirst("^www\\.", "");
+    return withoutFinalDots(name).replaceFirst("^www\\.", "");
   }
+
+  /**
+   * Text without its final dots, read from the end, so a long run of dots costs no more than its
+   * length.
+   */
+  private static String withoutFinalDots(String text) {
+    int end = text.length();
+    while (end > 0 && text.charAt(end - 1) == '.') {
+      end--;
+    }
+    return text.substring(0, end);
+  }
+
+  /** The longest domain name there can be. Anything longer is refused before a pattern reads it. */
+  private static final int MAX_DOMAIN = 253;
 
   /**
    * Whether a domain name is one kept for private networks or tests, or has an IPv4 address inside
@@ -619,7 +638,7 @@ public final class Routes {
    * brackets.
    */
   private static boolean isEmail(String value) {
-    return EMAIL.matcher(value).find();
+    return value.length() <= Runlight.EMAIL_MAX && EMAIL.matcher(value).find();
   }
 
   /** An object's entries, or an array's as index and value, as Object.entries reads them. */
@@ -838,7 +857,10 @@ public final class Routes {
         String hour =
             "hour".equals(sheet.get("interval"))
                 ? " "
-                    + String.format("%02d", Time.localWeekdayHour(Js.asLong(value), timezone)[1])
+                    + String.format(
+                        java.util.Locale.ROOT,
+                        "%02d",
+                        Time.localWeekdayHour(Js.asLong(value), timezone)[1])
                     + ":00"
                 : "";
         out.put("date", Time.localDate(Js.asLong(value), timezone) + hour);
@@ -1159,6 +1181,21 @@ public final class Routes {
     return web != null ? web.signedIn(request) : null;
   }
 
+  /** Whether a request comes from an account kept to one site. */
+  private boolean siteOnly(Request request) {
+    Map<String, Object> scoped = sessionScope(request);
+    return scoped != null && scoped.get("site") != null;
+  }
+
+  /**
+   * A hub's manage token and an account kept to one site reach one site's settings and nothing of
+   * the install's, so neither is taken at its word about where this app lives: the Host of a
+   * request is the caller's to choose.
+   */
+  private boolean restricted(Request request) {
+    return managed.containsKey(request) || siteOnly(request);
+  }
+
   private Object canRead(Request request) {
     if (managed.containsKey(request)) {
       return true;
@@ -1175,8 +1212,11 @@ public final class Routes {
         return true;
       }
       var scoped = sessionScope(request);
-      if (scoped != null && scoped.get("site") != null && request.url().contains("/oauth/"))
+      if (scoped != null
+          && scoped.get("site") != null
+          && new Url(request.url()).pathname.startsWith(base + "/oauth/")) {
         return false;
+      }
       Object answer = authorize != null ? authorize.apply(request) : web.access(request);
       // A member changes things like an owner, apart from the few controls adminOnly() names.
       if ("member".equals(answer)) {
@@ -1425,9 +1465,12 @@ public final class Routes {
   private Object checkLinkDomain(Request request, Url url, String site, Object value) {
     String domain =
         Js.lower(Js.trim(value == null || value == Json.UNDEFINED ? "" : Js.string(value)));
+    if (domain.length() > MAX_DOMAIN) {
+      return coded("That is not a domain name", "domain_invalid", 400);
+    }
     domain = domain.replaceFirst("^https?://", "");
     domain = domain.replaceFirst("/" + Js.DOT + "*\\z", "");
-    domain = domain.replaceFirst("\\.+\\z", "");
+    domain = withoutFinalDots(domain);
     domain = domain.replaceFirst("^www\\.", "");
     if (!DOMAIN_NAME.matcher(domain).find()) {
       return coded("That is not a domain name", "domain_invalid", 400);
@@ -1442,8 +1485,9 @@ public final class Routes {
     // A link domain answers every path on it, so it must never be where the dashboard or a
     // counted site lives. The request's own Host is the caller's to choose, so the configured
     // address and the names people signed in from count too. A hub cannot know every name
-    // this app answers on, so it adds none until the app knows its own address.
-    if (managed.containsKey(request) && origin == null) {
+    // this app answers on, so it adds none until the app knows its own address, and neither does
+    // an account kept to one site, which has a hub's reach.
+    if (restricted(request) && origin == null) {
       return originNeeded();
     }
     List<String> own = new ArrayList<>();
@@ -2293,8 +2337,8 @@ public final class Routes {
           // the address the request came to. An address in the body is never used, so whoever adds
           // a report cannot point its links somewhere else. A report made from a hub needs the
           // configured address, where its unsubscribe link answers, since the Host its request
-          // names is the hub's to choose.
-          if (managed.containsKey(request) && origin == null) {
+          // names is the hub's to choose. So does one made by an account kept to one site.
+          if (restricted(request) && origin == null) {
             return originNeeded();
           }
           String home = (origin != null ? origin : url.origin()) + base;
@@ -3312,6 +3356,14 @@ public final class Routes {
             "pick_hub",
             403);
       }
+      // An account kept to one site gets a ticket only for this dashboard: the configured address,
+      // or without one the address its request came to.
+      if (hub == null
+          && siteOnly(request)
+          && !pickOrigin.equals(origin != null ? origin : url.origin())) {
+        return coded(
+            "Your account can only pick from this dashboard's own address", "pick_own", 403);
+      }
       return json(
           Json.object("ticket", pickTicket(pickOrigin, (String) asMap(found).get("id"), back)));
     }
@@ -3487,10 +3539,8 @@ public final class Routes {
     // A fetch reported without its address cannot be checked; it is never checked against the
     // reporter's own.
     for (Page p : keep) {
-      Request fetch =
-          new Request(
-              p.page().href(), "GET", Headers.of("user-agent", p.userAgent()), new byte[0], "");
-      if (rl.observe(fetch, p.at(), Map.of("agentIp", p.ip()))) {
+      Request fetch = new Request(p.page().href(), "GET", new Headers(), new byte[0], "");
+      if (rl.observe(fetch, p.at(), Map.of("agentIp", p.ip(), "userAgent", p.userAgent()))) {
         recorded++;
       }
     }

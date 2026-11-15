@@ -30,9 +30,10 @@ import sh.runlight.http.Url;
  *
  * <p>The URL is the one the browser asked for: the scheme from {@code X-Forwarded-Proto}, else the
  * connection's, the {@code Host} header, and {@code getRequestURI()} (which the container leaves
- * undecoded) with the query string as sent. The address is the connection's, since Runlight reads
- * proxy headers itself, only when {@code trustProxy} allows. A body is read only for a method that
- * has one, capped at 16 KiB for the tracker's {@code /e} and 10 MiB for everything else.
+ * undecoded) with the query string as sent. The host is only ever the header's: a path that starts
+ * with two slashes stays a path. The address is the connection's, since Runlight reads proxy
+ * headers itself, only when {@code trustProxy} allows. A body is read only for a method that has
+ * one, capped at 16 KiB for the tracker's {@code /e} and 10 MiB for everything else.
  */
 public final class ServletBridge {
   private ServletBridge() {}
@@ -48,6 +49,15 @@ public final class ServletBridge {
    * reads the 413 rather than a reset connection. Past this the connection is cut.
    */
   public static final long MAX_DRAIN = 64L * 1024 * 1024;
+
+  /** Methods no route or link answers, so they are the app's, or a 405 where there is no app. */
+  private static final List<String> UNSUPPORTED = List.of("TRACE", "TRACK", "CONNECT");
+
+  /** Whether a request's method is one Runlight leaves alone. */
+  public static boolean unsupported(HttpServletRequest req) {
+    return req.getMethod() != null
+        && UNSUPPORTED.contains(req.getMethod().toUpperCase(Locale.ROOT));
+  }
 
   /** The request without its body, for the link filter, which leaves the body to the app. */
   public static Request request(HttpServletRequest req) {
@@ -88,15 +98,14 @@ public final class ServletBridge {
     if (host == null) {
       host = "localhost";
     }
-    String target = req.getRequestURI() == null ? "/" : req.getRequestURI();
-    if (req.getQueryString() != null) {
-      target += "?" + req.getQueryString();
-    }
     try {
-      return new Url(
-              target.startsWith("/") ? target : "/" + target,
-              (proto.equals("https") ? "https" : "http") + "://" + host)
-          .href();
+      // The path and query are set on the address, never resolved against it: a target such as
+      // //other.example/x, resolved, would name its own host, and the request's origin with it.
+      Url url = new Url((proto.equals("https") ? "https" : "http") + "://" + host);
+      String path = req.getRequestURI() == null ? "/" : req.getRequestURI();
+      url.setPathname(path.startsWith("/") ? path : "/" + path);
+      url.setSearch(req.getQueryString() == null ? "" : req.getQueryString());
+      return url.href();
     } catch (IllegalArgumentException e) {
       return "http://localhost/";
     }

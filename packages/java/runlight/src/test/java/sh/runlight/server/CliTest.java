@@ -430,9 +430,20 @@ class CliTest {
     assertEquals(dir.resolve("dbip-city-lite-2026-09.mmdb"), geo.newest());
     assertNotNull(geo.lookup());
 
+    // This month's file was missing, so the next tries wait: five minutes, then twice as long each
+    // time, up to six hours.
+    asked.clear();
+    geo.refresh(october + 4 * 60_000L);
+    assertEquals(List.of(), asked, "not asked again within five minutes");
+    geo.refresh(october + 5 * 60_000L);
+    assertEquals(1, asked.size(), "asked again after five");
+    asked.clear();
+    geo.refresh(october + 14 * 60_000L);
+    assertEquals(List.of(), asked, "then not for ten more");
+
     published.add("2026-10");
     asked.clear();
-    geo.refresh(october);
+    geo.refresh(october + 15 * 60_000L);
     assertEquals(List.of("https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz"), asked);
     try (Stream<Path> files = Files.list(dir)) {
       assertEquals(

@@ -112,6 +112,10 @@ public final class RunlightServlet extends HttpServlet {
 
   @Override
   protected void service(HttpServletRequest req, HttpServletResponse res) {
+    if (ServletBridge.unsupported(req)) {
+      res.setStatus(405);
+      return;
+    }
     Routes served = routes(req);
     Request request;
     try {

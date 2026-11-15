@@ -543,6 +543,23 @@ class AccountsTest {
     assertEquals(List.of("throttle-key:2026-10-08"), keys(store, "throttle-key"));
   }
 
+  @Test
+  void triesSweepEveryThrottlesEndedCountsWithoutAScheduledCheck() {
+    SqlStore store = store("sqlite");
+    long hour = 3_600_000L;
+    Throttle ips = new Throttle(store, "ip", 30);
+    assertTrue(ips.take("203.0.113.7", NOW));
+    assertTrue(new Throttle(store, "address", 10).take("jon@example.com\n203.0.113.7", NOW));
+    assertEquals(2, keys(store, "throttle:").size());
+    // Within the hour nothing is looked over again, though both windows have ended.
+    assertTrue(ips.take("198.51.100.4", NOW + 20 * 60_000L));
+    assertEquals(1, keys(store, "throttle:address:").size());
+    // A try an hour on clears what ended, in the other throttle too, and keeps its own count.
+    assertTrue(ips.take("192.0.2.9", NOW + hour + 1));
+    assertEquals(List.of(), keys(store, "throttle:address:"));
+    assertEquals(1, keys(store, "throttle:ip:").size());
+  }
+
   private static List<String> keys(SqlStore store, String prefix) {
     List<String> out = new ArrayList<>();
     for (Map<String, Object> setting : store.settingsStartingWith(prefix)) {

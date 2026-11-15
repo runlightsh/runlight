@@ -3,8 +3,10 @@ package sh.runlight;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -36,7 +38,7 @@ public final class Json {
   /** JSON.stringify(value). */
   public static String stringify(Object value) {
     StringBuilder out = new StringBuilder();
-    write(out, value, null, "");
+    write(out, value, null);
     return out.toString();
   }
 
@@ -46,7 +48,7 @@ public final class Json {
       return stringify(value);
     }
     StringBuilder out = new StringBuilder();
-    write(out, value, " ".repeat(Math.min(indent, 10)), "");
+    write(out, value, " ".repeat(Math.min(indent, 10)));
     return out.toString();
   }
 
@@ -70,9 +72,13 @@ public final class Json {
 
   /** JSON.parse(text). Throws {@link JsonException} where JSON.parse throws a SyntaxError. */
   public static Object parse(String text) {
-    Parser parser = new Parser(text);
+    return parse(text, false);
+  }
+
+  private static Object parse(String text, boolean shallow) {
+    Parser parser = new Parser(text, shallow);
     parser.space();
-    Object value = parser.value(0);
+    Object value = parser.value();
     parser.space();
     if (parser.at < text.length()) {
       throw new JsonException("Unexpected non-whitespace character after JSON");
@@ -87,6 +93,19 @@ public final class Json {
   public static Parsed tryParse(String text) {
     try {
       return new Parsed(true, parse(text));
+    } catch (JsonException e) {
+      return new Parsed(false, null);
+    }
+  }
+
+  /**
+   * As {@link #tryParse}, for a body whose depths are never read, such as a tracker hit: an object
+   * or array nested past {@link #MAX_DEPTH} is checked to be JSON and left out as null, rather than
+   * refused, so the rest reads as JSON.parse reads it however deep some part of it goes.
+   */
+  public static Parsed tryParseShallow(String text) {
+    try {
+      return new Parsed(true, parse(text, true));
     } catch (JsonException e) {
       return new Parsed(false, null);
     }
@@ -150,63 +169,94 @@ public final class Json {
     return number(d);
   }
 
-  private static void write(StringBuilder out, Object value, String indent, String current) {
-    if (value == null || value == UNDEFINED) {
-      out.append("null");
-    } else if (value instanceof Boolean b) {
-      out.append(b ? "true" : "false");
-    } else if (value instanceof Number n) {
-      out.append(jsonNumber(n));
-    } else if (value instanceof CharSequence s) {
-      quote(out, s.toString());
-    } else if (value instanceof JsonValue j) {
-      write(out, j.toJson(), indent, current);
-    } else if (value instanceof Map<?, ?> map) {
-      String inner = indent == null ? "" : current + indent;
-      boolean first = true;
-      out.append('{');
-      for (Map.Entry<String, Object> entry : Js.entries(map)) {
-        Object item = entry.getValue();
-        if (item == UNDEFINED) {
+  /** An object or array being written: what is left of it, and whether anything was written. */
+  private static final class Open {
+    final Iterator<?> rest;
+    final boolean object;
+    boolean any;
+
+    Open(Iterator<?> rest, boolean object) {
+      this.rest = rest;
+      this.object = object;
+    }
+  }
+
+  /**
+   * Writes a value. What is open is kept in a list rather than in calls, so a value nested however
+   * deep is written without a call for each level.
+   */
+  private static void write(StringBuilder out, Object root, String indent) {
+    List<Open> open = new ArrayList<>();
+    Object value = root;
+    while (true) {
+      while (value instanceof JsonValue j) {
+        value = j.toJson();
+      }
+      if (value instanceof Object[] array) {
+        value = List.of(array);
+      }
+      if (value == null || value == UNDEFINED) {
+        out.append("null");
+      } else if (value instanceof Boolean b) {
+        out.append(b ? "true" : "false");
+      } else if (value instanceof Number n) {
+        out.append(jsonNumber(n));
+      } else if (value instanceof CharSequence s) {
+        quote(out, s.toString());
+      } else if (value instanceof Map<?, ?> map) {
+        out.append('{');
+        open.add(new Open(Js.entries(map).iterator(), true));
+      } else if (value instanceof Collection<?> list) {
+        out.append('[');
+        open.add(new Open(list.iterator(), false));
+      } else {
+        quote(out, value.toString());
+      }
+      // On to the next value of whatever is open, closing what has none left.
+      boolean found = false;
+      while (!found) {
+        if (open.isEmpty()) {
+          return;
+        }
+        Open top = open.get(open.size() - 1);
+        String key = null;
+        Object next = null;
+        while (!found && top.rest.hasNext()) {
+          Object item = top.rest.next();
+          if (top.object) {
+            Map.Entry<?, ?> entry = (Map.Entry<?, ?>) item;
+            // A field holding undefined is left out, as JSON.stringify leaves it.
+            if (entry.getValue() == UNDEFINED) {
+              continue;
+            }
+            key = (String) entry.getKey();
+            next = entry.getValue();
+          } else {
+            next = item;
+          }
+          found = true;
+        }
+        if (!found) {
+          open.remove(open.size() - 1);
+          if (top.any && indent != null) {
+            out.append('\n').append(indent.repeat(open.size()));
+          }
+          out.append(top.object ? '}' : ']');
           continue;
         }
-        if (!first) {
+        if (top.any) {
           out.append(',');
         }
-        first = false;
+        top.any = true;
         if (indent != null) {
-          out.append('\n').append(inner);
+          out.append('\n').append(indent.repeat(open.size()));
         }
-        quote(out, entry.getKey());
-        out.append(indent == null ? ":" : ": ");
-        write(out, item, indent, inner);
-      }
-      if (!first && indent != null) {
-        out.append('\n').append(current);
-      }
-      out.append('}');
-    } else if (value instanceof Collection<?> list) {
-      String inner = indent == null ? "" : current + indent;
-      boolean first = true;
-      out.append('[');
-      for (Object item : list) {
-        if (!first) {
-          out.append(',');
+        if (top.object) {
+          quote(out, key);
+          out.append(indent == null ? ":" : ": ");
         }
-        first = false;
-        if (indent != null) {
-          out.append('\n').append(inner);
-        }
-        write(out, item, indent, inner);
+        value = next;
       }
-      if (!first && indent != null) {
-        out.append('\n').append(current);
-      }
-      out.append(']');
-    } else if (value instanceof Object[] array) {
-      write(out, List.of(array), indent, current);
-    } else {
-      quote(out, value.toString());
     }
   }
 
@@ -232,15 +282,15 @@ public final class Json {
         case '\t' -> out.append("\\t");
         default -> {
           if (c < 0x20) {
-            out.append(String.format("\\u%04x", (int) c));
+            out.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
           } else if (Character.isHighSurrogate(c)) {
             if (i + 1 < length && Character.isLowSurrogate(text.charAt(i + 1))) {
               out.append(c).append(text.charAt(++i));
             } else {
-              out.append(String.format("\\u%04x", (int) c));
+              out.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
             }
           } else if (Character.isLowSurrogate(c)) {
-            out.append(String.format("\\u%04x", (int) c));
+            out.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
           } else {
             out.append(c);
           }
@@ -255,12 +305,25 @@ public final class Json {
     Object toJson();
   }
 
+  /**
+   * The deepest arrays and objects may nest. Reading a value takes no calls, however deep it goes,
+   * and neither does writing one back (stringify, and String() of an array), so those can never run
+   * a thread's stack out. The limit is for whatever else walks a value it was handed, a call a
+   * level: two hundred levels take a few tens of kilobytes of stack, where the 5,000 once allowed
+   * ran out a megabyte. Nothing Runlight reads nests a tenth as deep.
+   */
+  public static final int MAX_DEPTH = 200;
+
   private static final class Parser {
     private final String text;
     private int at;
 
-    Parser(String text) {
+    /** Whether what nests past the limit is left out as null rather than refused. */
+    private final boolean shallow;
+
+    Parser(String text, boolean shallow) {
       this.text = text;
+      this.shallow = shallow;
     }
 
     void space() {
@@ -281,72 +344,96 @@ public final class Json {
               : "Unexpected token in JSON at position " + at);
     }
 
-    Object value(int depth) {
-      if (depth > 5000) {
-        throw new JsonException("Maximum call stack size exceeded");
+    /** The value at the cursor: an object or array's own values are read from a list, not calls. */
+    Object value() {
+      // The objects and arrays still open, outermost first, and beside each object the key whose
+      // value is being read.
+      List<Object> open = new ArrayList<>();
+      List<String> keys = new ArrayList<>();
+      while (true) {
+        if (at >= text.length()) {
+          throw error();
+        }
+        char c = text.charAt(at);
+        Object done;
+        if (c == '{' || c == '[') {
+          if (open.size() >= MAX_DEPTH && !shallow) {
+            throw new JsonException("Maximum call stack size exceeded");
+          }
+          at++;
+          space();
+          if (at < text.length() && text.charAt(at) == (c == '{' ? '}' : ']')) {
+            at++;
+            done = kept(open.size(), c == '{' ? new LinkedHashMap<String, Object>() : list());
+          } else {
+            open.add(c == '{' ? new LinkedHashMap<String, Object>() : list());
+            keys.add(c == '{' ? key() : null);
+            space();
+            continue;
+          }
+        } else {
+          done = scalar(c);
+        }
+        // The value read goes into whatever is open, which may close in turn.
+        while (true) {
+          if (open.isEmpty()) {
+            return done;
+          }
+          int last = open.size() - 1;
+          Object into = open.get(last);
+          boolean object = into instanceof Map<?, ?>;
+          if (object) {
+            Js.map(into).put(keys.get(last), done);
+          } else {
+            Js.list(into).add(done);
+          }
+          space();
+          if (at < text.length() && text.charAt(at) == ',') {
+            at++;
+            space();
+            if (object) {
+              keys.set(last, key());
+              space();
+            }
+            break;
+          }
+          if (at < text.length() && text.charAt(at) == (object ? '}' : ']')) {
+            at++;
+            open.remove(last);
+            keys.remove(last);
+            done = kept(last, into);
+            continue;
+          }
+          throw error();
+        }
       }
-      if (at >= text.length()) {
+    }
+
+    private static List<Object> list() {
+      return new ArrayList<>();
+    }
+
+    /** An object or array as it is kept: null when it is nested past the limit and left out. */
+    private static Object kept(int depth, Object value) {
+      return depth >= MAX_DEPTH ? null : value;
+    }
+
+    /** An object's next key, with the cursor left after its colon. */
+    private String key() {
+      if (at >= text.length() || text.charAt(at) != '"') {
         throw error();
       }
-      char c = text.charAt(at);
+      String key = string();
+      space();
+      if (at >= text.length() || text.charAt(at) != ':') {
+        throw error();
+      }
+      at++;
+      return key;
+    }
+
+    private Object scalar(char c) {
       switch (c) {
-        case '{' -> {
-          at++;
-          Map<String, Object> map = new LinkedHashMap<>();
-          space();
-          if (at < text.length() && text.charAt(at) == '}') {
-            at++;
-            return map;
-          }
-          while (true) {
-            space();
-            if (at >= text.length() || text.charAt(at) != '"') {
-              throw error();
-            }
-            String key = string();
-            space();
-            if (at >= text.length() || text.charAt(at) != ':') {
-              throw error();
-            }
-            at++;
-            space();
-            Object item = value(depth + 1);
-            map.put(key, item);
-            space();
-            if (at < text.length() && text.charAt(at) == ',') {
-              at++;
-              continue;
-            }
-            if (at < text.length() && text.charAt(at) == '}') {
-              at++;
-              return map;
-            }
-            throw error();
-          }
-        }
-        case '[' -> {
-          at++;
-          List<Object> list = new ArrayList<>();
-          space();
-          if (at < text.length() && text.charAt(at) == ']') {
-            at++;
-            return list;
-          }
-          while (true) {
-            space();
-            list.add(value(depth + 1));
-            space();
-            if (at < text.length() && text.charAt(at) == ',') {
-              at++;
-              continue;
-            }
-            if (at < text.length() && text.charAt(at) == ']') {
-              at++;
-              return list;
-            }
-            throw error();
-          }
-        }
         case '"' -> {
           return string();
         }

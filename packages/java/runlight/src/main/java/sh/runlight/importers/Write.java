@@ -38,6 +38,13 @@ public final class Write {
   /** The most clicks a day one imported link gets from a daily count. */
   private static final double MAX_DAILY = 10_000;
 
+  /**
+   * The most clicks one imported link brings with it, each click or each one of a daily count. The
+   * rest of a longer history is left behind, so no source, however much it sends, can fill memory
+   * or hold the database.
+   */
+  public static final int MAX_LINK_CLICKS = 100_000;
+
   // Browser and system names as other tools write them, in Runlight's spelling.
   public static final Map<String, String> BROWSERS =
       Map.ofEntries(
@@ -120,18 +127,74 @@ public final class Write {
     return v.isEmpty() ? "" : Js.upper(Js.slice(v, 0, 1)) + Js.slice(v, 1);
   }
 
+  /** An IPv4 address, or what reads as an IPv6 one, anywhere in a text. */
+  private static final Pattern ADDRESS =
+      Pattern.compile(
+          "(^|[^\\d.])\\d{1,3}(\\.\\d{1,3}){3}(?![\\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}",
+          Pattern.CASE_INSENSITIVE);
+
   /**
-   * A browser name in Runlight's spelling: a known one, or the name with a capital first letter.
+   * What a user agent has and a place name does not: a product with its version (Chrome/129), or
+   * its usual first words.
+   */
+  private static final Pattern AGENT =
+      Pattern.compile("[a-z]/\\d|mozilla|applewebkit", Pattern.CASE_INSENSITIVE);
+
+  /**
+   * A browser or system as a name: a word or a few, not starting with a digit, without the
+   * punctuation of a user agent.
+   */
+  private static final Pattern NAME = Pattern.compile("^[A-Za-z_][A-Za-z0-9 ._+-]{0,39}\\z");
+
+  private static final Pattern SCREEN = Pattern.compile("^\\d{1,5}x\\d{1,5}\\z");
+  private static final Pattern LANGUAGE =
+      Pattern.compile("^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}\\z");
+
+  /**
+   * Runlight never stores an IP address or a full user agent, and a file or another tool can hold
+   * either in any column. A name that is not one Runlight knows is kept only when it reads as a
+   * name, and nothing else.
+   */
+  private static String named(String name) {
+    String text = Js.trim(name);
+    return NAME.matcher(text).find() && !ADDRESS.matcher(text).find() ? text : "";
+  }
+
+  /**
+   * A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or
+   * none for anything else.
    */
   public static String browser(String name) {
     String known = BROWSERS.get(Js.lower(name));
-    return known != null ? known : title(name);
+    return known != null ? known : title(named(name));
   }
 
-  /** A system name in Runlight's spelling, or the name as given. */
+  /**
+   * A system name in Runlight's spelling, or a name as given, or none for anything that is not a
+   * name.
+   */
   public static String system(String name) {
     String known = SYSTEMS.get(Js.lower(name));
-    return known != null ? known : name;
+    return known != null ? known : named(name);
+  }
+
+  /**
+   * Free text about a place as given, or none when it holds an address or reads as a user agent.
+   */
+  public static String placeName(String name) {
+    return ADDRESS.matcher(name).find() || AGENT.matcher(name).find() ? "" : name;
+  }
+
+  /** A screen as 1440x900, or none. */
+  public static String screenSize(String value) {
+    String text = Js.trim(value);
+    return SCREEN.matcher(text).find() ? text : "";
+  }
+
+  /** A language tag such as en or pt-BR, or none. */
+  public static String languageTag(String value) {
+    String text = Js.trim(value);
+    return LANGUAGE.matcher(text).find() ? text : "";
   }
 
   public static String device(String name) {
@@ -191,7 +254,10 @@ public final class Write {
     String sourceId = Js.string(foreign.get("sourceId"));
     String id = importedLinkId(source, sourceId);
     SqlStore main = runlight.store();
-    if (main.linkById(id) != null) {
+    // Here already, or imported once and deleted since. A deleted link keeps its row and its
+    // clicks, so it is left as it is: writing it again would clear those clicks and the visits they
+    // opened, then fail on its id.
+    if (main.linkExists(id)) {
       return result("skipped");
     }
     String slug = Js.string(foreign.get("slug"));
@@ -258,6 +324,9 @@ public final class Write {
           Set<String> made = new HashSet<>();
           List<Object> clickList = Js.list(history.get("clicks"));
           for (Object item : clickList == null ? List.of() : clickList) {
+            if (clicks[0] >= MAX_LINK_CLICKS) {
+              break;
+            }
             Map<String, Object> c = Js.map(item);
             if (!Js.isFinite(c.get("ts"))) {
               continue;
@@ -285,7 +354,7 @@ public final class Write {
                   Sources.parsePage(
                       parsed != null ? parsed : new Url("https://" + host + "/" + slug));
               String country = Js.slice(Js.upper(str(c, "country")), 0, 2);
-              String rawRegion = str(c, "region");
+              String rawRegion = placeName(str(c, "region"));
               String region =
                   !rawRegion.isEmpty()
                       ? Js.slice(
@@ -309,14 +378,14 @@ public final class Write {
               row.put("utmContent", utm.get("content"));
               row.put("country", COUNTRY.matcher(country).find() ? country : "");
               row.put("region", !country.isEmpty() ? region : "");
-              row.put("city", Js.slice(str(c, "city"), 0, 100));
+              row.put("city", Js.slice(placeName(str(c, "city")), 0, 100));
               row.put("browser", browser(str(c, "browser")));
               row.put("browserVersion", "");
               row.put("os", system(str(c, "os")));
               row.put("osVersion", "");
               row.put("device", device(str(c, "device")));
-              row.put("screen", nullish(c, "screen"));
-              row.put("language", nullish(c, "language"));
+              row.put("screen", screenSize(nullish(c, "screen")));
+              row.put("language", languageTag(nullish(c, "language")));
               store.insertSession(row);
               store.db().run("UPDATE rl_sessions SET imported = 1 WHERE id = ?", List.of(session));
             }
@@ -347,7 +416,8 @@ public final class Write {
             }
             // A day's count is capped, so one made-up figure from a source cannot write millions of
             // rows.
-            double n = Math.min(Math.floor(count), MAX_DAILY);
+            double n =
+                Math.min(Math.min(Math.floor(count), MAX_DAILY), MAX_LINK_CLICKS - clicks[0]);
             for (int i = 0; i < n; i++) {
               store.insertEvent(
                   event(

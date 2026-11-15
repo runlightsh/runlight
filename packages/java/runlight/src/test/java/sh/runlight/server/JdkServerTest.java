@@ -278,6 +278,51 @@ class JdkServerTest {
     assertEquals("{\"error\":\"That request is too large\"}", big.body());
   }
 
+  /** One request written by hand, since the JDK's client will not send such a target. */
+  private String raw(String target) throws IOException {
+    return raw("GET", target);
+  }
+
+  private String raw(String method, String target) throws IOException {
+    try (java.net.Socket socket =
+        new java.net.Socket(InetAddress.getLoopbackAddress(), server.getAddress().getPort())) {
+      socket
+          .getOutputStream()
+          .write(
+              (method
+                      + " "
+                      + target
+                      + " HTTP/1.1\r\nHost: stats.example.com\r\nConnection: close\r\n\r\n")
+                  .getBytes(StandardCharsets.US_ASCII));
+      return new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    }
+  }
+
+  @Test
+  void aRequestTargetNeverNamesTheHostTheRequestIsReadAsComingTo() throws Exception {
+    // Resolved against the address, each of these would have named other.example as the host, and
+    // with it the origin the OAuth consent form is checked against.
+    for (String target :
+        new String[] {
+          "//other.example/cookies?a=1", "http://other.example/cookies?a=1", "/cookies?a=1"
+        }) {
+      String answer = raw(target);
+      // Newer JDKs refuse a target of two slashes themselves, before any handler sees it.
+      assertTrue(
+          answer.endsWith(" http://stats.example.com/cookies?a=1")
+              || (target.startsWith("//") && answer.startsWith("HTTP/1.1 400 ")),
+          target + " gave " + answer);
+    }
+  }
+
+  @Test
+  void aMethodNoRouteAnswersIsTheAppsOrA405() throws Exception {
+    for (String method : List.of("TRACE", "TRACK", "CONNECT")) {
+      assertTrue(raw(method, "/pricing").endsWith("the app"), method + " reaches the app");
+      assertTrue(raw(method, "/runlight/api/sites").startsWith("HTTP/1.1 405 "), method);
+    }
+  }
+
   @Test
   void ipv6AddressesAreWrittenShort() {
     byte[] loopback = new byte[16];

@@ -25,8 +25,62 @@ public final class Payload {
 
   private static final Pattern ID = Pattern.compile("^[a-z0-9]+\\z", Pattern.CASE_INSENSITIVE);
 
+  /** A string as it came, cut to max UTF-16 units: for a URL, which the parser then encodes. */
   private static String str(Object value, int max) {
     return value instanceof String s ? Js.slice(s, 0, max) : "";
+  }
+
+  /**
+   * Text as every database can keep it: without U+0000, which Postgres refuses, and with half a
+   * surrogate pair (which is no character) as U+FFFD.
+   */
+  public static String tidy(String text) {
+    StringBuilder out = null;
+    int length = text.length();
+    for (int i = 0; i < length; i++) {
+      char c = text.charAt(i);
+      boolean pair =
+          Character.isHighSurrogate(c)
+              && i + 1 < length
+              && Character.isLowSurrogate(text.charAt(i + 1));
+      boolean lone = Character.isSurrogate(c) && !pair;
+      if (c == 0 || lone) {
+        if (out == null) {
+          out = new StringBuilder(length).append(text, 0, i);
+        }
+        if (lone) {
+          out.append('\uFFFD');
+        }
+      } else if (out != null) {
+        out.append(c);
+        if (pair) {
+          out.append(text.charAt(i + 1));
+        }
+      }
+      if (pair) {
+        i++;
+      }
+    }
+    return out == null ? text : out.toString();
+  }
+
+  /**
+   * Tidied text cut to max characters (code points), so a character such as an emoji is never cut
+   * in half.
+   */
+  public static String cleanText(String text, int max) {
+    String clean = tidy(text);
+    if (clean.length() <= max) {
+      return clean;
+    }
+    return clean.codePointCount(0, clean.length()) <= max
+        ? clean
+        : clean.substring(0, clean.offsetByCodePoints(0, max));
+  }
+
+  /** A string the tracker sent, as it is stored. */
+  private static String stored(Object value, int max) {
+    return value instanceof String s ? cleanText(s, max) : "";
   }
 
   private static Long integer(Object value, long min, long max) {
@@ -47,14 +101,14 @@ public final class Payload {
       if (count >= MAX_PROPS) {
         break;
       }
-      String k = Js.slice(Js.trim(entry.getKey()), 0, 60);
+      String k = cleanText(Js.trim(tidy(entry.getKey())), 60);
       if (k.isEmpty()) {
         continue;
       }
       Object raw = entry.getValue();
       String text;
       if (raw instanceof String s) {
-        text = Js.slice(s, 0, 500);
+        text = cleanText(s, 500);
       } else if (raw instanceof Number && Js.isFinite(raw)) {
         text = Js.string(raw);
       } else if (raw instanceof Boolean) {
@@ -95,7 +149,8 @@ public final class Payload {
     if (text.length() > MAX_BODY) {
       return null;
     }
-    Json.Parsed parsed = Json.tryParse(text);
+    // However deep a body nests, only its top is read, so what is deeper is left out, not refused.
+    Json.Parsed parsed = Json.tryParseShallow(text);
     if (!parsed.ok() || !(parsed.value() instanceof Map<?, ?>)) {
       return null;
     }
@@ -114,7 +169,7 @@ public final class Payload {
       return null;
     }
 
-    String name = Js.trim(str(body.get("n"), 120));
+    String name = Js.trim(stored(body.get("n"), 120));
     if (kind.equals("event") && name.isEmpty()) {
       return null;
     }
@@ -130,13 +185,13 @@ public final class Payload {
     Long engaged = kind.equals("engagement") ? integer(body.get("e"), 0, MAX_ENGAGED_MS) : null;
     return Json.object(
         "kind", kind,
-        "site", str(body.get("s"), 64),
+        "site", stored(body.get("s"), 64),
         "url", url,
         "referrer", str(body.get("r"), 2048),
-        "title", str(body.get("t"), 500),
+        "title", stored(body.get("t"), 500),
         "screenWidth", integer(body.get("w"), 0, 20000),
         "screenHeight", integer(body.get("h"), 0, 20000),
-        "language", str(body.get("l"), 35),
+        "language", stored(body.get("l"), 35),
         "name", name,
         "props", kind.equals("event") ? linkProps(name, props(body.get("p"))) : null,
         "pageviewId", pageviewId,

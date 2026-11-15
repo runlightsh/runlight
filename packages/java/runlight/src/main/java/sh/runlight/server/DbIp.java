@@ -17,6 +17,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -39,7 +40,8 @@ public final class DbIp {
     boolean download(String url, Path file) throws Exception;
   }
 
-  private static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("uuuu-MM");
+  private static final DateTimeFormatter MONTH =
+      DateTimeFormatter.ofPattern("uuuu-MM", Locale.ROOT);
 
   private final Path dir;
   private final String mode;
@@ -156,8 +158,39 @@ public final class DbIp {
     scanned = Long.MIN_VALUE;
     String current = month(now);
     if (Files.isRegularFile(file(current))) {
+      wait = 0;
       return;
     }
+    // While the month's file is not published yet, or a download keeps failing, each try waits
+    // twice as long as the last, from five minutes up to six hours, so neither DB-IP nor the disk
+    // is
+    // asked for the whole file every few minutes.
+    if (now < retryAt) {
+      return;
+    }
+    try {
+      fetchRelease(now, current);
+    } finally {
+      if (Files.isRegularFile(file(current))) {
+        wait = 0;
+      } else {
+        wait = Math.min(wait == 0 ? FIRST_WAIT : wait * 2, LONGEST_WAIT);
+        retryAt = now + wait;
+      }
+    }
+  }
+
+  /** How long after a first failed try the next one waits, and the longest any waits. */
+  static final long FIRST_WAIT = 5 * 60_000L;
+
+  static final long LONGEST_WAIT = 6 * 3_600_000L;
+
+  /** After a try that left this month's file missing: how long the next waits, and when. */
+  private volatile long wait;
+
+  private volatile long retryAt;
+
+  private void fetchRelease(long now, String current) {
     try {
       Files.createDirectories(dir);
     } catch (IOException e) {

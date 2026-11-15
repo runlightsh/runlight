@@ -133,6 +133,43 @@ class ServletTest {
     }
   }
 
+  /** A request with a target and a Host of the test's choosing, as a container hands one over. */
+  private static HttpServletRequest asked(String uri, String query, String host) {
+    return (HttpServletRequest)
+        java.lang.reflect.Proxy.newProxyInstance(
+            ServletTest.class.getClassLoader(),
+            new Class<?>[] {HttpServletRequest.class},
+            (proxy, method, args) ->
+                switch (method.getName()) {
+                  case "getRequestURI" -> uri;
+                  case "getQueryString" -> query;
+                  case "getHeader" -> "host".equals(args[0]) ? host : null;
+                  case "isSecure" -> false;
+                  default -> throw new UnsupportedOperationException(method.getName());
+                });
+  }
+
+  @Test
+  void aRequestTargetNeverNamesTheHostTheRequestIsReadAsComingTo() {
+    // Resolved against the address, a path of two slashes or a slash and a backslash would have
+    // named other.example as the host, and with it the origin the OAuth consent form is checked
+    // against.
+    assertEquals(
+        "http://stats.example.com//other.example/runlight/oauth/authorize?a=1",
+        ServletBridge.url(
+            asked("//other.example/runlight/oauth/authorize", "a=1", "stats.example.com")));
+    assertEquals(
+        "http://stats.example.com//other.example/x",
+        ServletBridge.url(asked("/\\other.example/x", null, "stats.example.com")));
+    assertEquals(
+        "http://stats.example.com/runlight/api/stats?site=a&b=%2F",
+        ServletBridge.url(asked("/runlight/api/stats", "site=a&b=%2F", "stats.example.com")));
+    assertEquals(
+        "http://stats.example.com/a/c",
+        ServletBridge.url(asked("/a/b/../c", null, "stats.example.com")));
+    assertEquals("http://localhost/", ServletBridge.url(asked("/x", null, "bad host")));
+  }
+
   @Test
   void theRequestKeepsItsQueryStringAndTheConnectionsAddress() throws Exception {
     int port = start("/", Map.of("/echo/*", new Echo()));

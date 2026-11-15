@@ -520,7 +520,7 @@ public final class Url {
     for (byte b : Js.utf8(text)) {
       int o = b & 0xFF;
       if (o < 0x21 || o > 0x7e || extra.indexOf(o) >= 0) {
-        out.append(String.format("%%%02X", o));
+        out.append(String.format(Locale.ROOT, "%%%02X", o));
       } else {
         out.append((char) o);
       }

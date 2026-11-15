@@ -285,7 +285,7 @@ public final class Time {
   /** The local date of an instant, YYYY-MM-DD. */
   public static String localDate(long ts, String timezone) {
     int[] p = parts(ts, timezone);
-    return String.format("%04d-%02d-%02d", p[0], p[1], p[2]);
+    return String.format(Locale.ROOT, "%04d-%02d-%02d", p[0], p[1], p[2]);
   }
 
   public static String addDays(String date, long days) {
@@ -564,7 +564,9 @@ public final class Time {
   /** Weekday (Monday is 0) and hour. */
   public static int[] localWeekdayHour(long ts, String timezone) {
     int[] p = parts(ts, timezone);
-    return new int[] {weekday(String.format("%04d-%02d-%02d", p[0], p[1], p[2])), p[3]};
+    return new int[] {
+      weekday(String.format(Locale.ROOT, "%04d-%02d-%02d", p[0], p[1], p[2])), p[3]
+    };
   }
 
   /** Monday is 0. */
@@ -628,9 +630,9 @@ public final class Time {
     int[] c = civil(ms);
     String year =
         c[0] >= 0 && c[0] <= 9999
-            ? String.format("%04d", c[0])
-            : (c[0] < 0 ? "-" : "+") + String.format("%06d", Math.abs(c[0]));
-    return String.format("%s-%02d-%02d", year, c[1], c[2]);
+            ? String.format(Locale.ROOT, "%04d", c[0])
+            : (c[0] < 0 ? "-" : "+") + String.format(Locale.ROOT, "%06d", Math.abs(c[0]));
+    return String.format(Locale.ROOT, "%s-%02d-%02d", year, c[1], c[2]);
   }
 
   /** Date.prototype.toISOString. */
@@ -639,7 +641,12 @@ public final class Time {
     long within = Math.floorMod(ms, 86_400_000L);
     String date = iso(day * 86_400_000L);
     return String.format(
+        Locale.ROOT,
         "%sT%02d:%02d:%02d.%03dZ",
-        date, within / 3_600_000, within / 60_000 % 60, within / 1000 % 60, within % 1000);
+        date,
+        within / 3_600_000,
+        within / 60_000 % 60,
+        within / 1000 % 60,
+        within % 1000);
   }
 }

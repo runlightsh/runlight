@@ -441,12 +441,15 @@ public final class Crypto {
    */
   public static Long matchStep(String secret, String code, long now, long after) {
     long current = Math.floorDiv(now, STEP_MS);
-    for (long step : new long[] {current, current - 1, current + 1}) {
-      if (step > after && totp(secret, step).equals(code)) {
-        return step;
+    // Every step is worked out and compared in time that does not depend on where the code differs.
+    // The current step is checked last, so it is the one kept if two should match.
+    Long found = null;
+    for (long step : new long[] {current + 1, current - 1, current}) {
+      if (sameText(totp(secret, step), code) && step > after) {
+        found = step;
       }
     }
-    return null;
+    return found;
   }
 
   /** The address an authenticator app reads from the QR code. */

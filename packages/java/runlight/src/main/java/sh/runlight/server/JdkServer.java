@@ -68,6 +68,13 @@ public final class JdkServer {
 
   private static final Pattern COLLECT = Pattern.compile("/e\\z");
 
+  /** Methods no route or link answers, so they are the app's, or a 405 where there is no app. */
+  private static final List<String> UNSUPPORTED = List.of("TRACE", "TRACK", "CONNECT");
+
+  private static boolean unsupported(String method) {
+    return method != null && UNSUPPORTED.contains(method.toUpperCase(Locale.ROOT));
+  }
+
   /** A body past the limit, answered with 413 rather than passed on empty. */
   public static final class BodyTooLarge extends RuntimeException {
     private static final long serialVersionUID = 1L;
@@ -171,6 +178,10 @@ public final class JdkServer {
     return new Filter() {
       @Override
       public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+        if (unsupported(exchange.getRequestMethod())) {
+          chain.doFilter(exchange);
+          return;
+        }
         Request request = head(exchange);
         Response linked =
             runlight.linkDomainResponse(request, Json.object("ip", request.remoteAddress()));
@@ -222,6 +233,11 @@ public final class JdkServer {
 
   private static void serve(HttpExchange exchange, Handler handler, Runnable after)
       throws IOException {
+    if (unsupported(exchange.getRequestMethod())) {
+      exchange.sendResponseHeaders(405, -1);
+      exchange.close();
+      return;
+    }
     Response response;
     try {
       Request request = toRequest(exchange);
@@ -321,14 +337,20 @@ public final class JdkServer {
       proto = exchange instanceof HttpsExchange ? "https" : "http";
     }
     String host = exchange.getRequestHeaders().getFirst("host");
-    String target = exchange.getRequestURI().toString();
     try {
-      return new Url(
-              target.startsWith("/") ? target : "/" + target,
+      // The path and query are set on the address, never resolved against it: a target such as
+      // //other.example/x, resolved, would name its own host, and the request's origin with it.
+      Url url =
+          new Url(
               (proto.equals("https") ? "https" : "http")
                   + "://"
-                  + (host == null ? "localhost" : host))
-          .href();
+                  + (host == null ? "localhost" : host));
+      String path = exchange.getRequestURI().getRawPath();
+      String query = exchange.getRequestURI().getRawQuery();
+      url.setPathname(
+          path == null || !path.startsWith("/") ? "/" + (path == null ? "" : path) : path);
+      url.setSearch(query == null ? "" : query);
+      return url.href();
     } catch (IllegalArgumentException error) {
       return "http://localhost/";
     }

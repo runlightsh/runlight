@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -24,8 +25,9 @@ import sh.runlight.store.SqlStore;
  * PHP port keeps them, "throttle:&lt;name&gt;:&lt;id&gt;" holding {count, until}, and the day's
  * hashing key as "throttle-key:&lt;YYYY-MM-DD&gt;". Every process of an install, in any of the
  * ports, then shares the same counts. Keys from before yesterday are deleted, and so are counts
- * whose window has ended, when read, when a new count is made, and in the scheduled check, so
- * nothing made from an address lasts longer than a day.
+ * whose window has ended, when read, when a new count is made, and in the scheduled check. An app
+ * that never runs the check is swept all the same: at each day's first try, at most hourly as tries
+ * come in, and at each day's first visit, so nothing made from an address outlasts two days.
  *
  * <p>A count is written back only if it is still the one read, so a burst of tries at once cannot
  * each read the same count and all get past the limit, in one process or across several. Tries
@@ -44,11 +46,18 @@ public final class Throttle {
     }
   }
 
+  /** How often tries sweep counts whose window has ended, when no scheduled check does. */
+  private static final long SWEEP_EVERY_MS = 3_600_000;
+
   private final SqlStore store;
   private final String name;
   private final long limit;
   private final long windowMs;
   private volatile boolean migrated;
+
+  /** When this throttle last swept, on the clock its tries bring. */
+  private final AtomicLong swept = new AtomicLong(Long.MIN_VALUE);
+
   // How many entries this throttle can hold, as of the last prune and the new ones counted since,
   // so
   // a flood of new keys prunes only when the ceiling may have been passed, not on every one. Other
@@ -88,7 +97,7 @@ public final class Throttle {
     // use, or they would count the same key apart. A new day's key is when the old ones go.
     String made = Hash.randomId(16);
     String salt = store.swapSetting(key, saved, made) ? made : store.setting(key);
-    dropOldKeys(store, now);
+    sweep(store, now);
     return salt;
   }
 
@@ -124,6 +133,7 @@ public final class Throttle {
       }
     }
     dropOldKeys(store, now);
+    Lockout.sweep(store, now);
   }
 
   /** Runs fn while no other try under the same id in this process reads or counts. */
@@ -262,6 +272,7 @@ public final class Throttle {
             idFor(key, now),
             entry ->
                 entry != null && entry[1] > now && entry[0] >= limit ? null : counted(entry, now));
+    sweepWhenDue(now);
     if (made == null) {
       return false;
     }
@@ -269,6 +280,25 @@ public final class Throttle {
       prune(now);
     }
     return true;
+  }
+
+  /**
+   * Sweeps every throttle's ended counts at most hourly, so they go without a scheduled check. A
+   * failure is left for the next try, since the try itself was counted.
+   */
+  private void sweepWhenDue(long now) {
+    long last = swept.get();
+    if (last != Long.MIN_VALUE && now >= last && now - last < SWEEP_EVERY_MS) {
+      return;
+    }
+    if (!swept.compareAndSet(last, now)) {
+      return;
+    }
+    try {
+      sweep(store, now);
+    } catch (RuntimeException error) {
+      // Swept by the next try that is due, or the scheduled check.
+    }
   }
 
   /** Takes back one counted try, for one that turned out right. */

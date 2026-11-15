@@ -75,8 +75,9 @@ public final class Index {
     Importer importer = make.apply(new Http(runlight.fetcher()), runlight::now);
     Importer.Known known =
         (sourceId, slug, url) -> {
-          if (runlight.store().linkById(Write.importedLinkId(source, Js.string(sourceId)))
-              != null) {
+          // A link imported before and deleted since counts too, so its history is not fetched to
+          // be thrown away.
+          if (runlight.store().linkExists(Write.importedLinkId(source, Js.string(sourceId)))) {
             return true;
           }
           if (!Js.truthy(slug) || !Js.truthy(url)) {

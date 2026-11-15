@@ -440,6 +440,17 @@ public final class Visits {
         "language", text(Js.get(session, "language")));
   }
 
+  private static final Pattern MORE_THAN_HOST = Pattern.compile("[/?#@\\\\]");
+
+  /** Whether a hostname can be the host of an address, and nothing more than a host. */
+  private static boolean validHost(String host) {
+    if (host.isEmpty() || MORE_THAN_HOST.matcher(host).find()) {
+      return false;
+    }
+    Url url = Url.parse("https://" + host + "/");
+    return url != null && !url.hostname.isEmpty();
+  }
+
   /**
    * Writes one imported pageview or event as part of a Runlight visit. Visitors are hashed per day
    * from the hit's key, as live visitors are hashed per day, and a hit within thirty minutes of the
@@ -464,6 +475,13 @@ public final class Visits {
             !hostname.isEmpty()
                 ? hostname
                 : Js.truthy(firstHost) ? Js.string(firstHost) : "imported.invalid");
+    // A hostname no address can hold (a space in it, say) is the site's own instead, so one bad
+    // cell
+    // is one row under the site's name rather than a failed batch.
+    if (!validHost(host)) {
+      String own = firstHost instanceof String s ? s : "";
+      host = validHost(own) ? Js.lower(own) : "imported.invalid";
+    }
     String path = (String) e.get("path");
     String query = (String) e.get("query");
     Url url =
@@ -481,7 +499,7 @@ public final class Visits {
       id = Write.hexId(ns + ":" + key + ":" + ts);
       store.db().run("DELETE FROM rl_sessions WHERE id = ?", List.of(id));
       String country = Js.slice(Js.upper((String) e.get("country")), 0, 2);
-      String rawRegion = (String) e.get("region");
+      String rawRegion = Write.placeName((String) e.get("region"));
       String region =
           !rawRegion.isEmpty()
               ? Js.slice(
@@ -510,14 +528,14 @@ public final class Visits {
       row.put("utmContent", utm.get("content"));
       row.put("country", known ? country : "");
       row.put("region", known ? region : "");
-      row.put("city", Js.slice((String) e.get("city"), 0, 100));
+      row.put("city", Js.slice(Write.placeName((String) e.get("city")), 0, 100));
       row.put("browser", Write.browser((String) e.get("browser")));
       row.put("browserVersion", "");
       row.put("os", Write.system((String) e.get("os")));
       row.put("osVersion", "");
       row.put("device", Write.device((String) e.get("device")));
-      row.put("screen", Js.slice((String) e.get("screen"), 0, 20));
-      row.put("language", Js.slice((String) e.get("language"), 0, 35));
+      row.put("screen", Write.screenSize((String) e.get("screen")));
+      row.put("language", Write.languageTag((String) e.get("language")));
       store.insertSession(row);
       // No engaged time is known, so duration falls back to first-to-last pageview.
       store

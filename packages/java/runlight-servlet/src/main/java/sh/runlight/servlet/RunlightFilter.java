@@ -65,6 +65,10 @@ public final class RunlightFilter implements Filter {
       chain.doFilter(request, response);
       return;
     }
+    if (ServletBridge.unsupported(req)) {
+      chain.doFilter(request, response);
+      return;
+    }
     Request ours = ServletBridge.request(req);
     Response answer = answer(req, ours);
     if (answer != null) {

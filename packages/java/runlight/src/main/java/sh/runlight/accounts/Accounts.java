@@ -48,6 +48,13 @@ public final class Accounts {
       Pattern.compile(
           "^[^" + Js.SPACE + "@<>\"]+@[^" + Js.SPACE + "@<>\"]+\\.[^" + Js.SPACE + "@<>\"]+\\z");
 
+  /** The longest an address can be. Anything longer is refused before the pattern reads it. */
+  private static final int MAX_EMAIL = 320;
+
+  private static boolean isEmail(String address) {
+    return address.length() <= MAX_EMAIL && EMAIL.matcher(address).find();
+  }
+
   private static final Pattern SPACES = Pattern.compile("[" + Js.SPACE + "]");
   private static final Pattern SIX_DIGITS = Pattern.compile("^\\d{6}\\z");
   private static final Pattern INVITE_CODE = Pattern.compile("^[A-Za-z0-9_-]{20,64}\\z");
@@ -346,7 +353,14 @@ public final class Accounts {
     }
     Object read = r.get("totp_recovery");
     List<Object> hashes = stringList(read);
-    int at = hashes.indexOf(Crypto.recoveryHash(given));
+    // Every hash is compared, each in time that does not depend on where it differs.
+    String mine = Crypto.recoveryHash(given);
+    int at = -1;
+    for (int i = 0; i < hashes.size(); i++) {
+      if (Crypto.sameText(Js.string(hashes.get(i)), mine)) {
+        at = i;
+      }
+    }
     if (at < 0) {
       return false;
     }
@@ -589,7 +603,7 @@ public final class Accounts {
       throw new AccountError("Choose member or viewer for one site", "role_scope");
     }
     String address = Js.lower(Js.trim(email));
-    if (!EMAIL.matcher(address).find()) {
+    if (!isEmail(address)) {
       throw new AccountError("Enter an email address", "email_invalid");
     }
     if (password.length() < MIN_PASSWORD) {
@@ -670,7 +684,7 @@ public final class Accounts {
     if (site != null && (site.isEmpty() || !(role.equals("member") || role.equals("viewer"))))
       throw new AccountError("Choose member or viewer for one site", "role_scope");
     String address = Js.lower(Js.trim(email));
-    if (!EMAIL.matcher(address).find()) {
+    if (!isEmail(address)) {
       throw new AccountError("Enter an email address", "email_invalid");
     }
     if (byEmail(address) != null) {

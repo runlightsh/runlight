@@ -2,10 +2,12 @@ package sh.runlight.server;
 
 import com.sun.net.httpserver.HttpHandler;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -18,6 +20,7 @@ import sh.runlight.Routes;
 import sh.runlight.Runlight;
 import sh.runlight.accounts.Accounts;
 import sh.runlight.accounts.Crypto;
+import sh.runlight.accounts.Throttle;
 import sh.runlight.accounts.Web;
 import sh.runlight.http.Fetcher;
 import sh.runlight.http.Headers;
@@ -66,6 +69,33 @@ public final class Standalone {
    * becoming link domains.
    */
   public static final int MAX_OWN_HOSTS = 20;
+
+  /** A secret or token shorter than this is short enough to guess. */
+  public static final int SHORTEST = 32;
+
+  /**
+   * What to say at start about a secret or token someone set by hand that is short enough to guess,
+   * or null. The server still starts, since refusing would stop an install that ran before this was
+   * checked.
+   */
+  public static String shortWarning(String name, String value) {
+    if (value == null || value.length() >= SHORTEST) {
+      return null;
+    }
+    String does =
+        name.equals("RUNLIGHT_SECRET")
+            ? "It signs every session and encrypts the saved mail and assistant keys"
+            : "Anyone who guesses it has the whole API, as the owner";
+    return "Runlight: WARNING: "
+        + name
+        + " is only "
+        + value.length()
+        + " characters long. "
+        + does
+        + ". Set it to "
+        + SHORTEST
+        + " or more random characters, such as the output of: openssl rand -hex 32";
+  }
 
   private static final Pattern ONE_SEGMENT = Pattern.compile("^/[^/]*\\z");
   private static final Pattern GO = Pattern.compile("^/go/[^/]+/?\\z");
@@ -187,7 +217,24 @@ public final class Standalone {
   public final Routes routes;
   private final SqlStore store;
   private final String token;
-  private final Object trustProxy;
+
+  /**
+   * Where each request came from, as the handler was told, for the routes' callbacks, which get the
+   * request alone.
+   */
+  private final Map<Request, Map<String, Object>> contexts =
+      Collections.synchronizedMap(new WeakHashMap<>());
+
+  /**
+   * A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which
+   * that address's tries are all refused until the time is up. A long one cannot be guessed, so
+   * nothing is counted for it and nobody's wrong tries can keep a script that shares their address
+   * out.
+   */
+  private final boolean guessable;
+
+  private final Throttle guesses;
+  private final LongSupplier clock;
   private final Url publicUrl;
   private final String publicHost;
   private List<String> ownHosts;
@@ -199,7 +246,9 @@ public final class Standalone {
     this.store = options.store;
     LongSupplier now = options.now != null ? options.now : System::currentTimeMillis;
     this.token = options.token != null && !options.token.isEmpty() ? options.token : null;
-    this.trustProxy = options.trustProxy != null ? options.trustProxy : true;
+    this.clock = now;
+    this.guessable = token != null && token.length() < SHORTEST;
+    this.guesses = new Throttle(store, "guess", 10);
     this.publicUrl = options.url != null && !options.url.isEmpty() ? new Url(options.url) : null;
     this.publicHost = publicUrl != null ? Routes.hostName(publicUrl.host()) : null;
 
@@ -275,15 +324,33 @@ public final class Standalone {
       routes.origin(publicUrl.origin());
     }
     this.routes = rl.routes(routes);
+    // A link at one of the server's own paths would open at /go/<slug> and never on a link domain,
+    // where the server's page answers first, so no new link takes one.
+    Set<String> reserved = new java.util.HashSet<>();
+    for (String path : SERVER_PATHS) {
+      reserved.add(path.substring(1));
+    }
+    rl.links.reserved = Set.copyOf(reserved);
   }
 
   private Object authorize(Request request) {
     String auth = request.headers().get("authorization");
     auth = auth == null ? "" : auth;
+    String given = Js.lower(auth).startsWith("bearer ") ? Js.trim(auth.substring(7)) : "";
+    // A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
     if (token != null
-        && Js.lower(auth).startsWith("bearer ")
-        && Crypto.sameText(Js.trim(auth.substring(7)), token)) {
-      return true;
+        && !given.isEmpty()
+        && (!given.startsWith("rl_") || token.startsWith("rl_"))) {
+      String ip = runlight.clientIp(request, contextOf(request));
+      String from = ip == null || ip.isEmpty() ? "unknown" : ip;
+      if (!(guessable && guesses.blocked(from, clock.getAsLong()))) {
+        if (Crypto.sameText(given, token)) {
+          return true;
+        }
+        if (guessable) {
+          guesses.fail(from, clock.getAsLong());
+        }
+      }
     }
     Object access = web.access(request);
     if (Boolean.TRUE.equals(access)) {
@@ -292,10 +359,19 @@ public final class Standalone {
     return access;
   }
 
-  /** The name a request came in on, read as link domains read it. */
+  /** Where a request came from, as the handler was told, or as the request itself says. */
+  private Map<String, Object> contextOf(Request request) {
+    Map<String, Object> context = contexts.get(request);
+    return context != null ? context : Map.of();
+  }
+
+  /**
+   * The name a request came in on, read as link domains read it: a proxy's X-Forwarded-Host only
+   * where the library believes a proxy's headers at all, so a client that reaches the server
+   * straight from the internet cannot name the host itself.
+   */
   private String hostOf(Request request) {
-    String forwarded =
-        !Boolean.FALSE.equals(trustProxy) ? request.headers().get("x-forwarded-host") : null;
+    String forwarded = runlight.forwardedHost(request, contextOf(request));
     String given = forwarded != null ? forwarded : request.headers().get("host");
     return Routes.hostName(given != null ? given : new Url(request.url()).host());
   }
@@ -375,6 +451,7 @@ public final class Standalone {
    */
   public Response handle(Request request, Map<String, Object> context) {
     String path = new Url(request.url()).pathname;
+    contexts.put(request, context == null ? Map.of() : context);
     try {
       // A domain pointed at this server for short links answers at its root, with links one
       // segment deep. The server's own pages and its public address never answer as links, and "/"

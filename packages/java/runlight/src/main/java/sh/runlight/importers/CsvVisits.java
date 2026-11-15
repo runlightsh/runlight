@@ -22,6 +22,12 @@ public final class CsvVisits {
   /** At most this many rows in one request. */
   public static final int CSV_BATCH = 2000;
 
+  /**
+   * The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a
+   * date written 20240501 would otherwise land in 1970, and the site's history would begin there.
+   */
+  public static final long CSV_EARLIEST = 946_684_800_000L;
+
   private static final Pattern UNIX = Pattern.compile("^\\d+(\\.\\d+)?\\z");
   private static final Pattern ZONED = Pattern.compile("[zZ]|[+-]\\d\\d:?\\d\\d\\z");
   private static final Pattern TIMED = Pattern.compile("T\\d");
@@ -45,6 +51,11 @@ public final class CsvVisits {
    * milliseconds.
    */
   public static double rowTime(Map<String, String> row, String format) {
+    double ts = readTime(row, format);
+    return ts >= CSV_EARLIEST ? ts : Double.NaN;
+  }
+
+  private static double readTime(Map<String, String> row, String format) {
     String raw = format.equals("umami") ? row.get("created_at") : row.get("time");
     String text = raw == null ? "" : Js.trim(raw);
     if (text.isEmpty()) {

@@ -36,7 +36,8 @@ public final class Ua {
           new Browser("Chrome", Pattern.compile("(?:CriOS|Chrome)/(\\d+)")),
           new Browser(
               "Safari",
-              Pattern.compile("Version/(\\d+)[\\d.]* (?:Mobile/[^" + Js.SPACE + "]+ )?Safari/")),
+              Pattern.compile(
+                  "Version/(\\d+)(?:\\.[\\d.]*)? (?:Mobile/[^" + Js.SPACE + "]+ )?Safari/")),
           new Browser(
               "Internet Explorer", Pattern.compile("(?:MSIE |Trident/" + Js.DOT + "*rv:)(\\d+)")));
 
@@ -52,9 +53,19 @@ public final class Ua {
   private static final Pattern TABLET = Pattern.compile("iPad|Tablet|PlayBook|Silk");
   private static final Pattern MOBILE = Pattern.compile("Mobi|iPhone|iPod|Opera Mini|IEMobile");
 
+  /**
+   * The most of a user agent, or of a client hint, that is read: a real one is far shorter, and
+   * nothing past it is parsed.
+   */
+  public static final int MAX_UA = 512;
+
+  private static String cap(String value) {
+    return value.length() > MAX_UA ? value.substring(0, MAX_UA) : value;
+  }
+
   /** The AI agent a user agent names, or null. */
   public static Map<String, Object> aiAgent(String ua) {
-    String lower = Js.lower(ua);
+    String lower = Js.lower(cap(ua));
     for (Map<String, Object> agent : Agents.AI_AGENTS) {
       if (lower.contains((String) agent.get("token"))) {
         return agent;
@@ -64,6 +75,7 @@ public final class Ua {
   }
 
   public static boolean isBot(String ua) {
+    ua = cap(ua);
     if (ua.length() < 20 || !MOZILLA.matcher(ua).find()) {
       return true;
     }
@@ -89,6 +101,12 @@ public final class Ua {
     if (hints == null) {
       hints = Map.of();
     }
+    ua = cap(ua);
+    hints =
+        Json.object(
+            "brands", cap(Js.strOr(hints.get("brands"), "")),
+            "mobile", cap(Js.strOr(hints.get("mobile"), "")),
+            "platform", cap(Js.strOr(hints.get("platform"), "")));
     String browser = "Other";
     String browserVersion = "";
     for (Browser b : BROWSERS) {

@@ -784,7 +784,7 @@ public final class SqlStore implements AutoCloseable {
 
   /**
    * A breakdown of a visit dimension or of pages from rollups and the visits left over, merged,
-   * then sorted and cut to the page asked for.
+   * sorted, and cut to the page asked for by the database.
    */
   private List<Map<String, Object>> rolledBreakdown(
       Map<String, Object> query, String dimension, int limit, int offset) {
@@ -807,134 +807,162 @@ public final class SqlStore implements AutoCloseable {
     if (plan == null) {
       return null;
     }
-    Map<String, Map<String, Double>> sums = new LinkedHashMap<>();
-    java.util.function.Consumer<Map<String, Object>> bump =
-        row -> {
-          String key = text(row.get("value"));
-          Map<String, Double> into = sums.computeIfAbsent(key, k -> zeros(SUM_KEYS));
-          for (String k : SUM_KEYS) {
-            into.put(k, into.get(k) + dnum(row.get(k)));
-          }
-        };
+    // Each source adds up its own rows by value, and the database adds the sources together, sorts
+    // them, and cuts them to the page asked for, so no more than that page is ever read into
+    // memory.
+    List<String> parts = new ArrayList<>();
+    List<Object> params = new ArrayList<>();
     if (!plan.days().isEmpty()) {
-      List<Map<String, Object>> rolled =
-          db.all(
-              "SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,\n"
-                  + "           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events\n"
-                  + "         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN ("
-                  + Sql.BUILT_DAYS
-                  + ") GROUP BY value",
-              list(site(query), dimension, site(query), from(query), to(query)));
-      rolled.forEach(bump);
+      parts.add(
+          "SELECT value, "
+              + String.join(", ", SUM_KEYS)
+              + " FROM rl_rollups WHERE site = ? AND dim = ? AND day IN ("
+              + Sql.BUILT_DAYS
+              + ")");
+      params.addAll(list(site(query), dimension, site(query), from(query), to(query)));
     }
     Sql.Piece w = within(plan.rest());
     String isVisit = Sql.IS_VISIT;
-    if ((page || event) && !plan.rest().isEmpty()) {
-      // A visit's pageviews and events belong to the day it started, as in the rollups.
-      double lo = Double.POSITIVE_INFINITY;
-      double hi = Double.NEGATIVE_INFINITY;
-      for (double[] r : plan.rest()) {
-        lo = Math.min(lo, r[0]);
-        hi = Math.max(hi, r[1]);
-      }
-      hi += Sql.EVENT_TAIL_MS;
-      Function<String, String> ofRest =
-          kind ->
-              "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '"
-                  + kind
-                  + "' AND e.ts >= ? AND e.ts < ? AND "
-                  + isVisit
-                  + " AND "
-                  + w.sql();
-      List<Object> at = concat(list(site(query), Js.num(lo), Js.num(hi)), w.params());
+    // A visit's pageviews and events belong to the day it started, as in the rollups.
+    double lo = Double.POSITIVE_INFINITY;
+    double hi = Double.NEGATIVE_INFINITY;
+    for (double[] r : plan.rest()) {
+      lo = Math.min(lo, r[0]);
+      hi = Math.max(hi, r[1]);
+    }
+    hi += Sql.EVENT_TAIL_MS;
+    Function<String, String> ofRest =
+        kind ->
+            "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '"
+                + kind
+                + "' AND e.ts >= ? AND e.ts < ? AND "
+                + isVisit
+                + " AND "
+                + w.sql();
+    List<Object> at =
+        plan.rest().isEmpty()
+            ? List.of()
+            : concat(list(site(query), Js.num(lo), Js.num(hi)), w.params());
+    if (!plan.rest().isEmpty()) {
       if (page) {
-        db.all(
-                "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, "
-                    + Sql.LIVE_VIEWS
-                    + " AS views "
-                    + ofRest.apply("pageview")
-                    + " GROUP BY e.path",
-                at)
-            .forEach(bump);
-        db.all(
-                "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (\n"
-                    + "             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest "
-                    + ofRest.apply("engagement")
-                    + " GROUP BY e.path, e.pageview) t GROUP BY value",
-                at)
-            .forEach(bump);
+        parts.add(
+            "SELECT "
+                + part(
+                    "e.path",
+                    Map.of(
+                        "visitors",
+                        "COUNT(DISTINCT e.visitor)",
+                        "pageviews",
+                        "COUNT(*)",
+                        "views",
+                        Sql.LIVE_VIEWS))
+                + " "
+                + ofRest.apply("pageview")
+                + " GROUP BY e.path");
+        params.addAll(at);
+      } else if (event) {
+        parts.add(
+            "SELECT "
+                + part(
+                    "e.name", Map.of("visitors", "COUNT(DISTINCT e.visitor)", "events", "COUNT(*)"))
+                + " "
+                + ofRest.apply("event")
+                + " GROUP BY e.name");
+        params.addAll(at);
       } else {
-        db.all(
-                "SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events "
-                    + ofRest.apply("event")
-                    + " GROUP BY e.name",
-                at)
-            .forEach(bump);
+        String col = "s." + Query.SESSION_DIMENSIONS.get(dimension);
+        parts.add(
+            "SELECT "
+                + part(
+                    col,
+                    Map.of(
+                        "visitors",
+                        "COUNT(DISTINCT s.visitor)",
+                        "visits",
+                        "COUNT(*)",
+                        "pageviews",
+                        "SUM(s.pageviews)",
+                        "bounced",
+                        "SUM(CASE WHEN " + Sql.BOUNCE + " THEN 1 ELSE 0 END)",
+                        "duration",
+                        "SUM(" + Sql.DURATION + ")"))
+                + " FROM rl_sessions s WHERE s.site = ? AND "
+                + isVisit
+                + " AND "
+                + w.sql()
+                + " AND "
+                + col
+                + " <> '' GROUP BY "
+                + col);
+        params.add(site(query));
+        params.addAll(w.params());
       }
-    } else if (page || event) {
-      // Every day of the range is built.
-    } else {
-      String col = "s." + Query.SESSION_DIMENSIONS.get(dimension);
-      db.all(
-              "SELECT "
-                  + col
-                  + " AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,\n"
-                  + "           SUM(CASE WHEN "
-                  + Sql.BOUNCE
-                  + " THEN 1 ELSE 0 END) AS bounced, SUM("
-                  + Sql.DURATION
-                  + ") AS duration\n"
-                  + "         FROM rl_sessions s WHERE s.site = ? AND "
-                  + isVisit
-                  + " AND "
-                  + w.sql()
-                  + " AND "
-                  + col
-                  + " <> '' GROUP BY "
-                  + col,
-              concat(List.of(site(query)), w.params()))
-          .forEach(bump);
+    }
+    if (parts.isEmpty()) {
+      return new ArrayList<>();
     }
     boolean entryExit = dimension.equals("entry") || dimension.equals("exit");
-    List<Map.Entry<String, Map<String, Double>>> rows = new ArrayList<>();
-    for (Map.Entry<String, Map<String, Double>> e : sums.entrySet()) {
-      Map<String, Double> x = e.getValue();
-      if ((event || !e.getKey().isEmpty())
-          && (page ? x.get("pageviews") > 0 : event ? x.get("events") > 0 : x.get("visits") > 0)) {
-        rows.add(e);
+    String order =
+        entryExit
+            ? "n_visits DESC"
+            : event
+                ? "n_visitors DESC, n_events DESC"
+                : page ? "n_visitors DESC, n_pageviews DESC" : "n_visitors DESC, n_visits DESC";
+    List<String> sums = new ArrayList<>();
+    for (String c : SUM_KEYS) {
+      sums.add("SUM(" + c + ") AS n_" + c);
+    }
+    List<Map<String, Object>> rows =
+        db.all(
+            "SELECT value, "
+                + String.join(", ", sums)
+                + " FROM ("
+                + String.join(" UNION ALL ", parts)
+                + ") t\n       "
+                + (event ? "" : "WHERE value <> ''")
+                + " GROUP BY value ORDER BY "
+                + order
+                + ", value"
+                + textOrder()
+                + " LIMIT ? OFFSET ?",
+            concat(params, list(limit, offset)));
+    // The engaged time and scroll of the pages on this page of the report, from the visits no built
+    // day holds.
+    Map<String, double[]> rest = new HashMap<>();
+    if (page && !plan.rest().isEmpty() && !rows.isEmpty()) {
+      // Engaged time is added up per pageview first.
+      int size = Math.max(1, Math.min(Sql.VALUES_PER_QUERY, Sql.MAX_PARAMS - at.size() - 4));
+      List<String> values = new ArrayList<>();
+      for (Map<String, Object> row : rows) {
+        values.add(text(row.get("value")));
+      }
+      List<Map<String, Object>> engaged =
+          Sql.inPieces(
+              values,
+              size,
+              piece ->
+                  db.all(
+                      "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (\n"
+                          + "             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest "
+                          + ofRest.apply("engagement")
+                          + " AND e.path IN ("
+                          + String.join(", ", Collections.nCopies(piece.size(), "?"))
+                          + ") GROUP BY e.path, e.pageview) t GROUP BY value",
+                      concat(at, piece)));
+      for (Map<String, Object> row : engaged) {
+        double[] into = rest.computeIfAbsent(text(row.get("value")), key -> new double[3]);
+        into[0] += dnum(row.get("engaged"));
+        into[1] += dnum(row.get("scroll_sum"));
+        into[2] += dnum(row.get("scroll_n"));
       }
     }
-    rows.sort(
-        (p, q) -> {
-          Map<String, Double> x = p.getValue();
-          Map<String, Double> y = q.getValue();
-          double[] order =
-              entryExit
-                  ? new double[] {y.get("visits") - x.get("visits")}
-                  : event
-                      ? new double[] {
-                        y.get("visitors") - x.get("visitors"), y.get("events") - x.get("events")
-                      }
-                      : page
-                          ? new double[] {
-                            y.get("visitors") - x.get("visitors"),
-                            y.get("pageviews") - x.get("pageviews")
-                          }
-                          : new double[] {
-                            y.get("visitors") - x.get("visitors"), y.get("visits") - x.get("visits")
-                          };
-          for (double d : order) {
-            if (d != 0) {
-              return d < 0 ? -1 : 1;
-            }
-          }
-          return Sql.codeOrder(p.getKey(), q.getKey());
-        });
     List<Map<String, Object>> out = new ArrayList<>();
-    for (Map.Entry<String, Map<String, Double>> e :
-        rows.subList(Math.min(offset, rows.size()), Math.min(rows.size(), offset + limit))) {
-      String value = e.getKey();
-      Map<String, Double> x = e.getValue();
+    for (Map<String, Object> found : rows) {
+      String value = text(found.get("value"));
+      Map<String, Double> x = new HashMap<>();
+      for (String c : SUM_KEYS) {
+        x.put(c, dnum(found.get("n_" + c)));
+      }
       if (event) {
         out.add(
             Json.object(
@@ -947,6 +975,8 @@ public final class SqlStore implements AutoCloseable {
         continue;
       }
       if (page) {
+        double[] more = rest.getOrDefault(value, new double[3]);
+        double scrollN = x.get("scroll_n") + more[2];
         out.add(
             Json.object(
                 "value",
@@ -958,11 +988,11 @@ public final class SqlStore implements AutoCloseable {
                 // Over every pageview that could report its time, counting those that sent none as
                 // none.
                 "timeOnPage",
-                x.get("views") > 0 ? whole(Js.round(x.get("engaged") / x.get("views"))) : 0L,
+                x.get("views") > 0
+                    ? whole(Js.round((x.get("engaged") + more[0]) / x.get("views")))
+                    : 0L,
                 "scrollDepth",
-                x.get("scroll_n") > 0
-                    ? whole(Js.round(x.get("scroll_sum") / x.get("scroll_n")))
-                    : 0L));
+                scrollN > 0 ? whole(Js.round((x.get("scroll_sum") + more[1]) / scrollN)) : 0L));
         continue;
       }
       Map<String, Object> row =
@@ -984,6 +1014,15 @@ public final class SqlStore implements AutoCloseable {
       out.add(row);
     }
     return out;
+  }
+
+  /** One source's columns: the value, and each sum it counts, with 0 for those it does not. */
+  private static String part(String value, Map<String, String> counted) {
+    List<String> columns = new ArrayList<>();
+    for (String c : SUM_KEYS) {
+      columns.add(counted.getOrDefault(c, "0") + " AS " + c);
+    }
+    return value + " AS value, " + String.join(", ", columns);
   }
 
   private static Map<String, Double> zeros(List<String> keys) {
@@ -1106,11 +1145,16 @@ public final class SqlStore implements AutoCloseable {
    * again.
    */
   public void dropSaltsExcept(List<String> days) {
+    // Never a day after the newest of these: a process whose clock is a moment behind must not
+    // delete the salt another has just made for the day that began.
+    String newest = Collections.max(days);
+    List<Object> params = new ArrayList<>(days);
+    params.add(newest);
     db.run(
         "DELETE FROM rl_salts WHERE day NOT IN ("
             + String.join(", ", Collections.nCopies(days.size(), "?"))
-            + ")",
-        new ArrayList<Object>(days));
+            + ") AND day < ?",
+        params);
   }
 
   /**
@@ -1336,6 +1380,15 @@ public final class SqlStore implements AutoCloseable {
             db.all(
                 "SELECT * FROM rl_links WHERE id = ? AND deleted_at IS NULL LIMIT 1", List.of(id)));
     return row == null ? null : Sql.linkRow(row);
+  }
+
+  /**
+   * Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with
+   * its id and its clicks. An import asks this, so a link it brought in once and that was deleted
+   * since is left deleted.
+   */
+  public boolean linkExists(String id) {
+    return !db.all("SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1", List.of(id)).isEmpty();
   }
 
   public void insertLink(Map<String, Object> link) {
@@ -1939,11 +1992,39 @@ public final class SqlStore implements AutoCloseable {
         "click".equals(goal.get("kind")) ? goal.get("name") : match);
   }
 
+  /**
+   * Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after
+   * an even number of backslashes. JSON.stringify writes both for a string that holds them, and
+   * they are valid JSON.
+   */
+  static final String PG_UNREADABLE_PROPS =
+      "(?<!\\\\)(\\\\\\\\)*(\\\\u0000|\\\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\\\u[dD][c-fC-F][0-9a-fA-F]{2}))"
+          + "|(?<!\\\\)(?<!\\\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\\\\\)*\\\\u[dD][c-fC-F][0-9a-fA-F]{2}";
+
+  /**
+   * An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres
+   * refuses an escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as
+   * one with no props, rather than failing every report that reads its event. SQLite reads them as
+   * they are.
+   */
+  private String readableProps() {
+    return switch (db.dialect()) {
+      case "postgres" ->
+          "(CASE WHEN e.props !~ '" + PG_UNREADABLE_PROPS + "' THEN e.props END)::jsonb";
+      case "mysql" -> "(CASE WHEN JSON_VALID(e.props) THEN e.props END)";
+      default -> "e.props";
+    };
+  }
+
   /** A numeric event property for one row, as SQL (0 when it is not a number). */
   private Sql.Piece propValue(String prop) {
     if (db.dialect().equals("postgres")) {
       return Sql.Piece.of(
-          "(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)",
+          "(CASE WHEN ("
+              + readableProps()
+              + " ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN ("
+              + readableProps()
+              + " ->> ?)::numeric ELSE 0 END)",
           prop,
           prop);
     }
@@ -1951,7 +2032,7 @@ public final class SqlStore implements AutoCloseable {
     if (db.dialect().equals("mysql")) {
       // As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal
       // point.
-      String value = "JSON_EXTRACT(e.props, ?)";
+      String value = "JSON_EXTRACT(" + readableProps() + ", ?)";
       return new Sql.Piece(
           "(CASE\n          WHEN JSON_TYPE("
               + value
@@ -2013,7 +2094,9 @@ public final class SqlStore implements AutoCloseable {
                   "SELECT j.k AS \"key\", COUNT(*) AS events FROM "
                       + v.from()
                       + "\n"
-                      + "             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE "
+                      + "             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE("
+                      + readableProps()
+                      + ") = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE "
                       + Sql.MYSQL_COLLATION
                       + " PATH '$')) j\n             WHERE "
                       + where
@@ -2023,7 +2106,11 @@ public final class SqlStore implements AutoCloseable {
               db.all(
                   "SELECT k AS \"key\", COUNT(*) AS events FROM "
                       + v.from()
-                      + " CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k\n"
+                      + " CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof("
+                      + readableProps()
+                      + ") = 'object' THEN "
+                      + readableProps()
+                      + " ELSE '{}'::jsonb END) AS k\n"
                       + "             WHERE "
                       + where
                       + " GROUP BY k ORDER BY events DESC, k"
@@ -2051,9 +2138,13 @@ public final class SqlStore implements AutoCloseable {
         Sql.visitRows(filters(query), site(query), from(query), to(query), db.dialect());
     String value =
         switch (db.dialect()) {
-          case "postgres" -> "(e.props::jsonb ->> ?)";
+          case "postgres" -> "(" + readableProps() + " ->> ?)";
           case "mysql" ->
-              "(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE " + Sql.MYSQL_COLLATION + ")";
+              "(JSON_UNQUOTE(JSON_EXTRACT("
+                  + readableProps()
+                  + ", ?)) COLLATE "
+                  + Sql.MYSQL_COLLATION
+                  + ")";
           default -> "CAST(json_extract(e.props, ?) AS TEXT)";
         };
     String path = db.dialect().equals("postgres") ? key : "$.\"" + key + "\"";

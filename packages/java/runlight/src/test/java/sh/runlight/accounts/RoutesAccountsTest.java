@@ -286,6 +286,17 @@ class RoutesAccountsTest {
     assertEquals(List.of(), body(mail).get("saved"));
     assertEquals("resend", body(mail).get("service"));
 
+    // A report filtered to a path under /oauth/ is still its own to read: only the consent pages
+    // themselves are kept from it.
+    assertEquals(
+        200,
+        call.call(
+                member,
+                "GET",
+                "/api/stats?site=" + alpha + "&period=7d&filter=page:is:/oauth/callback",
+                null)
+            .status());
+
     // It may rename the site, as a hub may, never move it.
     Response moved =
         call.call(

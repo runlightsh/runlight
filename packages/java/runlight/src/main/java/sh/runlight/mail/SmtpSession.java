@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledFuture;
 import java.util.regex.Pattern;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
@@ -22,6 +23,7 @@ import javax.net.ssl.SSLSocketFactory;
 import sh.runlight.Js;
 import sh.runlight.Json;
 import sh.runlight.Safefetch;
+import sh.runlight.http.Deadline;
 
 /**
  * One SMTP connection for {@link Smtp#send}: the socket, the replies read from it (multi-line
@@ -37,6 +39,13 @@ public final class SmtpSession {
   private final SSLSocketFactory tls;
   private Socket socket;
   private InputStream in;
+
+  /**
+   * Closes the connection at the deadline. A read gives up by itself; a write to a server that has
+   * stopped reading would otherwise wait for as long as the server kept the connection open.
+   */
+  private ScheduledFuture<?> watch;
+
   private final StringBuilder buffer = new StringBuilder();
 
   /**
@@ -122,6 +131,7 @@ public final class SmtpSession {
         }
       }
       candidate.connect(new InetSocketAddress(addresses[0], port), millis(wait));
+      watch = Deadline.closeAt(candidate, deadline);
       socket = candidate;
       if (secure) {
         socket = secure(socket);
@@ -133,6 +143,7 @@ public final class SmtpSession {
       } catch (IOException ignored) {
         // Already gone.
       }
+      unwatch();
       socket = null;
       if (e instanceof MailError refusal) {
         throw refusal;
@@ -239,6 +250,10 @@ public final class SmtpSession {
         // Nothing came in the time left; the checks above decide what that means.
         continue;
       } catch (IOException e) {
+        // Closed at the deadline, when it passed during the read.
+        if (left() <= 0) {
+          throw late();
+        }
         close();
         throw new MailError("SMTP: the server closed the connection");
       }
@@ -288,7 +303,15 @@ public final class SmtpSession {
     }
   }
 
+  private void unwatch() {
+    if (watch != null) {
+      watch.cancel(false);
+      watch = null;
+    }
+  }
+
   public void close() {
+    unwatch();
     if (socket != null) {
       try {
         socket.close();

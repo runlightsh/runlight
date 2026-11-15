@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ScheduledFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
@@ -35,9 +36,11 @@ import javax.net.ssl.SSLSocketFactory;
  * fetch() follows them (a 303, and a 301 or 302 answering a POST, become a GET) or, with "manual",
  * handed back; one timeout for the whole request, redirects included; and maxBytes ({@link
  * #DEFAULT_MAX_BYTES} when not given), past which it stops reading and throws {@link BodyTooLong}
- * or, with truncate, hands back the start. Bodies come chunked, with a Content-Length, or until the
- * connection closes, and gzip or deflate ones are decoded. Throws {@link FetchError} when no answer
- * comes back.
+ * or, with truncate, hands back the start. An answer's head (its headers, any interim answers, and
+ * trailers) is held to {@link #MAX_HEAD_BYTES}, and the timeout holds what is sent as well as what
+ * is read, so a server that stops reading cannot keep a request past it. Bodies come chunked, with
+ * a Content-Length, or until the connection closes, and gzip or deflate ones are decoded. Throws
+ * {@link FetchError} when no answer comes back.
  */
 public final class JdkFetcher implements Fetcher {
   private static final int MAX_REDIRECTS = 20;
@@ -49,6 +52,13 @@ public final class JdkFetcher implements Fetcher {
   public static final long DEFAULT_MAX_BYTES = 100L * 1024 * 1024;
 
   private static final long CONNECT_TIMEOUT_MS = 15_000;
+
+  /**
+   * The most an answer's head may weigh: its status line and headers, those of any interim answers
+   * before it, and a chunked body's trailers. maxBytes holds only the body, so without this a
+   * server could send headers without end and have every one kept.
+   */
+  static final int MAX_HEAD_BYTES = 64 * 1024;
 
   /** host:port:addresses, the host before the first colon, since a v6 address has colons too. */
   private static final Pattern PIN = Pattern.compile("^([^:]+):(\\d{1,5}):(.+)\\z");
@@ -157,6 +167,13 @@ public final class JdkFetcher implements Fetcher {
     private final int port;
     private Socket socket;
     private InputStream in;
+
+    /** Closes the connection at the deadline, which a write to a server not reading needs. */
+    private ScheduledFuture<?> watch;
+
+    /** How much of the answer's head may still be read. */
+    private int headLeft = MAX_HEAD_BYTES;
+
     int status;
     String location;
 
@@ -241,6 +258,7 @@ public final class JdkFetcher implements Fetcher {
         throw last != null ? last : new IOException("no address to connect to");
       }
       socket.setTcpNoDelay(true);
+      watch = Deadline.closeAt(socket, until);
       if (url.protocol.equals("https:")) {
         SSLSocket secured = (SSLSocket) tls.createSocket(socket, host, port, true);
         SSLParameters parameters = secured.getSSLParameters();
@@ -304,7 +322,7 @@ public final class JdkFetcher implements Fetcher {
     Response receive(String method, FetchInit init, boolean follow) throws IOException {
       Headers headers;
       for (; ; ) {
-        String line = line();
+        String line = headLine();
         if (line == null) {
           throw new IOException("the server closed the connection without answering");
         }
@@ -314,7 +332,7 @@ public final class JdkFetcher implements Fetcher {
         }
         status = Integer.parseInt(m.group(1));
         headers = new Headers();
-        for (String field = line(); field != null && !field.isEmpty(); field = line()) {
+        for (String field = headLine(); field != null && !field.isEmpty(); field = headLine()) {
           int colon = field.indexOf(':');
           if (colon > 0) {
             headers.append(field.substring(0, colon).trim(), field.substring(colon + 1).trim());
@@ -430,13 +448,27 @@ public final class JdkFetcher implements Fetcher {
         }
         if (left == 0) {
           done = true;
-          for (String trailer = line(); trailer != null && !trailer.isEmpty(); trailer = line()) {
+          for (String trailer = headLine();
+              trailer != null && !trailer.isEmpty();
+              trailer = headLine()) {
             // Trailers are not kept.
           }
           return false;
         }
         return true;
       }
+    }
+
+    /** A line of the head or the trailers, counted against what the whole head may weigh. */
+    private String headLine() throws IOException {
+      String line = line();
+      if (line != null) {
+        headLeft -= line.length() + 2;
+        if (headLeft < 0) {
+          throw new IOException("the answer's headers are over " + MAX_HEAD_BYTES + " bytes");
+        }
+      }
+      return line;
     }
 
     /** A line of the head, without its CRLF, or null at the end of the stream. */
@@ -460,6 +492,9 @@ public final class JdkFetcher implements Fetcher {
     }
 
     void close() {
+      if (watch != null) {
+        watch.cancel(false);
+      }
       if (socket != null) {
         try {
           socket.close();
