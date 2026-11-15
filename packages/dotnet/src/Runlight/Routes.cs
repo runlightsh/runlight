@@ -909,7 +909,11 @@ public sealed class Routes
 
     private sealed record Read(JsObject Query, JsObject Range, JsObject? Compared);
 
-    private async Task<object> ReadQueryAsync(Url url, JsObject site, CancellationToken cancellationToken)
+    /// <summary>
+    /// The range and filters a report asks for, or a refusal. <paramref name="clicks"/> is for the short link
+    /// reports, whose "all" reaches back to the oldest click as well as the oldest visit.
+    /// </summary>
+    private async Task<object> ReadQueryAsync(Url url, JsObject site, CancellationToken cancellationToken, bool clicks = false)
     {
         var parameters = url.SearchParams;
         var filters = new List<object?>();
@@ -931,7 +935,10 @@ public sealed class Routes
         string? firstDate = null;
         if (parameters.Get("period") == "all")
         {
-            double? first = await Store.FirstSeenAsync(site.Str("id")!, cancellationToken).ConfigureAwait(false);
+            double? seen = await Store.FirstSeenAsync(site.Str("id")!, cancellationToken).ConfigureAwait(false);
+            // Clicks imported as daily counts belong to no visit, and may be older than any.
+            double? clicked = clicks ? await Store.FirstClickAsync(site.Str("id")!, cancellationToken).ConfigureAwait(false) : null;
+            double? first = seen == null ? clicked : clicked == null ? seen : Math.Min(seen.Value, clicked.Value);
             if (first != null)
             {
                 firstDate = Time.LocalDate((long)first.Value, timezone);
@@ -1156,7 +1163,7 @@ public sealed class Routes
             {
                 if (request.Method == "GET")
                 {
-                    object readOrRefusal = await ReadQueryAsync(url, site, cancellationToken).ConfigureAwait(false);
+                    object readOrRefusal = await ReadQueryAsync(url, site, cancellationToken, clicks: true).ConfigureAwait(false);
                     if (readOrRefusal is not Read read)
                     {
                         return (Response)readOrRefusal;
@@ -1243,7 +1250,7 @@ public sealed class Routes
                     {
                         return Coded("Unknown link", "unknown_link", 404);
                     }
-                    object readOrRefusal = await ReadQueryAsync(url, site, cancellationToken).ConfigureAwait(false);
+                    object readOrRefusal = await ReadQueryAsync(url, site, cancellationToken, clicks: true).ConfigureAwait(false);
                     if (readOrRefusal is not Read read)
                     {
                         return (Response)readOrRefusal;

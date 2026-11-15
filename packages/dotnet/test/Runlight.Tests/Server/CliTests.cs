@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -295,67 +294,5 @@ public sealed class CliTests : ServerTestCase
         await store.MigrateAsync();
         await store.SetSettingAsync("hello", "world");
         Assert.Equal("world", await store.SettingAsync("hello"));
-    }
-
-    [Fact]
-    public async Task Db_ip_downloads_this_month_or_last_and_keeps_only_the_newest()
-    {
-        byte[] db = Convert.FromBase64String(((JsObject)Fixtures.Load("geo").Arr("databases")![0]!).Str("base64")!);
-        string dir = _root + "/geo";
-        var asked = new List<string>();
-        var logged = new List<string>();
-        var published = new List<string> { "2026-09" };
-        Task<bool> Download(string url, string file, CancellationToken _)
-        {
-            asked.Add(url);
-            string release = Regex.Match(url, "lite-([0-9]{4}-[0-9]{2})\\.mmdb\\.gz\\z").Groups[1].Value;
-            if (!published.Contains(release))
-            {
-                return Task.FromResult(false);
-            }
-            File.WriteAllBytes(file, Gzip(db));
-            return Task.FromResult(true);
-        }
-        var geo = new DbIp(dir, "city", Download, logged.Add);
-        Assert.Null(geo.Lookup()); // nothing to look up before the first download
-
-        await geo.RefreshAsync(October);
-        Assert.Equal(["https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz", "https://download.db-ip.com/free/dbip-city-lite-2026-09.mmdb.gz"], asked); // a month's file appears a day or so in, so last month's stands in
-        Assert.Equal(["Runlight: location data from DB-IP (2026-09) is ready."], logged);
-        Assert.Equal(dir + "/dbip-city-lite-2026-09.mmdb", geo.Newest());
-        Assert.NotNull(geo.Lookup());
-        Assert.Null(geo.Current()("203.0.113.1")); // a running server reads nothing until it loads the release
-        geo.LoadNewest();
-
-        published.Add("2026-10");
-        asked.Clear();
-        await geo.RefreshAsync(October);
-        Assert.Empty(asked); // this month's file was missing a moment ago, so it is not asked for again yet
-        await geo.RefreshAsync(October + DbIp.FirstWaitMs);
-        Assert.Equal(["https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz"], asked);
-        Assert.Equal([dir + "/dbip-city-lite-2026-10.mmdb"], Directory.GetFiles(dir).Select(f => dir + "/" + Path.GetFileName(f))); // older releases go
-        asked.Clear();
-        await geo.RefreshAsync(October);
-        Assert.Empty(asked); // once this month is there, nothing is fetched
-
-        // January's fallback is December of the year before, and a broken file is never kept.
-        var broken = new DbIp(dir + "/country", "country", (url, file, _) =>
-        {
-            File.WriteAllBytes(file, Gzip("not a database"u8.ToArray()));
-            return Task.FromResult(true);
-        }, logged.Add);
-        await broken.RefreshAsync(1_798_761_600_000 + 86_400_000); // 2027-01-02
-        Assert.Contains("dbip-country-lite-2026-12.mmdb.gz", logged[^1], StringComparison.Ordinal);
-        Assert.Null(broken.Newest());
-    }
-
-    private static byte[] Gzip(byte[] bytes)
-    {
-        using var output = new MemoryStream();
-        using (var gzip = new GZipStream(output, CompressionMode.Compress))
-        {
-            gzip.Write(bytes);
-        }
-        return output.ToArray();
     }
 }

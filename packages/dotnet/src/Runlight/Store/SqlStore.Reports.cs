@@ -24,6 +24,13 @@ public sealed partial class SqlStore
         return row == null || row.Get("t") == null ? null : Sql.Num(row.Get("t"));
     }
 
+    /// <summary>When a site's oldest short link click was, a click imported as a daily count included, or null when it has none.</summary>
+    public async Task<double?> FirstClickAsync(string site, CancellationToken cancellationToken = default)
+    {
+        var row = await Db.FirstAsync("SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'", A(site), cancellationToken).ConfigureAwait(false);
+        return row == null || row.Get("t") == null ? null : Sql.Num(row.Get("t"));
+    }
+
     /// <summary>Just the visitor count from stats, in one query, for conversion rates.</summary>
     public async Task<double> VisitorsAsync(JsObject query, CancellationToken cancellationToken = default)
     {

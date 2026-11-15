@@ -9,8 +9,8 @@ using Runlight.Server;
 using Runlight.Store;
 using Runlight.Tests.Core;
 using Runlight.Tests.Routes;
-using Response = Runlight.Http.Response;
 using Xunit;
+using Response = Runlight.Http.Response;
 
 namespace Runlight.Tests;
 
@@ -462,10 +462,10 @@ public sealed class RoundTwoTests : IAsyncLifetime
         try
         {
             int asked = 0;
-            var geo = new DbIp(dir, "country", (_, _, _) =>
+            var geo = new DbIp(dir, "country", (_, _) =>
             {
                 asked++;
-                return Task.FromResult(false);
+                return Task.FromResult(new DbIpAnswer(404, new MemoryStream()));
             }, _ => { });
             const long Min = 60_000;
             long now = 1_791_374_400_000;

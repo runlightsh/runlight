@@ -478,7 +478,7 @@ public sealed class WebTests : IAsyncLifetime
         }
         var held = await H(web, Req("/login", "POST", headers, body));
         Assert.Equal(429, held.Status);
-        Assert.Contains("Too many tries. Wait fifteen minutes and try again.", held.Text());
+        Assert.Contains("Too many tries. Try again later.", held.Text());
         string right = FormBody(("email", "jon@example.com"), ("password", "a long password"));
         Assert.Equal(429, (await H(web, Req("/login", "POST", headers, right))).Status);
         var elsewhere = new Dictionary<string, string>(headers) { ["x-forwarded-for"] = "203.0.113.10" };
