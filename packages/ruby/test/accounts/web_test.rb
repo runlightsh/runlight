@@ -346,7 +346,7 @@ class AccountsWebTest < Minitest::Test
     10.times { assert_equal 401, handle(web, req("/login", "POST", headers, body)).status }
     held = handle(web, req("/login", "POST", headers, body))
     assert_equal 429, held.status
-    assert_includes held.text, "Too many tries. Wait fifteen minutes and try again."
+    assert_includes held.text, "Too many tries. Try again later."
     right = SearchParams.new({ "email" => "jon@example.com", "password" => "a long password" }).to_s
     assert_equal 429, handle(web, req("/login", "POST", headers, right)).status, "even the right password waits"
     assert_equal 303, handle(web, req("/login", "POST", headers.merge("x-forwarded-for" => "203.0.113.10"), right)).status, "another address is not held up"

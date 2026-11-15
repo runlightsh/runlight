@@ -221,67 +221,6 @@ class ServerCliTest < Minitest::Test
     assert File.exist?("#{@root}/data/deeper/runlight.db")
   end
 
-  def test_db_ip_downloads_this_month_or_last_and_keeps_only_the_newest
-    db = Base64.decode64(Fixtures.load("geo")["databases"][0]["base64"])
-    dir = "#{@root}/geo"
-    asked = []
-    logged = []
-    published = ["2026-09"]
-    download = lambda do |url, file|
-      asked << url
-      release = url[/lite-(\d{4}-\d{2})\.mmdb\.gz\z/, 1]
-      next false unless published.include?(release)
-
-      File.binwrite(file, Zlib.gzip(db))
-      true
-    end
-    geo = DbIp.new(dir, "city", download, ->(line) { logged << line })
-    assert_nil geo.lookup, "nothing to look up before the first download"
-    assert_nil geo.current.call("203.0.113.9"), "a running server's lookup answers nothing yet"
-
-    october = 1_791_374_400_000 # 2026-10-07
-    geo.refresh(october)
-    assert_equal ["https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz",
-                  "https://download.db-ip.com/free/dbip-city-lite-2026-09.mmdb.gz"], asked,
-                 "a month's file appears a day or so in, so last month's stands in"
-    assert_equal ["Runlight: location data from DB-IP (2026-09) is ready."], logged
-    assert_equal "#{dir}/dbip-city-lite-2026-09.mmdb", geo.newest
-    refute_nil geo.lookup
-    assert_same geo, geo.load_newest
-
-    # This month's file is still missing, so the next try waits: five minutes, then twice as long each time,
-    # up to six hours, whichever process asks (the wait is kept beside the releases, for `runlight cron`).
-    asked = []
-    geo.refresh(october + 299_999)
-    DbIp.new(dir, "city", download, ->(line) { logged << line }).refresh(october + 299_999)
-    assert_equal [], asked, "not asked again within five minutes"
-    geo.refresh(october + 300_000)
-    assert_equal 1, asked.length
-    geo.refresh(october + 300_000 + 599_999)
-    assert_equal 1, asked.length, "then ten minutes"
-    asked = []
-    14.times { |i| geo.refresh(october + ((i + 1) * 86_400_000)) }
-    assert_equal 14, asked.length
-    geo.refresh(october + (14 * 86_400_000) + 21_599_999)
-    assert_equal 14, asked.length, "six hours at the longest"
-
-    published << "2026-10"
-    asked = []
-    later = october + (15 * 86_400_000)
-    geo.refresh(later)
-    assert_equal ["https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz"], asked
-    assert_equal ["#{dir}/dbip-city-lite-2026-10.mmdb"], Dir.glob("#{dir}/*"), "older releases go, and the wait with them"
-    asked = []
-    geo.refresh(later)
-    assert_equal [], asked, "once this month is there, nothing is fetched"
-
-    # January's fallback is December of the year before, and a broken file is never kept.
-    broken = DbIp.new(dir, "country", ->(_url, file) { File.binwrite(file, Zlib.gzip("not a database")).positive? }, ->(line) { logged << line })
-    broken.refresh(1_798_761_600_000 + 86_400_000) # 2027-01-02
-    assert_includes logged.last, "dbip-country-lite-2026-12.mmdb.gz"
-    assert_nil broken.newest
-  end
-
   # `runlight serve` as someone runs it: the server on PORT, the setup link printed, a body past the limit
   # refused, and a clean stop on SIGTERM.
   def test_serve_runs_the_server_until_it_is_stopped

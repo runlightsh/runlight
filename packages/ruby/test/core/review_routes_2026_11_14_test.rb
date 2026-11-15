@@ -307,4 +307,29 @@ class CoreReviewRoutes20261114Test < CoreTestCase
     assert_equal [401] * 12, Array.new(12) { ask.call(long, "wrong", "198.51.100.7") }
     assert_equal 200, ask.call(long, "t" * 40, "198.51.100.7"), "a long token counts nothing"
   end
+  # Clicks imported as daily counts belong to no visit, and may be older than any, so the short links report's
+  # "all" starts at the oldest of the two. Every other report's "all" starts at the first visit, as before.
+  def test_all_time_on_the_short_links_report_reaches_back_to_the_oldest_click
+    install
+    owner = { "authorization" => "Bearer app-token" }
+    range = ->(path) { Json.decode(@handler.call(req(path, "GET", owner)).text)["range"] }
+    today = Runlight::Dates.local_date(@now, "UTC")
+    link = @rl.links.create("default", { "url" => "https://example.org/", "slug" => "sale" })
+    assert_equal [today, today], range.call("/api/links/#{link["id"]}?period=all").values_at("from", "to"), "neither a visit nor a click: today"
+
+    day = 86_400_000
+    @rl.store.insert_event({ "site" => "default", "ts" => @now - (40 * day), "kind" => "click", "visitor" => "", "session" => "", "pageview" => "", "path" => "/sale",
+                             "hostname" => "", "title" => "", "name" => "sale", "props" => { "imported" => "daily" }, "engagedMs" => 0, "scroll" => nil, "link" => link["id"] })
+    oldest = Runlight::Dates.local_date(@now - (40 * day), "UTC")
+    assert_equal oldest, range.call("/api/links/#{link["id"]}?period=all")["from"], "a click with no visit"
+    listed = Json.decode(@handler.call(req("/api/links?period=all", "GET", owner)).text)
+    assert_equal [1], listed["links"].map { |l| l["clicks"] }
+    assert_equal today, range.call("/api/stats?period=all")["from"], "other reports are unchanged"
+
+    @rl.store.db.run("INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, pageviews) VALUES ('s1', 'default', 'v1', ?, ?, 1)", [@now - (10 * day), @now - (10 * day)])
+    assert_equal oldest, range.call("/api/links/#{link["id"]}?period=all")["from"], "the older of the two"
+    assert_equal Runlight::Dates.local_date(@now - (10 * day), "UTC"), range.call("/api/stats?period=all")["from"]
+    @rl.store.db.run("UPDATE rl_sessions SET started_at = ? WHERE id = 's1'", [@now - (90 * day)])
+    assert_equal Runlight::Dates.local_date(@now - (90 * day), "UTC"), range.call("/api/links/#{link["id"]}?period=all")["from"]
+  end
 end

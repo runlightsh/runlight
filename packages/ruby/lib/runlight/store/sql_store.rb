@@ -1147,6 +1147,13 @@ module Runlight
         row.nil? || row["t"].nil? ? nil : Sql.num(row["t"])
       end
 
+      # When a site's oldest short link click was, or nil with none. Clicks imported as daily counts belong to
+      # no visit, so first_seen does not reach them.
+      def first_click(site)
+        row = @db.all("SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'", [site])[0]
+        row.nil? || row["t"].nil? ? nil : Sql.num(row["t"])
+      end
+
       # Just the visitor count from stats(), in one query, for conversion rates.
       def visitors(query)
         # Built days add up their visitors, as the stats do.

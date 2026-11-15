@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "net/http"
+require "openssl"
 require "uri"
 require "zlib"
 
@@ -13,19 +14,51 @@ module Runlight
     # refresh(), and lookups read the newest file on disk. lookup() opens it at the first lookup, as each PHP
     # request does; a server that keeps running reads through current() instead, which load_newest() points at the
     # newest release whenever the schedule runs, as the Node server's Geo does.
+    #
+    # A download is used only once it is checked: its SHA-1 against the one DB-IP publishes on its download page,
+    # and the file itself as a DB-IP database of the kind asked for, no older than the one in use. That catches a
+    # damaged or swapped file, and a download server serving something else. It is not a signature: DB-IP
+    # publishes none, so whoever can change DB-IP's own page can change both. A checksum that does not match
+    # always refuses the download. Only when none can be read at all (the page is down, or no longer reads as it
+    # did) is a download accepted on the other checks alone, with a warning, so a change to that page does not
+    # stop location data everywhere.
     class DbIp
       # How long after a first failed try the next one waits, and the longest any waits.
       FIRST_WAIT = 5 * 60_000
       LONGEST_WAIT = 6 * 3_600_000
-      private_constant :FIRST_WAIT, :LONGEST_WAIT
+      # The most a database may unpack to, several times the city file's size, so a bad download cannot fill the disk.
+      MOST_BYTES = 512 * 1024 * 1024
+      # The most the download itself may weigh, and the least a database unpacks to (the country one is 8 MB).
+      MOST_PACKED_BYTES = 256 * 1024 * 1024
+      FEWEST_BYTES = 1024 * 1024
+      # The most of DB-IP's download page that is read; it is about 25 KB.
+      MOST_PAGE_BYTES = 1024 * 1024
+      DAY = 86_400_000
+      # A release is built at the start of its month and stands in until the next appears, so one is two months old at most.
+      OLDEST_BUILD = 100 * DAY
+      # Addresses any location database knows: Google's and Cloudflare's resolvers, over IPv4 and IPv6.
+      KNOWN = ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"].freeze
+      MARKER = "\xAB\xCD\xEFMaxMind.com".b.freeze
+      private_constant :FIRST_WAIT, :LONGEST_WAIT, :MOST_BYTES, :MOST_PACKED_BYTES, :FEWEST_BYTES, :MOST_PAGE_BYTES, :DAY, :OLDEST_BUILD, :KNOWN, :MARKER
 
-      # dir: the folder the releases live in. mode: "city" or "country". download: a callable taking the URL and a
-      # file, that writes the gzipped file at the URL to the file and says whether it got one (Net::HTTP by
-      # default). log: a callable taking a line.
-      def initialize(dir, mode, download = nil, log = nil)
+      # An answer that was not a plain 200, with its status, so a month not out yet (404) can be told apart.
+      class Refused < StandardError
+        attr_reader :status
+
+        def initialize(status)
+          super("it answered #{status}")
+          @status = status
+        end
+      end
+
+      # dir: the folder the releases live in. mode: "city" or "country". get: a callable taking a URL and a
+      # timeout in seconds, that makes one GET without following any redirect and yields the status, the
+      # headers (a Hash with lowercase names), and the body as something whose each gives its parts; it returns
+      # what the block returns (Net::HTTP by default). log: a callable taking a line.
+      def initialize(dir, mode, get = nil, log = nil)
         @dir = dir
         @mode = mode
-        @download = download || method(:fetch_to)
+        @get = get || method(:http_get)
         @log = log || ->(line) { warn(line) }
         @loaded = nil
         @lookup = nil
@@ -35,6 +68,68 @@ module Runlight
       # "2026-10", the month DB-IP names each release after.
       def self.month(ms)
         Time.at(ms.div(1000)).utc.strftime("%Y-%m")
+      end
+
+      # The release and SHA-1 on DB-IP's download page for the MMDB file of one kind: the last SHA1SUM before
+      # the link to that file, and after the link to any other. Nil when the page does not read that way.
+      def self.published_checksum(page, mode)
+        page = Js.scrub(page)
+        link = page.match(/download\.db-ip\.com\/free\/dbip-#{Regexp.escape(mode)}-lite-(\d{4}-\d{2})\.mmdb\.gz/)
+        return nil if link.nil?
+
+        before = link.pre_match
+        other = before.rindex("download.db-ip.com/free/dbip-")
+        card = other.nil? ? before : before[other..]
+        sha1 = card.scan(/SHA1SUM.{0,200}?\b([0-9a-f]{40})\b/im).last&.first
+        sha1.nil? ? nil : { "release" => link[1], "sha1" => sha1.downcase }
+      end
+
+      # Raises unless `bytes` is a DB-IP database of the kind asked for that a lookup can be made in: of a
+      # believable size, its search tree inside the file, built lately and not before the one in use (`in_use`,
+      # a time in milliseconds, or 0 for none), and answering for addresses everyone knows.
+      def self.check_database(bytes, mode, now, in_use = 0)
+        bytes = bytes.b
+        raise RuntimeError, "it unpacks to #{bytes.bytesize} bytes, too few for a location database" if bytes.bytesize < FEWEST_BYTES
+
+        marker = bytes.rindex(MARKER)
+        raise RuntimeError, "it is not an MMDB file" if marker.nil?
+
+        reader = begin
+          Mmdb.new(bytes)
+        rescue StandardError => e
+          raise RuntimeError, "it does not open as an MMDB file: #{e.message}"
+        end
+        meta = reader.metadata
+        major = meta["binary_format_major_version"]
+        raise RuntimeError, "its format is version #{major}, not 2" unless major == 2
+
+        type = meta["database_type"].to_s
+        raise RuntimeError, "it is a \"#{type}\" database, not DB-IP's #{mode} one" unless type.downcase == "dbip-#{mode}-lite"
+        raise RuntimeError, "it covers IP version #{meta["ip_version"]}, not 6" unless meta["ip_version"] == 6
+
+        size = meta["record_size"]
+        raise RuntimeError, "its records are #{size} bits" unless [24, 28, 32].include?(size)
+
+        nodes = meta["node_count"]
+        raise RuntimeError, "its search tree does not fit in the file" unless nodes.is_a?(Integer) && nodes.positive? && (nodes * size / 4.0) + 16 <= marker
+
+        epoch = meta["build_epoch"]
+        built = epoch.is_a?(Integer) ? epoch * 1000 : nil
+        if built.nil? || built > now + (2 * DAY) || built < now - OLDEST_BUILD
+          raise RuntimeError, "it was built on #{built.nil? ? "no date" : Time.at(epoch).utc.strftime("%Y-%m-%d")}"
+        end
+        raise RuntimeError, "it is older than the database in use" if built < in_use
+
+        KNOWN.each do |ip|
+          found = begin
+            reader.get(ip)
+          rescue StandardError
+            nil
+          end
+          country = found.is_a?(Hash) && found["country"].is_a?(Hash) ? found["country"]["iso_code"] : nil
+          raise RuntimeError, "it has no country for #{ip}" unless country.is_a?(String) && country.match?(/\A[A-Z]{2}\z/)
+        end
+        nil
       end
 
       # The newest release on disk, or nil before the first download.
@@ -99,7 +194,13 @@ module Runlight
         return if now < retry_at
 
         begin
-          download_releases(now, current)
+          FileUtils.mkdir_p(@dir, mode: 0o755)
+        rescue SystemCallError
+          @log.call("Runlight: could not make the folder for location data, #{@dir}")
+          return
+        end
+        begin
+          fetch(current, now)
         ensure
           if File.file?(file(current))
             FileUtils.rm_f(wait_file)
@@ -112,14 +213,6 @@ module Runlight
             end
           end
         end
-      end
-
-      def self.gunzip(from, to)
-        Zlib::GzipReader.open(from) do |input|
-          File.open(to, "wb") { |output| IO.copy_stream(input, output) }
-        end
-      rescue Zlib::Error
-        raise RuntimeError, "could not unpack #{from}"
       end
 
       private
@@ -137,70 +230,177 @@ module Runlight
         [0, 0]
       end
 
-      def download_releases(now, current)
-        begin
-          FileUtils.mkdir_p(@dir, mode: 0o755)
-        rescue SystemCallError
-          @log.call("Runlight: could not make the folder for location data, #{@dir}")
-          return
-        end
-        at = Time.at(now.div(1000)).utc
-        year = at.month == 1 ? at.year - 1 : at.year
-        previous = format("%<year>04d-%<month>02d", year: year, month: at.month == 1 ? 12 : at.month - 1)
-        [current, previous].each do |release|
-          return if File.file?(file(release))
-
-          url = "https://download.db-ip.com/free/dbip-#{@mode}-lite-#{release}.mmdb.gz"
-          gz = "#{file(release)}.gz.partial"
-          partial = "#{file(release)}.partial"
-          begin
-            next unless @download.call(url, gz)
-
-            self.class.gunzip(gz, partial)
-            # A file that does not open as a database is never kept.
-            Mmdb.open(partial)
-            File.rename(partial, file(release))
-            Dir.glob("#{@dir}/dbip-#{@mode}-lite-*").each do |old|
-              File.unlink(old) if old != file(release)
-            rescue SystemCallError
-              nil
-            end
-            @log.call("Runlight: location data from DB-IP (#{release}) is ready.")
-            return
-          rescue StandardError => e
-            @log.call("Runlight: could not download location data from #{url}: #{e.message}")
-          ensure
-            FileUtils.rm_f(gz)
-            FileUtils.rm_f(partial)
-          end
-        end
-      end
-
       def file(release)
         "#{@dir}/dbip-#{@mode}-lite-#{release}.mmdb"
       end
 
-      # Downloads a file straight to disk, since a city database is too big to hold in memory. This is the one
-      # download that does not go through a fetcher, which keeps whole answers in memory. Redirects are followed
-      # on https only.
-      def fetch_to(url, file, redirects = 5)
+      # One GET that goes nowhere but where it was sent, and yields the headers and the body of a plain 200.
+      # Anything else is Refused, with its status.
+      def request(url, timeout)
+        @get.call(url, timeout) do |status, headers, body|
+          raise Refused, status unless status == 200
+
+          yield headers || {}, body || []
+        end
+      end
+
+      # The release DB-IP's download page offers for this kind of database, and the SHA-1 it gives for the
+      # unpacked file. Raises with why when there is none to read.
+      def published
+        url = "https://db-ip.com/db/download/ip-to-#{@mode}-lite"
+        page = begin
+          request(url, 30) do |_headers, body|
+            text = +"".b
+            body.each do |chunk|
+              text << chunk.to_s.b
+              raise RuntimeError, "it is more than #{MOST_PAGE_BYTES / 1024} KB" if text.bytesize > MOST_PAGE_BYTES
+            end
+            text
+          end
+        rescue StandardError => e
+          raise RuntimeError, "could not read DB-IP's checksums at #{url}: #{e.message}"
+        end
+        found = self.class.published_checksum(page, @mode)
+        raise RuntimeError, "found no checksum for the #{@mode} database at #{url}" if found.nil?
+
+        found
+      end
+
+      def fetch(release, now)
+        # A new month's file appears a day or so after the month starts; until then, last month's is current.
+        at = Time.at(now.div(1000)).utc
+        year = at.month == 1 ? at.year - 1 : at.year
+        tries = [release, format("%<year>04d-%<month>02d", year: year, month: at.month == 1 ? 12 : at.month - 1)]
+        # The page says which release there is and what it must hash to, so only that file is asked for. When the
+        # page cannot be read, the newest release there is goes unchecked against it, and the log says so.
+        found = nil
+        unchecked = ""
+        begin
+          found = published
+        rescue StandardError => e
+          unchecked = e.message
+        end
+        if !found.nil? && !tries.include?(found["release"])
+          @log.call("Runlight: location data was not updated: DB-IP offers the #{found["release"]} release, which is neither this month's nor last month's")
+          return
+        end
+        (found.nil? ? tries : [found["release"]]).each do |name|
+          return if File.file?(file(name))
+
+          url = "https://download.db-ip.com/free/dbip-#{@mode}-lite-#{name}.mmdb.gz"
+          partial = "#{file(name)}.partial.#{Process.pid}"
+          begin
+            save(url, partial, found.nil? ? nil : found["sha1"], now)
+            File.rename(partial, file(name))
+            # Older releases go once the new one is in place.
+            Dir.glob("#{@dir}/dbip-#{@mode}-lite-*").each do |old|
+              File.unlink(old) if old != file(name)
+            rescue SystemCallError
+              nil
+            end
+            if found.nil?
+              @log.call("Runlight: warning: location data from DB-IP (#{name}) could not be checked against DB-IP's published checksum (#{unchecked}). " \
+                        "It was accepted as a DB-IP database of the right kind, without that check.")
+            end
+            @log.call("Runlight: location data from DB-IP (#{name}) is ready.")
+            return
+          rescue StandardError => e
+            FileUtils.rm_f(partial)
+            # Without the page to say which release there is, this month's not being out yet is no failure.
+            next if found.nil? && e.is_a?(Refused) && e.status == 404
+
+            # Whatever went wrong, the database in use stays in use.
+            @log.call("Runlight: location data was not updated from #{url}: #{e.message}")
+          end
+        end
+        @log.call("Runlight: location data was not updated: #{unchecked}, and no release could be downloaded without them") if found.nil?
+      end
+
+      # Downloads one release to `partial`, unpacked, and raises unless it is fit to use: the published SHA-1's
+      # (when there is one to hold it to), and a DB-IP database of this kind no older than the one in use.
+      def save(url, partial, sha1, now)
+        hash = OpenSSL::Digest.new("SHA1")
+        request(url, 10 * 60) do |headers, body|
+          raise RuntimeError, "the download is more than #{MOST_PACKED_BYTES / 1024 / 1024} MB" if Js.number(headers["content-length"] || 0) > MOST_PACKED_BYTES
+
+          unpack(body, partial, hash)
+        end
+        got = hash.hexdigest
+        raise RuntimeError, "its SHA-1 is #{got}, and DB-IP publishes #{sha1}" if !sha1.nil? && got != sha1
+
+        self.class.check_database(File.binread(partial), @mode, now, in_use)
+      end
+
+      # Unpacks a gzipped body into a file as it arrives, hashing what is written. The stream must be whole and
+      # nothing may follow it: Zlib stops reading at the end of the stream, so what it left unread is looked for.
+      def unpack(body, partial, hash)
+        inflate = Zlib::Inflate.new(Zlib::MAX_WBITS + 16)
+        packed = 0
+        unpacked = 0
+        begin
+          File.open(partial, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |out|
+            body.each do |chunk|
+              chunk = chunk.to_s.b
+              next if chunk.empty?
+
+              packed += chunk.bytesize
+              raise RuntimeError, "the location data is more than #{MOST_PACKED_BYTES / 1024 / 1024} MB" if packed > MOST_PACKED_BYTES
+              raise RuntimeError, "there is data after the end of its gzip stream" if inflate.finished?
+
+              inflate.inflate(chunk) do |piece|
+                unpacked += piece.bytesize
+                raise RuntimeError, "the location data is more than #{MOST_BYTES / 1024 / 1024} MB" if unpacked > MOST_BYTES
+
+                hash << piece
+                out.write(piece)
+              end
+              raise RuntimeError, "there is data after the end of its gzip stream" if inflate.finished? && inflate.total_in < packed
+            end
+            raise RuntimeError, "unexpected end of the gzip stream" unless inflate.finished?
+          end
+        rescue Zlib::Error => e
+          raise RuntimeError, "it is not gzip: #{e.message}"
+        ensure
+          inflate.close
+        end
+      end
+
+      # When the newest release on disk was built, in milliseconds, or 0 with none (or one that does not open).
+      def in_use
+        file = newest
+        return 0 if file.nil?
+
+        File.open(file, "rb") do |handle|
+          epoch = Mmdb.new("", handle).metadata["build_epoch"]
+          epoch.is_a?(Integer) ? epoch * 1000 : 0
+        end
+      rescue StandardError
+        0
+      end
+
+      # One GET over https with Net::HTTP, no redirect followed, the body given a part at a time (a city database
+      # is too big to hold packed in memory as well as unpacked), and the whole of it within `timeout` seconds.
+      def http_get(url, timeout)
         uri = URI(url)
         raise RuntimeError, "not https: #{url}" unless uri.scheme == "https"
 
-        Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 15, read_timeout: 600) do |http|
-          http.request(Net::HTTP::Get.new(uri)) do |answer|
-            if answer.is_a?(Net::HTTPRedirection) && redirects.positive? && answer["location"]
-              return fetch_to(URI.join(url, answer["location"]).to_s, file, redirects - 1)
-            end
-            return false unless answer.code == "200"
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+        Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: [timeout, 15].min, read_timeout: [timeout, 60].min) do |http|
+          # Asked for as it is, so the length the server declares is the length of what arrives.
+          get = Net::HTTP::Get.new(uri, { "accept-encoding" => "identity", "user-agent" => "Runlight (+https://runlight.sh)" })
+          http.request(get) do |answer|
+            headers = {}
+            answer.each_header { |name, value| headers[name.downcase] = value }
+            parts = Enumerator.new do |out|
+              answer.read_body do |chunk|
+                raise RuntimeError, "it took more than #{timeout} seconds" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
-            File.open(file, "wb") do |out|
-              answer.read_body { |chunk| out.write(chunk) }
+                out << chunk
+              end
             end
-            return true
+            return yield(answer.code.to_i, headers, parts)
           end
         end
-        false
       end
     end
   end

@@ -702,7 +702,8 @@ module Runlight
       @rl.site(url.search_params.get("site")) || coded("Unknown site", "unknown_site", 404)
     end
 
-    def read_query(url, site)
+    # `clicks` is for the short link reports, whose "all" reaches back to the oldest click as well as the oldest visit.
+    def read_query(url, site, clicks = false)
       params = url.search_params
       filters = []
       if params.get_all("filter").length > Query::MAX_FILTERS
@@ -718,7 +719,10 @@ module Runlight
       now = @rl.now
       first_date = nil
       if params.get("period") == "all"
-        first = store.first_seen(site["id"])
+        seen = store.first_seen(site["id"])
+        # Clicks imported as daily counts belong to no visit, and may be older than any.
+        clicked = clicks ? store.first_click(site["id"]) : nil
+        first = [seen, clicked].compact.min
         first_date = Dates.local_date(first.to_i, site["timezone"]) unless first.nil?
       end
       range = Dates.resolve_range({ "period" => params.get("period"), "from" => params.get("from"), "to" => params.get("to"),
@@ -953,7 +957,7 @@ module Runlight
 
         if path == "/api/links"
           if request.method == "GET"
-            read = read_query(url, site)
+            read = read_query(url, site, true)
             return read if read.is_a?(Http::Response)
 
             links = store.links(site["id"], read["range"]["from"], read["range"]["to"])
@@ -1016,7 +1020,7 @@ module Runlight
             link = store.link_by_id(id)
             return coded("Unknown link", "unknown_link", 404) if link.nil? || link["site"] != site["id"]
 
-            read = read_query(url, site)
+            read = read_query(url, site, true)
             return read if read.is_a?(Http::Response)
 
             range = read["range"]
