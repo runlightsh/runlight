@@ -2222,6 +2222,13 @@ defmodule Runlight.Store do
     if row == nil or row["t"] == nil, do: nil, else: num(row["t"])
   end
 
+  @doc "When the site's oldest short link click was recorded, a click imported as a daily count included, or nil."
+  @spec first_click(t(), String.t()) :: number() | nil
+  def first_click(store, site) do
+    row = first(store, "SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'", [site])
+    if row == nil or row["t"] == nil, do: nil, else: num(row["t"])
+  end
+
   @doc "Just the visitor count from stats, in one query, for conversion rates."
   @spec visitors(t(), map()) :: number()
   def visitors(store, query) do

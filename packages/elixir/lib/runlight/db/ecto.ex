@@ -18,8 +18,9 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     TABLE IF NOT EXISTS`), so a Node, PHP, or Elixir process can make them in
     any order. Statements are not logged (they would fill an app's debug log
     with a line for every tracker hit), and the repo's telemetry event is not
-    sent for them either, since a statement or its values hold salts and
-    hashes that an app's tracing should never be handed. Nor do they run under
+    sent for them either: every value is bound, never written into a
+    statement, and that event carries the bound values, salts and hashes
+    among them, which an app's tracing should never be handed. Nor do they run under
     the repo's `:timeout`: like the SDK's drivers, Runlight sets no deadline
     of its own on a statement, so a long report is the database's to finish.
 
@@ -63,12 +64,16 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       %Db{module: __MODULE__, dialect: dialect, state: %{repo: repo, dynamic: Keyword.get(opts, :dynamic_repo)}}
     end
 
-    # What every statement of Runlight's runs with. Not logged, and no telemetry event either: on Postgres and MySQL
-    # the values are written into the statement, and on SQLite they ride beside it, so an app's own tracing would
-    # otherwise be handed salts, visitor hashes, and password hashes. And no deadline in the client, as the SDK's
+    # What every statement of Runlight's runs with. Not logged, and no telemetry event either: every value is
+    # bound, and Ecto's event carries the bound values beside the statement, so an app's own tracing would
+    # otherwise be handed salts, visitor hashes, and password hashes. A statement itself holds no value, so a
+    # driver's error may name the one that failed. And no deadline in the client, as the SDK's
     # drivers have none: a long report or an index being built is the database's to finish, as it already is inside
     # a transaction or a checkout.
     @quiet [log: false, telemetry_event: nil, timeout: :infinity]
+
+    # The most prepared statements Runlight keeps open on one MySQL or MariaDB connection.
+    @mysql_statements 256
 
     defp with_repo(%Db{state: %{repo: repo, dynamic: nil}}, fun), do: fun.(repo)
 
@@ -91,30 +96,36 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
               if sqlite_frees?(sql), do: sqlite_checkout(repo, run), else: run.()
 
             :postgres ->
-              repo.query(Db.postgres_text(sql, params), [], @quiet)
+              {text, bound} = Db.postgres_bound(sql, params)
+              repo.query(text, bound, @quiet)
 
             :mysql ->
-              mysql_checkout(repo, fn -> repo.query(Db.mysql_text(sql, params), [], [query_type: :text] ++ @quiet) end)
+              {text, bound} = Db.mysql_bound(sql, params)
+              # A statement with values is prepared and its values bound; one with none goes as text, since some
+              # (those that set the session up) cannot be prepared.
+              # A prepared statement is kept open on its connection, so the next one like it is one round trip and
+              # not three. It is kept under one of a fixed number of names, picked from its text: a statement that
+              # lands on a name another holds takes its place there, and the driver closes the other, so those
+              # written with a varying number of placeholders can never pile up.
+              opts =
+                if bound == [],
+                  do: [query_type: :text],
+                  else: [query_type: :binary, cache_statement: "runlight_#{:erlang.phash2(text, @mysql_statements)}"]
+
+              mysql_checkout(repo, fn -> repo.query(text, bound, opts ++ @quiet) end)
           end
 
         case result do
           {:ok, result} -> result
-          {:error, error} -> raise unstated(error)
+          {:error, error} -> raise error
         end
       end)
     end
 
-    # A driver's error names the statement that failed, which on Postgres and MySQL holds its values, and the
-    # error's message ends up in logs. The database's own words stay; the statement goes.
-    defp unstated(%{__exception__: true} = error) do
-      error
-      |> then(&if(Map.has_key?(&1, :query), do: %{&1 | query: nil}, else: &1))
-      |> then(&if(Map.has_key?(&1, :statement), do: %{&1 | statement: nil}, else: &1))
-    end
-
-    # Values are escaped with backslashes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a quote could
-    # end the value early. Every connection drops that one mode before Runlight's statements run on it, an app's own
-    # repo's too. A pooled connection cannot be told from the next one before a statement runs on it, so the mode is
+    # Values are bound, so no mode of the server's can turn one into SQL. The text a statement itself holds is
+    # written with backslashes doubled (see Db.mysql_bound/2), which a server set to NO_BACKSLASH_ESCAPES would read
+    # as two, so every connection drops that one mode before Runlight's statements run on it, an app's own repo's
+    # too. A pooled connection cannot be told from the next one before a statement runs on it, so the mode is
     # dropped once for each checkout, which a transaction holds for all of its statements.
     defp mysql_checkout(repo, fun) do
       key = {__MODULE__, :mysql_checkout, repo.get_dynamic_repo()}

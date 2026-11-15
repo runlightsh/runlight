@@ -7,9 +7,9 @@ defmodule Runlight.Db do
 
   SQL is written with `?` placeholders and "double quotes" around a name that
   is a keyword somewhere. Each implementation turns that into what its
-  database reads, as the SDK's drivers do: Postgres gets the values written
-  into the statement as text, as node-postgres sends them, and MySQL gets them
-  escaped in place with backticks for quoted names, as mysql2 does.
+  database reads, and binds the values: no value is written into a
+  statement. Postgres gets numbered placeholders, each cast to its value's
+  type, and MySQL gets backticks for quoted names.
   """
 
   @enforce_keys [:module, :dialect, :state]
@@ -69,87 +69,94 @@ defmodule Runlight.Db do
   end
 
   @doc """
-  The statement with each `?` replaced by its value written as Postgres text:
-  a quoted literal of unknown type, as node-postgres sends every value, so the
-  database reads it in the type the statement needs.
+  The statement as Postgres reads it, and the values to bind to it: each `?`
+  becomes `$1`, `$2`, and so on, cast to the type of the value it stands for
+  (text, bigint, double precision, or boolean), since Postgrex sends every
+  value in the type it has here. A nil is written as `NULL`, which is no
+  value, so it takes any column's type. No value is ever written into the
+  statement.
   """
-  @spec postgres_text(String.t(), [term()]) :: String.t()
-  def postgres_text(sql, params) do
-    fill(sql, params, &postgres_value/1, false)
+  @spec postgres_bound(String.t(), [term()]) :: {String.t(), [term()]}
+  def postgres_bound(sql, params) do
+    {parts, bound} =
+      scan(sql, params, false, fn value, bound ->
+        case postgres_value(value) do
+          :null -> {"NULL", bound}
+          {type, value} -> {"$#{length(bound) + 1}::#{type}", [value | bound]}
+        end
+      end)
+
+    {IO.iodata_to_binary(parts), Enum.reverse(bound)}
   end
 
-  defp postgres_value(nil), do: "NULL"
-  defp postgres_value(v), do: "E'" <> escape_e(Runlight.JS.string(v)) <> "'"
+  # The widest whole number a BIGINT holds.
+  @int8 9_223_372_036_854_775_807
 
-  defp escape_e(text) do
-    if String.contains?(text, <<0>>), do: raise(ArgumentError, "Runlight: Postgres text cannot hold a zero byte")
-    text |> String.replace("\\", "\\\\") |> String.replace("'", "''")
+  defp postgres_value(nil), do: :null
+  defp postgres_value(v) when is_boolean(v), do: {"boolean", v}
+  defp postgres_value(v) when is_integer(v) and v >= -@int8 - 1 and v <= @int8, do: {"bigint", v}
+  defp postgres_value(v) when is_float(v), do: {"double precision", v}
+
+  defp postgres_value(v) when is_binary(v) do
+    if String.contains?(v, <<0>>), do: raise(ArgumentError, "Runlight: Postgres text cannot hold a zero byte")
+    {"text", v}
   end
+
+  # Anything else as the text JavaScript's String() gives it, as it was always sent.
+  defp postgres_value(v), do: postgres_value(Runlight.JS.string(v))
 
   @doc """
   SQL written for SQLite and Postgres, as MySQL and MariaDB read it (the SDK's
-  mysqlText): `?` becomes the value, escaped; a "quoted" identifier is quoted
-  with backticks; and a backslash inside 'text' is doubled, since MySQL reads
-  it as an escape where standard SQL takes it literally.
+  mysqlText, less its values), and the values to bind to it: a "quoted"
+  identifier is quoted with backticks, and a backslash inside 'text' the
+  statement itself holds is doubled, since MySQL reads it as an escape where
+  standard SQL takes it literally. Each `?` stays a `?`, for the prepared
+  statement to bind, so no value is ever written into the statement.
   """
-  @spec mysql_text(String.t(), [term()]) :: String.t()
-  def mysql_text(sql, params), do: fill(sql, params, &mysql_value/1, true)
-
-  defp mysql_value(nil), do: "NULL"
-  defp mysql_value(true), do: "true"
-  defp mysql_value(false), do: "false"
-  defp mysql_value(n) when is_integer(n) or is_float(n), do: Runlight.JS.format_number(n)
-
-  defp mysql_value(s) when is_binary(s) do
-    escaped =
-      for <<c <- s>>, into: "" do
-        case c do
-          0 -> "\\0"
-          8 -> "\\b"
-          9 -> "\\t"
-          10 -> "\\n"
-          13 -> "\\r"
-          26 -> "\\Z"
-          ?" -> "\\\""
-          ?' -> "\\'"
-          ?\\ -> "\\\\"
-          c -> <<c>>
-        end
-      end
-
-    "'" <> escaped <> "'"
+  @spec mysql_bound(String.t(), [term()]) :: {String.t(), [term()]}
+  def mysql_bound(sql, params) do
+    {parts, bound} = scan(sql, params, true, fn value, bound -> {"?", [mysql_value(value) | bound]} end)
+    {IO.iodata_to_binary(parts), Enum.reverse(bound)}
   end
 
-  defp mysql_value(other), do: mysql_value(Runlight.JS.string(other))
+  defp mysql_value(v) when is_nil(v) or is_boolean(v) or is_integer(v) or is_float(v) or is_binary(v), do: v
+  defp mysql_value(%{__struct__: Decimal} = v), do: v
+  defp mysql_value(other), do: Runlight.JS.string(other)
 
-  defp fill(sql, params, value, mysql) do
-    {out, rest, _quote} =
-      for <<ch::utf8 <- sql>>, reduce: {[], params, nil} do
-        {out, rest, quote} ->
+  # Walks a statement, leaving what is quoted alone (but for MySQL's own quoting), and hands each placeholder's
+  # value to `place`, which answers what to write there and the values bound so far.
+  defp scan(sql, params, mysql, place) do
+    {out, rest, _quote, bound} =
+      for <<ch::utf8 <- sql>>, reduce: {[], params, nil, []} do
+        {out, rest, quote, bound} ->
           cond do
             quote != nil ->
               cond do
-                ch == quote -> {[if(mysql and ch == ?", do: "`", else: <<ch::utf8>>) | out], rest, nil}
-                mysql and quote == ?' and ch == ?\\ -> {["\\\\" | out], rest, quote}
-                mysql and quote == ?" and ch == ?` -> {["``" | out], rest, quote}
-                true -> {[<<ch::utf8>> | out], rest, quote}
+                ch == quote -> {[if(mysql and ch == ?", do: "`", else: <<ch::utf8>>) | out], rest, nil, bound}
+                mysql and quote == ?' and ch == ?\\ -> {["\\\\" | out], rest, quote, bound}
+                mysql and quote == ?" and ch == ?` -> {["``" | out], rest, quote, bound}
+                true -> {[<<ch::utf8>> | out], rest, quote, bound}
               end
 
             ch in [?', ?"] or (mysql and ch == ?`) ->
-              {[if(mysql and ch == ?", do: "`", else: <<ch::utf8>>) | out], rest, ch}
+              {[if(mysql and ch == ?", do: "`", else: <<ch::utf8>>) | out], rest, ch, bound}
 
             ch == ?? ->
               case rest do
-                [v | more] -> {[value.(v) | out], more, nil}
-                [] -> raise ArgumentError, "Runlight: a statement has more placeholders than values"
+                [v | more] ->
+                  {text, bound} = place.(v, bound)
+                  {[text | out], more, nil, bound}
+
+                [] ->
+                  raise ArgumentError, "Runlight: a statement has more placeholders than values"
               end
 
             true ->
-              {[<<ch::utf8>> | out], rest, nil}
+              {[<<ch::utf8>> | out], rest, nil, bound}
           end
       end
 
     if rest != [], do: raise(ArgumentError, "Runlight: a statement has more values than placeholders")
-    out |> Enum.reverse() |> IO.iodata_to_binary()
+    {Enum.reverse(out), bound}
   end
 end

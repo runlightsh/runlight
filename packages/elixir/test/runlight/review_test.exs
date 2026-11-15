@@ -577,6 +577,69 @@ defmodule Runlight.ReviewTest do
     end
   end
 
+  for {kind, url} <- Stores.kinds() do
+    @kind kind
+    @url url
+
+    test "#{kind}: a live sign-in replaces an old hash once, and the password and the session it gave still work" do
+      rl = instance(@kind, @url, secret: String.duplicate("k", 64))
+      routes = Runlight.routes(rl, accounts: true, token: "secret")
+      acc = routes.web.accounts
+      user = Accounts.set_password(acc, "owner@example.com", "a long password", @now)
+      salt = :crypto.strong_rand_bytes(16)
+
+      old = [
+        "scrypt$16$8$1$#{Crypto.base64url(salt)}$#{Crypto.base64url(Crypto.scrypt("a long password", salt, 16, 8, 1, 32))}",
+        "pbkdf2$1000$#{Crypto.base64url(salt)}$#{Crypto.base64url(Crypto.pbkdf2("a long password", salt, 1000, 32))}"
+      ]
+
+      sign_in = fn password ->
+        Runlight.Routes.handle(
+          routes,
+          Request.new("https://example.com/runlight/login",
+            method: "POST",
+            headers: [{"content-type", "application/x-www-form-urlencoded"}],
+            body: Runlight.SearchParams.to_string([{"email", "owner@example.com"}, {"password", password}]),
+            remote_address: "198.51.100.#{System.unique_integer([:positive])}"
+          )
+        )
+      end
+
+      for hash <- old do
+        Db.run(rl.store.db, "UPDATE rl_users SET hash = ? WHERE id = ?", [hash, user["id"]])
+
+        assert sign_in.("a wrong password").status == 401
+        assert Accounts.by_id(acc, user["id"])["hash"] == hash, "a wrong password changes nothing"
+
+        first = sign_in.("a long password")
+        assert first.status == 303
+        made = Accounts.by_id(acc, user["id"])["hash"]
+        assert made =~ ~r/\Apbkdf2\$600000\$/
+        assert made != hash
+
+        # The session that sign-in gave is signed with the new hash, so it is still good.
+        cookie =
+          first
+          |> Response.set_cookies()
+          |> Enum.find(&String.starts_with?(&1, Accounts.session_cookie() <> "="))
+          |> String.split(";")
+          |> hd()
+
+        account =
+          Runlight.Routes.handle(
+            routes,
+            Request.new("https://example.com/runlight/api/account", headers: [{"cookie", cookie}])
+          )
+
+        assert account.status == 200
+
+        # The same password signs in again, and the hash is not made again.
+        assert sign_in.("a long password").status == 303
+        assert Accounts.by_id(acc, user["id"])["hash"] == made
+      end
+    end
+  end
+
   describe "the plugs" do
     defmodule Router do
       use Plug.Router

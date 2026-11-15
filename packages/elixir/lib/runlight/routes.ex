@@ -628,7 +628,9 @@ defmodule Runlight.Routes do
     end
   end
 
-  defp read_query(routes, url, site) do
+  # `clicks` is for the short link reports, whose "all" reaches back to the oldest click as well as the oldest
+  # visit.
+  defp read_query(routes, url, site, clicks \\ false) do
     q = Url.search_params(url)
     raw_filters = SearchParams.get_all(q, "filter")
     max = Query.max_filters()
@@ -644,9 +646,13 @@ defmodule Runlight.Routes do
 
       first_date =
         if SearchParams.get(q, "period") == "all" do
-          case Store.first_seen(rl.store, site["id"]) do
-            nil -> nil
-            first -> Time.local_date(first, site["timezone"])
+          seen = Store.first_seen(rl.store, site["id"])
+          # Clicks imported as daily counts belong to no visit, and may be older than any.
+          clicked = if clicks, do: Store.first_click(rl.store, site["id"])
+
+          case Enum.reject([seen, clicked], &is_nil/1) do
+            [] -> nil
+            found -> Time.local_date(Enum.min(found), site["timezone"])
           end
         end
 
@@ -910,7 +916,7 @@ defmodule Runlight.Routes do
         end
 
       path == "/api/links" and method == "GET" ->
-        with {:ok, read} <- read_query(routes, url, site) do
+        with {:ok, read} <- read_query(routes, url, site, true) do
           links = Store.links(rl.store, site["id"], read.range.from, read.range.to)
           # Links on a removed domain are served from the app's own path until it is added back.
           domains = for d <- Store.link_domains(rl.store), d["site"] == site["id"], do: d["domain"]
@@ -1010,7 +1016,7 @@ defmodule Runlight.Routes do
         if link == nil or link["site"] != site["id"] do
           coded("Unknown link", "unknown_link", 404)
         else
-          with {:ok, read} <- read_query(routes, url, site) do
+          with {:ok, read} <- read_query(routes, url, site, true) do
             range = read.range
             by = fn dimension -> Store.link_breakdown(rl.store, site["id"], id, range.from, range.to, dimension, 10) end
             series = Store.link_series(rl.store, site["id"], id, Time.buckets(range, site["timezone"]))
