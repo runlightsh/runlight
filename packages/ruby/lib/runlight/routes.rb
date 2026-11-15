@@ -97,7 +97,10 @@ module Runlight
     EMAIL = /\A[^#{Js::SPACE}@<>"]+@[^#{Js::SPACE}@<>"]+\.[^#{Js::SPACE}@<>"]+\z/
     # A dashboard's origin, which a picker ticket names.
     ORIGIN = %r{\Ahttps?://[^/?\##{Js::SPACE}]+\z}
-    private_constant :EMAIL, :ORIGIN
+    # The longest email address and domain name there can be. Anything longer is refused before a pattern reads it.
+    MAX_EMAIL = 320
+    MAX_DOMAIN = 253
+    private_constant :EMAIL, :ORIGIN, :MAX_EMAIL, :MAX_DOMAIN
 
     # The files in assets/, read once per process.
     @assets = {}
@@ -181,7 +184,11 @@ module Runlight
         "runlight" => runlight,
         "base" => @base,
         "isOwner" => ->(r) { can_read(r) == true },
-        "isReader" => ->(r) { authorize.nil? ? (web ? web.access(r) == "read" : false) : authorize.call(r) == "read" },
+        # An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+        "isReader" => lambda do |r|
+          !session_scope(r)&.dig("site").nil? || (authorize.nil? ? (web ? web.access(r) == "read" : false) : authorize.call(r) == "read")
+        end,
+        "isSiteOnly" => ->(r) { !session_scope(r)&.dig("site").nil? },
       }
       oauth["signIn"] = @sign_in if !@sign_in.nil? && @sign_in != ""
       oauth["accountOf"] = @account_of unless @account_of.nil?
@@ -249,7 +256,14 @@ module Runlight
                else
                  first.sub(/:\d*\z/, "")
                end
-        name.sub(/\.+\z/, "").sub(/\Awww\./, "")
+        without_final_dots(name).sub(/\Awww\./, "")
+      end
+
+      # Text without its final dots, read from the end, so a long run of dots costs no more than its length.
+      def without_final_dots(text)
+        finish = text.length
+        finish -= 1 while finish.positive? && text[finish - 1] == "."
+        text[0, finish]
       end
 
       # Whether a domain name is one kept for private networks or tests, or has
@@ -263,7 +277,8 @@ module Runlight
       end
 
       def email?(value)
-        Js.scrub(value).match?(EMAIL)
+        text = Js.scrub(value)
+        Js.length(text) <= MAX_EMAIL && text.match?(EMAIL)
       end
 
       # A plain page in a visitor's language, for unsubscribing, for a share link that is gone, and for the picker's
@@ -607,6 +622,12 @@ module Runlight
       @web.signed_in(request) if @web
     end
 
+    # A hub's manage token and an account kept to one site reach one site's settings and nothing of the install's,
+    # so neither is taken at its word about where this app lives: the Host of a request is the caller's to choose.
+    def restricted?(request)
+      @managed.key?(request) || !session_scope(request)&.dig("site").nil?
+    end
+
     def can_read(request)
       return true if @managed.key?(request)
 
@@ -819,10 +840,12 @@ module Runlight
     # The checks a link domain passes before a site gets it, from Settings or from an import: the name as it
     # is kept, or the refusal to send.
     def check_link_domain(request, url, site, value)
-      domain = Js.lower(Js.trim(value))
-      domain = domain.sub(%r{\Ahttps?://}, "")
+      given = Js.lower(Js.trim(value))
+      return coded("That is not a domain name", "domain_invalid", 400) if Js.length(given) > MAX_DOMAIN
+
+      domain = given.sub(%r{\Ahttps?://}, "")
       domain = domain.sub(%r{/.*\z}, "")
-      domain = domain.sub(/\.+\z/, "")
+      domain = without_final_dots(domain)
       domain = domain.sub(/\Awww\./, "")
       return coded("That is not a domain name", "domain_invalid", 400) unless domain.match?(DOMAIN_NAME)
 
@@ -833,8 +856,8 @@ module Runlight
       # A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
       # The request's own Host is the caller's to choose, so the configured address and the names people
       # signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-      # the app knows its own address.
-      return origin_needed if @managed.key?(request) && @origin.nil?
+      # the app knows its own address, and neither does an account kept to one site, which has a hub's reach.
+      return origin_needed if restricted?(request) && @origin.nil?
 
       here = [request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host].select { |h| Js.truthy?(h) }
       own = [*(@origin.nil? ? [] : [Http::Url.new(@origin).host]), *here]
@@ -1297,8 +1320,9 @@ module Runlight
             # Links in the email point back to the configured address, or else to this dashboard at the address
             # the request came to. An address in the body is never used, so whoever adds a report cannot point
             # its links somewhere else. A report made from a hub needs the configured address, where its
-            # unsubscribe link answers, since the Host its request names is the hub's to choose.
-            return origin_needed if @managed.key?(request) && @origin.nil?
+            # unsubscribe link answers, since the Host its request names is the hub's to choose. So does one
+            # made by an account kept to one site.
+            return origin_needed if restricted?(request) && @origin.nil?
 
             home = "#{@origin || url.origin}#{@base}"
             # A period already due counts as sent, so a report added mid-week first goes out on the next Monday, as the form says.
@@ -2003,6 +2027,11 @@ module Runlight
         if !hub.nil? && store.setting("token-origin:#{hub["id"]}") != origin
           return coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403)
         end
+        # An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+        # one the address its request came to.
+        if hub.nil? && !session_scope(request)&.dig("site").nil? && origin != (@origin || url.origin)
+          return coded("Your account can only pick from this dashboard's own address", "pick_own", 403)
+        end
 
         return json({ "ticket" => pick_ticket(origin, site["id"], back) })
       end
@@ -2131,8 +2160,7 @@ module Runlight
       recorded = 0
       # A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
       keep.each do |p|
-        request = Http::Request.new(p["page"].href, method: "GET", headers: { "user-agent" => p["userAgent"] })
-        recorded += 1 if rl.observe(request, p["at"], { "agentIp" => p["ip"] })
+        recorded += 1 if rl.observe(Http::Request.new(p["page"].href, method: "GET"), p["at"], { "agentIp" => p["ip"], "userAgent" => p["userAgent"] })
       end
       # A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
       return Http::Response.new("", status: 204) unless batch

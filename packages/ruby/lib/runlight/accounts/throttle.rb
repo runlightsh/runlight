@@ -6,13 +6,19 @@ module Runlight
     # Keys are hashed with a key made for each UTC day, so the counts never hold
     # an address or an email as it was given.
     #
-    # TypeScript keeps the counts in its process. Here they live in the database's
-    # settings, as "throttle:<name>:<id>" holding {count, until}, and the hashing
-    # key as "throttle-key:<UTC day>", so every process of an install shares the
-    # same counts. Some keys are addresses, and nothing derived from one lasts
-    # longer than a day: an expired count is deleted when it is read and by the
-    # scheduled check (sweep), and a day's hashing key goes once the day is over
-    # (yesterday's is kept only long enough to carry a count across midnight).
+    # TypeScript keeps the counts in its process. Here the counts keyed by an
+    # account live in the database's settings, as "throttle:<name>:<id>" holding
+    # {count, until}, and the hashing key as "throttle-key:<UTC day>", so every
+    # process of an install shares the same counts. An expired count is deleted
+    # when it is read, by the scheduled check, and by each process once an hour
+    # (sweep), a count taken back to nothing is deleted at once, and a day's
+    # hashing key goes once the day is over (yesterday's is kept only long
+    # enough to carry a count across midnight).
+    #
+    # A count keyed by a caller's address (`memory: true`) is never written
+    # anywhere: it lives in this process alone, as TypeScript's do, under a key
+    # made when the process started, and goes when its window ends. Each process
+    # then counts on its own, as the tracker's rate limit does.
     class Throttle
       KEY = "throttle-key:"
       # The one hashing key from before keys were made per day.
@@ -20,13 +26,28 @@ module Runlight
       DAY_MS = 86_400_000
       # How long after midnight yesterday's key carries a count over: the longest window a throttle counts in.
       CARRY_MS = 15 * 60_000
-      private_constant :KEY, :LEGACY_KEY, :DAY_MS, :CARRY_MS
+      # The counts earlier versions kept in the settings under a hash of an address.
+      ADDRESS_NAMES = %w[address ip].freeze
+      private_constant :KEY, :LEGACY_KEY, :DAY_MS, :CARRY_MS, :ADDRESS_NAMES
 
-      def initialize(store, name, limit = 10, window_ms = 15 * 60_000)
+      def initialize(store, name, limit = 10, window_ms = 15 * 60_000, memory: false)
         @store = store
         @name = name
         @limit = limit
         @window_ms = window_ms
+        # With memory, id to {count, until}, the key the ids are made with, and one change at a time.
+        @held = memory ? {} : nil
+        @held_key = memory ? Hashing.random_id(16) : nil
+        @lock = Mutex.new
+      end
+
+      # Deletes what earlier versions wrote to the settings under a hash of a caller's address: the sign-in
+      # counts per address, and the count of app registrations.
+      def self.forget_addresses(store)
+        ADDRESS_NAMES.each do |name|
+          store.settings_starting_with("throttle:#{name}:").each { |row| store.set_setting(row["key"], nil) }
+        end
+        store.set_setting("oauth-registrations", nil) unless store.setting("oauth-registrations").nil?
       end
 
       # Deletes every count that has run out and the hashing keys of days gone, for the scheduled check.
@@ -56,6 +77,8 @@ module Runlight
 
       def blocked(key, now)
         today, yesterday = ids(key, now)
+        return turn { blocked_entry?(entry(today, now)) } if @held
+
         entry = entry(today, now) || (yesterday && entry(yesterday, now))
         blocked_entry?(entry)
       end
@@ -84,7 +107,8 @@ module Runlight
           next unless entry && entry["count"].positive?
 
           entry["count"] -= 1
-          save(ids[0], entry)
+          # A count back at nothing says nothing, so it is not kept until its window ends.
+          entry["count"].zero? ? drop(ids[0]) : save(ids[0], entry)
         end
         nil
       end
@@ -96,7 +120,8 @@ module Runlight
       end
 
       def clear(key, now)
-        ids(key, now).compact.each { |id| @store.set_setting("#{prefix}#{id}", nil) }
+        found = ids(key, now).compact
+        @held ? turn { found.each { |id| drop(id) } } : found.each { |id| drop(id) }
         nil
       end
 
@@ -123,12 +148,17 @@ module Runlight
 
       # One change to the counts at a time, across threads and processes, as the accounts take turns.
       def turn(&block)
+        return @lock.synchronize(&block) if @held
+
         db = @store.db
         db.respond_to?(:turn) ? db.turn { block.call } : db.exclusive { block.call }
       end
 
       # The key's id under today's hashing key, and under yesterday's while that is still kept (else nil).
       def ids(key, now)
+        # In memory there are no days: the one key lasts as long as the process.
+        return [keyed(@held_key, key), nil] if @held
+
         yesterday = salt(now - DAY_MS, false)
         [keyed(salt(now), key), yesterday.nil? ? nil : keyed(yesterday, key)]
       end
@@ -143,6 +173,13 @@ module Runlight
 
       # A count that has not run out, or nil. One that has is deleted as it is read.
       def entry(id, now)
+        if @held
+          entry = @held[id]
+          return entry if entry.nil? || entry["until"] > now
+
+          @held.delete(id)
+          return nil
+        end
         saved = @store.setting("#{prefix}#{id}")
         return nil if saved.nil?
 
@@ -150,7 +187,7 @@ module Runlight
         entry = entry.is_a?(Hash) ? { "count" => int(entry["count"]), "until" => int(entry["until"]) } : nil
         return entry if entry && entry["until"] > now
 
-        @store.set_setting("#{prefix}#{id}", nil)
+        drop(id)
         nil
       end
 
@@ -175,7 +212,15 @@ module Runlight
       end
 
       def save(id, entry)
+        return @held[id] = entry if @held
+
         @store.set_setting("#{prefix}#{id}", Json.encode(entry))
+      end
+
+      def drop(id)
+        return @held.delete(id) if @held
+
+        @store.set_setting("#{prefix}#{id}", nil)
       end
 
       def blocked_entry?(entry)
@@ -197,12 +242,21 @@ module Runlight
       # or the count of a name someone is close to blocking. Run when a new entry is made, since only then can
       # there be more.
       def prune(now)
+        if @held
+          # In memory this is cheap to skip: once a minute is often enough, unless the ceiling is reached.
+          return if @held.size <= Accounts::MAX_THROTTLED && !@pruned_at.nil? && now >= @pruned_at && now - @pruned_at < 60_000
+
+          @pruned_at = now
+        end
         entries = []
-        @store.settings_starting_with(prefix).each do |row|
-          entry = Json.try_decode(row["value"])
+        saved = if @held then @held.map { |id, entry| { "key" => id, "value" => entry } }
+                else @store.settings_starting_with(prefix).map { |row| { "key" => row["key"].delete_prefix(prefix), "value" => Json.try_decode(row["value"]) } }
+                end
+        saved.each do |row|
+          entry = row["value"]
           until_ms = entry.is_a?(Hash) ? int(entry["until"]) : 0
           if until_ms <= now
-            @store.set_setting(row["key"], nil)
+            drop(row["key"])
             next
           end
           entries << { "key" => row["key"], "until" => until_ms, "count" => int(entry["count"]) }
@@ -211,7 +265,7 @@ module Runlight
 
         # Fewest tries first, and among equals the oldest: each entry's window started windowMs before its end.
         fewest = entries.each_with_index.sort_by { |e, i| [e["count"], e["until"], i] }.map(&:first)
-        fewest.first(entries.length - (Accounts::MAX_THROTTLED * 0.9).floor).each { |e| @store.set_setting(e["key"], nil) }
+        fewest.first(entries.length - (Accounts::MAX_THROTTLED * 0.9).floor).each { |e| drop(e["key"]) }
       end
     end
   end

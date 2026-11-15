@@ -77,6 +77,20 @@ module Runlight
         dialect == "sqlite" ? "rl_events e INDEXED BY rl_events_site_kind_ts" : "rl_events e"
       end
 
+      # Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even
+      # number of backslashes. JSON.stringify writes both for a string that holds them, and they are valid JSON.
+      PG_UNREADABLE_PROPS = '(?<!\\\\)(\\\\\\\\)*(\\\\u0000|\\\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\\\)(?<!\\\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\\\\\)*\\\\u[dD][c-fC-F][0-9a-fA-F]{2}'
+
+      # An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+      # escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props,
+      # rather than failing every report that reads its event. SQLite reads them as they are.
+      def readable_props(dialect)
+        return "(CASE WHEN e.props !~ '#{PG_UNREADABLE_PROPS}' THEN e.props END)::jsonb" if dialect == "postgres"
+        return "(CASE WHEN JSON_VALID(e.props) THEN e.props END)" if dialect == "mysql"
+
+        "e.props"
+      end
+
       # Runs a query over pieces of a list and joins the answers, in order.
       def in_pieces(items, size)
         out = []

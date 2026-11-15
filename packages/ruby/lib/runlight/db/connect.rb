@@ -78,8 +78,8 @@ module Runlight
         db = Database.new(Pools.make(config.compact), owned: true, statement_timeout: statement_timeout.to_i, dialect: "mysql")
         version, mode = db.connection_class.connection_pool.with_connection { |c| c.select_rows("SELECT VERSION(), @@GLOBAL.sql_mode")[0] }
         db.connection_class.connection_pool.disconnect!
-        # Less NO_BACKSLASH_ESCAPES, since values are written with backslash escapes (Database drops it from
-        # every session too).
+        # Less NO_BACKSLASH_ESCAPES, as mysql.ts drops it. Nothing depends on that: Database writes values to
+        # read the same with or without it.
         variables = { sql_mode: ((mode.to_s.split(",") - ["NO_BACKSLASH_ESCAPES"]) | ["IGNORE_SPACE"]).join(",") }
         if statement_timeout.to_i.positive?
           variables.merge!(version.to_s.match?(/mariadb/i) ? { max_statement_time: statement_timeout.to_i / 1000.0 } : { max_execution_time: statement_timeout.to_i })

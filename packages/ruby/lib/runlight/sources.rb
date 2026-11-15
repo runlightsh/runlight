@@ -26,7 +26,7 @@ module Runlight
     def maps
       return unless @by_host.nil?
 
-      # Later entries win, as Map.set does: the alias "kit" names Newsletter, not Kit.
+      # Later entries win, as Map.set does.
       by_host = {}
       Data::Sources::SOURCES.each do |source|
         source["hosts"].each { |host| by_host[host] = source }
@@ -35,8 +35,9 @@ module Runlight
       @by_host = by_host
     end
 
+    # A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character.
     def clip(value, max = 200)
-      Js.slice(Js.trim(value || ""), 0, max)
+      Payload.clean_text(Js.trim(Payload.tidy(value || "")), max)
     end
 
     def strip_www(host)

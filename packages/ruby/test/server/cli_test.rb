@@ -249,13 +249,30 @@ class ServerCliTest < Minitest::Test
     refute_nil geo.lookup
     assert_same geo, geo.load_newest
 
+    # This month's file is still missing, so the next try waits: five minutes, then twice as long each time,
+    # up to six hours, whichever process asks (the wait is kept beside the releases, for `runlight cron`).
+    asked = []
+    geo.refresh(october + 299_999)
+    DbIp.new(dir, "city", download, ->(line) { logged << line }).refresh(october + 299_999)
+    assert_equal [], asked, "not asked again within five minutes"
+    geo.refresh(october + 300_000)
+    assert_equal 1, asked.length
+    geo.refresh(october + 300_000 + 599_999)
+    assert_equal 1, asked.length, "then ten minutes"
+    asked = []
+    14.times { |i| geo.refresh(october + ((i + 1) * 86_400_000)) }
+    assert_equal 14, asked.length
+    geo.refresh(october + (14 * 86_400_000) + 21_599_999)
+    assert_equal 14, asked.length, "six hours at the longest"
+
     published << "2026-10"
     asked = []
-    geo.refresh(october)
+    later = october + (15 * 86_400_000)
+    geo.refresh(later)
     assert_equal ["https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz"], asked
-    assert_equal ["#{dir}/dbip-city-lite-2026-10.mmdb"], Dir.glob("#{dir}/*"), "older releases go"
+    assert_equal ["#{dir}/dbip-city-lite-2026-10.mmdb"], Dir.glob("#{dir}/*"), "older releases go, and the wait with them"
     asked = []
-    geo.refresh(october)
+    geo.refresh(later)
     assert_equal [], asked, "once this month is there, nothing is fetched"
 
     # January's fallback is December of the year before, and a broken file is never kept.
@@ -304,5 +321,33 @@ class ServerCliTest < Minitest::Test
       end
     end
     assert status.success?, File.read(log)
+  end
+  # A port already taken is said in one line, and a token short enough to guess is warned about at every start.
+  def test_serve_says_a_taken_port_in_a_line_and_warns_about_a_short_token
+    port = free_port
+    holder = TCPServer.new("127.0.0.1", port)
+    log = "#{@root}/taken.log"
+    env = { "PORT" => port.to_s, "HOST" => "127.0.0.1", "RUNLIGHT_GEO" => "off", "DATA_DIR" => "#{@root}/data",
+            "RUNLIGHT_TOKEN" => "shorttok", "RUNLIGHT_SECRET" => nil, "RUNLIGHT_URL" => nil, "DATABASE_URL" => nil, "RUNLIGHT_CONFIG" => nil }
+    pid = Process.spawn(env, RbConfig.ruby, EXE, "serve", chdir: @root, out: log, err: log)
+    status = nil
+    300.times do
+      _, status = Process.wait2(pid, Process::WNOHANG)
+      break unless status.nil?
+
+      sleep 0.1
+    end
+    if status.nil?
+      Process.kill("KILL", pid)
+      Process.wait(pid)
+      flunk "the server kept running on a taken port: #{File.read(log)}"
+    end
+    printed = File.read(log)
+    assert_equal 1, status.exitstatus, printed
+    assert_includes printed, "Runlight: WARNING: RUNLIGHT_TOKEN is only 8 characters long."
+    assert_equal 1, printed.lines.grep(/\ARunlight: could not listen on 127\.0\.0\.1:#{port}: /).length, printed
+    refute_includes printed, "is listening on"
+  ensure
+    holder&.close
   end
 end

@@ -31,7 +31,20 @@ module Runlight
       EVERY = 5 * 60
 
       TOO_LARGE = Json.encode({ "error" => "That request is too large" })
-      private_constant :TOO_LARGE
+      # Shorter than this, a secret or token set by hand is short enough to guess.
+      SHORTEST = 32
+      # Where each request came from, as the handler was told, for the routes' callbacks, which get the request alone.
+      CONTEXTS = defined?(ObjectSpace::WeakKeyMap) ? ObjectSpace::WeakKeyMap : ObjectSpace::WeakMap
+      private_constant :TOO_LARGE, :CONTEXTS
+
+      # What to say at start about a secret or token someone set by hand that is short enough to guess, or nil.
+      # The server still starts, since refusing would stop an install that ran before this was checked.
+      def self.short_warning(name, value)
+        return nil if value.nil? || Js.length(value) >= SHORTEST
+
+        does = name == "RUNLIGHT_SECRET" ? "It signs every session and encrypts the saved mail and assistant keys" : "Anyone who guesses it has the whole API, as the owner"
+        "Runlight: WARNING: #{name} is only #{Js.length(value)} characters long. #{does}. Set it to #{SHORTEST} or more random characters, such as the output of: openssl rand -hex 32"
+      end
 
       attr_reader :runlight, :accounts, :web, :routes
 
@@ -53,7 +66,10 @@ module Runlight
       #   account is made with it instead.
       # - url: the dashboard's public address, such as https://stats.example.com. It can never become a link
       #   domain, short links never answer on it, and emails link to it whatever Host header a request carries.
-      # - trustProxy, geo, geoCredit, now, fetcher: as the Core's and the routes' options of those names.
+      # - trustProxy: whether X-Forwarded-For and friends count, for the visitor's address and the name a request
+      #   came in on. Left unset they count only from a proxy on this computer or a private network; true believes
+      #   them from anywhere, false never, and a header's name reads that one alone.
+      # - geo, geoCredit, now, fetcher: as the Core's and the routes' options of those names.
       # - setupCode: the one-time code that unlocks /setup while no account exists; setupWhere (true) says it is
       #   written in setup.txt, for the page that asks for it.
       # - cronSecret: a bearer secret for POST /api/check, for a scheduler that calls it over HTTP.
@@ -71,6 +87,13 @@ module Runlight
         @public_host = @public_url.nil? ? nil : Routes.host_name(@public_url.host)
         @own_hosts = nil
         @schedule = nil
+        @contexts = CONTEXTS.new
+        # A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that
+        # address's tries are all refused until the time is up. A long one cannot be guessed, so nothing is counted
+        # for it and nobody's wrong tries can keep a script that shares their address out. Counted in this
+        # process alone, as every count keyed by an address is.
+        @guessable = !@token.nil? && Js.length(@token) < SHORTEST
+        @guesses = Accounts::Throttle.new(@store, "token", 10, memory: true)
 
         core = {
           "store" => @store,
@@ -118,8 +141,16 @@ module Runlight
           "accounts" => @web,
           "authorize" => lambda do |request|
             auth = request.headers.get("authorization") || ""
-            if !@token.nil? && auth.downcase.start_with?("bearer ") && Accounts::Crypto.same_text(Js.trim(auth[7..]), @token)
-              next true
+            given = auth.downcase.start_with?("bearer ") ? Js.trim(auth[7..]) : ""
+            # A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
+            if !@token.nil? && given != "" && (!given.start_with?("rl_") || @token.start_with?("rl_"))
+              from = rl.client_ip(request, @contexts[request] || {})
+              from = "unknown" if from == ""
+              unless @guessable && @guesses.blocked(from, @now.call)
+                next true if Accounts::Crypto.same_text(given, @token)
+
+                @guesses.record_failure(from, @now.call) if @guessable
+              end
             end
 
             access = @web.access(request)
@@ -130,11 +161,15 @@ module Runlight
         }
         routes["origin"] = @public_url.origin unless @public_url.nil?
         @routes = rl.routes(routes)
+        # A link at one of the server's own paths would open at /go/<slug> and never on a link domain, where the
+        # server's page answers first, so no new link takes one.
+        rl.links.reserved = SERVER_PATHS.map { |path| path[1..] }.freeze
       end
 
       # The answer to one request. context: { "ip" => the client's address }.
       def handle(request, context = {})
         path = Http::Url.new(request.url).pathname
+        @contexts[request] = context
         begin
           # A domain pointed at this server for short links answers at its root, with links one segment deep. The
           # server's own pages and its public address never answer as links, and "/" stays the dashboard for someone
@@ -243,9 +278,11 @@ module Runlight
         warn "Runlight: #{e.message}"
       end
 
-      # The name a request came in on, read as link domains read it.
+      # The name a request came in on, read as link domains read it: a proxy's X-Forwarded-Host only where the
+      # library believes a proxy's headers at all, so a client that reaches the server straight from the internet
+      # cannot name the host itself.
       def host_of(request)
-        forwarded = @trust_proxy == false ? nil : request.headers.get("x-forwarded-host")
+        forwarded = @runlight.forwarded_host(request, @contexts[request] || {})
         Routes.host_name(forwarded || request.headers.get("host") || Http::Url.new(request.url).host)
       end
 

@@ -64,6 +64,9 @@ module Runlight
           loop do
             body = @http.get_json("#{base}/api#{path}&page=#{page}&pageSize=1000", { "headers" => headers })
             out.concat(body["data"])
+            # No more than a link keeps: a longer history, or a server that never stops, ends here.
+            return out.first(Write::MAX_LINK_CLICKS) if out.length >= Write::MAX_LINK_CLICKS
+
             return out if out.length >= (body["count"].nil? ? Float::INFINITY : body["count"]) || body["data"] == []
 
             page += 1

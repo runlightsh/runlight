@@ -7,6 +7,10 @@ require "securerandom"
 
 ActiveRecord::Base.logger = nil if defined?(ActiveRecord::Base)
 
+# A process checks thirty passwords a minute, and the suites sign in far more often than that. The tests of
+# the budget itself set one.
+Runlight::Accounts::Accounts.checks_per_minute = nil
+
 # The made-up installs and services the fake fetchers answer (an Umami at stats.example.com, an install at
 # install.example.net) resolve to a public address, so fetches that only go to the public internet reach them.
 # Tests of the address checks themselves pass a lookup of their own.

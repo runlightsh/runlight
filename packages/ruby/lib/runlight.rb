@@ -64,6 +64,7 @@ module Runlight
     autoload :Crypto, "runlight/accounts/crypto"
     autoload :Pages, "runlight/accounts/pages"
     autoload :Scrypt, "runlight/accounts/scrypt"
+    autoload :Lockout, "runlight/accounts/lockout"
     autoload :Throttle, "runlight/accounts/throttle"
     autoload :Web, "runlight/accounts/web"
   end

@@ -374,7 +374,9 @@ module Runlight
 
       # Deletes every salt but those of these days, so the hashes made with them can never be made again.
       def drop_salts_except(days)
-        @db.run("DELETE FROM rl_salts WHERE day NOT IN (#{(["?"] * days.length).join(", ")})", days)
+        # Never a day after the newest of these: a process whose clock is a moment behind must not delete the
+        # salt another has just made for the day that began.
+        @db.run("DELETE FROM rl_salts WHERE day NOT IN (#{(["?"] * days.length).join(", ")}) AND day < ?", [*days, days.max])
       end
 
       # Whether a visit to one of these sites that started in a stretch of time was still going at `since`.
@@ -507,6 +509,12 @@ module Runlight
       def link_by_id(id)
         rows = @db.all("SELECT * FROM rl_links WHERE id = ? AND deleted_at IS NULL LIMIT 1", [id])
         rows[0].nil? ? nil : Sql.link_row(rows[0])
+      end
+
+      # Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id and
+      # its clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted.
+      def link_exists(id)
+        !@db.all("SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1", [id]).empty?
       end
 
       def insert_link(link)
@@ -861,13 +869,13 @@ module Runlight
                  # Each key as a row of its own, compared and sorted by code point like every other value.
                  @db.all(
                    "SELECT j.k AS \"key\", COUNT(*) AS events FROM #{v["from"]}
-             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE #{Sql::MYSQL_COLLATION} PATH '$')) j
+             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(#{Sql.readable_props("mysql")}) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE #{Sql::MYSQL_COLLATION} PATH '$')) j
              WHERE #{where} GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30",
                    params,
                  )
                when "postgres"
                  @db.all(
-                   "SELECT k AS \"key\", COUNT(*) AS events FROM #{v["from"]} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k
+                   "SELECT k AS \"key\", COUNT(*) AS events FROM #{v["from"]} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(#{Sql.readable_props("postgres")}) = 'object' THEN #{Sql.readable_props("postgres")} ELSE '{}'::jsonb END) AS k
              WHERE #{where} GROUP BY k ORDER BY events DESC, k#{text_order} LIMIT 30",
                    params,
                  )
@@ -886,8 +894,8 @@ module Runlight
       def event_prop_values(query, event, key, limit)
         v = Sql.visit_rows(query["filters"], query["site"], query["from"], query["to"], @db.dialect)
         value = case @db.dialect
-                when "postgres" then "(e.props::jsonb ->> ?)"
-                when "mysql" then "(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE #{Sql::MYSQL_COLLATION})"
+                when "postgres" then "(#{Sql.readable_props("postgres")} ->> ?)"
+                when "mysql" then "(JSON_UNQUOTE(JSON_EXTRACT(#{Sql.readable_props("mysql")}, ?)) COLLATE #{Sql::MYSQL_COLLATION})"
                 else "CAST(json_extract(e.props, ?) AS TEXT)"
                 end
         path = @db.dialect == "postgres" ? key : "$.\"#{key}\""
@@ -1658,7 +1666,7 @@ module Runlight
       end
 
       # A breakdown of a visit dimension or of pages from rollups and the visits
-      # left over, merged, then sorted and cut to the page asked for.
+      # left over, merged, sorted, and cut to the page asked for by the database.
       def rolled_breakdown(query, dimension, limit, offset)
         page = dimension == "page"
         event = dimension == "event"
@@ -1669,83 +1677,97 @@ module Runlight
         plan = rollup_plan(query, query["from"], query["to"]) || (page || event ? { "days" => [], "rest" => [[query["from"], query["to"]]] } : nil)
         return nil if plan.nil?
 
-        zero = { "visitors" => 0, "visits" => 0, "pageviews" => 0, "bounced" => 0, "duration" => 0, "engaged" => 0, "views" => 0, "scroll_sum" => 0, "scroll_n" => 0, "events" => 0 }
-        # Keyed by value in the order first seen.
-        sums = {}
-        bump = lambda do |row|
-          key = Sql.string(row["value"])
-          sums[key] = (sums[key] || zero).to_h { |k, n| [k, n + Sql.num(row[k])] }
-        end
+        # Each source adds up its own rows by value, and the database adds the sources together, sorts them,
+        # and cuts them to the page asked for, so no more than that page is ever read into memory.
+        columns = %w[visitors visits pageviews bounced duration engaged views scroll_sum scroll_n events]
+        part = ->(value, counted) { "#{value} AS value, #{columns.map { |c| "#{counted[c] || "0"} AS #{c}" }.join(", ")}" }
+        parts = []
+        params = []
         unless plan["days"].empty?
-          rolled = @db.all(
-            "SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (#{Sql::BUILT_DAYS}) GROUP BY value",
-            [query["site"], dimension, query["site"], query["from"], query["to"]],
-          )
-          rolled.each { |row| bump.call(row) }
+          parts << "SELECT value, #{columns.join(", ")} FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (#{Sql::BUILT_DAYS})"
+          params.push(query["site"], dimension, query["site"], query["from"], query["to"])
         end
         w = within(plan["rest"])
-        if (page || event) && !plan["rest"].empty?
+        of_rest = nil
+        at = []
+        unless plan["rest"].empty?
           # A visit's pageviews and events belong to the day it started, as in the rollups.
           # Bounded by time as well, so the events index finds them (see build_rollup_day).
           lo = plan["rest"].map { |r| r[0] }.min
           hi = plan["rest"].map { |r| r[1] }.max + Sql::EVENT_TAIL_MS
-          of_rest = ->(kind) { "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '#{kind}' AND e.ts >= ? AND e.ts < ? AND #{Sql::IS_VISIT} AND #{w["sql"]}" }
+          of_rest = lambda do |kind|
+            "FROM #{Sql.event_kind_table(@db.dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '#{kind}' AND e.ts >= ? AND e.ts < ? AND #{Sql::IS_VISIT} AND #{w["sql"]}"
+          end
           at = [query["site"], lo, hi, *w["params"]]
           if page
-            @db.all("SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, #{Sql::LIVE_VIEWS} AS views #{of_rest.call("pageview")} GROUP BY e.path", at).each { |row| bump.call(row) }
+            parts << "SELECT #{part.call("e.path", { "visitors" => "COUNT(DISTINCT e.visitor)", "pageviews" => "COUNT(*)", "views" => Sql::LIVE_VIEWS })} #{of_rest.call("pageview")} GROUP BY e.path"
+            params.concat(at)
+          elsif event
+            parts << "SELECT #{part.call("e.name", { "visitors" => "COUNT(DISTINCT e.visitor)", "events" => "COUNT(*)" })} #{of_rest.call("event")} GROUP BY e.name"
+            params.concat(at)
+          else
+            col = "s.#{Query::SESSION_DIMENSIONS[dimension]}"
+            counted = { "visitors" => "COUNT(DISTINCT s.visitor)", "visits" => "COUNT(*)", "pageviews" => "SUM(s.pageviews)",
+                        "bounced" => "SUM(CASE WHEN #{Sql::BOUNCE} THEN 1 ELSE 0 END)", "duration" => "SUM(#{Sql::DURATION})" }
+            parts << "SELECT #{part.call(col, counted)} FROM rl_sessions s WHERE s.site = ? AND #{Sql::IS_VISIT} AND #{w["sql"]} AND #{col} <> '' GROUP BY #{col}"
+            params.push(query["site"], *w["params"])
+          end
+        end
+        # Every day of a range of pages or events may be built already, and none of one with nothing in it.
+        return [] if parts.empty?
+
+        entry_exit = dimension == "entry" || dimension == "exit"
+        order = if entry_exit then "n_visits DESC"
+                elsif event then "n_visitors DESC, n_events DESC"
+                elsif page then "n_visitors DESC, n_pageviews DESC"
+                else "n_visitors DESC, n_visits DESC"
+                end
+        rows = @db.all(
+          "SELECT value, #{columns.map { |c| "SUM(#{c}) AS n_#{c}" }.join(", ")} FROM (#{parts.join(" UNION ALL ")}) t
+       #{event ? "" : "WHERE value <> ''"} GROUP BY value ORDER BY #{order}, value#{text_order} LIMIT ? OFFSET ?",
+          [*params, limit, offset],
+        )
+        # The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+        rest = {}
+        if page && !plan["rest"].empty? && !rows.empty?
+          # Engaged time is added up per pageview first.
+          size = [1, [Sql::VALUES_PER_QUERY, Sql::MAX_PARAMS - at.length - 4].min].max
+          engaged = Sql.in_pieces(rows.map { |row| Sql.string(row["value"]) }, size) do |piece|
             @db.all(
               "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest #{of_rest.call("engagement")} GROUP BY e.path, e.pageview) t GROUP BY value",
-              at,
-            ).each { |row| bump.call(row) }
-          else
-            @db.all("SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events #{of_rest.call("event")} GROUP BY e.name", at).each { |row| bump.call(row) }
+             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest #{of_rest.call("engagement")} AND e.path IN (#{(["?"] * piece.length).join(", ")})
+             GROUP BY e.path, e.pageview) t GROUP BY value",
+              [*at, *piece],
+            )
           end
-        elsif page || event
-          # Every day of the range is built.
-        else
-          col = "s.#{Query::SESSION_DIMENSIONS[dimension]}"
-          @db.all(
-            "SELECT #{col} AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-           SUM(CASE WHEN #{Sql::BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(#{Sql::DURATION}) AS duration
-         FROM rl_sessions s WHERE s.site = ? AND #{Sql::IS_VISIT} AND #{w["sql"]} AND #{col} <> '' GROUP BY #{col}",
-            [query["site"], *w["params"]],
-          ).each { |row| bump.call(row) }
+          engaged.each do |row|
+            into = (rest[Sql.string(row["value"])] ||= { "engaged" => 0, "scroll_sum" => 0, "scroll_n" => 0 })
+            %w[engaged scroll_sum scroll_n].each { |k| into[k] += Sql.num(row[k]) }
+          end
         end
-        entry_exit = dimension == "entry" || dimension == "exit"
-        rows = sums.select do |value, x|
-          (event || value != "") && (page ? x["pageviews"].positive? : (event ? x["events"].positive? : x["visits"].positive?))
-        end.to_a
-        rows.sort! do |(a, x), (b, y)|
-          order = if entry_exit then [y["visits"] - x["visits"]]
-                  elsif event then [y["visitors"] - x["visitors"], y["events"] - x["events"]]
-                  elsif page then [y["visitors"] - x["visitors"], y["pageviews"] - x["pageviews"]]
-                  else [y["visitors"] - x["visitors"], y["visits"] - x["visits"]]
-                  end
-          d = order.find { |n| n != 0 }
-          d.nil? ? Sql.code_order(a, b) : (d.negative? ? -1 : 1)
-        end
-        (rows[offset, limit] || []).map do |value, x|
+        rows.map do |row|
+          value = Sql.string(row["value"])
+          x = columns.to_h { |c| [c, Sql.num(row["n_#{c}"])] }
           if event
             { "value" => value, "visitors" => x["visitors"], "events" => x["events"] }
           elsif page
+            more = rest[value] || { "engaged" => 0, "scroll_sum" => 0, "scroll_n" => 0 }
+            scroll_n = x["scroll_n"] + more["scroll_n"]
             {
               "value" => value,
               "visitors" => x["visitors"],
               "pageviews" => x["pageviews"],
               # Over every pageview that could report its time, counting those that sent none (under a second) as none.
-              "timeOnPage" => x["views"].positive? ? whole(Js.round(x["engaged"].fdiv(x["views"]))) : 0,
-              "scrollDepth" => x["scroll_n"].positive? ? whole(Js.round(x["scroll_sum"].fdiv(x["scroll_n"]))) : 0,
+              "timeOnPage" => x["views"].positive? ? whole(Js.round((x["engaged"] + more["engaged"]).fdiv(x["views"]))) : 0,
+              "scrollDepth" => scroll_n.positive? ? whole(Js.round((x["scroll_sum"] + more["scroll_sum"]).fdiv(scroll_n))) : 0,
             }
           else
-            row = { "value" => value, "visitors" => x["visitors"], "visits" => x["visits"], "bounceRate" => x["visits"].positive? ? whole(x["bounced"].fdiv(x["visits"])) : 0 }
+            out = { "value" => value, "visitors" => x["visitors"], "visits" => x["visits"], "bounceRate" => x["visits"].positive? ? whole(x["bounced"].fdiv(x["visits"])) : 0 }
             unless entry_exit
-              row["pageviews"] = x["pageviews"]
-              row["visitDuration"] = x["visits"].positive? ? whole(Js.round(x["duration"].fdiv(x["visits"]))) : 0
+              out["pageviews"] = x["pageviews"]
+              out["visitDuration"] = x["visits"].positive? ? whole(Js.round(x["duration"].fdiv(x["visits"]))) : 0
             end
-            row
+            out
           end
         end
       end
@@ -1823,14 +1845,14 @@ module Runlight
       def prop_value(prop)
         if @db.dialect == "postgres"
           return {
-            "sql" => '(CASE WHEN (e.props::jsonb ->> ?) ~ \'^-?[0-9]+(\.[0-9]+)?$\' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)',
+            "sql" => "(CASE WHEN (#{Sql.readable_props("postgres")} ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (#{Sql.readable_props("postgres")} ->> ?)::numeric ELSE 0 END)",
             "params" => [prop, prop],
           }
         end
         path = "$.\"#{prop}\""
         if @db.dialect == "mysql"
           # As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-          value = "JSON_EXTRACT(e.props, ?)"
+          value = "JSON_EXTRACT(#{Sql.readable_props("mysql")}, ?)"
           return {
             "sql" => "(CASE
           WHEN JSON_TYPE(#{value}) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN CAST(#{value} AS DOUBLE)

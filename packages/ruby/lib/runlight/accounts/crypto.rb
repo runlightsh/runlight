@@ -251,10 +251,13 @@ module Runlight
       # The time step a code matches, one step either side for clocks that drift, newer than `after`; else nil.
       def match_step(secret, code, now, after)
         current = now.floor.div(STEP_MS)
-        [current, current - 1, current + 1].each do |step|
-          return step if step > after && totp(secret, step) == code
+        # Every step is worked out and compared in time that does not depend on where the code differs. The
+        # current step is checked last, so it is the one kept if two should match.
+        found = nil
+        [current + 1, current - 1, current].each do |step|
+          found = step if same_text(totp(secret, step), code) && step > after
         end
-        nil
+        found
       end
 
       # The address an authenticator app reads from the QR code.

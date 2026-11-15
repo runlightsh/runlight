@@ -34,10 +34,14 @@ module Runlight
     # The longest client id, which carries the app's name and redirect addresses.
     MAX_CLIENT_ID = 2048
     SCOPES = %w[read manage cms].freeze
+    # The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.
+    MAX_BODY_BYTES = 64 * 1024
 
-    # Where the per-address count of registrations is kept. TypeScript keeps it in memory per install; here it
-    # lives in the install's settings, keyed by a hash of the address, so every process shares it.
-    REGISTRATIONS = "oauth-registrations"
+    # Each install's per-address count of registrations, kept in this process as TypeScript keeps it and as the
+    # tracker's rate limit is: under a key made at start, dropped whole at the end of each minute, and never
+    # written anywhere.
+    REGISTRATIONS = defined?(ObjectSpace::WeakKeyMap) ? ObjectSpace::WeakKeyMap.new : ObjectSpace::WeakMap.new
+    REGISTRATIONS_LOCK = Mutex.new
 
     CORS = {
       "access-control-allow-origin" => "*",
@@ -46,7 +50,7 @@ module Runlight
     }.freeze
 
     ESCAPES = { "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;", "'" => "&#39;" }.freeze
-    private_constant :REGISTRATIONS, :CORS, :ESCAPES, :SCOPES
+    private_constant :REGISTRATIONS, :REGISTRATIONS_LOCK, :CORS, :ESCAPES, :SCOPES, :MAX_BODY_BYTES
 
     module_function
 
@@ -89,6 +93,13 @@ module Runlight
     #
     # context: {"ip" => the connection's address}, optional.
     def oauth_response(ctx, request, path, url, context = {})
+      respond(ctx, request, path, url, context)
+    rescue Http::BodyTooLong
+      # Capped here, since not every host caps a request body before it reaches the app.
+      oauth_error("invalid_request", "Send a smaller body", 413)
+    end
+
+    def respond(ctx, request, path, url, context)
       runlight = ctx["runlight"]
       base = ctx["base"].to_s
       issuer = "#{url.origin}#{base}"
@@ -121,7 +132,7 @@ module Runlight
           return oauth_error("invalid_client_metadata", "Too many registrations from this address. Wait a minute and try again.", 429)
         end
 
-        parsed, body = Js.parse_json(request.text)
+        parsed, body = Js.parse_json(Body.request_text(request, MAX_BODY_BYTES))
         body = nil unless parsed
         uris = !body.nil? && Js.object?(body) ? Js.get(body, "redirect_uris") : nil
         redirects = []
@@ -138,12 +149,15 @@ module Runlight
         h = translator["html"]
         lang = translator["lang"]
         page = ->(title, body, status = 200) { page_in(lang, title, body, status) }
-        form = request.method == "POST" ? Http::SearchParams.new(request.text) : url.search_params
+        # The app's own check of who is asking reads the same request, whose body is kept as text, so it can find
+        # the csrf field there each time it is asked.
+        form = request.method == "POST" ? Http::SearchParams.new(Body.request_text(request, MAX_BODY_BYTES)) : url.search_params
         client_id = form.get("client_id") || ""
         client = client_for(runlight, client_id)&.fetch("client", nil)
         redirect = form.get("redirect_uri") || ""
         # Without a known client and one of its own addresses there is nowhere safe to send an answer.
-        if client.nil? || !Array(client["redirects"]).include?(redirect)
+        # An address that does not parse, from an app registered before those were refused, is no address of its own.
+        if client.nil? || !Array(client["redirects"]).include?(redirect) || Http::Url.parse(redirect).nil?
           return page.call(h.call("oauth.unregisteredTitle"), "<p>#{h.call("oauth.startAgain")}</p>", 400)
         end
 
@@ -186,7 +200,8 @@ module Runlight
         unless ctx["isOwner"].call(request)
           # Someone signed in who may only read would be sent to sign in again and again.
           if ctx["isReader"]&.call(request)
-            return page.call(h.call("oauth.viewerTitle"), "<p>#{h.call("oauth.viewer", { "app" => esc(name) })}</p>", 403)
+            site_only = ctx["isSiteOnly"] ? ctx["isSiteOnly"].call(request) : false
+            return page.call(h.call("oauth.viewerTitle"), "<p>#{h.call(site_only ? "oauth.siteAccount" : "oauth.viewer", { "app" => esc(name) })}</p>", 403)
           end
 
           # The site stays, since on the way in it only says which one to offer first.
@@ -304,7 +319,8 @@ module Runlight
       if path == "/oauth/token" && request.method == "POST"
         runlight.init
         type = (request.headers.get("content-type") || "").split(";", -1)[0].to_s.strip
-        form = type == "application/json" ? json_form(request.text) : Http::SearchParams.new(request.text)
+        text = Body.request_text(request, MAX_BODY_BYTES)
+        form = type == "application/json" ? json_form(text) : Http::SearchParams.new(text)
         return oauth_error("unsupported_grant_type", "Only authorization_code is supported") if form.get("grant_type") != "authorization_code"
 
         key = "oauth-code:#{Hashing.sha256(form.get("code") || "")}"
@@ -418,9 +434,10 @@ module Runlight
       json({ "error" => error, "error_description" => description }, status)
     end
 
-    # Redirect addresses a client may register: https, or a local app's own loopback address.
+    # Redirect addresses a client may register: https, or a local app's own loopback address, and one that
+    # parses as an address at all.
     def allowed_redirect(value)
-      value.match?(%r{\Ahttps://[^/]+}) || value.match?(%r{\Ahttp://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/})
+      (value.match?(%r{\Ahttps://[^/]+}) || value.match?(%r{\Ahttp://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/})) && !Http::Url.parse(value).nil?
     end
 
     # `new URLSearchParams(Object.entries(await request.json() ?? {}))`, each value as String() writes it.
@@ -438,18 +455,12 @@ module Runlight
     end
 
     # Counts a registration from an address and says whether it is under the limit for this minute. The count
-    # is kept in the install's settings, keyed by an HMAC of the address, so no address is ever stored.
+    # is kept in this process, keyed by a hash of the address, so no address is ever kept or written down.
     def allow_registration(runlight, ip)
-      # No address cannot be told apart, so it is not limited.
-      return true if ip == ""
-
-      window = runlight.now.div(60_000)
-      id = Hashing.hmac(client_key(runlight), "register:#{ip}")[0, 16]
-      saved = Json.try_decode(runlight.store.setting(REGISTRATIONS).to_s)
-      counts = saved.is_a?(Hash) && saved["window"] == window && saved["counts"].is_a?(Hash) ? saved["counts"] : {}
-      counts[id] = Js.number(counts[id] || 0).to_i + 1
-      runlight.store.set_setting(REGISTRATIONS, Json.encode({ "window" => window, "counts" => counts }))
-      counts[id] <= REGISTRATIONS_PER_MINUTE
+      limit = REGISTRATIONS_LOCK.synchronize do
+        REGISTRATIONS[runlight] ||= RateLimit.new(REGISTRATIONS_PER_MINUTE, -> { runlight.now })
+      end
+      limit.allow(ip)
     end
 
     # Registers a client by signing its name and addresses into its id, so
@@ -494,7 +505,7 @@ module Runlight
       )
     end
 
-    private_class_method :base64url, :from_base64url, :client_key, :client_for, :site_host, :constant_time_equal, :esc, :json, :oauth_error,
+    private_class_method :respond, :base64url, :from_base64url, :client_key, :client_for, :site_host, :constant_time_equal, :esc, :json, :oauth_error,
                          :allowed_redirect, :json_form, :allow_registration, :register, :page_in
   end
 end

@@ -14,6 +14,11 @@ module Runlight
     # request does; a server that keeps running reads through current() instead, which load_newest() points at the
     # newest release whenever the schedule runs, as the Node server's Geo does.
     class DbIp
+      # How long after a first failed try the next one waits, and the longest any waits.
+      FIRST_WAIT = 5 * 60_000
+      LONGEST_WAIT = 6 * 3_600_000
+      private_constant :FIRST_WAIT, :LONGEST_WAIT
+
       # dir: the folder the releases live in. mode: "city" or "country". download: a callable taking the URL and a
       # file, that writes the gzipped file at the URL to the file and says whether it got one (Net::HTTP by
       # default). log: a callable taking a line.
@@ -81,11 +86,58 @@ module Runlight
 
       # Fetches this month's release when it is missing. A new month's file appears a day or so after the month
       # starts, so until then last month's is fetched when that is missing too. Older releases go once a new
-      # one is ready. Safe to call often: once this month's file is there it reads only the folder.
+      # one is ready. Safe to call often: once this month's file is there it reads only the folder, and while
+      # the month's file is not published yet, or a download keeps failing, each try waits twice as long as the
+      # last, from five minutes up to six hours, so neither DB-IP nor the disk is asked for the whole file every
+      # few minutes. The wait is kept in a small file beside the releases, since `runlight cron` is a new
+      # process each time.
       def refresh(now)
         current = self.class.month(now)
         return if File.file?(file(current))
 
+        wait, retry_at = waiting
+        return if now < retry_at
+
+        begin
+          download_releases(now, current)
+        ensure
+          if File.file?(file(current))
+            FileUtils.rm_f(wait_file)
+          else
+            wait = [wait.zero? ? FIRST_WAIT : wait * 2, LONGEST_WAIT].min
+            begin
+              File.write(wait_file, "#{wait} #{now + wait}\n")
+            rescue SystemCallError
+              nil
+            end
+          end
+        end
+      end
+
+      def self.gunzip(from, to)
+        Zlib::GzipReader.open(from) do |input|
+          File.open(to, "wb") { |output| IO.copy_stream(input, output) }
+        end
+      rescue Zlib::Error
+        raise RuntimeError, "could not unpack #{from}"
+      end
+
+      private
+
+      # Where the wait after a failed try is kept: how long it was, and when the next try may start.
+      def wait_file
+        "#{@dir}/dbip-#{@mode}-retry"
+      end
+
+      # The wait kept from the last failed try, as [how long, when the next may start]; zeros when there is none.
+      def waiting
+        wait, retry_at = File.read(wait_file).split.map { |n| Integer(n, 10) }
+        wait.nil? || retry_at.nil? || wait.negative? ? [0, 0] : [wait, retry_at]
+      rescue SystemCallError, ArgumentError
+        [0, 0]
+      end
+
+      def download_releases(now, current)
         begin
           FileUtils.mkdir_p(@dir, mode: 0o755)
         rescue SystemCallError
@@ -123,16 +175,6 @@ module Runlight
           end
         end
       end
-
-      def self.gunzip(from, to)
-        Zlib::GzipReader.open(from) do |input|
-          File.open(to, "wb") { |output| IO.copy_stream(input, output) }
-        end
-      rescue Zlib::Error
-        raise RuntimeError, "could not unpack #{from}"
-      end
-
-      private
 
       def file(release)
         "#{@dir}/dbip-#{@mode}-lite-#{release}.mmdb"

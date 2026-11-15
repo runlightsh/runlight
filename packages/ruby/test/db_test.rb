@@ -46,9 +46,10 @@ class DbTest < Minitest::Test
     end
   end
 
-  # Values are written with backslash escapes, which a server set to NO_BACKSLASH_ESCAPES would read as text.
-  # An app's own connection set that way (here a pool of its own, as ActiveRecord::Base would be) still
-  # round-trips quotes and backslashes, before and after a reconnect.
+  # What a backslash inside quotes means depends on the session's NO_BACKSLASH_ESCAPES mode, so values are
+  # written without one. An app's own connection set that way (here a pool of its own, as ActiveRecord::Base
+  # would be) round-trips quotes and backslashes and keeps its mode, before and after a reconnect, and after
+  # the server drops the connection, which ActiveRecord replaces inside the next statement.
   def test_mysql_values_round_trip_on_a_connection_set_to_no_backslash_escapes
     kinds = Databases.mysql_urls
     skip "MySQL only: set RUNLIGHT_TEST_MYSQL" if kinds.empty?
@@ -68,9 +69,22 @@ class DbTest < Minitest::Test
       db.run('INSERT INTO rl_probe ("key", t) VALUES (?, ?)', ["a", text])
       assert_equal text, db.all('SELECT t FROM rl_probe WHERE "key" = ?', ["a"])[0]["t"], kind
       assert_equal [], db.all("SELECT t FROM rl_probe WHERE t = ?", ["x' OR '1'='1"]), kind
-      refute_includes db.all("SELECT @@SESSION.sql_mode AS m")[0]["m"], "NO_BACKSLASH_ESCAPES", kind
+      assert_includes db.all("SELECT @@SESSION.sql_mode AS m")[0]["m"], "NO_BACKSLASH_ESCAPES", "#{kind}: the app's mode is left alone"
       pool.connection_pool.with_connection(&:reconnect!)
       assert_equal text, db.all('SELECT t FROM rl_probe WHERE t = ?', [text])[0]["t"], "#{kind}, after a reconnect"
+
+      # The server ends the session, as a restart, a failover, or wait_timeout would. ActiveRecord only finds
+      # out inside the next statement, once the connection has sat for two seconds, and opens a new session
+      # there, so that statement's values must already be safe in whatever mode the new session starts with.
+      id = db.all("SELECT CONNECTION_ID() AS id")[0]["id"].to_i
+      killer = Runlight::Db::Pools.make(config.merge(variables: {}))
+      killer.connection_pool.with_connection { |c| c.execute("KILL #{id}") }
+      killer.connection_pool.disconnect!
+      sleep 2.2
+      assert_equal [], db.all("SELECT t FROM rl_probe WHERE t = ?", ["' OR 1=1 -- "]), "#{kind}: the first statement on the new session"
+      refute_equal id, db.all("SELECT CONNECTION_ID() AS id")[0]["id"].to_i, "#{kind}: it was a new session"
+      assert_equal text, db.all('SELECT t FROM rl_probe WHERE t = ?', [text])[0]["t"], "#{kind}, after the server dropped the connection"
+      assert_equal ["a"], db.all("SELECT \"key\" FROM rl_probe WHERE t LIKE ? ESCAPE '\\'", ["%back\\\\'slash%"]).map { |r| r["key"] }, kind
     ensure
       pool&.connection_pool&.disconnect!
     end
@@ -116,8 +130,11 @@ class DbTest < Minitest::Test
     Databases.cleanup
   end
 
+  # No backslash is written inside quotes, since what one means there depends on the session's SQL mode.
   def test_mysql_text
-    assert_equal "SELECT `key` FROM t WHERE a = 'it\\'s' AND b = 'x\\\\y' AND c = 1.5",
-                 Runlight::Db::Database.mysql_text("SELECT \"key\" FROM t WHERE a = ? AND b = 'x\\y' AND c = ?", ["it's", 1.5])
+    assert_equal "SELECT `key` FROM t WHERE a = 'it''s' AND b = _utf8mb4 X'785c79' AND c = 1.5 AND d = 'it''s'",
+                 Runlight::Db::Database.mysql_text("SELECT \"key\" FROM t WHERE a = ? AND b = 'x\\y' AND c = ? AND d = 'it''s'", ["it's", 1.5])
+    assert_equal "SELECT _utf8mb4 X'5c27204f5220313d31202d2d20', 'a\"b', _utf8mb4 X'6100', 'café'",
+                 Runlight::Db::Database.mysql_text("SELECT ?, ?, ?, ?", ["\\' OR 1=1 -- ", "a\"b", "a\0", "café"])
   end
 end

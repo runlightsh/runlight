@@ -257,7 +257,7 @@ class CoreIngestTest < CoreTestCase
     t.rl.check
     assert_equal Runlight::AgentCheck.bundled["lists"].length, fetcher.requests.length
     saved = Json.decode(t.store.setting("agent-ranges"))
-    assert_equal({ "at" => t.now, "lists" => {} }, saved, "saved even when every download failed")
+    assert_equal({ "at" => t.now, "lists" => {}, "fetched" => {} }, saved, "saved even when every download failed")
     # The bundled lists stay in use.
     t.rl.observe(Request.new("https://example.com/post", headers: { "user-agent" => "GPTBot/1.2", "host" => "example.com", "x-forwarded-for" => "20.171.206.17" }))
     assert_equal ["verified"], t.store.db.all("SELECT title FROM rl_events WHERE kind = 'fetch'").map { |r| r["title"] }

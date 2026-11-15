@@ -13,6 +13,10 @@ module Runlight
       # At most this many rows in one request.
       CSV_BATCH = 2000
 
+      # The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a date written
+      # 20240501 would otherwise land in 1970, and the site's history would begin there.
+      CSV_EARLIEST = 946_684_800_000
+
       SCHEME = %r{\A[a-z][a-z0-9+.-]*://}i
       private_constant :SCHEME
 
@@ -26,9 +30,15 @@ module Runlight
         nil
       end
 
-      # A row's time in milliseconds, or NaN. ISO 8601 with or without a zone, "2024-05-01 12:34:56"
-      # (both read as UTC when no zone is given, as Umami writes them), or a Unix time in seconds or milliseconds.
+      # A row's time in milliseconds, or NaN, as it also is for a time before CSV_EARLIEST. ISO 8601 with or
+      # without a zone, "2024-05-01 12:34:56" (both read as UTC when no zone is given, as Umami writes them),
+      # or a Unix time in seconds or milliseconds.
       def row_time(row, format)
+        ts = read_time(row, format)
+        ts >= CSV_EARLIEST ? ts : Float::NAN
+      end
+
+      def read_time(row, format)
         text = Js.trim((format == "umami" ? row["created_at"] : row["time"]) || "")
         return Float::NAN if text.empty?
 
@@ -151,7 +161,7 @@ module Runlight
         }
       end
 
-      private_class_method :cell, :own_key, :full_referrer
+      private_class_method :cell, :own_key, :full_referrer, :read_time
     end
   end
 end

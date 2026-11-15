@@ -20,9 +20,11 @@ module Runlight
   # passed through. Once the answer is sent, the work TS does after answering (a
   # retention change's deletions) runs in the Core's idle.
   class RackApp
+    # Methods no route or link answers, so they are the app's.
+    UNSUPPORTED = %w[TRACE TRACK CONNECT].freeze
     INTERNAL = Json.encode({ "error" => "Internal error", "code" => "internal" })
     TOO_LARGE = Json.encode({ "error" => "That request is too large" })
-    private_constant :INTERNAL, :TOO_LARGE
+    private_constant :INTERNAL, :TOO_LARGE, :UNSUPPORTED
 
     attr_reader :runlight
 
@@ -49,6 +51,10 @@ module Runlight
     def call(env)
       # A request the app behind will answer keeps its body for the app; Runlight reads only its headers.
       path = "#{env["SCRIPT_NAME"]}#{env["PATH_INFO"]}"
+      if UNSUPPORTED.include?((env["rack.methodoverride.original_method"] || env["REQUEST_METHOD"]).to_s.upcase)
+        return @app.nil? ? [405, {}, []] : @app.call(env)
+      end
+
       begin
         request = Http::Request.from_rack(env, read_body: @app.nil? || mine?(path))
       rescue Http::Request::TooLarge

@@ -124,6 +124,11 @@ module Runlight
         host = config.get("HOST") || "0.0.0.0"
         server = config.standalone({ "now" => now })
         server.runlight.init
+        # Said at every start, loudly, and the server still runs: an install with a short one must keep working.
+        %w[RUNLIGHT_SECRET RUNLIGHT_TOKEN].each do |name|
+          warning = Standalone.short_warning(name, config.get(name))
+          err.write("\n#{warning}\n\n") unless warning.nil?
+        end
         shown = ["0.0.0.0", "::"].include?(host) ? "localhost" : host
         options = { Host: host, Port: port }
         if name == "puma"
@@ -151,6 +156,10 @@ module Runlight
             end
             out.flush if out.respond_to?(:flush)
           end
+        rescue Errno::EADDRINUSE, Errno::EADDRNOTAVAIL, Errno::EACCES => e
+          # A port already taken, or an address that cannot be listened on, is said in a line, like any other
+          # trouble at start.
+          raise RuntimeError, "could not listen on #{host}:#{port}: #{e.message}"
         ensure
           server.stop
           config.store.close if config.store.respond_to?(:close)

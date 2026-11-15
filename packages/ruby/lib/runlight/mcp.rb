@@ -318,9 +318,18 @@ module Runlight
     end
 
     # Answers one POST to the MCP endpoint, already authorised.
+    # The most a message or batch may weigh; a real one is a few hundred bytes a call.
+    MAX_BODY_BYTES = 1024 * 1024
+
     def mcp_response(request, read_api)
       headers = { "content-type" => "application/json; charset=utf-8", "cache-control" => "no-store" }
-      parsed, body = Js.parse_json(request.text)
+      begin
+        text = Body.request_text(request, MAX_BODY_BYTES)
+      rescue Http::BodyTooLong
+        # Capped here, since not every host caps a request body before it reaches the app.
+        return Http::Response.new(Json.encode(rpc_error(nil, -32_600, "Send a smaller message")), status: 413, headers: headers)
+      end
+      parsed, body = Js.parse_json(text)
       return Http::Response.new(Json.encode(rpc_error(nil, -32_700, "Send a JSON-RPC message")), status: 400, headers: headers) if !parsed || !Js.object?(body)
 
       # Batches were in the 2025-03-26 protocol. Only a short list, so one request cannot start hundreds of

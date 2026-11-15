@@ -66,7 +66,7 @@ module Runlight
         { "name" => "Yahoo Mail", "kind" => "email", "hosts" => ["mail.yahoo.com"], "aliases" => ["yahoomail"] },
         { "name" => "Fastmail", "kind" => "email", "hosts" => ["app.fastmail.com", "fastmail.com"], "aliases" => ["fastmail"] },
         { "name" => "Proton Mail", "kind" => "email", "hosts" => ["mail.proton.me"], "aliases" => ["protonmail"] },
-        { "name" => "Newsletter", "kind" => "email", "hosts" => [], "aliases" => ["newsletter", "email", "e-mail", "mailchimp", "kit", "convertkit", "beehiiv", "buttondown"] },
+        { "name" => "Newsletter", "kind" => "email", "hosts" => [], "aliases" => ["newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown"] },
       ].freeze
 
       # Hosts known by their shape rather than their name: email services' click
@@ -77,7 +77,6 @@ module Runlight
         { "pattern" => /(\A|\.)convertkit-mail\d*\.com\z|(\A|\.)kit-mail\d*\.com\z/, "name" => "Kit", "kind" => "email" },
         { "pattern" => /(\A|\.)(list-manage|mailchi)\.(com|mp)\z/, "name" => "Mailchimp", "kind" => "email" },
         { "pattern" => /(\A|\.)beehiiv\.com\z/, "name" => "beehiiv", "kind" => "email" },
-        { "pattern" => /(\A|\.)substack\.com\z/, "name" => "Substack", "kind" => "email" },
         { "pattern" => /\A(web)?mail\d*\.|(\A|\.)webmail\./, "name" => nil, "kind" => "email" },
       ].freeze
     end

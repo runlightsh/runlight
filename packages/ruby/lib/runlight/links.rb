@@ -12,8 +12,13 @@ module Runlight
     ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
     private_constant :ALPHABET
 
+    # Slugs no new link may take, for a host whose own pages sit where a link domain's links do: the standalone
+    # server answers /login, /api, and the rest on every name, so a link there would never open on its own domain.
+    attr_accessor :reserved
+
     def initialize(runlight)
       @runlight = runlight
+      @reserved = [].freeze
     end
 
     # Six characters from an alphabet without look-alikes (no 0/o, 1/l).
@@ -147,12 +152,16 @@ module Runlight
 
         taken = @runlight.store.link_by_slug(wanted)
         raise LinkError.new("/#{wanted} is already taken", "link_taken", { "slug" => wanted }) if !taken.nil? && taken["id"] != except
+        # A link made before the slug was kept back keeps it.
+        if @reserved.include?(wanted) && taken.nil?
+          raise LinkError.new("/#{wanted} is one of this server's own pages, so a link there would never open on a link domain", "link_reserved", { "slug" => wanted })
+        end
 
         return wanted
       end
       8.times do
         slug = self.class.random_slug
-        return slug if @runlight.store.link_by_slug(slug).nil?
+        return slug if !@reserved.include?(slug) && @runlight.store.link_by_slug(slug).nil?
       end
       raise LinkError.new("Could not find a free slug; try again", "link_no_slug")
     end

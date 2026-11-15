@@ -261,6 +261,14 @@ module Runlight
         }
       end
 
+      # Whether a hostname can be the host of an address, and nothing more than a host.
+      def valid_host?(host)
+        return false if host == "" || host.match?(%r{[/?#@\\]})
+
+        url = Http::Url.parse("https://#{host}/")
+        !url.nil? && url.hostname != ""
+      end
+
       # Writes one imported pageview or event as part of a Runlight visit. Visitors
       # are hashed per day from the hit's key, as live visitors are hashed per day,
       # and a hit within thirty minutes of the visitor's last one joins that visit.
@@ -273,6 +281,9 @@ module Runlight
         # A visit that runs past midnight keeps the id it started with, as a live one does.
         yesterday = Write.hex_id("#{ns}:#{e["key"]}:#{Dates.add_days(day, -1)}", 16)
         host = Js.lower(e["hostname"].empty? ? site["hostnames"][0] || "imported.invalid" : e["hostname"])
+        # A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
+        # row under the site's name rather than a failed batch.
+        host = valid_host?(site["hostnames"][0] || "") ? Js.lower(site["hostnames"][0]) : "imported.invalid" unless valid_host?(host)
         url = Http::Url.parse("https://#{host}#{e["path"].empty? ? "/" : e["path"]}#{e["query"].empty? ? "" : "?#{e["query"].sub(/\A\?/, "")}"}") ||
               Http::Url.new("https://#{host}/")
         page = Sources.parse_page(url)
@@ -282,7 +293,7 @@ module Runlight
           id = Write.hex_id("#{ns}:#{e["key"]}:#{e["ts"]}")
           store.db.run("DELETE FROM rl_sessions WHERE id = ?", [id])
           country = Js.slice(Js.upper(e["country"]), 0, 2)
-          raw_region = e["region"]
+          raw_region = Write.place_name(e["region"])
           region = raw_region.empty? ? "" : Js.slice(Js.upper(raw_region.include?("-") ? raw_region : "#{country}-#{raw_region}"), 0, 10)
           known = country.match?(/\A[A-Z]{2}\z/)
           store.insert_session(
@@ -300,14 +311,14 @@ module Runlight
               "utmContent" => page["utm"]["content"],
               "country" => known ? country : "",
               "region" => known ? region : "",
-              "city" => Js.slice(e["city"], 0, 100),
+              "city" => Js.slice(Write.place_name(e["city"]), 0, 100),
               "browser" => Write.browser(e["browser"]),
               "browserVersion" => "",
               "os" => Write.system_name(e["os"]),
               "osVersion" => "",
               "device" => Write.device(e["device"]),
-              "screen" => Js.slice(e["screen"], 0, 20),
-              "language" => Js.slice(e["language"], 0, 35),
+              "screen" => Write.screen_size(e["screen"]),
+              "language" => Write.language_tag(e["language"]),
             ),
           )
           # No engaged time is known, so duration falls back to first-to-last pageview.
@@ -386,7 +397,7 @@ module Runlight
         counts.merge("skipped" => skipped, "secret" => key)
       end
 
-      private_class_method :progress_key, :all, :write_step, :referrer_of, :from_umami, :write_event
+      private_class_method :progress_key, :all, :write_step, :referrer_of, :from_umami, :write_event, :valid_host?
     end
   end
 end

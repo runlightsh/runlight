@@ -29,7 +29,9 @@ module Runlight
 
       # What passes for an email address, with JavaScript's \s.
       EMAIL = /\A[^#{Js::SPACE}@<>"]+@[^#{Js::SPACE}@<>"]+\.[^#{Js::SPACE}@<>"]+\z/
-      private_constant :EMAIL
+      # The longest an address can be. Anything longer is refused before the pattern reads it.
+      MAX_EMAIL = 320
+      private_constant :EMAIL, :MAX_EMAIL
 
       # A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed.
       @decoy = nil
@@ -37,19 +39,41 @@ module Runlight
       # Password checks run at once, in this process, and the most that may wait for one.
       CHECKING = 4
       WAITING = 64
+      # Password checks a process runs in a minute. A check holds Ruby's global lock for its whole length (about
+      # 150 ms at today's cost), so while one runs nothing else in the process does, the app's own requests
+      # among them when Runlight is mounted in one. Thirty a minute keeps sign-ins to a tenth of the process's
+      # time or so however many are tried. Browsers that signed in to the account before, and people already
+      # signed in who are asked for their password again, have thirty of their own, so a flood of tries from
+      # strangers cannot use up theirs. Nil is no limit.
+      CHECKS_PER_MINUTE = 30
       SLOTS = Mutex.new
       FREED = ConditionVariable.new
       private_constant :SLOTS, :FREED
       @running = 0
       @waiting = 0
+      @checks_per_minute = CHECKS_PER_MINUTE
+      # When each of the last minute's checks began, for strangers (false) and for known browsers (true).
+      @checked = { false => [], true => [] }
 
       class << self
         attr_accessor :decoy
 
+        # The budget of password checks a minute, CHECKS_PER_MINUTE unless set otherwise; nil for no limit.
+        attr_accessor :checks_per_minute
+
         # Runs a password check when one of the few slots is free, so a flood of sign-ins cannot take every core.
-        # Past the queue's length it refuses at once, with an AccountError coded "busy".
-        def slot
+        # Past the queue's length, or past the minute's budget of checks (`known` picks which of the two), it
+        # refuses at once, with an AccountError coded "busy".
+        def slot(known = false)
           SLOTS.synchronize do
+            unless @checks_per_minute.nil?
+              at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              spent = @checked[known ? true : false]
+              spent.shift while !spent.empty? && at - spent[0] >= 60
+              raise AccountError.new("Runlight is busy checking other sign-ins. Try again in a moment.", "busy") if spent.length >= @checks_per_minute
+
+              spent << at
+            end
             if @running >= CHECKING
               raise AccountError.new("Runlight is busy checking other sign-ins. Try again in a moment.", "busy") if @waiting >= WAITING
 
@@ -273,7 +297,7 @@ module Runlight
         init
         raise AccountError.new("Choose member or viewer for one site", "role_scope") if !site.nil? && (site.empty? || !%w[member viewer].include?(role))
         address = Js.lower(Js.trim(email))
-        raise AccountError.new("Enter an email address", "email_invalid") unless address.match?(EMAIL)
+        raise AccountError.new("Enter an email address", "email_invalid") unless Js.length(address) <= MAX_EMAIL && address.match?(EMAIL)
         if Js.length(password) < MIN_PASSWORD
           raise AccountError.new("Use a password of at least #{MIN_PASSWORD} characters", "password_short", { "min" => MIN_PASSWORD.to_s })
         end
@@ -362,18 +386,21 @@ module Runlight
 
       # The account for an email and password, or nil. Takes the same time either way. Only a few checks run at
       # once; with too many waiting it raises an AccountError coded "busy".
-      def sign_in(email, password)
+      # `known` says the try comes from a browser that signed in to the account before, or from someone already
+      # signed in, whose checks have a budget of their own.
+      def sign_in(email, password, known: false)
         user = by_email(email)
         if user.nil?
           hash = self.class.decoy ||= Crypto.hash_password(Crypto.hex(Crypto.random_bytes(16)))
-          self.class.slot { Crypto.check_password(password, hash) }
+          self.class.slot(known) { Crypto.check_password(password, hash) }
           return nil
         end
-        return nil unless self.class.slot { Crypto.check_password(password, user["hash"]) }
+        return nil unless self.class.slot(known) { Crypto.check_password(password, user["hash"]) }
         return user unless Crypto.weaker_than_now?(user["hash"])
 
         # A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
-        hash = self.class.slot { Crypto.hash_password(password) }
+        # The password was right, so making it again is not counted against the minute's checks.
+        hash = Crypto.hash_password(password)
         @store.db.run("UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", [hash, user["id"], user["hash"]])
         by_id(user["id"]) || user
       end
@@ -524,7 +551,10 @@ module Runlight
         end
         read = Js.truthy?(row["totp_recovery"]) ? row["totp_recovery"].to_s : nil
         hashes = read.nil? ? [] : Json.decode(read)
-        at = hashes.index(Crypto.recovery_hash(given))
+        # Every hash is compared, each in time that does not depend on where it differs.
+        mine = Crypto.recovery_hash(given)
+        at = nil
+        hashes.each_with_index { |hash, i| at = i if Crypto.same_text(hash.to_s, mine) }
         return false if at.nil?
 
         hashes.delete_at(at)
@@ -569,7 +599,7 @@ module Runlight
       def invite_now(email, role, invited_by, now, site = nil)
         raise AccountError.new("Choose member or viewer for one site", "role_scope") if !site.nil? && (site.empty? || !%w[member viewer].include?(role))
         address = Js.lower(Js.trim(email))
-        raise AccountError.new("Enter an email address", "email_invalid") unless address.match?(EMAIL)
+        raise AccountError.new("Enter an email address", "email_invalid") unless Js.length(address) <= MAX_EMAIL && address.match?(EMAIL)
         raise AccountError.new("#{address} already has an account", "account_exists", { "email" => address }) unless by_email(address).nil?
 
         code = Crypto.base64url(Crypto.random_bytes(24))

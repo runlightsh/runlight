@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "ipaddr"
+
 module Runlight
   module Accounts
     # Accounts on the web: sign-in, the code step, invites, first-run setup, and the Account and People APIs, under
@@ -17,12 +19,14 @@ module Runlight
       }.freeze
 
       DEVICE_COOKIE = "runlight_device"
+      # The most a sign-in form or an account change may weigh: a few fields, far smaller than this.
+      MAX_BODY_BYTES = 64 * 1024
       # Who made each token, kept beside it as a setting, so removing someone or making them a viewer deletes them.
       MADE_BY = "token-by:"
       # When each account was last sent a sign-in link, at most one a minute; a setting, so every process sees it.
       LINK_SENT = "login-link-sent:"
       ESCAPES = { "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;", "'" => "&#39;" }.freeze
-      private_constant :HTML, :DEVICE_COOKIE, :MADE_BY, :LINK_SENT, :ESCAPES
+      private_constant :HTML, :DEVICE_COOKIE, :MAX_BODY_BYTES, :MADE_BY, :LINK_SENT, :ESCAPES
 
       attr_reader :accounts
 
@@ -52,12 +56,17 @@ module Runlight
         # cannot keep the server hashing; a request with no known address skips that one,
         # since it would hold up everyone at once.
         # Each try counts before the password is checked, and a right one is taken back.
-        @per_address = Throttle.new(@store, "address", 10)
+        # The two keyed by an address are counted in this process and never written down (an IPv6 address
+        # counts as its /64, which is one caller's to pick from); the one per account is kept in the database,
+        # so every process shares it.
+        @per_address = Throttle.new(@store, "address", 10, memory: true)
         @per_account = Throttle.new(@store, "account", 50)
-        @per_ip = Throttle.new(@store, "ip", 30)
-        # Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-        # Password re-checks in Account: ten.
-        @code_tries = Throttle.new(@store, "code", 5)
+        @per_ip = Throttle.new(@store, "ip", 30, memory: true)
+        # Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the
+        # tries run out again, up to a day, so guessing on and on gets about five tries a day. A browser that
+        # signed in to the account before counts on its own, so its owner is never held up by others' guesses.
+        # Five tries to confirm the first code. Password re-checks in Account: ten.
+        @code_tries = Lockout.new(@store, "code", 5)
         @confirm_tries = Throttle.new(@store, "confirm", 5)
         @rechecks = Throttle.new(@store, "recheck", 10)
       end
@@ -85,6 +94,19 @@ module Runlight
 
         path = "#{url.pathname}#{url.search}#{url.hash}"
         path.start_with?("//") || path.start_with?("/\\") ? @home_path : path
+      end
+
+      # The address a caller's tries are counted under. One caller has a whole IPv6 /64 to send from, often
+      # more, so every address in it counts as the same; an IPv4 address written inside IPv6 counts as the
+      # IPv4 one. Anything that is not an address counts as it came.
+      def self.address_key(ip)
+        return "" if ip == ""
+
+        address = IPAddr.new(ip.to_s.sub(/%.*\z/m, "").delete_prefix("[").delete_suffix("]"))
+        address = address.native if address.ipv6? && address.ipv4_mapped?
+        address.ipv6? ? "#{address.mask(64)}/64" : address.to_s
+      rescue ArgumentError
+        ip.to_s
       end
 
       def signed_in(request)
@@ -135,6 +157,29 @@ module Runlight
       # Answers an account page or API request at a path under the base, or nil for anything else.
       # context: {"ip" => the connection's address}, optional.
       def handle(request, path, context = {})
+        answer(request, path, context)
+      rescue Http::BodyTooLong
+        too_large
+      end
+
+      def confirm_password(request)
+        user = signed_in(request)
+        return coded("Sign in first", "sign_in", 401) if user.nil?
+        input = body(request)
+        return coded("Send JSON", "send_json", 415) if input.nil?
+        recheck(user, input, "password", ["Your password is not right", "password_wrong"])
+      rescue Http::BodyTooLong
+        too_large
+      end
+
+      private
+
+      # A body past the cap is refused here, since not every host caps a request body before it reaches the app.
+      def too_large
+        coded("Send a smaller body", "body_too_large", 413)
+      end
+
+      def answer(request, path, context)
         if path == "/api/account" || path.start_with?("/api/account/") || path == "/api/people" || path.start_with?("/api/people/") ||
            path.start_with?("/api/invites/")
           return api(request, path)
@@ -152,16 +197,6 @@ module Runlight
         end
         nil
       end
-
-      def confirm_password(request)
-        user = signed_in(request)
-        return coded("Sign in first", "sign_in", 401) if user.nil?
-        input = body(request)
-        return coded("Send JSON", "send_json", 415) if input.nil?
-        recheck(user, input, "password", ["Your password is not right", "password_wrong"])
-      end
-
-      private
 
       def now
         @now.call
@@ -231,8 +266,13 @@ module Runlight
       def body(request)
         return nil if media_type(request) != "application/json"
 
-        parsed, value = Js.parse_json(request.text)
+        parsed, value = Js.parse_json(Body.request_text(request, MAX_BODY_BYTES))
         parsed && value.is_a?(Hash) ? value : nil
+      end
+
+      # A posted form's fields. Raises Http::BodyTooLong for one past the cap.
+      def form_of(request)
+        Http::SearchParams.new(Body.request_text(request, MAX_BODY_BYTES))
       end
 
       # `String(input[field] ?? "")`.
@@ -377,7 +417,7 @@ module Runlight
             return setup_ok(code) ? html(Pages.setup_page(base, { "code" => code }, lang)) : setup_locked(lang)
           end
           if method == "POST"
-            form = Http::SearchParams.new(request.text)
+            form = form_of(request)
             code = form.get("code") || ""
             unless setup_ok(code)
               if @asks_for_token
@@ -424,13 +464,15 @@ module Runlight
 
         if path == "/login/code" && method == "POST"
           ready
-          form = Http::SearchParams.new(request.text)
+          form = form_of(request)
           next_path = safe_next(form.get("next"))
           user = @accounts.from_pending(form.get("pending") || "", now)
           return redirect("#{base}/login?next=#{Js.encode_uri_component(next_path)}") if user.nil?
 
-          # Counted before the check, so a burst cannot get past five.
-          unless @code_tries.take(user["id"], now)
+          # Counted before the check, so a burst cannot get past five. A browser the account signed in from
+          # before has its own count, which only someone holding that browser's mark can use up.
+          tries = @accounts.trusts_device(read_cookie(request, DEVICE_COOKIE), user) ? "#{user["id"]}\ndevice" : user["id"]
+          unless @code_tries.take(tries, now)
             return html(Pages.code_page(base, { "pending" => form.get("pending") || "", "next" => next_path, "error" => t.call("error.too_many_tries") }, lang), 429)
           end
           unless @accounts.check_second_factor(user["id"], form.get("code") || "", now)
@@ -438,7 +480,7 @@ module Runlight
                                                 "error" => t.call("auth.codeWrong") }, lang), 401)
           end
 
-          @code_tries.clear(user["id"], now)
+          @code_tries.clear(tries)
           return signed_in_to(request, user, next_path)
         end
 
@@ -456,7 +498,7 @@ module Runlight
             return html(Pages.invite_page(base, { "code" => code, "email" => invite["email"], "role" => invite["role"], "site" => invite["site"], "host" => url.host }, lang))
           end
           if method == "POST"
-            form = Http::SearchParams.new(request.text)
+            form = form_of(request)
             code = form.get("code") || ""
             invite = @accounts.invite_by_code(code, now)
             return html(Pages.invite_gone_page(base, lang), 410) if invite.nil?
@@ -483,12 +525,12 @@ module Runlight
       def login(request, context)
         ready
         base = @base
-        form = Http::SearchParams.new(request.text)
+        form = form_of(request)
         email = form.get("email") || ""
         password = form.get("password") || ""
         next_path = safe_next(form.get("next"))
         account = Js.lower(Js.trim(email))
-        ip = @rl.client_ip(request, context)
+        ip = self.class.address_key(@rl.client_ip(request, context))
         pair = "#{account}\n#{ip == "" ? "unknown" : ip}"
         lang = Messages.accepted_language(request)
         t = Messages.translator(lang)["t"]
@@ -509,7 +551,7 @@ module Runlight
           home = home_origin
           return too_many.call if !@rl.mail_settings || home.nil? || home == ""
 
-          user = @accounts.sign_in(email, password)
+          user = @accounts.sign_in(email, password, known: trusted)
           unless user.nil?
             # Sent once the answer is out, as TypeScript does, so a right password takes no longer to answer than a
             # wrong one.
@@ -521,7 +563,7 @@ module Runlight
           end
           return html(login_page.call({ "error" => t.call("auth.tooManyLink"), "email" => email }), 429)
         end
-        user = @accounts.sign_in(email, password)
+        user = @accounts.sign_in(email, password, known: trusted)
         return html(login_page.call({ "error" => t.call("auth.wrongPassword"), "email" => email }), 401) if user.nil?
 
 
@@ -542,7 +584,8 @@ module Runlight
       def recheck(user, input, name, wrong)
         return coded("Too many tries. Wait fifteen minutes and try again.", "too_many_tries", 429) unless @rechecks.take(user["id"], now)
         begin
-          right = @accounts.sign_in(user["email"], field(input, name))
+          # Someone signed in already: their check is not held up by sign-in tries from strangers.
+          right = @accounts.sign_in(user["email"], field(input, name), known: true)
         rescue AccountError => e
           raise unless e.code == "busy"
 

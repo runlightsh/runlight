@@ -30,7 +30,8 @@ module Runlight
         client = Client.new(runlight.fetcher)
         importer = Importers.const_get(name).new(client, -> { runlight.now })
         known = lambda do |source_id, slug = nil, url = nil|
-          return true unless runlight.store.link_by_id(Write.imported_link_id(source, Js.string(source_id))).nil?
+          # A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+          return true if runlight.store.link_exists(Write.imported_link_id(source, Js.string(source_id)))
           return false if !Js.truthy?(slug) || !Js.truthy?(url)
 
           taken = runlight.store.link_by_slug(Js.string(slug))

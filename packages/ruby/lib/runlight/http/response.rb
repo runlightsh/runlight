@@ -53,14 +53,33 @@ module Runlight
         @body.call(Writer.new(block))
       end
 
-      # [status, headers, body] for Rack. Header names are lowercase, as Rack 3 asks; Set-Cookie values are
-      # one per line.
+      # [status, headers, body] for Rack. Header names are lowercase, as Rack 3 asks. Several Set-Cookie values
+      # are an Array under Rack 3, which takes no line break in a value, and one per line under Rack 2 (or
+      # with no rack gem loaded, where servers split on the line break), which takes no Array.
       def to_rack
         headers = {}
         @headers.all.each do |name, values|
-          headers[name] = name == "set-cookie" ? values.join("\n") : values.join(", ")
+          headers[name] = if name != "set-cookie" then values.join(", ")
+                          elsif values.length > 1 && Response.rack3? then values.dup
+                          else values.join("\n")
+                          end
         end
         [@status, headers, RackBody.new(self)]
+      end
+
+      # Whether the rack gem loaded is 3 or later. Its version is in a file of its own, which an app that
+      # loaded only parts of rack may not have read yet.
+      def self.rack3?
+        return false unless defined?(::Rack)
+
+        unless ::Rack.respond_to?(:release)
+          begin
+            require "rack/version"
+          rescue LoadError
+            return false
+          end
+        end
+        ::Rack.respond_to?(:release) && ::Rack.release.to_i >= 3
       end
 
       # What a streamed body writes to: each part goes straight to the block.

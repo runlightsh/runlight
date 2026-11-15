@@ -30,11 +30,11 @@ module Runlight
       country = "" if !country.match?(/\A[A-Z]{2}\z/) || country == "XX" || country == "T1"
       # A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
       # that has no codes ("California") is kept readable, as "US-California".
-      raw = Js.trim(text(location["region"]))
+      raw = Js.trim(Payload.tidy(text(location["region"])))
       region = raw.match?(/\A([A-Za-z]{2}-)?[A-Za-z0-9]{1,3}\z/) ? raw.upcase : Js.slice(raw, 0, 80)
       region = "#{country}-#{region}" if region != "" && !region.match?(/\A[A-Z]{2}-/) && country != ""
       region = "" if country == ""
-      city = country == "" ? "" : Js.slice(text(location["city"]), 0, 100)
+      city = country == "" ? "" : Js.slice(Payload.tidy(text(location["city"])), 0, 100)
       { "country" => country, "region" => region, "city" => city }
     end
 

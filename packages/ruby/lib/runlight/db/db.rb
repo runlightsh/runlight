@@ -13,8 +13,10 @@ module Runlight
     # Postgres. Each `?` outside quotes is filled in on the client with the
     # value written as a literal, as mysql2 fills them in for the TypeScript
     # driver. On MySQL each statement also goes through mysql_text first: a
-    # "quoted" name in backticks, and a backslash inside 'text' doubled, since
-    # MySQL reads it as an escape where standard SQL takes it literally.
+    # "quoted" name in backticks, and text written so that it reads the same
+    # whatever the session's SQL mode: a quote doubled, and anything holding a
+    # backslash as hex, since MySQL reads a backslash as an escape or as itself
+    # depending on NO_BACKSLASH_ESCAPES. Nothing about the session is changed.
     #
     # Rows come back as Hashes keyed by column name; numbers may arrive as
     # strings, so the store casts what it reads.
@@ -43,10 +45,6 @@ module Runlight
       # characters at most.
       MYSQL_LOCK = "CONCAT('runlight:', LEFT(SHA2(COALESCE(DATABASE(), ''), 256), 48))"
 
-      # The session's sql_mode as it was, less NO_BACKSLASH_ESCAPES, wherever it sits in the list, as
-      # stores/mysql.ts sets it.
-      NO_BACKSLASH_ESCAPES_OFF = "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))"
-
       # Deleted rows, such as a day's salt once it is gone, are overwritten where that costs no extra writes, so
       # they do not linger in the file's free space. Rails' pragmas setting takes this one only as on or off.
       SECURE_DELETE = "PRAGMA secure_delete = FAST"
@@ -68,8 +66,8 @@ module Runlight
         @held = 0
         # Set on the thread inside a SQLite turn, whose BEGIN IMMEDIATE Rails does not know about.
         @turn_key = :"runlight_turn_#{object_id}"
-        # The MySQL sessions, and the SQLite connections this database opened, already set up, by their driver
-        # connection, which a reconnect replaces.
+        # The SQLite connections this database opened, already set up, by their driver connection, which a
+        # reconnect replaces.
         @set_up = ObjectSpace::WeakMap.new
       end
 
@@ -190,13 +188,13 @@ module Runlight
       end
 
       # SQL written for SQLite and Postgres as MySQL and MariaDB read it: a "quoted" identifier is quoted with
-      # backticks, and a backslash inside 'text' is doubled. With params, each `?` outside quotes becomes its
-      # value through the block (mysql2's escaping when none is given).
+      # backticks, and 'text' is written as mysql_string writes it. With params, each `?` outside quotes becomes
+      # its value through the block (mysql_escape when none is given).
       def self.mysql_text(sql, params = nil, &escape)
         fill(sql, params, mysql: true, &(escape || method(:mysql_escape)))
       end
 
-      # A value as a MySQL literal, as mysql2's escape() writes the values Runlight binds.
+      # A value as a MySQL literal that reads the same in every SQL mode.
       def self.mysql_escape(value)
         case value
         when nil then "NULL"
@@ -204,17 +202,23 @@ module Runlight
         when false then "false"
         when Integer then value.to_s
         when Float then Json.number(value)
-        else
-          escaped = value.to_s.gsub(/[\0\b\t\x1a\n\r"'\\]/) do |c|
-            { "\0" => "\\0", "\b" => "\\b", "\t" => "\\t", "\x1a" => "\\Z", "\n" => "\\n", "\r" => "\\r",
-              '"' => '\\"', "'" => "\\'", "\\" => "\\\\" }[c]
-          end
-          "'#{escaped}'"
+        else mysql_string(Js.scrub(value.to_s))
         end
       end
 
+      # Text as a MySQL literal. Whether a backslash inside quotes is an escape or itself depends on the
+      # session's NO_BACKSLASH_ESCAPES mode, which a reconnect inside a statement can change under it, so no
+      # backslash is ever written inside quotes: a quote is doubled, which every mode reads as one quote, and
+      # text holding a backslash (or a NUL or Ctrl-Z, which some clients and logs cut at) is written as hex,
+      # read as utf8mb4. Nothing a value holds can then end it early, whatever the session is set to.
+      def self.mysql_string(text)
+        return "_utf8mb4 X'#{text.unpack1("H*")}'" if text.match?(/[\\\0\x1a]/)
+
+        "'#{text.gsub("'", "''")}'"
+      end
+
       # Walks the statement once: each `?` outside quotes becomes the next value through the block, and on
-      # MySQL a "quoted" name takes backticks and a backslash in 'text' is doubled.
+      # MySQL a "quoted" name takes backticks and 'text' is written again as mysql_string writes it.
       def self.fill(sql, params, mysql: false)
         return sql if params.nil? && !mysql
         return sql if !mysql && params.empty? && !sql.include?("?")
@@ -222,18 +226,34 @@ module Runlight
         out = +""
         n = 0
         quote = nil
-        sql.each_char do |ch|
-          if quote
+        # On MySQL, the 'text' being read, written whole once it ends.
+        held = nil
+        chars = sql.chars
+        at = -1
+        while (at += 1) < chars.length
+          ch = chars[at]
+          if held
+            if ch != "'"
+              held << ch
+            elsif chars[at + 1] == "'"
+              # A doubled quote is one quote inside the text.
+              held << "'"
+              at += 1
+            else
+              out << mysql_string(held)
+              held = nil
+            end
+          elsif quote
             if ch == quote
               quote = nil
               out << (mysql && ch == '"' ? "`" : ch)
-            elsif mysql && quote == "'" && ch == "\\"
-              out << "\\\\"
             elsif mysql && quote == '"' && ch == "`"
               out << "``"
             else
               out << ch
             end
+          elsif mysql && ch == "'"
+            held = +""
           elsif ch == "'" || ch == '"' || ch == "`"
             quote = ch
             out << (mysql && ch == '"' ? "`" : ch)
@@ -246,6 +266,8 @@ module Runlight
             out << ch
           end
         end
+        # Text left open is written as it came, for the database to refuse.
+        out << "'" << held unless held.nil?
         raise ArgumentError, "Runlight: a statement has more values than placeholders" if !params.nil? && n != params.length
 
         out
@@ -255,22 +277,20 @@ module Runlight
 
       def connection
         @connection_class.connection_pool.with_connection do |c|
-          set_up(c) if dialect == "mysql" || (@owned && dialect == "sqlite")
+          set_up(c) if @owned && dialect == "sqlite"
           yield c
         end
       end
 
-      # Values are escaped with backslashes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a
-      # quote could end the value early. Every MySQL session Runlight uses drops that one mode first, an app's
-      # own ActiveRecord connection's too, and again after a reconnect, which starts the session over. A SQLite
-      # file Runlight opened itself turns on secure_delete, as stores/sqlite.ts does.
+      # A SQLite file Runlight opened itself turns on secure_delete, as stores/sqlite.ts does. A MySQL session
+      # needs nothing set: values are written to read the same in every SQL mode (mysql_string).
       def set_up(c)
         raw = c.instance_variable_get(:@raw_connection)
         return if raw && @set_up[raw]
 
-        c.execute(dialect == "sqlite" ? SECURE_DELETE : NO_BACKSLASH_ESCAPES_OFF, "Runlight")
+        c.execute(SECURE_DELETE, "Runlight")
         raw = c.instance_variable_get(:@raw_connection)
-        wait_without_the_lock(raw) if dialect == "sqlite"
+        wait_without_the_lock(raw)
         @set_up[raw] = true if raw
       end
 
@@ -295,7 +315,6 @@ module Runlight
         warn "Runlight: a #{dialect == "mysql" ? "MySQL" : "Postgres"} connection was lost; it reconnects on the next query. #{e.message}"
         connection do |c|
           c.reconnect!
-          set_up(c) if dialect == "mysql"
           block.call(c)
         end
       end

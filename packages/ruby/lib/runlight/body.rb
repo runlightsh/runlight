@@ -22,6 +22,19 @@ module Runlight
       utf8(text)
     end
 
+    # A request's body as text, up to max_bytes; past that, by its declared length or its own, Http::BodyTooLong.
+    # A Rack adapter has read the body whole by now (up to its own, far larger, limit), so this is where a
+    # route that takes only a small one refuses the rest.
+    def request_text(request, max_bytes)
+      declared = Js.number(request.headers.get("content-length"))
+      raise Http::BodyTooLong, "Body over #{max_bytes} bytes" if declared > max_bytes
+
+      text = request.text
+      raise Http::BodyTooLong, "Body over #{max_bytes} bytes" if text.bytesize > max_bytes
+
+      text
+    end
+
     # The body as JSON, up to max_bytes, as read_text_capped reads it.
     def read_json_capped(response, max_bytes)
       Json.decode(read_text_capped(response, max_bytes))

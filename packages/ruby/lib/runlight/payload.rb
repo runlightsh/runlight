@@ -21,8 +21,27 @@ module Runlight
 
     module_function
 
+    # A string as it came, cut to `max` UTF-16 units: for a URL, which the parser then encodes.
     def str(value, max)
       value.is_a?(String) ? Js.slice(value, 0, max) : ""
+    end
+
+    # Text as every database can keep it: without U+0000, which Postgres refuses. Half a surrogate pair, which
+    # is no character, is U+FFFD by the time text gets here: parse reads a lone escape as one, and bytes that
+    # are not UTF-8 are scrubbed to it.
+    def tidy(text)
+      Js.scrub(text).delete("\0")
+    end
+
+    # Tidied text cut to `max` characters (code points), so a character such as an emoji is never cut in half.
+    def clean_text(text, max)
+      clean = tidy(text)
+      clean.length <= max ? clean : clean[0, max]
+    end
+
+    # A string the tracker sent, as it is stored.
+    def stored(value, max)
+      value.is_a?(String) ? clean_text(value, max) : ""
     end
 
     def int(value, min, max)
@@ -42,11 +61,11 @@ module Runlight
       entries(value).each do |key, raw|
         break if count >= MAX_PROPS
 
-        k = Js.slice(Js.trim(key), 0, 60)
+        k = clean_text(Js.trim(tidy(key)), 60)
         next if k.empty?
 
         if raw.is_a?(String)
-          text = Js.slice(raw, 0, 500)
+          text = clean_text(raw, 500)
         elsif (raw.is_a?(Integer) || raw.is_a?(Float)) && raw.to_f.finite?
           # JSON.parse reads every number as a double, so a long integer is rounded as it is there.
           text = Js.string(raw.to_f)
@@ -120,7 +139,7 @@ module Runlight
       url = Http::Url.parse(str(get.call("u"), 2048))
       return nil if url.nil? || (url.protocol != "http:" && url.protocol != "https:")
 
-      name = Js.trim(str(get.call("n"), 120))
+      name = Js.trim(stored(get.call("n"), 120))
       return nil if kind == "event" && name.empty?
 
       pageview_id = str(get.call("i"), 32)
@@ -129,13 +148,13 @@ module Runlight
 
       {
         "kind" => kind,
-        "site" => str(get.call("s"), 64),
+        "site" => stored(get.call("s"), 64),
         "url" => url,
         "referrer" => str(get.call("r"), 2048),
-        "title" => str(get.call("t"), 500),
+        "title" => stored(get.call("t"), 500),
         "screenWidth" => int(get.call("w"), 0, 20_000),
         "screenHeight" => int(get.call("h"), 0, 20_000),
-        "language" => str(get.call("l"), 35),
+        "language" => stored(get.call("l"), 35),
         "name" => name,
         "props" => kind == "event" ? link_props(name, props(get.call("p"))) : nil,
         "pageviewId" => pageview_id,
@@ -144,6 +163,6 @@ module Runlight
       }
     end
 
-    private_class_method :str, :int, :props, :link_props, :entries, :parse
+    private_class_method :str, :stored, :int, :props, :link_props, :entries, :parse
   end
 end

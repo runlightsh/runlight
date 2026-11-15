@@ -9,9 +9,10 @@ class StoreSqlTest < Minitest::Test
 
   def test_values_fill_placeholders_outside_quotes_only_names_are_quoted_with_backticks_and_backslashes_stay_literal
     escape = ->(value) { value.is_a?(String) ? "'#{value}'" : (value.nil? ? "null" : value.to_s) }
-    assert_equal "SELECT `key`, 'x' FROM t WHERE a = '?' AND b LIKE 2 ESCAPE '\\\\' AND c = null",
+    assert_equal "SELECT `key`, 'x' FROM t WHERE a = '?' AND b LIKE 2 ESCAPE _utf8mb4 X'5c' AND c = null",
                  Database.mysql_text("SELECT \"key\", ? FROM t WHERE a = '?' AND b LIKE ? ESCAPE '\\' AND c = ?", ["x", 2, nil], &escape)
-    assert_equal "SELECT 'it\\'s', NULL, 1.5, 'a\\\\b'", Database.mysql_text("SELECT ?, ?, ?, ?", ["it's", nil, 1.5, "a\\b"]), "mysql2's own escaping"
+    assert_equal "SELECT 'it''s', NULL, 1.5, _utf8mb4 X'615c62'", Database.mysql_text("SELECT ?, ?, ?, ?", ["it's", nil, 1.5, "a\\b"]),
+                 "text reads the same whatever the session's SQL mode"
     assert_equal "SELECT `a``b`", Database.mysql_text('SELECT "a`b"')
     error = assert_raises(ArgumentError) { Database.mysql_text("SELECT ?, ?", [1]) }
     assert_includes error.message, "more placeholders"

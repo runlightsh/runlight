@@ -256,4 +256,26 @@ class RackAppTest < Minitest::Test
     body.close
     assert_equal [:later], ran
   end
+  # Signing in sets two cookies, the session and the mark for this browser. Rack 3 takes several values of one
+  # header as an Array and refuses a line break in a value, which Rack::Lint holds every answer to.
+  def test_signing_in_sets_both_cookies_in_a_way_rack_allows
+    rl = Runlight.new(store: Runlight::Stores.sqlite(":memory:"), site: { hostnames: ["example.com"] }, secret: "s" * 32, now: -> { @now })
+    app = Rack::Lint.new(Runlight::RackApp.new(runlight: rl, base_path: "/runlight", token: TOKEN, accounts: true))
+    form = lambda do |path, fields|
+      env = Rack::MockRequest.env_for(path, method: "POST", "HTTP_HOST" => "example.com", "CONTENT_TYPE" => "application/x-www-form-urlencoded",
+                                            "REMOTE_ADDR" => "203.0.113.9", input: URI.encode_www_form(fields))
+      status, headers, body = app.call(env)
+      body.each { |_| nil }
+      body.close
+      [status, headers]
+    end
+    status, = form.call("/runlight/setup", { "code" => TOKEN, "email" => "owner@example.com", "password" => "a long password", "again" => "a long password" })
+    assert_equal 303, status
+    status, headers = form.call("/runlight/login", { "email" => "owner@example.com", "password" => "a long password" })
+    assert_equal 303, status
+    cookies = headers["set-cookie"]
+    names = (cookies.is_a?(Array) ? cookies : cookies.split("\n")).map { |cookie| cookie.split("=").first }
+    assert_equal %w[runlight_session runlight_device], names
+    assert_equal Rack.release.to_i >= 3, cookies.is_a?(Array), "an Array under Rack 3, one per line before it"
+  end
 end

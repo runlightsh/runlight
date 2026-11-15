@@ -20,7 +20,8 @@ module Runlight
     # A few hundred sites at most; past that the oldest go, so the cache cannot grow without end.
     CACHE_SIZE = 500
     # A <link> tag, matched on bytes so case folding stays ASCII, as JavaScript's /i does.
-    LINK = /<link(?![A-Za-z0-9_])[^>]*>/in
+    # A tag is at most a few thousand characters; the bound keeps a page of unclosed tags from being read over and over.
+    LINK = /<link(?![A-Za-z0-9_])[^<>]{0,4000}>/in
     # Where the system has it, opening a link fails rather than following it.
     NOFOLLOW = File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : 0
     private_constant :TIMEOUT_MS, :MAX_BYTES, :DAY, :CACHE_SIZE, :LINK, :NOFOLLOW

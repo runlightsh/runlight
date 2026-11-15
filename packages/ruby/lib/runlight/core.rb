@@ -63,6 +63,14 @@ module Runlight
 
     # What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets.
     EMAIL = /\A[^#{Js::SPACE}@<>"]+@[^#{Js::SPACE}@<>"]+\.[^#{Js::SPACE}@<>"]+\z/
+    # The longest an address is read: no real one is longer, and the pattern is slow on a very long string.
+    EMAIL_MAX = 320
+
+    # Whether text passes for an email address, of EMAIL_MAX characters at most.
+    def self.email?(value)
+      text = Js.scrub(value)
+      Js.length(text) <= EMAIL_MAX && text.match?(EMAIL)
+    end
 
     # Raised whenever what a rolled-up day holds changes. 2: the heatmap counts visits only. 3: a page counts the views that can report time.
     ROLLUP_VERSION = 3
@@ -77,7 +85,18 @@ module Runlight
     TRACKER_WAIT_MS = 10_000
     # How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on.
     AGENT_RANGES_EVERY_MS = 86_400_000
-    private_constant :AGENT_RANGES_EVERY_MS, :ROLLUP_VERSION, :ROLLUP_BATCH, :REMOTE_MAX_BYTES, :METERED_ROLLUP_BATCH, :ROLLUP_DELAY_MS, :TRACKER_WAIT_MS
+    # The setting that changes whenever a process changes the sites: one added, deleted, renamed, moved to another
+    # timezone or other domains, or connected. Every process keeps the sites in memory, and rereads them when the
+    # setting no longer holds what it last saw, looking at most this often.
+    SITES_VERSION = "sites-version"
+    SITES_FRESH_MS = 5_000
+    # How long the link domains are kept, and how long a failure to read them is, before the database is asked again.
+    LINK_DOMAINS_FRESH_MS = 30_000
+    LINK_DOMAINS_RETRY_MS = 5_000
+    # How often a process clears sign-in counts that have run out, on its own, without the scheduled check.
+    SWEEP_EVERY_MS = 3_600_000
+    private_constant :AGENT_RANGES_EVERY_MS, :ROLLUP_VERSION, :ROLLUP_BATCH, :REMOTE_MAX_BYTES, :METERED_ROLLUP_BATCH, :ROLLUP_DELAY_MS, :TRACKER_WAIT_MS,
+                     :SITES_VERSION, :SITES_FRESH_MS, :LINK_DOMAINS_FRESH_MS, :LINK_DOMAINS_RETRY_MS, :SWEEP_EVERY_MS
 
     BUSY = /timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked/i
     private_constant :BUSY
@@ -140,13 +159,15 @@ module Runlight
       @limit = if number.is_a?(Numeric) && number.positive?
                  RateLimit.new(number.infinite? ? (2**63) - 1 : number.floor, -> { now })
                end
+      # AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast.
+      @fetch_limit = @limit.nil? ? nil : RateLimit.new(number.infinite? ? (2**63) - 1 : (number * 10).floor, -> { now })
       @clock = options["now"] || -> { Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond) }
       @fetcher = options["fetcher"] || Http::NetFetcher.new
       @links = Links.new(self)
       @link_path = "/#{(options["linkPath"].nil? ? "/go" : options["linkPath"]).to_s.gsub(%r{\A/+|/+\z}, "")}"
       mail = options["mail"]
       if mail.is_a?(Hash) && mail["send"].respond_to?(:call)
-        unless Js.string(mail["from"].nil? ? "" : mail["from"]).match?(EMAIL)
+        unless Core.email?(Js.string(mail["from"].nil? ? "" : mail["from"]))
           raise ArgumentError, "Runlight: the app's mailer needs a from address, like reports@example.com"
         end
 
@@ -183,6 +204,12 @@ module Runlight
       @remotes = {}
       @remote_seen = {}
       @overrides = {}
+      # What SITES_VERSION held when the sites were last read, when it was last looked at, and one look at a time.
+      @sites_version = ""
+      @sites_checked_at = 0
+      @sites_lock = Mutex.new
+      # When this process last cleared the sign-in counts that have run out.
+      @swept_at = nil
       @ready = false
       # init runs once however many threads ask at once; reentrant, as init may ask for itself.
       @init_lock = Monitor.new
@@ -284,7 +311,7 @@ module Runlight
                               end
       end
       from = Js.trim(Js.string(input["from"].nil? ? "" : input["from"]))
-      unless from.match?(EMAIL)
+      unless Core.email?(from)
         raise Mail::MailError.new("Enter the address reports come from, like reports@example.com", "mail_from", {})
       end
 
@@ -400,12 +427,18 @@ module Runlight
       # A database that never had its statistics gathered gets them now, before any report is read, rather
       # than at the first scheduled check, which an app may never run.
       @store.optimize(true)
+      # Read before the sites, so a change made while they are read is seen as one at the next look.
+      @sites_version = @store.setting(SITES_VERSION) || ""
+      @sites_checked_at = now
       if @managed_sites
         @configured = @store.sites
         load_remotes
       end
       @configured.each { |site| @store.upsert_site(site, now) }
       @overrides = @store.site_overrides
+      # Earlier versions kept counts under a hash of each caller's address in the settings: sign-in tries, and
+      # app registrations. Nothing made from an address is kept there now, and what was is cleared.
+      Accounts::Throttle.forget_addresses(@store)
       # A process starting with a timezone set in code is the newest word on it: if the code changed it,
       # the days built in the old one are cleared here, once, and never by a process still running.
       sites.each do |site|
@@ -436,12 +469,14 @@ module Runlight
 
     # The sites, with any settings changed in the dashboard applied.
     def sites
+      refresh_sites
       @configured.map { |site| site.merge(@overrides[site["id"]] || {}) }
     end
 
     # The install a site is read from, when it is counted elsewhere:
     # { "url", "token", "site", "hostnames", "scope" (optional) }, or nil.
     def remote(id)
+      refresh_sites
       @remotes[id]
     end
 
@@ -527,6 +562,7 @@ module Runlight
       site = { "id" => id, "name" => name, "hostnames" => hostnames, "timezone" => timezone }
       @store.upsert_site(site, now)
       @configured = by_name(@configured + [site])
+      sites_changed
       site
     end
 
@@ -552,6 +588,7 @@ module Runlight
       end
       @configured = @configured.reject { |site| site["id"] == id }
       @overrides.delete(id)
+      sites_changed
       nil
     end
 
@@ -595,6 +632,7 @@ module Runlight
         @store.set_site_overrides(id, nxt)
         @overrides[id] = nxt
       end
+      sites_changed
       set_retention(id, patch["retentionMonths"]) if given?(patch, "retentionMonths")
       site(id)
     end
@@ -639,6 +677,7 @@ module Runlight
           warn("Runlight: could not apply retention #{e.message}")
         end
       end
+      sweep_counts
     end
 
     # Adds up each site's finished days, so long ranges read a row a day instead
@@ -809,9 +848,18 @@ module Runlight
                     else
                       h.get(@trust_proxy.to_s)
                     end
-        return Js.trim(forwarded) if !forwarded.nil? && Js.trim(forwarded) != ""
+        return Core.bare_address(Js.trim(forwarded)) if !forwarded.nil? && Js.trim(forwarded) != ""
       end
       connection_ip(request, context).to_s
+    end
+
+    # A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and
+    # "[2001:db8::1]:443" are the address alone.
+    def self.bare_address(value)
+      bracketed = value.match(/\A\[([^\]]*)\](?::\d+)?\z/)
+      return bracketed[1] unless bracketed.nil?
+
+      value.match?(/\A\d{1,3}(?:\.\d{1,3}){3}:\d+\z/) ? value[0, value.rindex(":")] : value
     end
 
     # Whether a request's forwarding headers count. Left at its default, trustProxy believes them only on a
@@ -833,8 +881,18 @@ module Runlight
     end
     private :trusts?
 
-    # Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing raises.
+    # Handles one tracker request. Never raises: bad input is dropped quietly, and a hit the store could not
+    # take is logged.
     def collect(request, context = {})
+      take(request, context)
+      nil
+    rescue StandardError => e
+      # Analytics must never break the app it counts for.
+      warn("Runlight: could not record an event #{e.full_message(highlight: false)}")
+      nil
+    end
+
+    private def take(request, context)
       length = Js.number(request.headers.get("content-length") || 0)
       return if length > Payload::MAX_BODY
 
@@ -933,7 +991,8 @@ module Runlight
 
       site = site(link["site"]) || sites[0]
       ua = request.headers.get("user-agent") || ""
-      if !site.nil? && Ua.ai_agent(ua).nil? && !Ua.bot?(ua) && request.method == "GET"
+      # Past the tracker's limit for one address a click still redirects, and is not counted.
+      if !site.nil? && Ua.ai_agent(ua).nil? && !Ua.bot?(ua) && request.method == "GET" && (@limit.nil? || @limit.allow(client_ip(request, context)))
         begin
           at = now
           first = (request.headers.get("accept-language") || "").split(",", -1).first.to_s.split(";", -1).first.to_s
@@ -975,10 +1034,13 @@ module Runlight
     # for tracker hits, or context "agentIp" when a log reader or plugin
     # reports it) is checked against the list the agent's company publishes
     # and then dropped: only "verified", "mismatch", or "" is kept with the fetch.
+    # Context "userAgent" stands in for the request's header when given.
     def observe(request, at = nil, context = {})
       return false if request.method != "GET"
 
-      agent = Ua.ai_agent(request.headers.get("user-agent") || "")
+      # A log reader gives the user agent as text, since a logged one may not be fit for a header.
+      given = context.key?("userAgent") ? context["userAgent"] : context[:user_agent]
+      agent = Ua.ai_agent(given.nil? ? request.headers.get("user-agent") || "" : given.to_s)
       return false if agent.nil?
 
       url = Http::Url.new(request.url)
@@ -986,10 +1048,13 @@ module Runlight
       extension = url.pathname.match(/\.([a-z0-9]+)\z/i)
       return false if extension && !%w[html htm md txt php].include?(extension[1].downcase)
 
-      host = forwarded_host(request) || request.headers.get("host") || url.hostname
+      host = Js.trim((forwarded_host(request, context) || request.headers.get("host") || url.hostname).split(",", -1).first.to_s).split(":", -1).first.to_s
       init
-      site = site_for(host.split(":", -1).first.to_s)
+      site = site_for(host)
       return false if site.nil?
+      # A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+      reported = context.key?("agentIp") || context.key?(:agent_ip)
+      return false if !reported && !@fetch_limit.nil? && !@fetch_limit.allow(client_ip(request, context))
 
       # A log reader sends when the page was served. Older than a week is dropped, so a first run over
       # an old log does not land as one spike on today; a time ahead of now counts as now.
@@ -1006,7 +1071,7 @@ module Runlight
         "session" => "",
         "pageview" => "",
         "path" => Js.slice(url.pathname, 0, 1000),
-        "hostname" => Sources.strip_www(url.hostname),
+        "hostname" => Sources.strip_www(host),
         "name" => agent["name"],
         "props" => { "company" => agent["company"], "kind" => agent["kind"] },
         # A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when there was
@@ -1139,12 +1204,67 @@ module Runlight
       hostnames
     end
 
+    # Read aside and put in place whole, so a request on another thread never finds half of them.
     def load_remotes
-      @remotes = {}
+      remotes = {}
       @store.settings_starting_with("remote:").each do |row|
         opened = Mail::Secret.unseal(row["value"], @secret)
-        @remotes[row["key"].delete_prefix("remote:")] = Json.decode(opened) unless opened.nil? || opened == ""
+        remotes[row["key"].delete_prefix("remote:")] = Json.decode(opened) unless opened.nil? || opened == ""
       end
+      @remotes = remotes
+    end
+
+    # Says the sites changed, so every other process sharing the database reads them again within
+    # SITES_FRESH_MS. This one already holds the change, and reads them again at its next look too, which
+    # also brings in a change another process made at the same moment.
+    def sites_changed
+      @store.set_setting(SITES_VERSION, Hashing.random_id(8))
+    end
+
+    # Reads the sites, their dashboard settings, and connected installs again when another process changed
+    # them. One read of a setting at most every SITES_FRESH_MS, and nothing more while it holds what this
+    # process last saw. A database that cannot be asked leaves what is known in place until the next look.
+    def refresh_sites
+      return unless @ready
+
+      at = now
+      return if at >= @sites_checked_at && at - @sites_checked_at < SITES_FRESH_MS
+      # One thread looks; the others, and anything the look itself asks of the sites, go on with what is known.
+      return unless @sites_lock.try_lock
+
+      begin
+        @sites_checked_at = at
+        version = @store.setting(SITES_VERSION) || ""
+        return if version == @sites_version
+
+        if @managed_sites
+          # In the order a site added here takes its place, so the list reads the same in every process.
+          @configured = by_name(@store.sites)
+          load_remotes
+        end
+        @overrides = @store.site_overrides
+        # The version read before the sites: a change made while they were read shows at the next look.
+        @sites_version = version
+      rescue StandardError => e
+        warn("Runlight: could not look for changed sites #{e.message}")
+      ensure
+        @sites_lock.unlock
+      end
+    end
+
+    # Clears the sign-in counts that have run out and the hashing keys of days gone, at most once an hour, so
+    # they go even where the scheduled check never runs. Run once an answer is sent.
+    def sweep_counts
+      return unless @ready
+
+      at = now
+      return if !@swept_at.nil? && at >= @swept_at && at - @swept_at < SWEEP_EVERY_MS
+
+      @swept_at = at
+      Accounts::Throttle.sweep(@store, at)
+      Accounts::Lockout.sweep(@store, at)
+    rescue StandardError => e
+      warn("Runlight: could not clear old sign-in counts #{e.message}")
     end
 
     # A capped JSON body, or nil where TS's readJsonCapped(...).catch(() => null) gives null.
@@ -1218,7 +1338,13 @@ module Runlight
       end
       there ||= listed[0]
       field = ->(key) { there.is_a?(Hash) ? there[key] : nil }
-      there_hostnames = field.call("hostnames").is_a?(Array) ? field.call("hostnames").grep(String) : []
+      # Checked before anything is saved: a site there has an id and a name, as text.
+      there_id = field.call("id")
+      if !there_id.is_a?(String) || there_id == "" || Js.length(there_id) > 64 || !field.call("name").is_a?(String)
+        raise SettingsError.new("#{url} did not answer like a Runlight install", "connect_not_runlight", { "url" => url })
+      end
+
+      there_hostnames = field.call("hostnames").is_a?(Array) ? field.call("hostnames").grep(String).reject(&:empty?) : []
       # Connecting the same site again (to allow changes, or with a new token) updates it in place.
       @remotes.each do |existing, known|
         next unless known["url"] == url && known["site"] == field.call("id")
@@ -1228,10 +1354,12 @@ module Runlight
         @store.set_setting("remote:#{existing}", Mail::Secret.seal(Json.encode(updated), @secret))
         @remotes[existing.to_s] = updated
         @remote_seen.delete(existing)
+        sites_changed
         return site(existing.to_s)
       end
       # As TS's replace without the u flag, a character outside the BMP is two units, so two dashes.
-      host = Js.lower((there_hostnames[0] || Http::Url.new(url).host).to_s.gsub(/[^a-z0-9._-]/i) { |c| c.ord > 0xFFFF ? "--" : "-" })
+      host = Js.lower((there_hostnames[0] || Http::Url.new(url).host).to_s.gsub(/[^a-z0-9._-]/i) { |c| c.ord > 0xFFFF ? "--" : "-" }.sub(/\A[^a-z0-9]+/i, ""))
+      host = "site" if host == ""
       id = Js.slice(host, 0, 56)
       n = 2
       while site?(id)
@@ -1239,7 +1367,8 @@ module Runlight
         n += 1
       end
       name = Js.slice(Js.trim(Js.string(input["name"].nil? ? "" : input["name"])), 0, 80)
-      name = Js.string(field.call("name").nil? ? UNDEFINED : field.call("name")) if name == ""
+      name = Js.slice(Js.trim(field.call("name")), 0, 80) if name == ""
+      name = host if name == ""
       # No hostnames: tracker hits never land on a site that is counted elsewhere.
       timezone = field.call("timezone")
       site = { "id" => id, "name" => name, "hostnames" => [],
@@ -1249,6 +1378,7 @@ module Runlight
       @store.set_setting("remote:#{id}", Mail::Secret.seal(Json.encode(remote), @secret))
       @remotes[id] = remote
       @configured = by_name(@configured + [site])
+      sites_changed
       site
     end
 
@@ -1363,6 +1493,7 @@ module Runlight
     def forwarded_host(request, context = {})
       trusts?(request, context) ? request.headers.get("x-forwarded-host") : nil
     end
+    public :forwarded_host
 
     # The connection's own address: the context's "ip", or else the request's remote_address, or nil.
     def connection_ip(request, context)
@@ -1475,13 +1606,24 @@ module Runlight
     # standalone server asks, so this saves a query on each tracker hit; a
     # change made here clears it at once, one made by another process within
     # half a minute.
+    #
+    # Middleware asks on every request of the app behind it, so a database that cannot be read must never
+    # fail or hold up those: the failure is said once, the domains known before stay (none, when there were
+    # none), and the database is not asked again for LINK_DOMAINS_RETRY_MS.
     def link_domain_set
       at = now
-      return @link_domain_cache["domains"] if !@link_domain_cache.nil? && at - @link_domain_cache["at"] < 30_000
+      cached = @link_domain_cache
+      return cached["domains"] if !cached.nil? && at - cached["at"] < (cached["failed"] ? LINK_DOMAINS_RETRY_MS : LINK_DOMAINS_FRESH_MS)
 
-      init
-      domains = @store.link_domains.to_h { |d| [d["domain"], true] }
-      @link_domain_cache = { "at" => at, "domains" => domains }
+      begin
+        init
+        domains = @store.link_domains.to_h { |d| [d["domain"], true] }
+        @link_domain_cache = { "at" => at, "domains" => domains }
+      rescue StandardError => e
+        warn("Runlight: could not read the link domains #{e.message}") unless cached && cached["failed"]
+        domains = cached.nil? ? {} : cached["domains"]
+        @link_domain_cache = { "at" => at, "domains" => domains, "failed" => true }
+      end
       domains
     end
 
@@ -1532,21 +1674,31 @@ module Runlight
       saved = saved_agent_ranges(@store.setting("agent-ranges"))
       if @update_agent_ranges && (saved.nil? || now - saved["at"] >= AGENT_RANGES_EVERY_MS)
         lists = saved.nil? ? {} : saved["lists"].dup
+        fetched = saved.nil? ? {} : saved["fetched"].dup
         AgentCheck.bundled["lists"].each_key do |url|
           fresh = AgentCheck.download_range_list(url, @fetcher)
-          lists[url] = fresh unless fresh.nil?
+          next if fresh.nil?
+
+          lists[url] = fresh
+          fetched[url] = now
         end
-        saved = { "at" => now, "lists" => lists }
+        saved = { "at" => now, "lists" => lists, "fetched" => fetched }
         @store.set_setting("agent-ranges", Json.encode(saved))
       end
-      @agent_ranges = saved.nil? ? AgentCheck.bundled["lists"] : AgentCheck.bundled["lists"].merge(saved["lists"])
+      # A downloaded list stands in for the one that came with this version only while it is the newer of the two.
+      shipped = Importers::Client.parse_date(AgentCheck.bundled["fetchedAt"].to_s)
+      shipped = 0 unless shipped.is_a?(Integer) || (shipped.is_a?(Float) && shipped.finite?)
+      newer = saved.nil? ? {} : saved["lists"].select { |url, _| (saved["fetched"][url] || 0) >= shipped }
+      @agent_ranges = AgentCheck.bundled["lists"].merge(newer)
     rescue StandardError => e
       warn("Runlight: could not update the AI agents' address lists #{e.message}")
     end
     private :refresh_agent_ranges
 
-    # The "agent-ranges" setting, { "at" => ms, "lists" => { url => [prefix] } } with each list read as a
-    # download is, or nil when there is none or it is not JSON. A list that does not read is left out.
+    # The "agent-ranges" setting, { "at" => ms, "lists" => { url => [prefix] }, "fetched" => { url => ms } } with
+    # each list read as a download is, or nil when there is none or it is not JSON. A list that does not read
+    # is left out. `fetched` is when each list was downloaded; a copy saved before it was kept has only `at`,
+    # for all of them.
     def saved_agent_ranges(stored)
       return nil if stored.nil? || stored == ""
 
@@ -1562,14 +1714,23 @@ module Runlight
                 elsif given.is_a?(Array) then given.each_with_index.map { |list, i| [i.to_s, list] }
                 else []
                 end
+      at = parsed.is_a?(Hash) ? Js.number(parsed["at"]) : 0
+      at = 0 if at.is_a?(Float) && (at.nan? || at.zero?)
+      times = parsed.is_a?(Hash) ? parsed["fetched"] : nil
       lists = {}
+      fetched = {}
       entries.each do |url, list|
         wrapped = list.is_a?(Array) ? list.map { |p| { (Js.string(p).include?(":") ? "ipv6Prefix" : "ipv4Prefix") => p } } : nil
         prefixes = AgentCheck.read_range_list({ "prefixes" => wrapped })
-        lists[url] = prefixes unless prefixes.nil?
+        next if prefixes.nil?
+
+        lists[url] = prefixes
+        time = times.is_a?(Hash) ? Js.number(times[url].nil? ? UNDEFINED : times[url]) : Float::NAN
+        fetched[url] = if time.is_a?(Float) && (time.nan? || time.zero?) then Js.truthy?(times) ? 0 : at
+                       else time
+                       end
       end
-      at = parsed.is_a?(Hash) ? Js.number(parsed["at"]) : 0
-      { "at" => at.is_a?(Float) && (at.nan? || at.zero?) ? 0 : at, "lists" => lists }
+      { "at" => at, "lists" => lists, "fetched" => fetched }
     end
     private :saved_agent_ranges
 
@@ -1577,18 +1738,23 @@ module Runlight
       init
       # Requests take a current schema version on trust; the scheduled check goes over every table and index.
       @store.migrate(true)
+      version = @store.setting(SITES_VERSION) || ""
       if @managed_sites
         @configured = @store.sites
         load_remotes
       end
       # A name or timezone changed in the dashboard by another process reaches this one too.
       @overrides = @store.site_overrides
+      @sites_version = version
+      @sites_checked_at = now
       refresh_agent_ranges
       @salts = {}
       sites.map { |site| site["timezone"] }.uniq.each { |timezone| current_salts(now, timezone) }
       drop_old_salts(now)
-      # Sign-in counts that have run out, some keyed by an address, and the hashing keys of days gone.
+      # Sign-in counts that have run out, and the hashing keys of days gone.
       Accounts::Throttle.sweep(@store, now)
+      Accounts::Lockout.sweep(@store, now)
+      @swept_at = now
       # Every site's retention covers any one site's that is still waiting.
       @pruning = []
       apply_retention

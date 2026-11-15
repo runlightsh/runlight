@@ -160,7 +160,9 @@ class CoreCheckTest < CoreTestCase
     end
   end
 
-  def test_a_timezone_changed_in_the_dashboard_reaches_another_process_at_its_next_check
+  # Every process keeps the sites in memory. A change bumps a setting, which the others look at every five
+  # seconds, so they read the sites again without waiting for a scheduled check they may never run.
+  def test_a_timezone_changed_in_the_dashboard_reaches_another_process_within_seconds
     with_file do |file|
       now = utc(2026, 10, 6, 12)
       clock = -> { now }
@@ -168,18 +170,64 @@ class CoreCheckTest < CoreTestCase
       b = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(file), "site" => { "hostnames" => ["example.com"], "timezone" => "UTC" }, "now" => clock })
       a.init
       b.init
-      a.update_site("default", { "timezone" => "Europe/Paris" })
-      assert_equal "UTC", b.site("default")["timezone"]
+      a.update_site("default", { "timezone" => "Europe/Paris", "name" => "Renamed" })
+      assert_equal "UTC", b.site("default")["timezone"], "not asked again within five seconds of the last look"
+      now += 5000
+      assert_equal "Europe/Paris", b.site("default")["timezone"]
+      assert_equal "Renamed", b.site("default")["name"]
       # A visit after the change, and days enough for its day to be built.
       b.store.db.run("INSERT INTO rl_sessions (id, site, visitor, started_at, last_at, pageviews) VALUES ('s1', 'default', 'v1', ?, ?, 1)", [now + DAY, now + DAY])
       now += 3 * DAY
-      assert_equal 0, b.build_rollups, "holding the old timezone, it builds nothing"
-      b.check
-      assert_equal "Europe/Paris", b.site("default")["timezone"]
-      assert_equal %w[2026-10-07 2026-10-08], b.store.rollup_days("default").sort, "then it builds the days after the change"
+      assert_operator b.build_rollups, :>=, 1, "it builds the days after the change, in the new timezone"
+      assert_equal %w[2026-10-07 2026-10-08], b.store.rollup_days("default").sort
       a.store.close
       b.store.close
     end
+  end
+
+  def test_a_site_added_connected_or_deleted_in_the_dashboard_reaches_another_process_within_seconds
+    with_file do |file|
+      now = utc(2026, 10, 6, 12)
+      clock = -> { now }
+      a = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(file), "managedSites" => true, "now" => clock })
+      b = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(file), "managedSites" => true, "now" => clock })
+      a.init
+      b.init
+      added = a.add_site({ "hostnames" => ["example.com"] })
+      now += 5000
+      assert_equal [added["id"]], b.sites.map { |site| site["id"] }
+      assert_equal added["id"], b.site_for("example.com")&.fetch("id"), "its visits are counted by every process"
+
+      # Nothing changed: a look reads one setting and leaves the sites as they are.
+      before = b.sites
+      now += 60_000
+      reads = 0
+      store = b.store
+      original = store.method(:sites)
+      store.define_singleton_method(:sites) { reads += 1; original.call }
+      assert_equal before, b.sites
+      assert_equal 0, reads, "the sites are read again only when the setting changed"
+
+      a.delete_site(added["id"])
+      now += 5000
+      assert_equal [], b.sites
+      assert_equal 1, reads
+      a.store.close
+      b.store.close
+    end
+  end
+
+  # A database that cannot be asked leaves the sites as they were, and is asked again five seconds later.
+  def test_a_look_for_changed_sites_that_fails_keeps_what_is_known
+    now = utc(2026, 10, 6, 12)
+    rl = Runlight::Core.new({ "store" => Runlight::Stores.sqlite(":memory:"), "site" => { "hostnames" => ["example.com"] }, "now" => -> { now } })
+    rl.init
+    asked = 0
+    rl.store.define_singleton_method(:setting) { |_key| asked += 1; raise "the database is away" }
+    now += 5000
+    _out, err = capture_io { 3.times { assert_equal ["default"], rl.sites.map { |site| site["id"] } } }
+    assert_equal 1, asked, "one look, not one for every request"
+    assert_includes err, "could not look for changed sites"
   end
 
   on_every_database("events left behind by an older version whose visit retention removed are swept once") do |kind|

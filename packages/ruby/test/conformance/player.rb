@@ -18,7 +18,7 @@ module Conformance
   # description of the format changes.
   class Player
     # The SHA-256 of http.json's description this runner was written against.
-    FORMAT_SHA256 = "d78e8af310f1c99155b84090df4ad252dfe4f78649943b0495a3998354c20134"
+    FORMAT_SHA256 = "9084b2fe4e39a473874020a8343a9aa1768f541b09e79b846240331a0b160dfb"
 
     # Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts.
     ENV_NAMES = %w[RUNLIGHT_TOKEN RUNLIGHT_SECRET CRON_SECRET RUNLIGHT_OBSERVE_KEY NODE_ENV].freeze
@@ -345,8 +345,10 @@ module Conformance
       out
     end
 
-    # {{totp:name}} as the six-digit code for the captured secret at the step's clock, then {{name}}.
+    # {{pad:N}} as N letters x, for text past a limit that the file should not hold, then {{totp:name}} as the
+    # six-digit code for the captured secret at the step's clock, then {{name}}.
     def fill_totp(text, kept)
+      text = text.gsub(/\{\{pad:(\d+)\}\}/) { "x" * Regexp.last_match(1).to_i }
       out = text.dup
       text.scan(/\{\{totp:(\w+)\}\}/) do |(name)|
         whole = "{{totp:#{name}}}"

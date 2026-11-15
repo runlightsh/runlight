@@ -8,7 +8,16 @@ module Runlight
       SHORTENER_DOMAINS = %w[bit.ly bitly.com j.mp dub.sh dub.co dub.link short.gy rebrand.ly rebrandly.com rb.gy].freeze
       # The most clicks a day one imported link gets from a daily count.
       MAX_DAILY = 10_000
-      private_constant :SHORTENER_DOMAINS, :MAX_DAILY
+      # The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a
+      # longer history is left behind, so no source, however much it sends, can fill memory or hold the database.
+      MAX_LINK_CLICKS = 100_000
+      # An IPv4 address, or what reads as an IPv6 one, anywhere in a text.
+      ADDRESS = /(\A|[^\d.])\d{1,3}(\.\d{1,3}){3}(?![\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}/in
+      # What a user agent has and a place name does not: a product with its version (Chrome/129), or its usual first words.
+      AGENT = %r{[a-z]/\d|mozilla|applewebkit}in
+      # A browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user agent.
+      NAME = /\A[A-Za-z_][A-Za-z0-9 ._+-]{0,39}\z/
+      private_constant :SHORTENER_DOMAINS, :MAX_DAILY, :ADDRESS, :AGENT, :NAME
 
       # Browser and system names as other tools write them, in Runlight's spelling.
       BROWSERS = {
@@ -46,14 +55,39 @@ module Runlight
         v == "" ? "" : Js.upper(Js.slice(v, 0, 1)) + Js.slice(v, 1)
       end
 
-      # A browser name in Runlight's spelling: a known one, or the name with a capital first letter.
-      def browser(name)
-        BROWSERS[Js.lower(name)] || title(name)
+      # Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in
+      # any column. A name that is not one Runlight knows is kept only when it reads as a name, and nothing else.
+      def named(name)
+        text = Js.trim(name)
+        text.match?(NAME) && !text.b.match?(ADDRESS) ? text : ""
       end
 
-      # A system name in Runlight's spelling, or the name as given.
+      # A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for anything else.
+      def browser(name)
+        BROWSERS[Js.lower(name)] || title(named(name))
+      end
+
+      # A system name in Runlight's spelling, or a name as given, or none for anything that is not a name.
       def system_name(name)
-        SYSTEMS[Js.lower(name)] || name
+        SYSTEMS[Js.lower(name)] || named(name)
+      end
+
+      # Free text about a place as given, or none when it holds an address or reads as a user agent.
+      def place_name(name)
+        bytes = Js.scrub(name).b
+        bytes.match?(ADDRESS) || bytes.match?(AGENT) ? "" : name
+      end
+
+      # A screen as 1440x900, or none.
+      def screen_size(value)
+        text = Js.trim(value)
+        text.match?(/\A\d{1,5}x\d{1,5}\z/) ? text : ""
+      end
+
+      # A language tag such as en or pt-BR, or none.
+      def language_tag(value)
+        text = Js.trim(value)
+        text.match?(/\A[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}\z/) ? text : ""
       end
 
       def device(name)
@@ -84,7 +118,9 @@ module Runlight
       def write_link(runlight, site, source, foreign, history, link_domain = ->(_domain) {})
         source_id = Js.string(foreign["sourceId"])
         id = imported_link_id(source, source_id)
-        return { "status" => "skipped", "clicks" => 0 } unless runlight.store.link_by_id(id).nil?
+        # Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+        # left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+        return { "status" => "skipped", "clicks" => 0 } if runlight.store.link_exists(id)
 
         slug = foreign["slug"].to_s
         taken = runlight.store.link_by_slug(slug)
@@ -125,6 +161,8 @@ module Runlight
 
           made = {}
           (history["clicks"] || []).each do |c|
+            break if clicks >= MAX_LINK_CLICKS
+
             ts = c["ts"]
             next unless ts.is_a?(Integer) || (ts.is_a?(Float) && ts.finite?)
 
@@ -143,7 +181,7 @@ module Runlight
                     Http::Url.new("https://#{host}/#{slug}")
               page = Sources.parse_page(url)
               country = Js.slice(Js.upper(str(c, "country")), 0, 2)
-              raw_region = str(c, "region")
+              raw_region = place_name(str(c, "region"))
               region = raw_region.empty? ? "" : Js.slice(Js.upper(raw_region.include?("-") ? raw_region : "#{country}-#{raw_region}"), 0, 10)
               store.insert_session(
                 {
@@ -160,14 +198,14 @@ module Runlight
                   "utmContent" => page["utm"]["content"],
                   "country" => country.match?(/\A[A-Z]{2}\z/) ? country : "",
                   "region" => country.empty? ? "" : region,
-                  "city" => Js.slice(str(c, "city"), 0, 100),
+                  "city" => Js.slice(place_name(str(c, "city")), 0, 100),
                   "browser" => browser(str(c, "browser")),
                   "browserVersion" => "",
                   "os" => system_name(str(c, "os")),
                   "osVersion" => "",
                   "device" => device(str(c, "device")),
-                  "screen" => text(c, "screen"),
-                  "language" => text(c, "language"),
+                  "screen" => screen_size(text(c, "screen")),
+                  "language" => language_tag(text(c, "language")),
                 ),
               )
               store.db.run("UPDATE rl_sessions SET imported = 1 WHERE id = ?", [session])
@@ -188,7 +226,7 @@ module Runlight
             next if (start.is_a?(Float) && !start.finite?) || !(d["clicks"].is_a?(Numeric) && d["clicks"].positive?)
 
             # A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-            n = [d["clicks"], MAX_DAILY].min.floor
+            n = [d["clicks"].floor, MAX_DAILY, MAX_LINK_CLICKS - clicks].min
             i = 0
             while i < n
               store.insert_event({
@@ -218,7 +256,7 @@ module Runlight
         { "status" => "created", "clicks" => clicks }
       end
 
-      private_class_method :str, :text
+      private_class_method :str, :text, :named
     end
   end
 end

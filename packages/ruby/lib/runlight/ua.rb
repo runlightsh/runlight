@@ -25,7 +25,7 @@ module Runlight
       ["Instagram", /Instagram (\d+)/],
       ["Firefox", %r{(?:Firefox|FxiOS)/(\d+)}],
       ["Chrome", %r{(?:CriOS|Chrome)/(\d+)}],
-      ["Safari", %r{Version/(\d+)[\d.]* (?:Mobile/[^#{Js::SPACE}]+ )?Safari/}],
+      ["Safari", %r{Version/(\d+)(?:\.[\d.]*)? (?:Mobile/[^#{Js::SPACE}]+ )?Safari/}],
       ["Internet Explorer", %r{(?:MSIE |Trident/#{DOT}*rv:)(\d+)}],
     ].freeze
 
@@ -42,15 +42,24 @@ module Runlight
     PERSON = /mozilla|opera/in
     private_constant :BROWSERS, :WINDOWS, :IOS, :PERSON
 
+    # The most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past
+    # it is parsed.
+    MAX_UA = 512
+
     module_function
+
+    def cap(value)
+      Js.length(value) > MAX_UA ? Js.slice(value, 0, MAX_UA) : Js.scrub(value)
+    end
 
     # The AI agent a user agent names: a Hash {"name", "company", "kind", "token"}, or nil.
     def ai_agent(ua)
-      lower = Js.lower(ua)
+      lower = Js.lower(cap(ua))
       Data::Agents::AI_AGENTS.find { |agent| lower.include?(agent["token"]) }
     end
 
     def bot?(ua)
+      ua = cap(ua)
       return true if Js.length(ua) < 20 || !ua.b.match?(PERSON)
 
       ua.b.match?(Data::Agents::BOT_PATTERN)
@@ -58,7 +67,8 @@ module Runlight
 
     # hints: {"brands", "mobile", "platform"}, each optional. screen_width: Integer, Float, or nil.
     def parse_client(ua, hints = {}, screen_width = nil)
-      ua = Js.scrub(ua)
+      ua = cap(ua)
+      hints = { "brands" => cap(hints["brands"] || ""), "mobile" => cap(hints["mobile"] || ""), "platform" => cap(hints["platform"] || "") }
       browser = "Other"
       browser_version = ""
       BROWSERS.each do |name, pattern|
@@ -115,6 +125,6 @@ module Runlight
       Js.trim((value || "").delete('"'))
     end
 
-    private_class_method :unquote
+    private_class_method :unquote, :cap
   end
 end

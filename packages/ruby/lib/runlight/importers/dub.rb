@@ -78,7 +78,8 @@ module Runlight
                     "os" => Client.field(click, "os"),
                   })
                 end
-                break if events.length < 1000
+                # No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+                break if events.length < 1000 || clicks.length >= Write::MAX_LINK_CLICKS
 
                 page += 1
               end
