@@ -34,8 +34,9 @@ final class RateLimit
      *   folder; a Runlight on a clock given in code (tests, replays) counts on its own, since the same minutes
      *   come again
      * @param Cache|null $cache the app's own place for shared values, used in place of APCu and files
+     * @param string $name sets a second limiter's counts apart from the first's, in the Cache, APCu, and its own folder
      */
-    public function __construct(private readonly int $perMinute, private $now, private readonly ?string $dir = null, private readonly bool $shared = true, private readonly ?Cache $cache = null)
+    public function __construct(private readonly int $perMinute, private $now, private readonly ?string $dir = null, private readonly bool $shared = true, private readonly ?Cache $cache = null, private readonly string $name = '')
     {
     }
 
@@ -50,12 +51,12 @@ final class RateLimit
         $window = intdiv($ms, 60_000);
         $id = substr(hash('sha256', $this->key(intdiv($ms, 86_400_000)) . $ip), 0, 16);
         if ($this->shared && $this->cache !== null) {
-            $count = $this->cache->increment("runlight:rl:$window:$id", 120);
+            $count = $this->cache->increment("runlight:rl{$this->name}:$window:$id", 120);
             if ($count !== null) {
                 return $count <= $this->perMinute;
             }
         } elseif ($this->shared && self::apcu()) {
-            $name = "runlight:rl:$window:$id";
+            $name = "runlight:rl{$this->name}:$window:$id";
             apcu_add($name, 0, 120);
             $count = apcu_inc($name);
             if ($count !== false) {
@@ -103,7 +104,7 @@ final class RateLimit
     private function folder(): ?string
     {
         if ($this->folder === false) {
-            $this->folder = Scratch::dir('runlight-rate', $this->dir);
+            $this->folder = Scratch::dir('runlight-rate' . $this->name, $this->dir);
         }
         return $this->folder;
     }

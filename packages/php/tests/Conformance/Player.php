@@ -26,7 +26,7 @@ use Runlight\Json;
 final class Player
 {
     /** The SHA-256 of http.json's description this runner was written against. */
-    public const FORMAT_SHA256 = 'd78e8af310f1c99155b84090df4ad252dfe4f78649943b0495a3998354c20134';
+    public const FORMAT_SHA256 = '9084b2fe4e39a473874020a8343a9aa1768f541b09e79b846240331a0b160dfb';
 
     /** Environment the SDK reads defaults from, cleared while a scenario plays so nothing outside it counts. */
     public const ENV = ['RUNLIGHT_TOKEN', 'RUNLIGHT_SECRET', 'CRON_SECRET', 'RUNLIGHT_OBSERVE_KEY', 'NODE_ENV'];
@@ -405,6 +405,8 @@ final class Player
     /** {{totp:name}} as the six-digit code for the captured secret at the step's clock, then {{name}}. */
     private function fillTotp(string $text, array $kept): string
     {
+        // {{pad:N}} first: the letter x, N times, so a body past a size cap is not kept in the file.
+        $text = (string) preg_replace_callback('/\{\{pad:(\d+)\}\}/', static fn (array $m): string => str_repeat('x', (int) $m[1]), $text);
         $out = $text;
         if (preg_match_all('/\{\{totp:(\w+)\}\}/', $text, $matches, PREG_SET_ORDER)) {
             foreach ($matches as [$whole, $name]) {

@@ -78,7 +78,8 @@ final class SqlTest extends TestCase
     public function testTextIsOrderedByCodePoint(): void
     {
         $values = ['b', 'a ', 'A', "\u{FFFD}", "\u{1F600}", 'a', 'é'];
-        usort($values, Sql::codeOrder(...));
+        // The databases sort ties now, by bytes, which for UTF-8 is by code point.
+        usort($values, strcmp(...));
         $this->assertSame(['A', 'a', 'a ', 'b', 'é', "\u{FFFD}", "\u{1F600}"], $values, 'an emoji after U+FFFD, as code points order them and UTF-16 units do not');
     }
 }

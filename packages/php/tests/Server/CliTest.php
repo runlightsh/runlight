@@ -223,9 +223,18 @@ final class CliTest extends TestCase
         $this->assertSame("$dir/dbip-city-lite-2026-09.mmdb", $geo->newest());
         $this->assertNotNull($geo->lookup());
 
+        // The month's file is not out yet, so the next tries wait: five minutes, then twice as long each time.
+        $asked = [];
+        $geo->refresh($october + 4 * 60_000);
+        $this->assertSame([], $asked, 'not asked again within five minutes');
+        $geo->refresh($october + 5 * 60_000);
+        $this->assertSame(['https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz'], $asked);
+        $geo->refresh($october + 14 * 60_000);
+        $this->assertCount(1, $asked, 'then not within ten');
+
         $published[] = '2026-10';
         $asked = [];
-        $geo->refresh($october);
+        $geo->refresh($october + 15 * 60_000);
         $this->assertSame(['https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz'], $asked);
         $this->assertSame(["$dir/dbip-city-lite-2026-10.mmdb"], glob("$dir/*"), 'older releases go');
         $asked = [];

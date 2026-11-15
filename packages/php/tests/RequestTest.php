@@ -17,6 +17,17 @@ final class RequestTest extends TestCase
         return Request::fromServer(['REQUEST_METHOD' => 'GET', 'HTTP_HOST' => 'stats.example.com', 'REQUEST_URI' => '/runlight/?a=1', ...$extra], $stream ?: null)->url;
     }
 
+    public function testTheRequestTargetNeverChoosesTheHost(): void
+    {
+        // A target is a path and a query, whatever it looks like, so the host and origin stay the server's own.
+        foreach (['//evil.example/oauth/authorize', '/\\evil.example/x', '\\\\evil.example/x', 'http://evil.example/x?a=1', 'HTTPS://evil.example', '@evil.example/x', 'evil.example/x'] as $target) {
+            $url = new \Runlight\Http\Url(self::url(['REQUEST_URI' => $target]));
+            $this->assertSame('http://stats.example.com', $url->origin(), $target);
+        }
+        $this->assertSame('http://stats.example.com/x?a=1', self::url(['REQUEST_URI' => 'http://evil.example/x?a=1']));
+        $this->assertSame('http://stats.example.com//evil.example/oauth/authorize', self::url(['REQUEST_URI' => '//evil.example/oauth/authorize']));
+    }
+
     public function testTheSchemeIsHttpsWhenTheServerSaysSoOrAProxyDoes(): void
     {
         $this->assertSame('http://stats.example.com/runlight/?a=1', self::url([]));

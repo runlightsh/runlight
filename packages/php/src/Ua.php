@@ -33,7 +33,7 @@ final class Ua
         ['Instagram', '/Instagram (\d+)/'],
         ['Firefox', '/(?:Firefox|FxiOS)\/(\d+)/'],
         ['Chrome', '/(?:CriOS|Chrome)\/(\d+)/'],
-        ['Safari', '/Version\/(\d+)[\d.]* (?:Mobile\/[^' . Js::SPACE . ']+ )?Safari\//u'],
+        ['Safari', '/Version\/(\d+)(?:\.[\d.]*)? (?:Mobile\/[^' . Js::SPACE . ']+ )?Safari\//u'],
         ['Internet Explorer', '/(?:MSIE |Trident\/' . self::DOT . '*rv:)(\d+)/u'],
     ];
 
@@ -46,10 +46,18 @@ final class Ua
         '5.1' => 'XP',
     ];
 
+    /** The most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past it is parsed. */
+    public const MAX_UA = 512;
+
+    private static function cap(string $value): string
+    {
+        return strlen($value) > self::MAX_UA ? Js::slice($value, 0, self::MAX_UA) : $value;
+    }
+
     /** @return array{name: string, company: string, kind: string, token: string, ranges?: string}|null */
     public static function aiAgent(string $ua): ?array
     {
-        $lower = Js::lower($ua);
+        $lower = Js::lower(self::cap($ua));
         foreach (Agents::AI_AGENTS as $agent) {
             if (str_contains($lower, $agent['token'])) {
                 return $agent;
@@ -60,6 +68,7 @@ final class Ua
 
     public static function isBot(string $ua): bool
     {
+        $ua = self::cap($ua);
         if (Js::length($ua) < 20 || !preg_match('/mozilla|opera/i', $ua)) {
             return true;
         }
@@ -77,7 +86,8 @@ final class Ua
      */
     public static function parseClient(string $ua, array $hints = [], int|float|null $screenWidth = null): array
     {
-        $ua = Js::scrub($ua);
+        $ua = Js::scrub(self::cap($ua));
+        $hints = ['brands' => self::cap($hints['brands'] ?? ''), 'mobile' => self::cap($hints['mobile'] ?? ''), 'platform' => self::cap($hints['platform'] ?? '')];
         $browser = 'Other';
         $browserVersion = '';
         foreach (self::BROWSERS as [$name, $pattern]) {

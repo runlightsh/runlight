@@ -281,6 +281,8 @@ final class IngestTest extends CoreTestCase
             return $answer($url);
         });
         $t = new Harness('sqlite', ['updateAgentRanges' => true, 'fetcher' => $fetcher]);
+        // Date.UTC(2026, 10, 8, 12): no earlier than the lists that came with this version, which a download must be newer than.
+        $t->now = 1_794_139_200_000;
         $gptbot = 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)';
         $fetchFrom = static fn (Runlight $rl, string $ip): bool => $rl->observe(new Request('https://example.com/post', 'GET', ['user-agent' => $gptbot, 'host' => 'example.com', 'x-forwarded-for' => $ip]));
         $t->rl->check();

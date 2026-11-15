@@ -96,6 +96,9 @@ final class Routes
 
     public const DASHBOARD_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+    /** The longest domain name there can be. Anything longer is refused before a pattern reads it. */
+    private const MAX_DOMAIN = 253;
+
     /** A domain name, such as go.example.com. */
     public const DOMAIN_NAME = '/^(?=.{1,253}\z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\z/';
 
@@ -128,8 +131,6 @@ final class Routes
     private \WeakMap $managed;
     /** Requests from a member: full access apart from the install-wide controls. */
     private \WeakMap $members;
-    /** Questions to the assistant being answered now, per person, in this process. */
-    private array $open = [];
     /** @var array<string, array{body: string, etag: string, at: int}> the tracker per site, rebuilt when goals change */
     private array $trackers = [];
 
@@ -156,11 +157,11 @@ final class Routes
         }
 
         // Accounts: the standalone server passes its own, and an app turns them on with true. Sessions need a secret
-        // that outlives the process; in development without one, a made-up one does, so a restart signs everyone out.
+        // that outlives the request; in development without one, a made-up one kept in the database does.
         // An app left open on purpose (token: null) is treated like development here.
         $token = $this->token;
         $openSetup = $token === null || (($token === '') && self::isDevelopment());
-        $accountSecret = $runlight->secret ?? ($openSetup ? Hash::randomId(32) : null);
+        $accountSecret = $runlight->secret ?? ($openSetup && ($options['accounts'] ?? null) === true ? self::madeUpSecret($runlight) : null);
         $accounts = $options['accounts'] ?? null;
         if ($accounts instanceof Web) {
             $this->web = $accounts;
@@ -194,7 +195,9 @@ final class Routes
             'runlight' => $runlight,
             'base' => $this->base,
             'isOwner' => fn (Request $r): bool => $this->canRead($r) === true,
-            'isReader' => fn (Request $r): bool => $authorize !== null ? $authorize($r) === 'read' : ($web ? $web->access($r) === 'read' : false),
+            // An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+            'isReader' => fn (Request $r): bool => isset($this->sessionScope($r)['site']) || ($authorize !== null ? $authorize($r) === 'read' : ($web ? $web->access($r) === 'read' : false)),
+            'isSiteOnly' => fn (Request $r): bool => isset($this->sessionScope($r)['site']),
         ];
         if ($this->signIn !== null && $this->signIn !== '') {
             $oauth['signIn'] = $this->signIn;
@@ -212,6 +215,22 @@ final class Routes
     }
 
     // Helpers that need nothing of an instance.
+
+    /**
+     * The secret sessions are signed with where none was given and the app runs open. TypeScript makes one up
+     * for the life of its process; a PHP process serves one request, so one made up there would sign everyone
+     * out on the next. It is kept in the database instead, where every request finds the same one.
+     */
+    private static function madeUpSecret(object $runlight): string
+    {
+        try {
+            $runlight->store->migrate();
+            return $runlight->store->settingOrAdd('accounts-secret', static fn (): string => Hash::randomId(32));
+        } catch (\Throwable) {
+            // A database that cannot be reached answers for itself on the request; until then nobody is signed in.
+            return Hash::randomId(32);
+        }
+    }
 
     private static function escapeHtml(string $value): string
     {
@@ -286,7 +305,7 @@ final class Routes
         } else {
             $name = (string) preg_replace('/:\d*\z/', '', $first);
         }
-        return (string) preg_replace('/^www\./', '', (string) preg_replace('/\.+\z/', '', $name));
+        return (string) preg_replace('/^www\./', '', rtrim($name, '.'));
     }
 
     /**
@@ -306,8 +325,7 @@ final class Routes
     /** What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets. */
     private static function isEmail(string $value): bool
     {
-        $no = '[^' . Js::SPACE . '@<>"]+';
-        return (bool) preg_match("/^$no@$no\\.$no\\z/u", Js::scrub($value));
+        return Runlight::isEmail($value);
     }
 
     /**
@@ -702,6 +720,15 @@ final class Routes
         return $this->rl->store;
     }
 
+    /**
+     * A hub's manage token and an account kept to one site reach one site's settings and nothing of the install's,
+     * so neither is taken at its word about where this app lives: the Host of a request is the caller's to choose.
+     */
+    private function restricted(Request $request): bool
+    {
+        return isset($this->managed[$request]) || isset($this->sessionScope($request)['site']);
+    }
+
     /** Whether this request acts as the owner. "read" is someone signed in who may only read, such as a viewer. */
     private function sessionScope(Request $request): ?array
     {
@@ -889,10 +916,12 @@ final class Routes
      */
     private function checkLinkDomain(Request $request, Url $url, string $site, string $value): string|Response
     {
-        $domain = Js::lower(Js::trim($value));
-        $domain = (string) preg_replace('#^https?://#', '', $domain);
-        $domain = (string) preg_replace('#/.*\z#', '', $domain);
-        $domain = (string) preg_replace('/\.+\z/', '', $domain);
+        $given = Js::lower(Js::trim($value));
+        if (Js::length($given) > self::MAX_DOMAIN) {
+            return self::coded('That is not a domain name', 'domain_invalid', 400);
+        }
+        $domain = (string) preg_replace('#^https?://#', '', $given);
+        $domain = rtrim((string) preg_replace('#/.*\z#s', '', $domain), '.');
         $domain = (string) preg_replace('/^www\./', '', $domain);
         if (!preg_match(self::DOMAIN_NAME, $domain)) {
             return self::coded('That is not a domain name', 'domain_invalid', 400);
@@ -903,8 +932,8 @@ final class Routes
         // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
         // The request's own Host is the caller's to choose, so the configured address and the names people
         // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-        // the app knows its own address.
-        if (isset($this->managed[$request]) && $this->origin === null) {
+        // the app knows its own address, and neither does an account kept to one site, which has a hub's reach.
+        if ($this->restricted($request) && $this->origin === null) {
             return self::originNeeded();
         }
         $here = array_filter([$request->headers->get('host'), $request->headers->get('x-forwarded-host'), $url->host()], fn ($h) => Js::truthy($h));
@@ -1433,8 +1462,11 @@ final class Routes
                 // One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
                 // or use up a service's quota; one just set up can be tried at once. PHP forgets memory between
                 // requests, so when the last went out is kept in the install's settings.
+                // The minute is taken before the test goes out, in one step, so of tests asked for at once only one is sent.
                 $tested = 'test-sent:' . ($settings['source'] ?? '') . ':' . ($settings['service'] ?? '');
-                if ($this->rl->now() - (int) Js::number($this->store()->setting($tested) ?? 0) < 60_000) {
+                $asked = $this->rl->now();
+                $before = $this->store()->claimSetting($tested, $asked, 60_000);
+                if ($before === null) {
                     return self::coded('A test went out a moment ago. Wait a minute and try again.', 'test_soon', 429);
                 }
                 $t = Messages::translator(self::text($body, 'lang', 'en'))['t'];
@@ -1445,14 +1477,18 @@ final class Routes
                         break;
                     }
                 }
-                $this->rl->sendMail([
-                    'to' => $to,
-                    'subject' => $t('email.test.subject'),
-                    'text' => $t('email.test.body', ['service' => $name]),
-                    'html' => '<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
-                ]);
-                // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
-                $this->store()->setSetting($tested, (string) $this->rl->now());
+                try {
+                    $this->rl->sendMail([
+                        'to' => $to,
+                        'subject' => $t('email.test.subject'),
+                        'text' => $t('email.test.body', ['service' => $name]),
+                        'html' => '<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
+                    ]);
+                } catch (\Throwable $error) {
+                    // Only a test that went out counts, so one that failed can be tried again as soon as the setting is fixed.
+                    $this->store()->swapSetting($tested, (string) $asked, $before !== '' ? $before : '0');
+                    throw $error;
+                }
                 return self::json(['ok' => true]);
             }
 
@@ -1487,8 +1523,9 @@ final class Routes
                     // Links in the email point back to the configured address, or else to this dashboard at the address
                     // the request came to. An address in the body is never used, so whoever adds a report cannot point
                     // its links somewhere else. A report made from a hub needs the configured address, where its
-                    // unsubscribe link answers, since the Host its request names is the hub's to choose.
-                    if (isset($this->managed[$request]) && $this->origin === null) {
+                    // unsubscribe link answers, since the Host its request names is the hub's to choose. So does one
+                    // made by an account kept to one site.
+                    if ($this->restricted($request) && $this->origin === null) {
                         return self::originNeeded();
                     }
                     $home = ($this->origin ?? $url->origin()) . $this->base;
@@ -1527,13 +1564,12 @@ final class Routes
                 $viaHub = isset($this->managed[$request]);
                 $key = 'sample-sent:' . ($viaHub ? "site:{$site['id']}" : $report['id']);
                 $wait = $viaHub ? 600_000 : 60_000;
-                $last = (int) Js::number($this->store()->setting($key) ?? 0);
-                if ($this->rl->now() - $last < $wait) {
+                // The wait is taken in one step, so of samples asked for at once only one goes out.
+                if ($this->store()->claimSetting($key, $this->rl->now(), $wait) === null) {
                     return $viaHub
                         ? self::coded('A connected hub can send one sample every ten minutes. Wait a few minutes and try again.', 'sample_soon_hub', 429)
                         : self::coded('A sample went out a moment ago. Wait a minute and try again.', 'sample_soon', 429);
                 }
-                $this->store()->setSetting($key, (string) $this->rl->now());
                 $this->rl->deliverReport($report, $site);
                 return self::json(['ok' => true]);
             }
@@ -1625,34 +1661,59 @@ final class Routes
      * Counts a question to the assistant, which spends the owner's AI credit, or refuses it: past thirty an
      * hour or two at once for anyone, and past the owner's daily number for a viewer. Returns how to finish.
      *
-     * The hour's questions are kept in the install's settings, since PHP forgets memory between requests;
-     * how many are being answered at once is counted in this process, where a request runs to its end.
+     * Both counts are kept in the install's settings, since PHP forgets memory between requests and each
+     * request is a process of its own.
      */
     private function askTurn(string $who, bool $owner): Response|\Closure
     {
         $now = $this->rl->now();
+        $store = $this->store();
+        $soon = static fn (): Response => self::coded('You have asked a lot in a short time. Wait a little and ask again.', 'assistant_soon', 429);
+        // Each list is rewritten only from the one that was read, so of questions sent at once, to one process
+        // or to many, each is counted. A question still being answered holds its place under a name of its own
+        // until it is done, or for as long as an answer may take, should its process end before it says so.
+        $openKey = "assistant-open:$who";
+        $place = 'p' . Hash::randomId(8);
+        $took = $store->editSetting($openKey, static function (array $open) use ($now, $place): ?array {
+            $open = array_filter($open, static fn ($at): bool => (is_int($at) || is_float($at)) && $now - $at < Assistant::DEADLINE_MS);
+            return count($open) >= self::ASK_AT_ONCE ? null : [...$open, $place => $now];
+        });
+        if (!$took) {
+            return $soon();
+        }
+        $done = static function () use ($store, $openKey, $place): void {
+            $store->editSetting($openKey, static function (array $open) use ($place): array {
+                unset($open[$place]);
+                return $open;
+            });
+        };
         $hourKey = "assistant-hour:$who";
-        $saved = Json::tryDecode((string) $this->store()->setting($hourKey), true);
-        $at = array_values(array_filter(is_array($saved) ? $saved : [], fn ($t) => (is_int($t) || is_float($t)) && $now - $t < 3_600_000));
-        $open = $this->open[$who] ?? 0;
-        if (count($at) >= self::ASK_PER_HOUR || $open >= self::ASK_AT_ONCE) {
-            return self::coded('You have asked a lot in a short time. Wait a little and ask again.', 'assistant_soon', 429);
+        $counted = $store->editSetting($hourKey, static function (array $at) use ($now): ?array {
+            $at = array_values(array_filter($at, static fn ($t): bool => (is_int($t) || is_float($t)) && $now - $t < 3_600_000));
+            return count($at) >= self::ASK_PER_HOUR ? null : [...$at, $now];
+        });
+        if (!$counted) {
+            $done();
+            return $soon();
         }
         if (!$owner) {
-            $counted = $this->countAsk($who, $now);
-            if ($counted === null) {
-                return self::coded('You have asked a lot in a short time. Wait a little and ask again.', 'assistant_soon', 429);
-            }
-            if ($counted !== true) {
-                return self::coded('Viewers can ask ' . Js::string($counted) . ' questions a day. Ask again tomorrow.', 'assistant_daily', 429, ['limit' => Js::string($counted)]);
+            $asked = $this->countAsk($who, $now);
+            if ($asked !== true) {
+                // A question the day's number refused was never asked, so it does not count in the hour either.
+                $store->editSetting($hourKey, static function (array $at) use ($now): array {
+                    $last = array_search($now, $at, true);
+                    if ($last !== false) {
+                        unset($at[$last]);
+                    }
+                    return array_values($at);
+                });
+                $done();
+                return $asked === null
+                    ? $soon()
+                    : self::coded('Viewers can ask ' . Js::string($asked) . ' questions a day. Ask again tomorrow.', 'assistant_daily', 429, ['limit' => Js::string($asked)]);
             }
         }
-        $at[] = $now;
-        $this->store()->setSetting($hourKey, Json::encode($at));
-        $this->open[$who] = $open + 1;
-        return function () use ($who): void {
-            $this->open[$who]--;
-        };
+        return $done;
     }
 
     /**
@@ -1765,7 +1826,8 @@ final class Routes
         foreach (['content-type', 'content-length', self::SHARE_HEADER, self::EMBED_HEADER] as $name) {
             $headers->delete($name);
         }
-        return function (string $apiPath, array $params) use ($headers, $url, $defaultSite): Response {
+        $from = $request->remoteAddress;
+        return function (string $apiPath, array $params) use ($headers, $url, $defaultSite, $from): Response {
             $target = new Url("{$this->base}$apiPath", $url->origin());
             $query = $target->searchParams();
             foreach ($params as [$key, $value]) {
@@ -1776,7 +1838,7 @@ final class Routes
                 $query->set('site', $defaultSite);
             }
             $target->setSearchParams($query);
-            return $this->api(new Request($target->href(), 'GET', $headers, '', ''), $apiPath, $target);
+            return $this->api(new Request($target->href(), 'GET', $headers, '', $from), $apiPath, $target);
         };
     }
 
@@ -1796,15 +1858,17 @@ final class Routes
             $assistant = ($path === '/api/assistant' && $method === 'GET') || ($path === '/api/assistant/chat' && $method === 'POST');
             $manage = $scoped['role'] === 'member' && self::managePath($method, $path);
             if (!$read && !$assistant && !$manage) return self::coded('Your account only has access to its assigned site', 'site_access', 403);
+            // Each body is read here as the route itself reads it (a byte order mark skipped, bytes that are not
+            // UTF-8 repaired), so nothing this check cannot read is read differently further on.
             if ($path === '/api/assistant/chat') {
-                $body = json_decode($request->text(), true);
-                if (!is_array($body) || ($body['site'] ?? null) !== $site) return self::coded('Unknown site', 'unknown_site', 404);
+                [$parsed, $body] = Js::parseJson($request->text());
+                if (!$parsed || !$body instanceof \stdClass || Js::get($body, 'site') !== $site) return self::coded('Unknown site', 'unknown_site', 404);
             }
             if ($sitePath && self::isJson($request)) {
                 // Where a site lives stays with whoever runs the install: an account kept to the site may rename it, as
                 // a hub may, never move it.
-                $body = json_decode($request->text(), true);
-                if (is_array($body) && array_key_exists('hostnames', $body)) return self::coded("Your account cannot change a site's domains", 'site_domains', 403);
+                [$parsed, $body] = Js::parseJson($request->text());
+                if ($parsed && Js::truthy($body) && Js::isObject($body) && !(Js::get($body, 'hostnames') instanceof Undefined)) return self::coded("Your account cannot change a site's domains", 'site_domains', 403);
             }
             $url = new Url($url->href());
             $query = $url->searchParams();
@@ -2278,6 +2342,11 @@ final class Routes
             if ($hub !== null && $this->store()->setting("token-origin:{$hub['id']}") !== $origin) {
                 return self::coded("This hub's address is not the one it connected from. Connect the site again from here.", 'pick_hub', 403);
             }
+            // An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+            // one the address its request came to.
+            if ($hub === null && isset($this->sessionScope($request)['site']) && $origin !== ($this->origin ?? $url->origin())) {
+                return self::coded("Your account can only pick from this dashboard's own address", 'pick_own', 403);
+            }
             return self::json(['ticket' => $this->pickTicket($origin, $site['id'], $back)]);
         }
 
@@ -2418,7 +2487,7 @@ final class Routes
         $recorded = 0;
         // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         foreach ($keep as $p) {
-            if ($rl->observe(new Request($p['page']->href(), 'GET', ['user-agent' => $p['userAgent']]), $p['at'], ['agentIp' => $p['ip']])) {
+            if ($rl->observe(new Request($p['page']->href(), 'GET'), $p['at'], ['agentIp' => $p['ip'], 'userAgent' => $p['userAgent']])) {
                 $recorded++;
             }
         }

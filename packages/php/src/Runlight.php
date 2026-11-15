@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Runlight;
 
+use Runlight\Accounts\Lockout;
 use Runlight\Accounts\Throttle;
 use Runlight\Db\TablesBusy;
 use Runlight\Http\BodyTooLong;
@@ -94,6 +95,14 @@ final class Runlight
 
     /** What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets. */
     public const EMAIL = '/^[^' . Js::SPACE . '@<>"]+@[^' . Js::SPACE . '@<>"]+\.[^' . Js::SPACE . '@<>"]+$/uD';
+    /** The longest an address is read: no real one is longer, and the pattern is slow on a very long string. */
+    public const EMAIL_MAX = 320;
+
+    /** Whether text passes for an email address, and is no longer than one. */
+    public static function isEmail(string $value): bool
+    {
+        return strlen($value) <= 4 * self::EMAIL_MAX && Js::length($value) <= self::EMAIL_MAX && preg_match(self::EMAIL, Js::scrub($value)) === 1;
+    }
 
     /** Raised whenever what a rolled-up day holds changes. 2: the heatmap counts visits only. 3: a page counts the views that can report time. */
     private const ROLLUP_VERSION = 3;
@@ -106,6 +115,10 @@ final class Runlight
     private const ROLLUP_DELAY_MS = 2 * 3_600_000;
     /** The longest a tracker hit waits for the tables while another process creates or upgrades them, in seconds. */
     private const TRACKER_WAIT = 10;
+    /** How often a request does the tidying the scheduled check does, for an app that never schedules one. */
+    private const TIDY_EVERY_MS = 3_600_000;
+    /** How soon the link domains are asked for again after the database could not give them. */
+    private const LINK_DOMAINS_RETRY_MS = 5_000;
     /** How often the scheduled check downloads the agents' address lists, when updateAgentRanges is on. */
     private const AGENT_RANGES_EVERY_MS = 86_400_000;
 
@@ -155,6 +168,15 @@ final class Runlight
     /** Whether that warning is shared with other requests, so it comes at most once a day rather than once a request. */
     private bool $warnShared;
     private ?RateLimit $limit;
+    /** AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast. */
+    private ?RateLimit $fetchLimit;
+    /**
+     * Whether, with trustProxy left at its default, a request that comes with no address of its connection has
+     * its forwarding headers believed: on a hosting platform, whose proxy is the only way in, and outside
+     * production. A production server of its own could be reached straight from the internet.
+     */
+    private ?bool $trustUnaddressed = null;
+    private bool $warnUnaddressed = true;
     /** @var callable(): int */
     private $clock;
     private bool $ready = false;
@@ -168,6 +190,8 @@ final class Runlight
     private ?array $agentRanges = null;
     /** @var array{at: int, domains: array<string, true>}|null */
     private ?array $linkDomainCache = null;
+    /** When this process last asked whether tidying is due, or null. */
+    private ?int $tidyAsked = null;
     /** @var array<string, array{day: string, today: string, yesterday: ?string}> each timezone's salts for its current day, so a lookup is a map read until midnight there */
     private array $salts = [];
     private ?array $mailInCode;
@@ -213,6 +237,7 @@ final class Runlight
         $this->dataDir = isset($options['dataDir']) && $options['dataDir'] !== '' ? (string) $options['dataDir'] : null;
         $this->cache = ($options['cache'] ?? null) instanceof Cache ? $options['cache'] : null;
         $this->limit = !($number > 0) ? null : new RateLimit((int) min(PHP_INT_MAX, floor($number)), fn (): int => $this->now(), $this->dataDir, !isset($options['now']), $this->cache);
+        $this->fetchLimit = $this->limit === null ? null : new RateLimit((int) min(PHP_INT_MAX, floor($number * 10)), fn (): int => $this->now(), $this->dataDir, !isset($options['now']), $this->cache, '-fetch');
         $this->clock = $options['now'] ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->fetcher = $options['fetcher'] ?? new CurlFetcher();
         $this->localInstalls = (bool) ($options['localInstalls'] ?? false);
@@ -221,7 +246,7 @@ final class Runlight
         $this->linkPath = '/' . preg_replace('#^/+|/+$#D', '', (string) ($options['linkPath'] ?? '/go'));
         $mail = $options['mail'] ?? null;
         if (is_array($mail) && isset($mail['send']) && is_callable($mail['send'])) {
-            if (!preg_match(self::EMAIL, Js::string($mail['from'] ?? ''))) {
+            if (!self::isEmail(Js::string($mail['from'] ?? ''))) {
                 throw new \InvalidArgumentException("Runlight: the app's mailer needs a from address, like reports@example.com");
             }
             $this->appMailer = [
@@ -352,7 +377,7 @@ final class Runlight
             $settings[$f['name']] = $given === '' && $sameConnection ? Js::string($before[$f['name']] ?? '') : $given;
         }
         $from = Js::trim(Js::string($input['from'] ?? ''));
-        if (!preg_match(self::EMAIL, $from)) {
+        if (!self::isEmail($from)) {
             throw new MailError('Enter the address reports come from, like reports@example.com', 'mail_from', []);
         }
         $fromName = Js::slice(Js::trim(Js::string($input['fromName'] ?? '')), 0, 80);
@@ -485,6 +510,46 @@ final class Runlight
             }
         }
         $this->ready = true;
+        $this->tidy();
+    }
+
+    /**
+     * What the scheduled check clears of the counts made from addresses, at most once an hour across requests,
+     * for an app that never schedules a check: rate-limit windows that have ended and the keys their addresses
+     * were hashed with, and sign-in and registration counts that ran out. A PHP process forgets nothing of its
+     * own when it ends, since these live in files and settings, so without this they would wait for a request
+     * that happens to count again. Runs when the tables are first used and on tracker hits, and never fails
+     * the request it runs in.
+     */
+    public function tidy(): void
+    {
+        $now = $this->now();
+        if ($this->tidyAsked !== null && $now - $this->tidyAsked < 60_000) {
+            return;
+        }
+        $this->tidyAsked = $now;
+        try {
+            // Taken in one step, so of requests at once only one does the work.
+            if ($this->store->claimSetting('tidied-at', $now, self::TIDY_EVERY_MS) !== null) {
+                $this->sweepAddresses($now);
+            }
+        } catch (\Throwable) {
+            // A database opened read-only, or busy: the next request, or the scheduled check, tidies.
+        }
+    }
+
+    /** Deletes every count made from an address that has run out, and the keys older ones were hashed with. */
+    private function sweepAddresses(int $now): void
+    {
+        $this->limit?->sweep();
+        $this->fetchLimit?->sweep();
+        // Sign-in and registration counts that ran out, and hashing keys older than yesterday, so nothing made from an address lasts a day.
+        Throttle::sweep($this->store, $now);
+        Lockout::sweep($this->store, $now);
+        // Registrations were once counted under a key that never changed, in a row only the next one replaced.
+        if ($this->store->setting(OAuth::OLD_REGISTRATIONS) !== null) {
+            $this->store->setSetting(OAuth::OLD_REGISTRATIONS, null);
+        }
     }
 
     /**
@@ -714,7 +779,11 @@ final class Runlight
             }
         }
         $there ??= $sites[0];
-        $thereHostnames = is_array($there['hostnames'] ?? null) ? array_values(array_filter($there['hostnames'], 'is_string')) : [];
+        // Checked before anything is saved: a site there has an id and a name, as text.
+        if (!is_array($there) || !is_string($there['id'] ?? null) || $there['id'] === '' || Js::length($there['id']) > 64 || !is_string($there['name'] ?? null)) {
+            throw new SettingsError("$url did not answer like a Runlight install", 'connect_not_runlight', ['url' => $url]);
+        }
+        $thereHostnames = is_array($there['hostnames'] ?? null) ? array_values(array_filter($there['hostnames'], static fn (mixed $h): bool => is_string($h) && $h !== '')) : [];
         // Connecting the same site again (to allow changes, or with a new token) updates it in place.
         foreach ($this->remotes as $existing => $known) {
             if ($known['url'] === $url && $known['site'] === ($there['id'] ?? null)) {
@@ -728,13 +797,15 @@ final class Runlight
                 return $this->site((string) $existing);
             }
         }
-        $host = Js::lower((string) preg_replace('/[^a-z0-9._-]/iu', '-', (string) ($thereHostnames[0] ?? (new Url($url))->host())));
+        $host = Js::lower((string) preg_replace('/^[^a-z0-9]+/i', '', (string) preg_replace('/[^a-z0-9._-]/iu', '-', (string) ($thereHostnames[0] ?? (new Url($url))->host()))));
+        $host = $host !== '' ? $host : 'site';
         $id = Js::slice($host, 0, 56);
         for ($n = 2; $this->hasSite($id); $n++) {
             $id = Js::slice($host, 0, 56) . "-$n";
         }
         $name = Js::slice(Js::trim(Js::string($input['name'] ?? '')), 0, 80);
-        $name = $name !== '' ? $name : Js::string($there['name'] ?? Undefined::value());
+        $name = $name !== '' ? $name : Js::slice(Js::trim($there['name']), 0, 80);
+        $name = $name !== '' ? $name : $host;
         // No hostnames: tracker hits never land on a site that is counted elsewhere.
         $timezone = $there['timezone'] ?? null;
         $site = ['id' => $id, 'name' => $name, 'hostnames' => [], 'timezone' => is_string($timezone) && Time::isTimezone($timezone) ? $timezone : 'UTC'];
@@ -1277,7 +1348,7 @@ final class Runlight
                 ? ($last('x-forwarded-for') ?? $h->get('x-real-ip') ?? $h->get('cf-connecting-ip'))
                 : ($this->trustProxy === 'x-forwarded-for' ? $last('x-forwarded-for') : $h->get((string) $this->trustProxy));
             if ($forwarded !== null && Js::trim($forwarded) !== '') {
-                return Js::trim($forwarded);
+                return self::bareAddress(Js::trim($forwarded));
             }
         }
         return (string) ($context['ip'] ?? $request->remoteAddress);
@@ -1295,12 +1366,31 @@ final class Runlight
         if ($this->trustProxy === false) {
             return false;
         }
+        if (!$this->trustPrivate) {
+            return true;
+        }
         $ip = (string) ($context['ip'] ?? $request->remoteAddress);
-        if (!$this->trustPrivate || $ip === '' || !Safefetch::publicAddress($ip)) {
+        $h = $request->headers;
+        if ($ip === '') {
+            // Read only here, when a request names no address: an adapter that always passes one (the WordPress
+            // plugin, which ships without Env) never asks the environment.
+            $this->trustUnaddressed ??= Env::get('NODE_ENV') !== 'production' || self::hostingPlatform();
+            if ($this->trustUnaddressed) {
+                return true;
+            }
+            // Said once: nothing says where this request came from, so it could have come straight from the internet.
+            if ($this->warnUnaddressed && ($h->has('x-forwarded-for') || $h->has('x-real-ip') || $h->has('cf-connecting-ip'))) {
+                $this->warnUnaddressed = false;
+                if ($this->firstWarningToday('unaddressed')) {
+                    Log::write("Runlight: a request came with forwarding headers and no connection address, so the headers are not believed: in production, a client that reaches this server straight from the internet could write them itself and choose its own address. Behind a proxy of your own (nginx, Caddy, a load balancer), set 'trustProxy' to true or to the header it sets, or pass the connection's address as the request's remoteAddress. Until then every visitor with the same browser counts as one.");
+                }
+            }
+            return false;
+        }
+        if (!Safefetch::publicAddress($ip)) {
             return true;
         }
         // Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
-        $h = $request->headers;
         if ($this->warnDirect && ($h->has('x-forwarded-for') || $h->has('x-real-ip') || $h->has('cf-connecting-ip'))) {
             $this->warnDirect = false;
             if ($this->firstWarningToday()) {
@@ -1317,19 +1407,39 @@ final class Runlight
      * temporary folder, which needs nothing set up. A Runlight on a clock given in code (tests) warns once per
      * instance, as the TypeScript SDK does.
      */
-    private function firstWarningToday(): bool
+    private function firstWarningToday(string $which = 'direct'): bool
     {
         if (!$this->warnShared) {
             return true;
         }
         if ($this->cache !== null) {
-            return $this->cache->add('runlight:warned-direct', '1', 86_400);
+            return $this->cache->add("runlight:warned-$which", '1', 86_400);
         }
         if (function_exists('apcu_enabled') && apcu_enabled()) {
-            return apcu_add('runlight:warned-direct', 1, 86_400);
+            return apcu_add("runlight:warned-$which", 1, 86_400);
         }
         $dir = Scratch::dir('runlight-rate', $this->dataDir);
-        return $dir === null || Scratch::mark("$dir/warned-direct", 86_400);
+        return $dir === null || Scratch::mark("$dir/warned-$which", 86_400);
+    }
+
+    /** A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and "[2001:db8::1]:443" are the address alone. */
+    private static function bareAddress(string $value): string
+    {
+        if (preg_match('/^\[([^\]]*)\](?::\d+)?$/D', $value, $bracketed)) {
+            return $bracketed[1];
+        }
+        return preg_match('/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/D', $value) ? substr($value, 0, (int) strrpos($value, ':')) : $value;
+    }
+
+    /** Whether this runs on a hosting platform that puts its own proxy in front of every request, so forwarding headers are its own. */
+    private static function hostingPlatform(): bool
+    {
+        foreach (['VERCEL', 'NETLIFY', 'CF_PAGES', 'AWS_LAMBDA_FUNCTION_NAME', 'K_SERVICE', 'WEBSITE_SITE_NAME', 'FLY_APP_NAME', 'RENDER', 'RAILWAY_ENVIRONMENT', 'DENO_DEPLOYMENT_ID', 'DYNO'] as $name) {
+            if (Js::truthy(Env::get($name))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1394,17 +1504,28 @@ final class Runlight
      *
      * @param array{ip?: string} $context
      */
-    private function forwardedHost(Request $request, array $context = []): ?string
+    public function forwardedHost(Request $request, array $context = []): ?string
     {
         return $this->trusts($request, $context) ? $request->headers->get('x-forwarded-host') : null;
     }
 
     /**
-     * Handles one tracker request. Bad input is dropped quietly; only a database that keeps failing throws.
+     * Handles one tracker request. Never throws: bad input is dropped quietly, and a hit the store could not take is logged.
      *
      * @param array{ip?: string} $context
      */
     public function collect(Request $request, array $context = []): void
+    {
+        try {
+            $this->take($request, $context);
+        } catch (\Throwable $error) {
+            // Analytics must never break the app it counts for.
+            Log::write("Runlight: could not record an event $error");
+        }
+    }
+
+    /** @param array{ip?: string} $context */
+    private function take(Request $request, array $context): void
     {
         $length = Js::number($request->headers->get('content-length') ?? 0);
         if ($length > Payload::MAX_BODY) {
@@ -1433,6 +1554,7 @@ final class Runlight
         if (!$this->readyWithin(self::TRACKER_WAIT)) {
             return;
         }
+        $this->tidy();
 
         // A database too busy to take the hit right now (every pooled connection held by long reports, or
         // another process writing the SQLite file) gets it a little later, at the time it arrived.
@@ -1591,13 +1713,78 @@ final class Runlight
         if ($this->linkDomainCache !== null && $now - $this->linkDomainCache['at'] < 30_000) {
             return $this->linkDomainCache['domains'];
         }
-        $this->init();
-        $domains = [];
-        foreach ($this->store->linkDomains() as $d) {
-            $domains[$d['domain']] = true;
+        // Middleware asks on every request to the app, so a database that is down must not take the app down
+        // with it: the domains last read stand (none, when there were none), and it is asked again in a few
+        // seconds. A PHP request is a process of its own, so the word that it is down is shared between them.
+        $retry = ['at' => $now - 30_000 + self::LINK_DOMAINS_RETRY_MS, 'domains' => $this->linkDomainCache['domains'] ?? []];
+        if ($this->linkDomainsDown()) {
+            $this->linkDomainCache = $retry;
+            return $retry['domains'];
         }
-        $this->linkDomainCache = ['at' => $now, 'domains' => $domains];
+        try {
+            $this->init();
+            $domains = [];
+            foreach ($this->store->linkDomains() as $d) {
+                $domains[$d['domain']] = true;
+            }
+            $this->linkDomainCache = ['at' => $now, 'domains' => $domains];
+        } catch (\Throwable $error) {
+            $domains = $retry['domains'];
+            $this->linkDomainCache = $retry;
+            $this->linkDomainsFailed($error);
+        }
         return $domains;
+    }
+
+    /** The name requests share the word under that the link domains could not be read. */
+    private const LINKS_DOWN = 'runlight:links-down';
+
+    /**
+     * Whether another request could not read the link domains a moment ago: kept as the proxy warning is, in
+     * the app's Cache, APCu, or a marker file. A Runlight on a clock given in code (tests) shares nothing.
+     */
+    private function linkDomainsDown(): bool
+    {
+        if (!$this->warnShared) {
+            return false;
+        }
+        $seconds = intdiv(self::LINK_DOMAINS_RETRY_MS, 1000);
+        try {
+            if ($this->cache !== null) {
+                return $this->cache->get(self::LINKS_DOWN) !== null;
+            }
+            if (function_exists('apcu_enabled') && apcu_enabled()) {
+                return apcu_exists(self::LINKS_DOWN);
+            }
+            $dir = Scratch::dir('runlight-rate', $this->dataDir);
+            return $dir !== null && Scratch::fresh("$dir/links-down", $seconds);
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /** Notes that the link domains could not be read, for linkDomainsDown(), and says so once. */
+    private function linkDomainsFailed(\Throwable $error): void
+    {
+        Log::write('Runlight: could not read the link domains ' . $error->getMessage());
+        if (!$this->warnShared) {
+            return;
+        }
+        $seconds = intdiv(self::LINK_DOMAINS_RETRY_MS, 1000);
+        try {
+            if ($this->cache !== null) {
+                $this->cache->set(self::LINKS_DOWN, '1', $seconds);
+            } elseif (function_exists('apcu_enabled') && apcu_enabled()) {
+                apcu_store(self::LINKS_DOWN, 1, $seconds);
+            } else {
+                $dir = Scratch::dir('runlight-rate', $this->dataDir);
+                if ($dir !== null) {
+                    Scratch::touch("$dir/links-down");
+                }
+            }
+        } catch (\Throwable) {
+            // Remembered in this process at least.
+        }
     }
 
     /** Clears the cached link domains after one is added or removed. */
@@ -1683,7 +1870,8 @@ final class Runlight
         }
         $site = $this->site($link['site']) ?? ($this->sites()[0] ?? null);
         $ua = $request->headers->get('user-agent') ?? '';
-        if ($site !== null && Ua::aiAgent($ua) === null && !Ua::isBot($ua) && $request->method === 'GET') {
+        // Past the tracker's limit for one address a click still redirects, and is not counted.
+        if ($site !== null && Ua::aiAgent($ua) === null && !Ua::isBot($ua) && $request->method === 'GET' && ($this->limit === null || $this->limit->allow($this->clientIp($request, $context)))) {
             try {
                 $now = $this->now();
                 $first = explode(';', explode(',', $request->headers->get('accept-language') ?? '')[0])[0];
@@ -1760,7 +1948,9 @@ final class Runlight
      * `agentIp` when a log reader or plugin reports it) is checked against the list the agent's company
      * publishes and then dropped: only "verified", "mismatch", or "" is kept with the fetch.
      *
-     * @param array{ip?: string, agentIp?: string} $context
+     * `userAgent` stands in for the request's header when given.
+     *
+     * @param array{ip?: string, agentIp?: string, userAgent?: string} $context
      */
     public function observe(Request $request, int|float|null $at = null, array $context = []): bool
     {
@@ -1768,7 +1958,8 @@ final class Runlight
             if ($request->method !== 'GET') {
                 return false;
             }
-            $agent = Ua::aiAgent($request->headers->get('user-agent') ?? '');
+            // A log reader gives the user agent as text, since a logged one may not be fit for a header.
+            $agent = Ua::aiAgent(isset($context['userAgent']) ? (string) $context['userAgent'] : ($request->headers->get('user-agent') ?? ''));
             if ($agent === null) {
                 return false;
             }
@@ -1777,10 +1968,14 @@ final class Runlight
             if (preg_match('/\.([a-z0-9]+)$/iD', $url->pathname, $m) && !in_array(strtolower($m[1]), ['html', 'htm', 'md', 'txt', 'php'], true)) {
                 return false;
             }
-            $host = $this->forwardedHost($request) ?? $request->headers->get('host') ?? $url->hostname;
+            $host = explode(':', Js::trim(explode(',', $this->forwardedHost($request, $context) ?? $request->headers->get('host') ?? $url->hostname)[0]))[0];
             $this->init();
-            $site = $this->siteFor(explode(':', $host)[0]);
+            $site = $this->siteFor($host);
             if ($site === null) {
+                return false;
+            }
+            // A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+            if (!array_key_exists('agentIp', $context) && $this->fetchLimit !== null && !$this->fetchLimit->allow($this->clientIp($request, $context))) {
                 return false;
             }
             // A log reader sends when the page was served. Older than a week is dropped, so a first run over
@@ -1799,7 +1994,7 @@ final class Runlight
                 'session' => '',
                 'pageview' => '',
                 'path' => Js::slice($url->pathname, 0, 1000),
-                'hostname' => Sources::stripWww($url->hostname),
+                'hostname' => Sources::stripWww($host),
                 // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
                 // there was nothing to check against. The address itself is not kept.
                 'title' => AgentCheck::checkAgent($agent, isset($context['agentIp']) ? (string) $context['agentIp'] : $this->clientIp($request, $context), $this->agentRanges()),
@@ -1877,7 +2072,7 @@ final class Runlight
         if ($this->agentRanges === null) {
             $lists = AgentCheck::bundled()['lists'];
             try {
-                $lists = [...$lists, ...($this->savedAgentRanges()['lists'] ?? [])];
+                $lists = [...$lists, ...self::newerLists($this->savedAgentRanges())];
             } catch (\Throwable $error) {
                 Log::write("Runlight: could not read the AI agents' address lists " . $error->getMessage());
             }
@@ -1890,7 +2085,9 @@ final class Runlight
      * The lists downloaded by any process sharing this database, each read whole as a download is, or null
      * when none were saved.
      *
-     * @return array{at: int, lists: array<string, list<string>>}|null
+     * `fetched` is when each list was downloaded; a copy saved before that was kept has only `at`, for all of them.
+     *
+     * @return array{at: int, lists: array<string, list<string>>, fetched: array<string, int|float>}|null
      */
     private function savedAgentRanges(): ?array
     {
@@ -1902,18 +2099,38 @@ final class Runlight
         if (!is_array($parsed)) {
             return null;
         }
+        $at = Js::number($parsed['at'] ?? 0);
+        $at = is_finite($at) ? (int) $at : 0;
+        $times = is_array($parsed['fetched'] ?? null) ? $parsed['fetched'] : null;
         $lists = [];
+        $fetched = [];
         foreach (is_array($parsed['lists'] ?? null) ? $parsed['lists'] : [] as $url => $list) {
             $entries = is_array($list) && array_is_list($list)
                 ? array_map(static fn (mixed $p): array => is_string($p) && str_contains($p, ':') ? ['ipv6Prefix' => $p] : ['ipv4Prefix' => $p], $list)
                 : null;
             $prefixes = AgentCheck::readRangeList(['prefixes' => $entries]);
-            if ($prefixes !== null) {
-                $lists[(string) $url] = $prefixes;
+            if ($prefixes === null) {
+                continue;
             }
+            $lists[(string) $url] = $prefixes;
+            $when = Js::number($times[$url] ?? NAN);
+            $fetched[(string) $url] = is_finite($when) && $when != 0 ? $when : ($times !== null ? 0 : $at);
         }
-        $at = Js::number($parsed['at'] ?? 0);
-        return ['at' => is_finite($at) ? (int) $at : 0, 'lists' => $lists];
+        return ['at' => $at, 'lists' => $lists, 'fetched' => $fetched];
+    }
+
+    /**
+     * The downloaded lists that stand in for the ones that came with this version: each only while it is the
+     * newer of the two.
+     *
+     * @param array{at: int, lists: array<string, list<string>>, fetched: array<string, int|float>}|null $saved
+     * @return array<string, list<string>>
+     */
+    private static function newerLists(?array $saved): array
+    {
+        $shipped = Importers\Http::parseDate(AgentCheck::bundled()['fetchedAt'] ?? null);
+        $shipped = is_finite((float) $shipped) ? $shipped : 0;
+        return array_filter($saved['lists'] ?? [], static fn (string $url): bool => ($saved['fetched'][$url] ?? 0) >= $shipped, ARRAY_FILTER_USE_KEY);
     }
 
     /**
@@ -1928,16 +2145,19 @@ final class Runlight
             $bundled = AgentCheck::bundled()['lists'];
             if ($this->updateAgentRanges && ($saved === null || $this->now() - $saved['at'] >= self::AGENT_RANGES_EVERY_MS)) {
                 $lists = $saved['lists'] ?? [];
+                $fetched = $saved['fetched'] ?? [];
                 foreach (array_keys($bundled) as $url) {
                     $fresh = AgentCheck::downloadRangeList($this->fetcher, (string) $url);
-                    if ($fresh !== null) {
-                        $lists[(string) $url] = $fresh;
+                    if ($fresh === null) {
+                        continue;
                     }
+                    $lists[(string) $url] = $fresh;
+                    $fetched[(string) $url] = $this->now();
                 }
-                $saved = ['at' => $this->now(), 'lists' => $lists];
-                $this->store->setSetting('agent-ranges', Json::encode(['at' => $saved['at'], 'lists' => (object) $lists]));
+                $saved = ['at' => $this->now(), 'lists' => $lists, 'fetched' => $fetched];
+                $this->store->setSetting('agent-ranges', Json::encode(['at' => $saved['at'], 'lists' => (object) $lists, 'fetched' => (object) $fetched]));
             }
-            $this->agentRanges = [...$bundled, ...($saved['lists'] ?? [])];
+            $this->agentRanges = [...$bundled, ...self::newerLists($saved)];
         } catch (\Throwable $error) {
             Log::write("Runlight: could not update the AI agents' address lists " . $error->getMessage());
         }
@@ -1961,9 +2181,7 @@ final class Runlight
             $this->currentSalts($this->now(), $timezone);
         }
         $this->dropOldSalts($this->now());
-        $this->limit?->sweep();
-        // Sign-in counts that ran out, and hashing keys older than yesterday, so nothing made from an address lasts a day.
-        Throttle::sweep($this->store, $this->now());
+        $this->sweepAddresses($this->now());
         // Every site's retention covers any one site's that is still waiting.
         $this->pruning = [];
         $this->applyRetention();

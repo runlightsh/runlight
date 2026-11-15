@@ -381,6 +381,9 @@ Filters narrow any report to matching visits, written dimension:op:value with op
         }
     }
 
+    /** The most a message or batch may weigh; a real one is a few hundred bytes a call. */
+    private const MAX_BODY_BYTES = 1024 * 1024;
+
     /** The most messages one batch may hold. PHP answers them one after another, so none run at once. */
     public const MAX_BATCH = 20;
 
@@ -392,6 +395,10 @@ Filters narrow any report to matching visits, written dimension:op:value with op
     public static function mcpResponse(Request $request, callable $readApi): Response
     {
         $headers = ['content-type' => 'application/json; charset=utf-8', 'cache-control' => 'no-store'];
+        // Capped here, since not every host caps a request body before it reaches the app.
+        if (Body::over($request, self::MAX_BODY_BYTES)) {
+            return new Response(Json::encode(self::rpcError(null, -32600, 'Send a smaller message')), 413, $headers);
+        }
         [$parsed, $body] = Js::parseJson($request->text());
         if (!$parsed || !Js::isObject($body)) {
             return new Response(Json::encode(self::rpcError(null, -32700, 'Send a JSON-RPC message')), 400, $headers);

@@ -6,6 +6,7 @@ namespace Runlight\Server;
 
 use Runlight\Accounts\Accounts;
 use Runlight\Accounts\Crypto;
+use Runlight\Accounts\Throttle;
 use Runlight\Accounts\Web;
 use Runlight\Hash;
 use Runlight\Log;
@@ -49,6 +50,10 @@ final class Standalone
     private readonly ?string $publicHost;
     /** @var list<string>|null */
     private ?array $ownHosts = null;
+    /** Where each request came from, as the handler was told, for the routes' callbacks, which get the request alone. */
+    private \WeakMap $contexts;
+    /** Wrong guesses at a token short enough to guess, by address. */
+    private Throttle $guesses;
 
     /**
      * @param array{
@@ -84,6 +89,7 @@ final class Standalone
     public function __construct(array $options)
     {
         $this->store = $options['store'];
+        $this->contexts = new \WeakMap();
         $now = $options['now'] ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->token = isset($options['token']) && $options['token'] !== '' ? (string) $options['token'] : null;
         $this->trustProxy = $options['trustProxy'] ?? true;
@@ -145,8 +151,24 @@ final class Standalone
             'accounts' => $this->web,
             'authorize' => function (Request $request): bool|string {
                 $auth = $request->headers->get('authorization') ?? '';
-                if ($this->token !== null && str_starts_with(strtolower($auth), 'bearer ') && Crypto::sameText(trim(substr($auth, 7)), $this->token)) {
-                    return true;
+                $given = str_starts_with(strtolower($auth), 'bearer ') ? trim(substr($auth, 7)) : '';
+                // A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
+                if ($this->token !== null && $given !== '' && (!str_starts_with($given, 'rl_') || str_starts_with($this->token, 'rl_'))) {
+                    // A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that
+                    // address's tries are all refused until the time is up. A long one cannot be guessed, so nothing is
+                    // counted for it and nobody's wrong tries can keep a script that shares their address out.
+                    $guessable = strlen($this->token) < Config::SHORTEST_SECRET;
+                    $ip = $this->runlight->clientIp($request, $this->contexts[$request] ?? []);
+                    $from = $ip !== '' ? $ip : 'unknown';
+                    $at = $this->runlight->now();
+                    if (!($guessable && $this->guesses->blocked($from, $at))) {
+                        if (Crypto::sameText($given, $this->token)) {
+                            return true;
+                        }
+                        if ($guessable) {
+                            $this->guesses->fail($from, $at);
+                        }
+                    }
                 }
                 $access = $this->web->access($request);
                 if ($access === true) {
@@ -160,12 +182,20 @@ final class Standalone
             $routes['origin'] = $this->publicUrl->origin();
         }
         $this->routes = $rl->routes($routes);
+        $this->guesses = new Throttle($this->store, 'bearer', 10, clock: $now);
+        // A link at one of the server's own paths would open at /go/<slug> and never on a link domain, where the
+        // server's page answers first, so no new link takes one.
+        $rl->links->reserved = array_map(static fn (string $path): string => substr($path, 1), self::SERVER_PATHS);
     }
 
-    /** The name a request came in on, read as link domains read it. */
+    /**
+     * The name a request came in on, read as link domains read it: a proxy's X-Forwarded-Host only where the
+     * library believes a proxy's headers at all, so a client that reaches the server straight from the internet
+     * cannot name the host itself.
+     */
     private function hostOf(Request $request): string
     {
-        $forwarded = $this->trustProxy !== false ? $request->headers->get('x-forwarded-host') : null;
+        $forwarded = $this->runlight->forwardedHost($request, $this->contexts[$request] ?? []);
         return Routes::hostName($forwarded ?? $request->headers->get('host') ?? (new Url($request->url))->host());
     }
 
@@ -227,6 +257,7 @@ final class Standalone
     public function handle(Request $request, array $context = []): Response
     {
         $path = (new Url($request->url))->pathname;
+        $this->contexts[$request] = $context;
         try {
             // A domain pointed at this server for short links answers at its root, with links one segment deep. The
             // server's own pages and its public address never answer as links, and "/" stays the dashboard for someone

@@ -34,7 +34,7 @@ final class Sources
         if (self::$byHost !== null) {
             return;
         }
-        // Later entries win, as Map.set does: the alias "kit" names Newsletter, not Kit.
+        // Later entries win, as Map.set does, where two sources share an alias or a host.
         self::$byHost = [];
         foreach (Known::SOURCES as $source) {
             foreach ($source['hosts'] as $host) {
@@ -46,9 +46,10 @@ final class Sources
         }
     }
 
+    /** A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character. */
     private static function clip(?string $value, int $max = 200): string
     {
-        return Js::slice(Js::trim($value ?? ''), 0, $max);
+        return Payload::cleanText(Js::trim(Payload::tidy($value ?? '')), $max);
     }
 
     public static function stripWww(string $host): string

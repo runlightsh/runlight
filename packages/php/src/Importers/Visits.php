@@ -312,6 +312,16 @@ final class Visits
         ];
     }
 
+    /** Whether a hostname can be the host of an address, and nothing more than a host. */
+    private static function validHost(string $host): bool
+    {
+        if ($host === '' || preg_match('/[\/?#@\\\\]/', $host)) {
+            return false;
+        }
+        $url = Url::parse("https://$host/");
+        return $url !== null && $url->hostname !== '';
+    }
+
     /**
      * Writes one imported pageview or event as part of a Runlight visit. Visitors
      * are hashed per day from the hit's key, as live visitors are hashed per day,
@@ -327,6 +337,11 @@ final class Visits
         // A visit that runs past midnight keeps the id it started with, as a live one does.
         $yesterday = Write::hexId("$ns:{$e['key']}:" . Time::addDays($day, -1), 16);
         $host = Js::lower($e['hostname'] !== '' ? $e['hostname'] : ($site['hostnames'][0] ?? 'imported.invalid'));
+        // A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
+        // row under the site's name rather than a failed batch.
+        if (!self::validHost($host)) {
+            $host = self::validHost($site['hostnames'][0] ?? '') ? Js::lower($site['hostnames'][0]) : 'imported.invalid';
+        }
         $url = Url::parse("https://$host" . ($e['path'] !== '' ? $e['path'] : '/') . ($e['query'] !== '' ? '?' . preg_replace('/^\?/', '', $e['query']) : ''))
             ?? new Url("https://$host/");
         $page = Sources::parsePage($url);
@@ -336,7 +351,7 @@ final class Visits
             $id = Write::hexId("$ns:{$e['key']}:{$e['ts']}");
             $store->db->run('DELETE FROM rl_sessions WHERE id = ?', [$id]);
             $country = Js::slice(Js::upper($e['country']), 0, 2);
-            $rawRegion = $e['region'];
+            $rawRegion = Write::place($e['region']);
             $region = $rawRegion !== '' ? Js::slice(Js::upper(str_contains($rawRegion, '-') ? $rawRegion : "$country-$rawRegion"), 0, 10) : '';
             $known = (bool) preg_match('/^[A-Z]{2}$/D', $country);
             $store->insertSession([
@@ -353,14 +368,14 @@ final class Visits
                 'utmContent' => $page['utm']['content'],
                 'country' => $known ? $country : '',
                 'region' => $known ? $region : '',
-                'city' => Js::slice($e['city'], 0, 100),
+                'city' => Js::slice(Write::place($e['city']), 0, 100),
                 'browser' => Write::browser($e['browser']),
                 'browserVersion' => '',
                 'os' => Write::system($e['os']),
                 'osVersion' => '',
                 'device' => Write::device($e['device']),
-                'screen' => Js::slice($e['screen'], 0, 20),
-                'language' => Js::slice($e['language'], 0, 35),
+                'screen' => Write::screen($e['screen']),
+                'language' => Write::language($e['language']),
             ]);
             // No engaged time is known, so duration falls back to first-to-last pageview.
             $store->db->run('UPDATE rl_sessions SET imported = 1, engaged_ms = NULL WHERE id = ?', [$id]);

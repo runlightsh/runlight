@@ -25,9 +25,33 @@ final class Payload
     private const MAX_ENGAGED_MS = 30 * 60 * 1000;
     private const MAX_PROPS = 30;
 
+    /** A string as it came, cut to `$max` UTF-16 units: for a URL, which the parser then encodes. */
     private static function str(mixed $value, int $max): string
     {
         return is_string($value) ? Js::slice($value, 0, $max) : '';
+    }
+
+    /**
+     * Text as every database can keep it: without U+0000, which Postgres refuses. Half a surrogate pair, which
+     * is no character, cannot be in PHP's text: one written as an escape in JSON is U+FFFD once parsed here,
+     * and bytes that are not UTF-8 are too.
+     */
+    public static function tidy(string $text): string
+    {
+        return str_replace("\0", '', Js::scrub($text));
+    }
+
+    /** Tidied text cut to `$max` characters (code points), so a character such as an emoji is never cut in half. */
+    public static function cleanText(string $text, int $max): string
+    {
+        $clean = self::tidy($text);
+        return Js::length($clean) <= $max ? $clean : mb_substr($clean, 0, $max, 'UTF-8');
+    }
+
+    /** A string the tracker sent, as it is stored. */
+    private static function stored(mixed $value, int $max): string
+    {
+        return is_string($value) ? self::cleanText($value, $max) : '';
     }
 
     private static function int(mixed $value, int $min, int $max): ?int
@@ -74,12 +98,15 @@ final class Payload
             if ($count >= self::MAX_PROPS) {
                 break;
             }
-            $k = Js::slice(Js::trim($key), 0, 60);
+            if (str_starts_with($key, "\u{FFFF}\0")) {
+                $key = substr($key, 3);
+            }
+            $k = self::cleanText(Js::trim(self::tidy($key)), 60);
             if ($k === '') {
                 continue;
             }
             if (is_string($raw)) {
-                $text = Js::slice($raw, 0, 500);
+                $text = self::cleanText($raw, 500);
             } elseif ((is_int($raw) || is_float($raw)) && is_finite((float) $raw)) {
                 // JSON.parse reads every number as a double, so a long integer is rounded as it is there.
                 $text = Js::string((float) $raw);
@@ -137,6 +164,15 @@ final class Payload
             fn (array $m) => ($m['lone'] ?? '') !== '' ? '�' : $m[0],
             $text,
         ) ?? $text;
+        // PHP cannot hold an object's key that starts with U+0000, and refuses the whole body for one. Such a key
+        // gets U+FFFF in front, which props() takes off again, so it is read as any other key is.
+        if (str_contains($text, '"\\u0000')) {
+            $text = preg_replace_callback(
+                '/"((?:[^"\\\\]|\\\\.)*+)"(\s*:)?/s',
+                static fn (array $m): string => ($m[2] ?? '') !== '' && str_starts_with($m[1], '\\u0000') ? '"\\uffff' . $m[1] . '"' . $m[2] : $m[0],
+                $text,
+            ) ?? $text;
+        }
         return json_decode($text, false, 100000, JSON_THROW_ON_ERROR);
     }
 
@@ -171,7 +207,7 @@ final class Payload
             return null;
         }
 
-        $name = Js::trim(self::str($get('n'), 120));
+        $name = Js::trim(self::stored($get('n'), 120));
         if ($kind === 'event' && $name === '') {
             return null;
         }
@@ -186,13 +222,13 @@ final class Payload
 
         return [
             'kind' => $kind,
-            'site' => self::str($get('s'), 64),
+            'site' => self::stored($get('s'), 64),
             'url' => $url,
             'referrer' => self::str($get('r'), 2048),
-            'title' => self::str($get('t'), 500),
+            'title' => self::stored($get('t'), 500),
             'screenWidth' => self::int($get('w'), 0, 20000),
             'screenHeight' => self::int($get('h'), 0, 20000),
-            'language' => self::str($get('l'), 35),
+            'language' => self::stored($get('l'), 35),
             'name' => $name,
             'props' => $kind === 'event' ? self::linkProps($name, self::props($get('p'))) : null,
             'pageviewId' => $pageviewId,

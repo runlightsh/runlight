@@ -79,15 +79,6 @@ final class Sql
     private const PATH_DIMENSIONS = ['page', 'entry', 'exit'];
 
     /**
-     * Orders text by code point, as SQLite and Postgres's "C" collation do (JavaScript's < compares UTF-16
-     * units). UTF-8 bytes sort in code point order, so the bytes are compared.
-     */
-    public static function codeOrder(string $a, string $b): int
-    {
-        return strcmp($a, $b);
-    }
-
-    /**
      * Runs a query over pieces of a list and joins the answers, in order.
      *
      * @template T
@@ -317,6 +308,30 @@ final class Sql
     public static function escapeLike(string $value): string
     {
         return (string) preg_replace('/[\\\\%_]/', '\\\\$0', $value);
+    }
+
+    /**
+     * Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even
+     * number of backslashes. Both are valid JSON, and a database another implementation wrote may hold them.
+     */
+    private const PG_UNREADABLE_PROPS = <<<'PATTERN'
+        (?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}
+        PATTERN;
+
+    /**
+     * An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+     * escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props,
+     * rather than failing every report that reads its event. SQLite reads them as they are.
+     */
+    public static function readableProps(string $dialect): string
+    {
+        if ($dialect === 'postgres') {
+            return "(CASE WHEN e.props !~ '" . self::PG_UNREADABLE_PROPS . "' THEN e.props END)::jsonb";
+        }
+        if ($dialect === 'mysql') {
+            return '(CASE WHEN JSON_VALID(e.props) THEN e.props END)';
+        }
+        return 'e.props';
     }
 
     public static function column(string $dimension): string

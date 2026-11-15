@@ -40,7 +40,7 @@ final class Geo
         }
         // A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
         // that has no codes ("California") is kept readable, as "US-California".
-        $raw = Js::trim(self::text($location['region'] ?? null));
+        $raw = Js::trim(Payload::tidy(self::text($location['region'] ?? null)));
         $region = preg_match('/^([A-Za-z]{2}-)?[A-Za-z0-9]{1,3}$/D', $raw) ? strtoupper($raw) : Js::slice($raw, 0, 80);
         if ($region !== '' && !preg_match('/^[A-Z]{2}-/', $region) && $country !== '') {
             $region = "$country-$region";
@@ -48,7 +48,7 @@ final class Geo
         if ($country === '') {
             $region = '';
         }
-        $city = $country !== '' ? Js::slice(self::text($location['city'] ?? null), 0, 100) : '';
+        $city = $country !== '' ? Js::slice(Payload::tidy(self::text($location['city'] ?? null)), 0, 100) : '';
         return ['country' => $country, 'region' => $region, 'city' => $city];
     }
 

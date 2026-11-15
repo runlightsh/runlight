@@ -95,6 +95,44 @@ final class DbIp
         if (is_file($this->file($current))) {
             return;
         }
+        // While the month's file is not published yet, or a download keeps failing, each try waits twice as long
+        // as the last, from five minutes up to six hours, so neither DB-IP nor the disk is asked for the whole
+        // file every few minutes. PHP keeps nothing between runs, so the wait is kept in a file beside the data.
+        $waiting = $this->waiting();
+        if ($now < $waiting['retryAt']) {
+            return;
+        }
+        try {
+            $this->fetch($current, $now);
+        } finally {
+            if (is_file($this->file($current))) {
+                @unlink($this->waitFile());
+            } elseif (is_dir($this->dir)) {
+                $wait = min($waiting['wait'] > 0 ? $waiting['wait'] * 2 : self::FIRST_WAIT, self::LONGEST_WAIT);
+                @file_put_contents($this->waitFile(), (string) json_encode(['wait' => $wait, 'retryAt' => $now + $wait]), LOCK_EX);
+            }
+        }
+    }
+
+    /** How long after a first failed try the next one waits, and the longest any waits. */
+    private const FIRST_WAIT = 5 * 60_000;
+    private const LONGEST_WAIT = 6 * 3_600_000;
+
+    private function waitFile(): string
+    {
+        return "{$this->dir}/retry-{$this->mode}.json";
+    }
+
+    /** @return array{wait: int, retryAt: int} */
+    private function waiting(): array
+    {
+        $text = @file_get_contents($this->waitFile());
+        $saved = is_string($text) ? json_decode($text, true) : null;
+        return ['wait' => (int) ($saved['wait'] ?? 0), 'retryAt' => (int) ($saved['retryAt'] ?? 0)];
+    }
+
+    private function fetch(string $current, int $now): void
+    {
         // DB-IP sends its releases gzipped, so without zlib a download could never be used.
         if (!self::canUnpack()) {
             ($this->log)("Runlight: location data from DB-IP needs PHP's zlib extension to unpack. Turn zlib on, or set RUNLIGHT_GEO to off or to the path of an MMDB file.");

@@ -7,6 +7,8 @@ namespace Runlight\Server;
 use Runlight\Accounts\Web;
 use Runlight\Env;
 use Runlight\Geo;
+use Runlight\Log;
+use Runlight\Scratch;
 use Runlight\Store\SqlStore;
 use Runlight\Store\Stores;
 
@@ -168,7 +170,34 @@ final class Config
     }
 
     /** Shorter than any secret this file has ever been given, so a file caught half written is never used. */
-    private const SHORTEST_SECRET = 32;
+    public const SHORTEST_SECRET = 32;
+
+    /**
+     * What to say about a secret or token someone set by hand that is short enough to guess, or null. The
+     * server still runs, since refusing would stop an install that ran before this was checked.
+     */
+    public static function shortWarning(string $name, ?string $value): ?string
+    {
+        if ($value === null || strlen($value) >= self::SHORTEST_SECRET) {
+            return null;
+        }
+        $does = $name === 'RUNLIGHT_SECRET' ? 'It signs every session and encrypts the saved mail and assistant keys' : 'Anyone who guesses it has the whole API, as the owner';
+        return "Runlight: WARNING: $name is only " . strlen($value) . " characters long. $does. Set it to " . self::SHORTEST_SECRET . ' or more random characters, such as the output of: openssl rand -hex 32';
+    }
+
+    /**
+     * Says shortWarning() for each of the two, in the log. A PHP server has no start to say it at, so it is
+     * said at most once a day, kept by a marker in the data folder.
+     */
+    private function warnShort(): void
+    {
+        foreach (['RUNLIGHT_SECRET', 'RUNLIGHT_TOKEN'] as $name) {
+            $warning = self::shortWarning($name, $this->get($name));
+            if ($warning !== null && Scratch::mark($this->dataDir() . '/warned-short-' . strtolower($name), 86_400)) {
+                Log::write($warning);
+            }
+        }
+    }
 
     /**
      * The secret kept in `$dir`, made on first run, readable only by this user. Two servers starting at once on
@@ -364,6 +393,7 @@ final class Config
         if ($exposed !== null) {
             throw new \RuntimeException("Runlight: the data folder, which holds the database and the secret, is inside the web root at $exposed, and nothing says the web server turns requests for it away, so anyone could download it. Set DATA_DIR to a folder outside the web root, or deny $exposed in the web server's config (the PHP package's README shows how for nginx and Caddy) and set DATA_DIR_DENIED=true.");
         }
+        $this->warnShort();
         $dbIp = $this->dbIp();
         $geo = $this->geo();
         $code = $setup ? $this->setupCode() : null;

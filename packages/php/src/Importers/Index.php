@@ -35,7 +35,8 @@ final class Index
         /** @var Importer $importer */
         $importer = new $class(new Http($runlight->fetcher), static fn (): int => $runlight->now());
         $known = static function (mixed $sourceId, mixed $slug = null, mixed $url = null) use ($runlight, $source): bool {
-            if ($runlight->store->linkById(Write::importedLinkId($source, Js::string($sourceId))) !== null) {
+            // A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+            if ($runlight->store->linkExists(Write::importedLinkId($source, Js::string($sourceId)))) {
                 return true;
             }
             if (!Js::truthy($slug) || !Js::truthy($url)) {

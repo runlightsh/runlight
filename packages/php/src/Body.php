@@ -17,6 +17,19 @@ use Runlight\Http\Response;
  */
 final class Body
 {
+    /**
+     * Whether a request's body is over `$maxBytes`, by the length it declares or the length it has. PHP has read
+     * the body by the time a route sees it, so this is the cap TypeScript puts on reading one.
+     */
+    public static function over(Http\Request $request, int $maxBytes): bool
+    {
+        $declared = $request->headers->get('content-length');
+        if ($declared !== null && is_numeric(trim($declared)) && (float) trim($declared) > $maxBytes) {
+            return true;
+        }
+        return strlen($request->text()) > $maxBytes;
+    }
+
     /** The body as text, up to maxBytes; past that, BodyTooLong. */
     public static function readTextCapped(Response $response, int $maxBytes): string
     {

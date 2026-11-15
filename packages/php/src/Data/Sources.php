@@ -72,7 +72,7 @@ final class Sources
         ['name' => 'Yahoo Mail', 'kind' => 'email', 'hosts' => ['mail.yahoo.com'], 'aliases' => ['yahoomail']],
         ['name' => 'Fastmail', 'kind' => 'email', 'hosts' => ['app.fastmail.com', 'fastmail.com'], 'aliases' => ['fastmail']],
         ['name' => 'Proton Mail', 'kind' => 'email', 'hosts' => ['mail.proton.me'], 'aliases' => ['protonmail']],
-        ['name' => 'Newsletter', 'kind' => 'email', 'hosts' => [], 'aliases' => ['newsletter', 'email', 'e-mail', 'mailchimp', 'kit', 'convertkit', 'beehiiv', 'buttondown']],
+        ['name' => 'Newsletter', 'kind' => 'email', 'hosts' => [], 'aliases' => ['newsletter', 'email', 'e-mail', 'mailchimp', 'beehiiv', 'buttondown']],
     ];
 
     /**
@@ -87,7 +87,6 @@ final class Sources
         ['pattern' => '/(^|\.)convertkit-mail\d*\.com$|(^|\.)kit-mail\d*\.com$/D', 'name' => 'Kit', 'kind' => 'email'],
         ['pattern' => '/(^|\.)(list-manage|mailchi)\.(com|mp)$/D', 'name' => 'Mailchimp', 'kind' => 'email'],
         ['pattern' => '/(^|\.)beehiiv\.com$/D', 'name' => 'beehiiv', 'kind' => 'email'],
-        ['pattern' => '/(^|\.)substack\.com$/D', 'name' => 'Substack', 'kind' => 'email'],
         ['pattern' => '/^(web)?mail\d*\.|(^|\.)webmail\./', 'name' => null, 'kind' => 'email'],
     ];
 }

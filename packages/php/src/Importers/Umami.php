@@ -75,7 +75,13 @@ final class Umami implements Importer
             $out = [];
             for ($page = 1; ; $page++) {
                 $body = $this->http->getJson("$base/api$path&page=$page&pageSize=1000", ['headers' => $headers]);
-                array_push($out, ...$body['data']);
+                foreach ($body['data'] as $row) {
+                    $out[] = $row;
+                }
+                // No more than a link keeps: a longer history, or a server that never stops, ends here.
+                if (count($out) >= Write::MAX_LINK_CLICKS) {
+                    return array_slice($out, 0, Write::MAX_LINK_CLICKS);
+                }
                 if (count($out) >= ($body['count'] ?? INF) || $body['data'] === []) {
                     return $out;
                 }

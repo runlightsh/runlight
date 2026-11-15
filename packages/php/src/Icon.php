@@ -57,7 +57,8 @@ final class Icon
     public static function iconLinks(string $html, string $base): array
     {
         $found = [];
-        preg_match_all('/<link\b[^>]*>/i', $html, $tags);
+        // A tag is at most a few thousand characters; the bound keeps a page of unclosed tags from being read over and over.
+        preg_match_all('/<link\b[^<>]{0,4000}>/i', $html, $tags);
         foreach ($tags[0] as $tag) {
             $attributes = self::attrs($tag);
             $rel = preg_split('/\s+/', mb_strtolower($attributes['rel'] ?? '')) ?: [];

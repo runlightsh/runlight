@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Runlight\Accounts;
 
+use Runlight\Body;
+use Runlight\Http\BodyTooLong;
 use Runlight\Http\Headers;
 use Runlight\Http\Request;
 use Runlight\Http\Response;
@@ -42,6 +44,8 @@ final class Web
     /** When each account was last sent a sign-in link, at most one a minute; a setting, since PHP forgets between requests. */
     private const LINK_SENT = 'login-link-sent:';
     /** What a password check that found no free place answers, at sign-in (503) and in the Account API. */
+    /** The most a sign-in form or an account change may weigh: a few fields, far smaller than this. */
+    private const MAX_BODY_BYTES = 64 * 1024;
     private const BUSY = 'Runlight is busy checking other sign-ins. Try again in a moment.';
 
     public readonly Accounts $accounts;
@@ -75,9 +79,11 @@ final class Web
     private Throttle $perAddress;
     private Throttle $perAccount;
     private Throttle $perIp;
-    // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-    // Password re-checks in Account: ten.
-    private Throttle $codeTries;
+    // Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the
+    // tries run out again, up to a day, so guessing on and on gets about five tries a day. A browser that
+    // signed in to the account before counts on its own, so its owner is never held up by others' guesses.
+    // Five tries to confirm the first code. Password re-checks in Account: ten.
+    private Lockout $codeTries;
     private Throttle $confirmTries;
     private Throttle $rechecks;
     // PHP's scrypt takes most of a second of CPU, so only a few password checks run at once on a machine.
@@ -105,7 +111,7 @@ final class Web
         $this->perAddress = new Throttle($this->store, 'address', 10, clock: $clock);
         $this->perAccount = new Throttle($this->store, 'account', 50, clock: $clock);
         $this->perIp = new Throttle($this->store, 'ip', 30, clock: $clock);
-        $this->codeTries = new Throttle($this->store, 'code', 5, clock: $clock);
+        $this->codeTries = new Lockout($this->store, 'code', 5);
         $this->confirmTries = new Throttle($this->store, 'confirm', 5, clock: $clock);
         $this->rechecks = new Throttle($this->store, 'recheck', 10, clock: $clock);
         $this->checks = new Slots($this->rl->dataDir ?? null);
@@ -287,8 +293,24 @@ final class Web
         if (self::mediaType($request) !== 'application/json') {
             return null;
         }
+        if (Body::over($request, self::MAX_BODY_BYTES)) {
+            throw new BodyTooLong('Body over ' . self::MAX_BODY_BYTES . ' bytes');
+        }
         [$parsed, $value] = Js::parseJson($request->text());
         return $parsed && $value instanceof \stdClass ? $value : null;
+    }
+
+    /**
+     * A posted form. One past the cap is refused, since not every host caps a request body before it reaches the app.
+     *
+     * @throws BodyTooLong
+     */
+    private static function form(Request $request): SearchParams
+    {
+        if (Body::over($request, self::MAX_BODY_BYTES)) {
+            throw new BodyTooLong('Body over ' . self::MAX_BODY_BYTES . ' bytes');
+        }
+        return new SearchParams($request->text());
     }
 
     /** `String(input[field] ?? "")`. */
@@ -376,11 +398,10 @@ final class Web
         if ($origin === null || $origin === '') {
             return false;
         }
-        $key = self::LINK_SENT . $user['id'];
-        if ($this->now() - Js::number($this->store->setting($key) ?? 0) < 60_000) {
+        // The minute is taken in one step, so of sign-ins at once only one sends a link.
+        if ($this->store->claimSetting(self::LINK_SENT . $user['id'], $this->now(), 60_000) === null) {
             return true;
         }
-        $this->store->setSetting($key, (string) $this->now());
         $link = "$origin$this->base/login/link?" . (new SearchParams(['ticket' => $this->accounts->linkFor($user, $this->now()), 'next' => $next]))->toString();
         $host = (new Url($origin))->host();
         $this->rl->sendMail([
@@ -430,7 +451,7 @@ final class Web
                 return $this->setupOk($code) ? self::html(Pages::setupPage($base, ['code' => $code], $lang)) : $this->setupLocked($lang);
             }
             if ($method === 'POST') {
-                $form = new SearchParams($request->text());
+                $form = self::form($request);
                 $code = $form->get('code') ?? '';
                 if (!$this->setupOk($code)) {
                     if ($this->asksForToken) {
@@ -482,20 +503,22 @@ final class Web
         }
 
         if ($path === '/login/code' && $method === 'POST') {
-            $form = new SearchParams($request->text());
+            $form = self::form($request);
             $next = $this->safeNext($form->get('next'));
             $user = $this->accounts->fromPending($form->get('pending') ?? '', $this->now());
             if ($user === null) {
                 return self::redirect("$base/login?next=" . Js::encodeURIComponent($next));
             }
-            // Counted before the check, so a burst cannot get past five.
-            if (!$this->codeTries->take($user['id'], $this->now())) {
+            // Counted before the check, so a burst cannot get past five. A browser the account signed in from
+            // before has its own count, which only someone holding that browser's mark can use up.
+            $tries = $this->accounts->trustsDevice(self::readCookie($request, self::DEVICE_COOKIE), $user) ? "{$user['id']}\ndevice" : $user['id'];
+            if (!$this->codeTries->take($tries, $this->now())) {
                 return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => $t('error.too_many_tries')], $lang), 429);
             }
             if (!$this->accounts->checkSecondFactor($user['id'], $form->get('code') ?? '', $this->now())) {
                 return self::html(Pages::codePage($base, ['pending' => $form->get('pending') ?? '', 'next' => $next, 'error' => $t('auth.codeWrong')], $lang), 401);
             }
-            $this->codeTries->clear($user['id']);
+            $this->codeTries->clear($tries);
             return $this->signedInTo($request, $user, $next);
         }
 
@@ -513,7 +536,7 @@ final class Web
                     : self::html(Pages::inviteGonePage($base, $lang), 410);
             }
             if ($method === 'POST') {
-                $form = new SearchParams($request->text());
+                $form = self::form($request);
                 $code = $form->get('code') ?? '';
                 $invite = $this->accounts->inviteByCode($code, $this->now());
                 if ($invite === null) {
@@ -553,7 +576,7 @@ final class Web
         $base = $this->base;
         $lang = Messages::acceptedLanguage($request);
         $t = Messages::translator($lang)['t'];
-        $form = new SearchParams($request->text());
+        $form = self::form($request);
         $email = $form->get('email') ?? '';
         $password = $form->get('password') ?? '';
         $next = $this->safeNext($form->get('next'));
@@ -647,9 +670,19 @@ final class Web
     {
         $user = $this->signedIn($request);
         if ($user === null) return self::coded('Sign in first', 'sign_in', 401);
-        $input = self::body($request);
+        try {
+            $input = self::body($request);
+        } catch (BodyTooLong) {
+            return self::tooLarge();
+        }
         if ($input === null) return self::coded('Send JSON', 'send_json', 415);
         return $this->recheck($user, $input, 'password', ['Your password is not right', 'password_wrong']);
+    }
+
+    /** A body past the cap is refused here, since not every host caps a request body before it reaches the app. */
+    private static function tooLarge(): Response
+    {
+        return self::coded('Send a smaller body', 'body_too_large', 413);
     }
 
     private function api(Request $request, string $path): Response
@@ -927,6 +960,16 @@ final class Web
      * @param array{ip?: string} $context
      */
     public function handle(Request $request, string $path, array $context = []): ?Response
+    {
+        try {
+            return $this->answer($request, $path, $context);
+        } catch (BodyTooLong) {
+            return self::tooLarge();
+        }
+    }
+
+    /** @param array{ip?: string} $context */
+    private function answer(Request $request, string $path, array $context): ?Response
     {
         if ($path === '/api/account' || str_starts_with($path, '/api/account/') || $path === '/api/people' || str_starts_with($path, '/api/people/') || str_starts_with($path, '/api/invites/')) {
             return $this->api($request, $path);

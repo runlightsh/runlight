@@ -95,6 +95,17 @@ final class Crypto
     }
 
     /**
+     * A well-formed hash at the cost of a new one that no password matches, for checking a sign-in whose email
+     * has no account against, so that takes one check, as a wrong password for a real account does. It is
+     * fixed, since PHP keeps nothing between requests and making one each time would be a second hash's work,
+     * which told anyone timing the answer that the email has no account.
+     */
+    public static function decoyHash(): string
+    {
+        return 'scrypt$' . self::SCRYPT_N . '$' . self::SCRYPT_R . '$' . self::SCRYPT_P . '$' . str_repeat('A', 22) . '$' . str_repeat('A', 43);
+    }
+
+    /**
      * A scrypt hash's cost: recorded in it (scrypt$N$r$p$salt$key), or the old setting (scrypt$salt$key). Null for
      * one out of bounds, so a stored hash cannot ask for a huge amount of memory or time.
      *
@@ -321,12 +332,15 @@ final class Crypto
     public static function matchStep(string $secret, string $code, int $now, int $after): ?int
     {
         $current = intdiv($now, self::STEP_MS) - ($now < 0 && $now % self::STEP_MS !== 0 ? 1 : 0);
-        foreach ([$current, $current - 1, $current + 1] as $step) {
-            if ($step > $after && self::totp($secret, $step) === $code) {
-                return $step;
+        // Every step is worked out and compared in time that does not depend on where the code differs. The
+        // current step is checked last, so it is the one kept if two should match.
+        $found = null;
+        foreach ([$current + 1, $current - 1, $current] as $step) {
+            if (self::sameText(self::totp($secret, $step), $code) && $step > $after) {
+                $found = $step;
             }
         }
-        return null;
+        return $found;
     }
 
     /** The address an authenticator app reads from the QR code. */

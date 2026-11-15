@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Runlight;
 
+use Runlight\Accounts\Throttle;
 use Runlight\Http\Request;
 use Runlight\Http\Response;
 use Runlight\Http\SearchParams;
@@ -45,10 +46,10 @@ final class OAuth
     public const MAX_CLIENT_ID = 2048;
 
     /**
-     * Where the per-address count of registrations is kept. TypeScript keeps it in memory per install; PHP
-     * forgets memory between requests, so it lives in the install's settings, keyed by a hash of the address.
+     * Where the per-address count of registrations was kept before it moved to a Throttle, under a key that
+     * never changed. Runlight::tidy() deletes it.
      */
-    private const REGISTRATIONS = 'oauth-registrations';
+    public const OLD_REGISTRATIONS = 'oauth-registrations';
 
     private const SCOPES = ['read', 'manage', 'cms'];
 
@@ -168,11 +169,14 @@ final class OAuth
         return self::base64url(hash('sha256', $verifier, true));
     }
 
-    /** Redirect addresses a client may register: https, or a local app's own loopback address. */
+    /** Redirect addresses a client may register: https, or a local app's own loopback address, and one that parses as an address at all. */
     private static function allowedRedirect(string $value): bool
     {
-        return (bool) preg_match('#^https://[^/]+#', $value) || (bool) preg_match('#^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/#', $value);
+        return ((bool) preg_match('#^https://[^/]+#', $value) || (bool) preg_match('#^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/#', $value)) && Url::canParse($value);
     }
+
+    /** The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller. */
+    private const MAX_BODY_BYTES = 64 * 1024;
 
     /** The URL that a 401 from the MCP endpoint points clients at, to start OAuth. */
     public static function resourceMetadataUrl(string $origin, string $base): string
@@ -194,6 +198,10 @@ final class OAuth
         $base = (string) $ctx['base'];
         $issuer = $url->origin() . $base;
         $known = $path;
+        // Capped here, since not every host caps a request body before it reaches the app.
+        if ($request->method === 'POST' && in_array($path, ['/oauth/register', '/oauth/authorize', '/oauth/token'], true) && Body::over($request, self::MAX_BODY_BYTES)) {
+            return self::oauthError('invalid_request', 'Send a smaller body', 413);
+        }
         if ($request->method === 'OPTIONS' && (str_starts_with($known, '/.well-known/oauth-') || str_starts_with($known, '/.well-known/openid-configuration') || str_starts_with($path, '/oauth/'))) {
             return new Response('', 204, self::CORS);
         }
@@ -244,7 +252,8 @@ final class OAuth
             $client = self::clientFor($runlight, $clientId)['client'] ?? null;
             $redirect = $form->get('redirect_uri') ?? '';
             // Without a known client and one of its own addresses there is nowhere safe to send an answer.
-            if ($client === null || !in_array($redirect, $client['redirects'], true)) {
+            // An address that does not parse, from an app registered before those were refused, is no address of its own.
+            if ($client === null || !in_array($redirect, $client['redirects'], true) || !Url::canParse($redirect)) {
                 return self::page($lang, $h('oauth.unregisteredTitle'), '<p>' . $h('oauth.startAgain') . '</p>', 400);
             }
             $back = static function (array $params) use ($redirect, $form): Response {
@@ -285,7 +294,8 @@ final class OAuth
             if (!($ctx['isOwner'])($request)) {
                 // Someone signed in who may only read would be sent to sign in again and again.
                 if (isset($ctx['isReader']) && ($ctx['isReader'])($request)) {
-                    return self::page($lang, $h('oauth.viewerTitle'), '<p>' . $h('oauth.viewer', ['app' => self::esc($name)]) . '</p>', 403);
+                    $siteOnly = isset($ctx['isSiteOnly']) && ($ctx['isSiteOnly'])($request);
+                    return self::page($lang, $h('oauth.viewerTitle'), '<p>' . $h($siteOnly ? 'oauth.siteAccount' : 'oauth.viewer', ['app' => self::esc($name)]) . '</p>', 403);
                 }
                 // The site stays, since on the way in it only says which one to offer first.
                 $kept = new SearchParams();
@@ -521,8 +531,10 @@ final class OAuth
     }
 
     /**
-     * Counts a registration from an address and says whether it is under the limit for this minute. The count
-     * is kept in the install's settings, keyed by an HMAC of the address, so no address is ever stored.
+     * Counts a registration from an address and says whether it is under the limit for this minute. TypeScript
+     * keeps the count in memory; PHP forgets memory between requests, so it is a Throttle's, in the install's
+     * settings: counted one at a time under the database's lock, under a key made for the day, and gone once
+     * its minute is over (see Runlight::tidy()), so nothing made from an address is kept.
      */
     private static function allowRegistration(object $runlight, string $ip): bool
     {
@@ -530,13 +542,8 @@ final class OAuth
         if ($ip === '') {
             return true;
         }
-        $window = intdiv($runlight->now(), 60_000);
-        $id = substr(Hash::hmac(self::clientKey($runlight), "register:$ip"), 0, 16);
-        $saved = Json::tryDecode((string) $runlight->store->setting(self::REGISTRATIONS), true);
-        $counts = is_array($saved) && ($saved['window'] ?? null) === $window && is_array($saved['counts'] ?? null) ? $saved['counts'] : [];
-        $counts[$id] = (int) ($counts[$id] ?? 0) + 1;
-        $runlight->store->setSetting(self::REGISTRATIONS, Json::encode(['window' => $window, 'counts' => (object) $counts]));
-        return $counts[$id] <= self::REGISTRATIONS_PER_MINUTE;
+        $throttle = new Throttle($runlight->store, 'oauth-register', self::REGISTRATIONS_PER_MINUTE, 60_000, static fn (): int => $runlight->now());
+        return $throttle->take($ip, $runlight->now());
     }
 
     /**

@@ -128,6 +128,21 @@ final class Scratch
         return true;
     }
 
+    /** Whether a marker file was touched within the last `$seconds`. */
+    public static function fresh(string $file, int $seconds): bool
+    {
+        clearstatcache(true, $file);
+        $at = @filemtime($file);
+        return $at !== false && $at > time() - $seconds;
+    }
+
+    /** Touches a marker file, making it when it is not there. */
+    public static function touch(string $file): void
+    {
+        @touch($file);
+        self::protect($file);
+    }
+
     public static function delete(string $file): void
     {
         @unlink($file);

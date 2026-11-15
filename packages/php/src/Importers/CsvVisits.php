@@ -47,6 +47,18 @@ final class CsvVisits
      */
     public static function rowTime(array $row, string $format): int|float
     {
+        $ts = self::readTime($row, $format);
+        return $ts >= self::CSV_EARLIEST ? $ts : NAN;
+    }
+
+    /**
+     * The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a date written
+     * 20240501 would otherwise land in 1970, and the site's history would begin there.
+     */
+    public const CSV_EARLIEST = 946_684_800_000;
+
+    private static function readTime(array $row, string $format): int|float
+    {
         $text = Js::trim($format === 'umami' ? ($row['created_at'] ?? '') : ($row['time'] ?? ''));
         if ($text === '') {
             return NAN;

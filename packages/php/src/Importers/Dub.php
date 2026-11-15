@@ -77,7 +77,8 @@ final class Dub implements Importer
                                 'os' => Http::field($click, 'os'),
                             ]);
                         }
-                        if (count($events) < 1000) {
+                        // No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+                        if (count($events) < 1000 || count($clicks) >= Write::MAX_LINK_CLICKS) {
                             break;
                         }
                     }

@@ -71,6 +71,10 @@ final class HttpFoundation
      */
     public static function shortLink(Runlight $rl, SymfonyRequest $request): ?SymfonyResponse
     {
+        // No route or link answers these, so they are the app's.
+        if (in_array(strtoupper($request->getRealMethod()), ['TRACE', 'TRACK', 'CONNECT'], true)) {
+            return null;
+        }
         $ours = new Request(
             $request->getSchemeAndHttpHost() . $request->getRequestUri(),
             $request->getRealMethod(),

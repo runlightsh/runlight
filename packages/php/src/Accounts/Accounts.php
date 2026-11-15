@@ -6,6 +6,7 @@ namespace Runlight\Accounts;
 
 use Runlight\Js;
 use Runlight\Json;
+use Runlight\Runlight;
 use Runlight\Store\SqlStore;
 
 /**
@@ -39,9 +40,6 @@ final class Accounts
 
     /** What passes for an email address, with JavaScript's \s. */
     private const EMAIL = '/^[^' . Js::SPACE . '@<>"]+@[^' . Js::SPACE . '@<>"]+\.[^' . Js::SPACE . '@<>"]+$/uD';
-
-    /** A password checked against nothing, so a wrong email takes as long as a wrong password. Made when first needed. */
-    private static ?string $decoy = null;
 
     private bool $ready = false;
 
@@ -241,7 +239,14 @@ final class Accounts
         }
         $read = Js::truthy($row['totp_recovery'] ?? null) ? (string) $row['totp_recovery'] : null;
         $hashes = $read !== null ? Json::decode($read, true) : [];
-        $at = array_search(Crypto::recoveryHash($given), $hashes, true);
+        // Every hash is compared, each in time that does not depend on where it differs.
+        $mine = Crypto::recoveryHash($given);
+        $at = false;
+        foreach ($hashes as $i => $hash) {
+            if (is_string($hash) && Crypto::sameText($hash, $mine)) {
+                $at = $i;
+            }
+        }
         if ($at === false) {
             return false;
         }
@@ -476,7 +481,7 @@ final class Accounts
         $this->init();
         if ($site !== null && ($site === '' || !in_array($role, ['member', 'viewer'], true))) throw new AccountError('Choose member or viewer for one site', 'role_scope');
         $address = Js::lower(Js::trim($email));
-        if (!preg_match(self::EMAIL, $address)) {
+        if (!Runlight::isEmail($address)) {
             throw new AccountError('Enter an email address', 'email_invalid');
         }
         if (Js::length($password) < self::MIN_PASSWORD) {
@@ -547,7 +552,7 @@ final class Accounts
     private function inviteNow(string $email, string $role, string $invitedBy, int $now, ?string $site = null): array
     {
         $address = Js::lower(Js::trim($email));
-        if (!preg_match(self::EMAIL, $address)) {
+        if (!Runlight::isEmail($address)) {
             throw new AccountError('Enter an email address', 'email_invalid');
         }
         if ($this->byEmail($address) !== null) {
@@ -637,7 +642,8 @@ final class Accounts
     {
         $user = $this->byEmail($email);
         if ($user === null) {
-            Crypto::checkPassword($password, self::$decoy ??= Crypto::hashPassword(Crypto::hex(Crypto::randomBytes(16))));
+            // Checked against nothing, so a wrong email takes as long as a wrong password: one check.
+            Crypto::checkPassword($password, Crypto::decoyHash());
             return null;
         }
         if (!Crypto::checkPassword($password, $user['hash'])) {

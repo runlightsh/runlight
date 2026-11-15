@@ -63,7 +63,12 @@ final class SmtpSession
                 throw $refused();
             }
         }
-        $target = $found[0] ?? $bare;
+        // A name that does not resolve here is refused rather than handed to the socket to look up again, where
+        // a second answer would go unchecked.
+        if ($found === []) {
+            throw new MailError("SMTP: could not connect to {$this->host}:{$this->port}: the name does not resolve", 'mail_unreachable', ['host' => "{$this->host}:{$this->port}", 'detail' => 'the name does not resolve']);
+        }
+        $target = $found[0];
         $address = str_contains($target, ':') ? "[$target]" : $target;
         $wait = min($timeoutMs, $this->left());
         if ($wait <= 0) {

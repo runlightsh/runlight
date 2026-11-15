@@ -58,6 +58,13 @@ final class Request
         $scheme = ($forwarded !== '' ? $forwarded === 'https' : $https) ? 'https' : 'http';
         $host = (string) ($server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? 'localhost');
         $uri = (string) ($server['REQUEST_URI'] ?? '/');
+        // The target only ever names a path and a query. One sent whole (GET http://other/x, as to a proxy)
+        // loses its scheme and host, and anything else that does not start with a slash gains one, so the
+        // host is always the server's own and never one the request line chose.
+        $uri = (string) preg_replace('#^[A-Za-z][A-Za-z0-9+.\-]*://[^/?\#]*#', '', $uri);
+        if (!str_starts_with($uri, '/')) {
+            $uri = "/$uri";
+        }
         $headers = [];
         foreach ($server as $key => $value) {
             if (str_starts_with((string) $key, 'HTTP_')) {

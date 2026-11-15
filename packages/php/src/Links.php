@@ -17,6 +17,14 @@ final class Links
     public const SLUG_PATTERN = '/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/D';
     private const ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789';
 
+    /**
+     * Slugs no new link may take, for a host whose own pages sit where a link domain's links do: the standalone
+     * server answers /login, /api, and the rest on every name, so a link there would never open on its own domain.
+     *
+     * @var list<string>
+     */
+    public array $reserved = [];
+
     public function __construct(private readonly Runlight $runlight)
     {
     }
@@ -79,11 +87,15 @@ final class Links
             if ($taken !== null && $taken['id'] !== $except) {
                 throw new LinkError("/$wanted is already taken", 'link_taken', ['slug' => $wanted]);
             }
+            // A link made before the slug was kept back keeps it.
+            if ($taken === null && in_array($wanted, $this->reserved, true)) {
+                throw new LinkError("/$wanted is one of this server's own pages, so a link there would never open on a link domain", 'link_reserved', ['slug' => $wanted]);
+            }
             return $wanted;
         }
         for ($i = 0; $i < 8; $i++) {
             $slug = self::randomSlug();
-            if ($this->runlight->store->linkBySlug($slug) === null) {
+            if (!in_array($slug, $this->reserved, true) && $this->runlight->store->linkBySlug($slug) === null) {
                 return $slug;
             }
         }

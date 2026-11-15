@@ -535,7 +535,7 @@ final class SqlStore
 
     /**
      * A breakdown of a visit dimension or of pages from rollups and the visits
-     * left over, merged, then sorted and cut to the page asked for.
+     * left over, merged, sorted, and cut to the page asked for by the database.
      */
     private function rolledBreakdown(array $query, string $dimension, int $limit, int $offset): ?array
     {
@@ -552,107 +552,100 @@ final class SqlStore
         if ($plan === null) {
             return null;
         }
-        $zero = ['visitors' => 0, 'visits' => 0, 'pageviews' => 0, 'bounced' => 0, 'duration' => 0, 'engaged' => 0, 'views' => 0, 'scroll_sum' => 0, 'scroll_n' => 0, 'events' => 0];
-        // Keyed by value in the order first seen. PHP would turn a key like "12" into a number, so each
-        // value is kept beside its sums rather than as the key.
-        /** @var array<string, array{0: string, 1: array<string, int|float>}> $sums */
-        $sums = [];
-        $bump = function (array $row) use (&$sums, $zero): void {
-            $key = (string) $row['value'];
-            $into = $sums["v$key"][1] ?? $zero;
-            foreach ($into as $k => $n) {
-                $into[$k] = $n + Sql::num($row[$k] ?? null);
-            }
-            $sums["v$key"] = [$key, $into];
-        };
+        // Each source adds up its own rows by value, and the database adds the sources together, sorts them,
+        // and cuts them to the page asked for, so no more than that page is ever read into memory.
+        $columns = ['visitors', 'visits', 'pageviews', 'bounced', 'duration', 'engaged', 'views', 'scroll_sum', 'scroll_n', 'events'];
+        $part = static fn (string $value, array $counted): string => "$value AS value, " . implode(', ', array_map(static fn (string $c): string => ($counted[$c] ?? '0') . " AS $c", $columns));
+        $parts = [];
+        $params = [];
         if ($plan['days']) {
-            $rolled = $this->db->all(
-                'SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (' . Sql::BUILT_DAYS . ') GROUP BY value',
-                [$query['site'], $dimension, $query['site'], $query['from'], $query['to']],
-            );
-            foreach ($rolled as $row) {
-                $bump($row);
-            }
+            $parts[] = 'SELECT value, ' . implode(', ', $columns) . ' FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (' . Sql::BUILT_DAYS . ')';
+            array_push($params, $query['site'], $dimension, $query['site'], $query['from'], $query['to']);
         }
         $w = self::within($plan['rest']);
         $isVisit = Sql::IS_VISIT;
-        if (($page || $event) && $plan['rest']) {
-            // A visit's pageviews and events belong to the day it started, as in the rollups.
-            // Bounded by time as well, so the events index finds them (see buildRollupDay).
-            $lo = min(array_map(static fn (array $r) => $r[0], $plan['rest']));
-            $hi = max(array_map(static fn (array $r) => $r[1], $plan['rest'])) + Sql::EVENT_TAIL_MS;
-            $ofRest = static fn (string $kind): string => "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '$kind' AND e.ts >= ? AND e.ts < ? AND $isVisit AND {$w['sql']}";
-            $at = [$query['site'], $lo, $hi, ...$w['params']];
+        // A visit's pageviews and events belong to the day it started, as in the rollups.
+        // Bounded by time as well, so the events index finds them (see buildRollupDay).
+        $lo = $plan['rest'] ? min(array_map(static fn (array $r) => $r[0], $plan['rest'])) : 0;
+        $hi = $plan['rest'] ? max(array_map(static fn (array $r) => $r[1], $plan['rest'])) + Sql::EVENT_TAIL_MS : 0;
+        $ofRest = fn (string $kind): string => "FROM {$this->eventKindTable()} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '$kind' AND e.ts >= ? AND e.ts < ? AND $isVisit AND {$w['sql']}";
+        $at = [$query['site'], $lo, $hi, ...$w['params']];
+        if ($plan['rest']) {
             if ($page) {
-                foreach ($this->db->all('SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, ' . Sql::LIVE_VIEWS . " AS views {$ofRest('pageview')} GROUP BY e.path", $at) as $row) {
-                    $bump($row);
-                }
-                foreach ($this->db->all(
-                    "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest {$ofRest('engagement')} GROUP BY e.path, e.pageview) t GROUP BY value",
-                    $at,
-                ) as $row) {
-                    $bump($row);
-                }
+                $parts[] = 'SELECT ' . $part('e.path', ['visitors' => 'COUNT(DISTINCT e.visitor)', 'pageviews' => 'COUNT(*)', 'views' => Sql::LIVE_VIEWS]) . " {$ofRest('pageview')} GROUP BY e.path";
+                array_push($params, ...$at);
+            } elseif ($event) {
+                $parts[] = 'SELECT ' . $part('e.name', ['visitors' => 'COUNT(DISTINCT e.visitor)', 'events' => 'COUNT(*)']) . " {$ofRest('event')} GROUP BY e.name";
+                array_push($params, ...$at);
             } else {
-                foreach ($this->db->all("SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events {$ofRest('event')} GROUP BY e.name", $at) as $row) {
-                    $bump($row);
-                }
-            }
-        } elseif ($page || $event) {
-            // Every day of the range is built.
-        } else {
-            $col = 's.' . Query::SESSION_DIMENSIONS[$dimension];
-            foreach ($this->db->all(
-                "SELECT $col AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-           SUM(CASE WHEN " . Sql::BOUNCE . ' THEN 1 ELSE 0 END) AS bounced, SUM(' . Sql::DURATION . ") AS duration
-         FROM rl_sessions s WHERE s.site = ? AND $isVisit AND {$w['sql']} AND $col <> '' GROUP BY $col",
-                [$query['site'], ...$w['params']],
-            ) as $row) {
-                $bump($row);
+                $col = 's.' . Query::SESSION_DIMENSIONS[$dimension];
+                $counted = ['visitors' => 'COUNT(DISTINCT s.visitor)', 'visits' => 'COUNT(*)', 'pageviews' => 'SUM(s.pageviews)', 'bounced' => 'SUM(CASE WHEN ' . Sql::BOUNCE . ' THEN 1 ELSE 0 END)', 'duration' => 'SUM(' . Sql::DURATION . ')'];
+                $parts[] = 'SELECT ' . $part($col, $counted) . " FROM rl_sessions s WHERE s.site = ? AND $isVisit AND {$w['sql']} AND $col <> '' GROUP BY $col";
+                array_push($params, $query['site'], ...$w['params']);
             }
         }
         $entryExit = $dimension === 'entry' || $dimension === 'exit';
-        $rows = array_values(array_filter($sums, static fn (array $e): bool => ($event || $e[0] !== '') && ($page ? $e[1]['pageviews'] > 0 : ($event ? $e[1]['events'] > 0 : $e[1]['visits'] > 0))));
-        usort($rows, static function (array $p, array $q) use ($entryExit, $event, $page): int {
-            [$a, $x] = $p;
-            [$b, $y] = $q;
-            $order = $entryExit ? [$y['visits'] - $x['visits']]
-                : ($event ? [$y['visitors'] - $x['visitors'], $y['events'] - $x['events']]
-                : ($page ? [$y['visitors'] - $x['visitors'], $y['pageviews'] - $x['pageviews']]
-                : [$y['visitors'] - $x['visitors'], $y['visits'] - $x['visits']]));
-            foreach ($order as $d) {
-                if ($d != 0) {
-                    return $d < 0 ? -1 : 1;
+        if (!$parts) {
+            return [];
+        }
+        $order = $entryExit ? 'n_visits DESC' : ($event ? 'n_visitors DESC, n_events DESC' : ($page ? 'n_visitors DESC, n_pageviews DESC' : 'n_visitors DESC, n_visits DESC'));
+        $rows = $this->db->all(
+            'SELECT value, ' . implode(', ', array_map(static fn (string $c): string => "SUM($c) AS n_$c", $columns)) . ' FROM (' . implode(' UNION ALL ', $parts) . ') t
+       ' . ($event ? '' : "WHERE value <> ''") . " GROUP BY value ORDER BY $order, value{$this->textOrder()} LIMIT ? OFFSET ?",
+            [...$params, $limit, $offset],
+        );
+        // The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+        /** @var array<string, array{0: string, 1: array{engaged: int|float, scroll_sum: int|float, scroll_n: int|float}}> $rest */
+        $rest = [];
+        if ($page && $plan['rest'] && $rows) {
+            // Engaged time is added up per pageview first.
+            $size = max(1, min(Sql::VALUES_PER_QUERY, Sql::MAX_PARAMS - count($at) - 4));
+            $engaged = Sql::inPieces(array_map(static fn (array $row): string => (string) $row['value'], $rows), $size, fn (array $piece): array => $this->db->all(
+                "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest {$ofRest('engagement')} AND e.path IN (" . implode(', ', array_fill(0, count($piece), '?')) . ')
+                 GROUP BY e.path, e.pageview) t GROUP BY value',
+                [...$at, ...$piece],
+            ));
+            // PHP would turn a key like "12" into a number, so each value is kept under a key that stays text.
+            foreach ($engaged as $row) {
+                $key = 'v' . $row['value'];
+                $into = $rest[$key] ?? ['engaged' => 0, 'scroll_sum' => 0, 'scroll_n' => 0];
+                foreach ($into as $k => $n) {
+                    $into[$k] = $n + Sql::num($row[$k] ?? null);
                 }
+                $rest[$key] = $into;
             }
-            return Sql::codeOrder($a, $b);
-        });
+        }
         $out = [];
-        foreach (array_slice($rows, $offset, $limit) as [$value, $x]) {
+        foreach ($rows as $row) {
+            $value = (string) $row['value'];
+            $x = [];
+            foreach ($columns as $c) {
+                $x[$c] = Sql::num($row["n_$c"] ?? null);
+            }
             if ($event) {
                 $out[] = ['value' => $value, 'visitors' => $x['visitors'], 'events' => $x['events']];
                 continue;
             }
             if ($page) {
+                $more = $rest["v$value"] ?? ['engaged' => 0, 'scroll_sum' => 0, 'scroll_n' => 0];
+                $scrollN = $x['scroll_n'] + $more['scroll_n'];
                 $out[] = [
                     'value' => $value,
                     'visitors' => $x['visitors'],
                     'pageviews' => $x['pageviews'],
                     // Over every pageview that could report its time, counting those that sent none (under a second) as none.
-                    'timeOnPage' => $x['views'] > 0 ? self::whole(Js::round($x['engaged'] / $x['views'])) : 0,
-                    'scrollDepth' => $x['scroll_n'] > 0 ? self::whole(Js::round($x['scroll_sum'] / $x['scroll_n'])) : 0,
+                    'timeOnPage' => $x['views'] > 0 ? self::whole(Js::round(($x['engaged'] + $more['engaged']) / $x['views'])) : 0,
+                    'scrollDepth' => $scrollN > 0 ? self::whole(Js::round(($x['scroll_sum'] + $more['scroll_sum']) / $scrollN)) : 0,
                 ];
                 continue;
             }
-            $row = ['value' => $value, 'visitors' => $x['visitors'], 'visits' => $x['visits'], 'bounceRate' => $x['visits'] > 0 ? $x['bounced'] / $x['visits'] : 0];
+            $one = ['value' => $value, 'visitors' => $x['visitors'], 'visits' => $x['visits'], 'bounceRate' => $x['visits'] > 0 ? $x['bounced'] / $x['visits'] : 0];
             if (!$entryExit) {
-                $row['pageviews'] = $x['pageviews'];
-                $row['visitDuration'] = $x['visits'] > 0 ? self::whole(Js::round($x['duration'] / $x['visits'])) : 0;
+                $one['pageviews'] = $x['pageviews'];
+                $one['visitDuration'] = $x['visits'] > 0 ? self::whole(Js::round($x['duration'] / $x['visits'])) : 0;
             }
-            $out[] = $row;
+            $out[] = $one;
         }
         return $out;
     }
@@ -755,7 +748,11 @@ final class SqlStore
      */
     public function dropSaltsExcept(array $days): void
     {
-        $this->db->run('DELETE FROM rl_salts WHERE day NOT IN (' . implode(', ', array_fill(0, count($days), '?')) . ')', array_values($days));
+        // Never a day after the newest of these: a process whose clock is a moment behind must not delete the
+        // salt another has just made for the day that began.
+        $days = array_values($days);
+        $newest = max($days);
+        $this->db->run('DELETE FROM rl_salts WHERE day NOT IN (' . implode(', ', array_fill(0, count($days), '?')) . ') AND day < ?', [...$days, $newest]);
     }
 
     /**
@@ -929,6 +926,15 @@ final class SqlStore
     {
         $rows = $this->db->all('SELECT * FROM rl_links WHERE id = ? AND deleted_at IS NULL LIMIT 1', [$id]);
         return isset($rows[0]) ? Sql::linkRow($rows[0]) : null;
+    }
+
+    /**
+     * Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id and
+     * its clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted.
+     */
+    public function linkExists(string $id): bool
+    {
+        return $this->db->all('SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1', [$id]) !== [];
     }
 
     public function insertLink(array $link): void
@@ -1225,6 +1231,57 @@ final class SqlStore
     }
 
     /**
+     * Takes a turn that comes at most once every `$wait` milliseconds, such as a sample email: writes `$now` at
+     * `$key` unless a time less than `$wait` before it is there. Of callers at once, only one takes it. Null
+     * when it is too soon; else what was there before ("" when nothing was), to put back with swapSetting()
+     * when the turn came to nothing.
+     */
+    public function claimSetting(string $key, int $now, int $wait): ?string
+    {
+        for ($tries = 0; $tries < 20; $tries++) {
+            $seen = $this->setting($key);
+            if ($seen === null) {
+                if ($this->addSetting($key, (string) $now)) {
+                    return '';
+                }
+                continue;
+            }
+            if ($now - (int) Js::number($seen) < $wait) {
+                return null;
+            }
+            if ($seen === (string) $now || $this->swapSetting($key, $seen, (string) $now)) {
+                return $seen;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Rewrites a setting that holds a JSON list or object, from what `$edit` makes of the one there (an empty
+     * list when there is none). `$edit` gives null to leave it alone. The write only lands on the value that
+     * was read, so of callers at once each edit builds on the one before. False when `$edit` gave null, or
+     * the setting kept changing underneath.
+     *
+     * @param callable(array<array-key, mixed>): ?array<array-key, mixed> $edit
+     */
+    public function editSetting(string $key, callable $edit): bool
+    {
+        for ($tries = 0; $tries < 20; $tries++) {
+            $seen = $this->setting($key);
+            $held = $seen === null ? null : Json::tryDecode($seen, true);
+            $next = $edit(is_array($held) ? $held : []);
+            if ($next === null) {
+                return false;
+            }
+            $text = Json::encode($next);
+            if ($seen === null ? $this->addSetting($key, $text) : ($seen === $text || $this->swapSetting($key, $seen, $text))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * A setting that is made the first time it is wanted, such as a signing key. Of callers at once, every one
      * gets the value that was written first, never one that was then overwritten.
      *
@@ -1410,14 +1467,14 @@ final class SqlStore
     {
         if ($this->db->dialect() === 'postgres') {
             return [
-                'sql' => '(CASE WHEN (e.props::jsonb ->> ?) ~ \'^-?[0-9]+(\.[0-9]+)?$\' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)',
+                'sql' => '(CASE WHEN (' . Sql::readableProps('postgres') . ' ->> ?) ~ \'^-?[0-9]+(\.[0-9]+)?$\' THEN (' . Sql::readableProps('postgres') . ' ->> ?)::numeric ELSE 0 END)',
                 'params' => [$prop, $prop],
             ];
         }
         $path = "\$.\"$prop\"";
         if ($this->db->dialect() === 'mysql') {
             // As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-            $value = 'JSON_EXTRACT(e.props, ?)';
+            $value = 'JSON_EXTRACT(' . Sql::readableProps('mysql') . ', ?)';
             return [
                 'sql' => "(CASE
           WHEN JSON_TYPE($value) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN CAST($value AS DOUBLE)
@@ -1452,12 +1509,12 @@ final class SqlStore
             // Each key as a row of its own, compared and sorted by code point like every other value.
             'mysql' => $this->db->all(
                 "SELECT j.k AS \"key\", COUNT(*) AS events FROM {$v['from']}
-             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '\$[*]' COLUMNS (k VARCHAR(255) COLLATE " . Sql::MYSQL_COLLATION . " PATH '\$')) j
+             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(" . Sql::readableProps('mysql') . ") = 'OBJECT' THEN e.props ELSE '{}' END), '\$[*]' COLUMNS (k VARCHAR(255) COLLATE " . Sql::MYSQL_COLLATION . " PATH '\$')) j
              WHERE $where GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30",
                 $params,
             ),
             'postgres' => $this->db->all(
-                "SELECT k AS \"key\", COUNT(*) AS events FROM {$v['from']} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k
+                "SELECT k AS \"key\", COUNT(*) AS events FROM {$v['from']} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(" . Sql::readableProps('postgres') . ") = 'object' THEN " . Sql::readableProps('postgres') . " ELSE '{}'::jsonb END) AS k
              WHERE $where GROUP BY k ORDER BY events DESC, k{$this->textOrder()} LIMIT 30",
                 $params,
             ),
@@ -1479,8 +1536,8 @@ final class SqlStore
     {
         $v = Sql::visitRows($query['filters'], $query['site'], $query['from'], $query['to'], $this->db->dialect());
         $value = match ($this->db->dialect()) {
-            'postgres' => '(e.props::jsonb ->> ?)',
-            'mysql' => '(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE ' . Sql::MYSQL_COLLATION . ')',
+            'postgres' => '(' . Sql::readableProps('postgres') . ' ->> ?)',
+            'mysql' => '(JSON_UNQUOTE(JSON_EXTRACT(' . Sql::readableProps('mysql') . ', ?)) COLLATE ' . Sql::MYSQL_COLLATION . ')',
             default => 'CAST(json_extract(e.props, ?) AS TEXT)',
         };
         $path = $this->db->dialect() === 'postgres' ? $key : "\$.\"$key\"";

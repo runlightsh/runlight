@@ -22,6 +22,19 @@ final class Write
     /** The most clicks a day one imported link gets from a daily count. */
     private const MAX_DAILY = 10_000;
 
+    /**
+     * The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a
+     * longer history is left behind, so no source, however much it sends, can fill memory or hold the database.
+     */
+    public const MAX_LINK_CLICKS = 100_000;
+
+    /** An IPv4 address, or what reads as an IPv6 one, anywhere in a text. */
+    private const ADDRESS = '/(^|[^\d.])\d{1,3}(\.\d{1,3}){3}(?![\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}/i';
+    /** What a user agent has and a place name does not: a product with its version (Chrome/129), or its usual first words. */
+    private const AGENT = '/[a-z]\/\d|mozilla|applewebkit/i';
+    /** A browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user agent. */
+    private const NAME = '/^[A-Za-z_][A-Za-z0-9 ._+-]{0,39}$/D';
+
     // Browser and system names as other tools write them, in Runlight's spelling.
     public const BROWSERS = [
         'chrome' => 'Chrome', 'crios' => 'Chrome', 'chromium-webview' => 'Android WebView', 'chrome webview' => 'Android WebView', 'safari' => 'Safari', 'ios' => 'Safari', 'ios-webview' => 'Safari',
@@ -58,16 +71,46 @@ final class Write
         return $v === '' ? '' : Js::upper(Js::slice($v, 0, 1)) . Js::slice($v, 1);
     }
 
-    /** A browser name in Runlight's spelling: a known one, or the name with a capital first letter. */
-    public static function browser(string $name): string
+    /**
+     * Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in
+     * any column. A name that is not one Runlight knows is kept only when it reads as a name, and nothing else.
+     */
+    private static function named(string $name): string
     {
-        return self::BROWSERS[Js::lower($name)] ?? self::title($name);
+        $text = Js::trim($name);
+        return preg_match(self::NAME, $text) && !preg_match(self::ADDRESS, $text) ? $text : '';
     }
 
-    /** A system name in Runlight's spelling, or the name as given. */
+    /** A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for anything else. */
+    public static function browser(string $name): string
+    {
+        return self::BROWSERS[Js::lower($name)] ?? self::title(self::named($name));
+    }
+
+    /** A system name in Runlight's spelling, or a name as given, or none for anything that is not a name. */
     public static function system(string $name): string
     {
-        return self::SYSTEMS[Js::lower($name)] ?? $name;
+        return self::SYSTEMS[Js::lower($name)] ?? self::named($name);
+    }
+
+    /** Free text about a place as given, or none when it holds an address or reads as a user agent. */
+    public static function place(string $name): string
+    {
+        return preg_match(self::ADDRESS, $name) || preg_match(self::AGENT, $name) ? '' : $name;
+    }
+
+    /** A screen as 1440x900, or none. */
+    public static function screen(string $value): string
+    {
+        $text = Js::trim($value);
+        return preg_match('/^\d{1,5}x\d{1,5}$/D', $text) ? $text : '';
+    }
+
+    /** A language tag such as en or pt-BR, or none. */
+    public static function language(string $value): string
+    {
+        $text = Js::trim($value);
+        return preg_match('/^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}$/D', $text) ? $text : '';
     }
 
     public static function device(string $name): string
@@ -97,7 +140,9 @@ final class Write
     public static function writeLink(Runlight $runlight, string $site, string $source, array $foreign, array $history, ?callable $linkDomain = null): array
     {
         $id = self::importedLinkId($source, (string) $foreign['sourceId']);
-        if ($runlight->store->linkById($id) !== null) {
+        // Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+        // left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+        if ($runlight->store->linkExists($id)) {
             return ['status' => 'skipped', 'clicks' => 0];
         }
         $slug = (string) $foreign['slug'];
@@ -138,6 +183,9 @@ final class Write
 
             $made = [];
             foreach ($history['clicks'] ?? [] as $c) {
+                if ($clicks >= self::MAX_LINK_CLICKS) {
+                    break;
+                }
                 $ts = $c['ts'] ?? NAN;
                 if (!is_int($ts) && !(is_float($ts) && is_finite($ts))) {
                     continue;
@@ -157,7 +205,7 @@ final class Write
                         ?? new Url("https://$host/$slug");
                     $page = Sources::parsePage($url);
                     $country = Js::slice(Js::upper(self::str($c, 'country')), 0, 2);
-                    $rawRegion = self::str($c, 'region');
+                    $rawRegion = self::place(self::str($c, 'region'));
                     $region = $rawRegion !== '' ? Js::slice(Js::upper(str_contains($rawRegion, '-') ? $rawRegion : "$country-$rawRegion"), 0, 10) : '';
                     $store->insertSession([
                         'id' => $session,
@@ -173,14 +221,14 @@ final class Write
                         'utmContent' => $page['utm']['content'],
                         'country' => preg_match('/^[A-Z]{2}$/D', $country) ? $country : '',
                         'region' => $country !== '' ? $region : '',
-                        'city' => Js::slice(self::str($c, 'city'), 0, 100),
+                        'city' => Js::slice(self::place(self::str($c, 'city')), 0, 100),
                         'browser' => self::browser(self::str($c, 'browser')),
                         'browserVersion' => '',
                         'os' => self::SYSTEMS[Js::lower(self::str($c, 'os'))] ?? Js::string($c['os'] ?? ''),
                         'osVersion' => '',
                         'device' => self::device(self::str($c, 'device')),
-                        'screen' => Js::string($c['screen'] ?? ''),
-                        'language' => Js::string($c['language'] ?? ''),
+                        'screen' => self::screen(Js::string($c['screen'] ?? '')),
+                        'language' => self::language(Js::string($c['language'] ?? '')),
                     ]);
                     $store->db->run('UPDATE rl_sessions SET imported = 1 WHERE id = ?', [$session]);
                 }
@@ -200,7 +248,7 @@ final class Write
                     continue;
                 }
                 // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-                $n = min((int) floor($d['clicks']), self::MAX_DAILY);
+                $n = min((int) floor($d['clicks']), self::MAX_DAILY, self::MAX_LINK_CLICKS - $clicks);
                 for ($i = 0; $i < $n; $i++) {
                     $store->insertEvent([
                         'site' => $site, 'ts' => (int) $start + (int) floor((($i + 0.5) / $n) * 86_400_000), 'kind' => 'click', 'visitor' => '', 'session' => '', 'pageview' => '',
