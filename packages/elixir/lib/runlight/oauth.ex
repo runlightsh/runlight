@@ -91,10 +91,23 @@ defmodule Runlight.OAuth do
   def s256(verifier), do: :crypto.hash(:sha256, verifier) |> base64url()
 
   # Redirect addresses a client may register: https, or a local app's own loopback address.
+  # And one that parses as an address at all.
   defp allowed_redirect?(value),
     do:
-      Regex.match?(~r/^https:\/\/[^\/]+/, value) or
-        Regex.match?(~r/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//, value)
+      (Regex.match?(~r/^https:\/\/[^\/]+/, value) or
+         Regex.match?(~r/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//, value)) and
+        Url.parse(value) != nil
+
+  # The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.
+  @max_body_bytes 64 * 1024
+
+  # A body past the cap is refused where it would be read, since not every host caps a request body before it
+  # reaches the app.
+  defp capped(request, fun) do
+    if Request.longer?(request, @max_body_bytes),
+      do: oauth_error("invalid_request", "Send a smaller body", 413),
+      else: fun.()
+  end
 
   @doc """
   The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
@@ -181,25 +194,7 @@ defmodule Runlight.OAuth do
         limit = RateLimit.new(rl.table, :oauth_registrations, @registrations_per_minute)
 
         if RateLimit.allow?(limit, Runlight.client_ip(rl, request), Runlight.now(rl)) do
-          body =
-            case Request.json(request),
-              do: (
-                {:ok, %Object{} = b} -> b
-                _ -> nil
-              )
-
-          redirects =
-            case body && body["redirect_uris"] do
-              list when is_list(list) ->
-                list |> Enum.map(&JS.string/1) |> Enum.filter(&allowed_redirect?/1) |> Enum.take(10)
-
-              _ ->
-                []
-            end
-
-          if redirects == [],
-            do: oauth_error("invalid_redirect_uri", "Register at least one https redirect address"),
-            else: register(rl, JS.string(JS.nullish(body && JS.prop(body, "client_name"), "An app")), redirects)
+          capped(request, fn -> registration(rl, request) end)
         else
           oauth_error(
             "invalid_client_metadata",
@@ -210,15 +205,40 @@ defmodule Runlight.OAuth do
 
       path == "/oauth/authorize" and request.method in ["GET", "POST"] ->
         Runlight.init(rl)
-        authorize(ctx, request, url)
+
+        if request.method == "POST",
+          do: capped(request, fn -> authorize(ctx, request, url) end),
+          else: authorize(ctx, request, url)
 
       path == "/oauth/token" and request.method == "POST" ->
         Runlight.init(rl)
-        token(ctx, request)
+        capped(request, fn -> token(ctx, request) end)
 
       true ->
         nil
     end
+  end
+
+  defp registration(rl, request) do
+    body =
+      case Request.json(request),
+        do: (
+          {:ok, %Object{} = b} -> b
+          _ -> nil
+        )
+
+    redirects =
+      case body && body["redirect_uris"] do
+        list when is_list(list) ->
+          list |> Enum.map(&JS.string/1) |> Enum.filter(&allowed_redirect?/1) |> Enum.take(10)
+
+        _ ->
+          []
+      end
+
+    if redirects == [],
+      do: oauth_error("invalid_redirect_uri", "Register at least one https redirect address"),
+      else: register(rl, JS.string(JS.nullish(body && JS.prop(body, "client_name"), "An app")), redirects)
   end
 
   defp authorize(ctx, request, url) do
@@ -233,8 +253,9 @@ defmodule Runlight.OAuth do
     lang = Messages.accepted_language(request)
     h = &Messages.html(lang, &1, &2)
 
-    # Without a known client and one of its own addresses there is nowhere safe to send an answer.
-    if client == nil or redirect not in (client["redirects"] || []) do
+    # Without a known client and one of its own addresses there is nowhere safe to send an answer. An address
+    # that does not parse, from an app registered before those were refused, is no address of its own.
+    if client == nil or redirect not in (client["redirects"] || []) or Url.parse(redirect) == nil do
       page(lang, h.("oauth.unregisteredTitle", %{}), "<p>#{h.("oauth.startAgain", %{})}</p>", 400)
     else
       back = fn params ->
@@ -289,10 +310,12 @@ defmodule Runlight.OAuth do
           cond do
             # Someone signed in who may only read would be sent to sign in again and again.
             ctx.is_reader && ctx.is_reader.(request) ->
+              site_only = ctx[:is_site_only] != nil and ctx.is_site_only.(request)
+
               page(
                 lang,
                 h.("oauth.viewerTitle", %{}),
-                "<p>#{h.("oauth.viewer", %{"app" => esc(client["name"])})}</p>",
+                "<p>#{h.(if(site_only, do: "oauth.siteAccount", else: "oauth.viewer"), %{"app" => esc(client["name"])})}</p>",
                 403
               )
 

@@ -339,6 +339,15 @@ defmodule Runlight.Importers.Visits do
   # Writes one imported pageview or event as part of a Runlight visit. Visitors are hashed per day from the
   # hit's key, and a hit within thirty minutes of the visitor's last one joins that visit. Answers whether it
   # started a new visit.
+  # Whether a hostname can be the host of an address, and nothing more than a host.
+  defp valid_host?(host) do
+    host != "" and not Regex.match?(~r/[\/?#@\\]/, host) and
+      case Url.parse("https://#{host}/") do
+        nil -> false
+        url -> url.hostname != ""
+      end
+  end
+
   defp write_event(store, site, ns, e) do
     # The site's own day, as live visitors are counted, so days add up the same way in rollups.
     day = Time.local_date(e.ts, site["timezone"])
@@ -347,6 +356,17 @@ defmodule Runlight.Importers.Visits do
     # A visit that runs past midnight keeps the id it started with, as a live one does.
     yesterday = Importers.hex_id("#{ns}:#{key}:#{Time.add_days(day, -1)}", 16)
     host = JS.lower(JS.or_else(e.hostname, List.first(site["hostnames"]) || "imported.invalid"))
+    own = List.first(site["hostnames"]) || ""
+
+    # A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one row
+    # under the site's name rather than a failed batch.
+    host =
+      cond do
+        valid_host?(host) -> host
+        valid_host?(own) -> JS.lower(own)
+        true -> "imported.invalid"
+      end
+
     query = if JS.truthy?(e.query), do: "?" <> String.replace(e.query, ~r/^\?/, ""), else: ""
 
     page =
@@ -364,7 +384,7 @@ defmodule Runlight.Importers.Visits do
         id = Importers.hex_id("#{ns}:#{key}:#{JS.string(e.ts)}")
         Store.run_sql(store, "DELETE FROM rl_sessions WHERE id = ?", [id])
         country = e.country |> JS.or_else("") |> JS.upper() |> JS.slice(0, 2)
-        raw_region = e.region
+        raw_region = Importers.place_name(e.region)
 
         region =
           if JS.truthy?(raw_region) do
@@ -394,14 +414,14 @@ defmodule Runlight.Importers.Visits do
           utm_content: page.utm.content,
           country: if(valid, do: country, else: ""),
           region: if(valid, do: region, else: ""),
-          city: e.city |> JS.or_else("") |> JS.slice(0, 100),
+          city: e.city |> Importers.place_name() |> JS.slice(0, 100),
           browser: Importers.browser_name(JS.or_else(e.browser, "")),
           browser_version: "",
           os: Importers.system_name(e.os),
           os_version: "",
           device: Importers.device_name(JS.or_else(e.device, "")),
-          screen: JS.slice(e.screen, 0, 20),
-          language: JS.slice(e.language, 0, 35)
+          screen: Importers.screen_size(e.screen),
+          language: Importers.language_tag(e.language)
         })
 
         # No engaged time is known, so duration falls back to first-to-last pageview.
@@ -527,13 +547,25 @@ defmodule Runlight.Importers.Visits do
     end
   end
 
+  # The start of 2000, in milliseconds.
+  @csv_earliest 946_684_800_000
+
   @doc """
-  A row's time in milliseconds, or NaN. ISO 8601 with or without a zone (both
+  A row's time in milliseconds, or NaN, as it also is for a time before the
+  start of 2000: a bare number is read as a Unix time, so a date written
+  20240501 would otherwise land in 1970. ISO 8601 with or without a zone (both
   read as UTC when no zone is given, as Umami writes them), or a Unix time in
   seconds or milliseconds.
   """
   @spec row_time(Object.t() | map(), String.t()) :: number() | :nan
   def row_time(r, format) do
+    case read_time(r, format) do
+      ts when is_number(ts) and ts >= @csv_earliest -> ts
+      _ -> :nan
+    end
+  end
+
+  defp read_time(r, format) do
     text = JS.trim(JS.nullish(row(r, if(format == "umami", do: "created_at", else: "time")), ""))
 
     cond do

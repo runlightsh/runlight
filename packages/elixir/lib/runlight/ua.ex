@@ -6,16 +6,28 @@ defmodule Runlight.Ua do
   alias Runlight.Data.Agents
   alias Runlight.JS
 
+  # The most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past it is
+  # parsed.
+  @max_ua 512
+
+  @doc "The most of a user agent that is read, in UTF-16 units."
+  def max_ua, do: @max_ua
+
+  defp cap(nil), do: ""
+  defp cap(value), do: if(JS.len16(value) > @max_ua, do: JS.slice(value, 0, @max_ua), else: value)
+
   @doc "The AI agent a user agent names, or nil."
   @spec ai_agent(String.t()) :: map() | nil
   def ai_agent(ua) do
-    lower = JS.lower(ua)
+    lower = ua |> cap() |> JS.lower()
     Enum.find(Agents.all(), &String.contains?(lower, &1.token))
   end
 
   @doc "Whether the user agent is clearly not a person in a browser."
   @spec bot?(String.t()) :: boolean()
   def bot?(ua) do
+    ua = cap(ua)
+
     if JS.len16(ua) < 20 or not Regex.match?(~r/mozilla|opera/i, ua),
       do: true,
       else: Regex.match?(Agents.bot_pattern(), ua)
@@ -34,14 +46,13 @@ defmodule Runlight.Ua do
       {"Instagram", ~r/Instagram (\d+)/},
       {"Firefox", ~r/(?:Firefox|FxiOS)\/(\d+)/},
       {"Chrome", ~r/(?:CriOS|Chrome)\/(\d+)/},
-      {"Safari", ~r/Version\/(\d+)[\d.]* (?:Mobile\/\S+ )?Safari\//},
+      {"Safari", ~r/Version\/(\d+)(?:\.[\d.]*)? (?:Mobile\/\S+ )?Safari\//},
       {"Internet Explorer", ~r/(?:MSIE |Trident\/.*rv:)(\d+)/}
     ]
   end
 
   @windows %{"10.0" => "10", "6.3" => "8.1", "6.2" => "8", "6.1" => "7", "6.0" => "Vista", "5.1" => "XP"}
 
-  defp unquote_hint(nil), do: ""
   defp unquote_hint(value), do: value |> String.replace("\"", "") |> JS.trim()
 
   @doc """
@@ -51,6 +62,9 @@ defmodule Runlight.Ua do
   """
   @spec parse_client(String.t(), map(), integer() | nil) :: map()
   def parse_client(ua, hints \\ %{}, screen_width \\ nil) do
+    ua = cap(ua)
+    hints = %{brands: cap(hints[:brands]), mobile: cap(hints[:mobile]), platform: cap(hints[:platform])}
+
     {browser, version} =
       Enum.find_value(browsers(), {"Other", ""}, fn {name, pattern} ->
         case Regex.run(pattern, ua) do

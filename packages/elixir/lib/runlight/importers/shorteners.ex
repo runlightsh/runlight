@@ -131,7 +131,10 @@ defmodule Runlight.Importers.Shorteners do
           )
         end)
 
-    if length(events) < 1000, do: acc, else: dub_pages(http, headers, l, page + 1, acc)
+    # No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+    if length(events) < 1000 or length(acc) >= Runlight.Importers.max_link_clicks(),
+      do: acc,
+      else: dub_pages(http, headers, l, page + 1, acc)
   end
 
   defp dub_daily(http, headers, l) do
@@ -549,9 +552,13 @@ defmodule Runlight.Importers.Shorteners do
   defp umami_all(http, base, headers, path, page \\ 1, out \\ []) do
     body = Http.get_json(http, "#{base}/api#{path}&page=#{page}&pageSize=1000", headers: headers)
     out = out ++ body["data"]
+    max = Runlight.Importers.max_link_clicks()
 
-    if length(out) >= body["count"] or body["data"] == [],
-      do: out,
-      else: umami_all(http, base, headers, path, page + 1, out)
+    cond do
+      # No more than a link keeps: a longer history, or a server that never stops, ends here.
+      length(out) >= max -> Enum.take(out, max)
+      length(out) >= body["count"] or body["data"] == [] -> out
+      true -> umami_all(http, base, headers, path, page + 1, out)
+    end
   end
 end

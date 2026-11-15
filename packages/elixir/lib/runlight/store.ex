@@ -635,143 +635,135 @@ defmodule Runlight.Store do
     page = dimension == "page"
     event = dimension == "event"
 
-    bump = fn {order, sums}, row ->
-      key = str(row["value"])
-
-      {order, into} =
-        if Map.has_key?(sums, key), do: {order, sums[key]}, else: {[key | order], Map.new(@sum_keys, &{&1, 0})}
-
-      into = Map.new(into, fn {k, v} -> {k, v + num(row[k])} end)
-      {order, Map.put(sums, key, into)}
+    # Each source adds up its own rows by value, and the database adds the sources together, sorts them, and cuts
+    # them to the page asked for, so no more than that page is ever read into memory.
+    part = fn value, counted ->
+      "#{value} AS value, " <> Enum.map_join(@sum_keys, ", ", &"#{Map.get(counted, &1, "0")} AS #{&1}")
     end
 
-    acc = {[], %{}}
-
-    acc =
-      if plan.days != [] do
-        rolled =
-          all(
-            store,
-            """
-            SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-                       SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-                     FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (#{built_days()}) GROUP BY value\
-            """,
-            [query.site, dimension, query.site, query.from, query.to]
-          )
-
-        Enum.reduce(rolled, acc, &bump.(&2, &1))
-      else
-        acc
-      end
+    {parts, params} =
+      if plan.days != [],
+        do:
+          {[
+             "SELECT value, #{Enum.join(@sum_keys, ", ")} FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (#{built_days()})"
+           ], [query.site, dimension, query.site, query.from, query.to]},
+        else: {[], []}
 
     {w_sql, w_params} = within(plan.rest)
+    # A visit's pageviews and events belong to the day it started, as in the rollups.
+    # Bounded by time as well, so the events index finds them (see build_rollup_day).
+    lo = plan.rest |> Enum.map(&elem(&1, 0)) |> Enum.min(fn -> 0 end)
+    hi = (plan.rest |> Enum.map(&elem(&1, 1)) |> Enum.max(fn -> 0 end)) + event_tail_ms()
 
-    acc =
+    of_rest = fn kind ->
+      "FROM #{event_kind_table(store)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '#{kind}' AND e.ts >= ? AND e.ts < ? AND #{visit_sql()} AND #{w_sql}"
+    end
+
+    at = [query.site, lo, hi] ++ w_params
+
+    {parts, params} =
       cond do
-        (page or event) and plan.rest != [] ->
-          # A visit's pageviews and events belong to the day it started, as in the rollups.
-          lo = plan.rest |> Enum.map(&elem(&1, 0)) |> Enum.min()
-          hi = (plan.rest |> Enum.map(&elem(&1, 1)) |> Enum.max()) + event_tail_ms()
+        plan.rest == [] ->
+          {parts, params}
 
-          of_rest = fn kind ->
-            "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '#{kind}' AND e.ts >= ? AND e.ts < ? AND #{visit_sql()} AND #{w_sql}"
-          end
+        page ->
+          counted = %{"visitors" => "COUNT(DISTINCT e.visitor)", "pageviews" => "COUNT(*)", "views" => live_views()}
+          {parts ++ ["SELECT #{part.("e.path", counted)} #{of_rest.("pageview")} GROUP BY e.path"], params ++ at}
 
-          at = [query.site, lo, hi] ++ w_params
-
-          if page do
-            acc =
-              store
-              |> all(
-                "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, #{live_views()} AS views #{of_rest.("pageview")} GROUP BY e.path",
-                at
-              )
-              |> Enum.reduce(acc, &bump.(&2, &1))
-
-            store
-            |> all(
-              """
-              SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-                         SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest #{of_rest.("engagement")} GROUP BY e.path, e.pageview) t GROUP BY value\
-              """,
-              at
-            )
-            |> Enum.reduce(acc, &bump.(&2, &1))
-          else
-            store
-            |> all(
-              "SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events #{of_rest.("event")} GROUP BY e.name",
-              at
-            )
-            |> Enum.reduce(acc, &bump.(&2, &1))
-          end
-
-        page or event ->
-          # Every day of the range is built.
-          acc
+        event ->
+          counted = %{"visitors" => "COUNT(DISTINCT e.visitor)", "events" => "COUNT(*)"}
+          {parts ++ ["SELECT #{part.("e.name", counted)} #{of_rest.("event")} GROUP BY e.name"], params ++ at}
 
         true ->
           col = "s." <> Query.session_column(dimension)
 
-          store
-          |> all(
-            """
-            SELECT #{col} AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-                       SUM(CASE WHEN #{bounce()} THEN 1 ELSE 0 END) AS bounced, SUM(#{duration()}) AS duration
-                     FROM rl_sessions s WHERE s.site = ? AND #{visit_sql()} AND #{w_sql} AND #{col} <> '' GROUP BY #{col}\
-            """,
-            [query.site] ++ w_params
-          )
-          |> Enum.reduce(acc, &bump.(&2, &1))
+          counted = %{
+            "visitors" => "COUNT(DISTINCT s.visitor)",
+            "visits" => "COUNT(*)",
+            "pageviews" => "SUM(s.pageviews)",
+            "bounced" => "SUM(CASE WHEN #{bounce()} THEN 1 ELSE 0 END)",
+            "duration" => "SUM(#{duration()})"
+          }
+
+          {parts ++
+             [
+               "SELECT #{part.(col, counted)} FROM rl_sessions s WHERE s.site = ? AND #{visit_sql()} AND #{w_sql} AND #{col} <> '' GROUP BY #{col}"
+             ], params ++ [query.site] ++ w_params}
       end
 
-    {order, sums} = acc
     entry_exit = dimension in ["entry", "exit"]
 
+    order =
+      cond do
+        entry_exit -> "n_visits DESC"
+        event -> "n_visitors DESC, n_events DESC"
+        page -> "n_visitors DESC, n_pageviews DESC"
+        true -> "n_visitors DESC, n_visits DESC"
+      end
+
     rows =
-      order
-      |> Enum.reverse()
-      |> Enum.map(&{&1, sums[&1]})
-      |> Enum.filter(fn {value, x} ->
-        (event or value != "") and
-          cond do
-            page -> x["pageviews"] > 0
-            event -> x["events"] > 0
-            true -> x["visits"] > 0
-          end
-      end)
-      |> Enum.sort(fn {a, x}, {b, y} ->
-        keys =
-          cond do
-            entry_exit -> [y["visits"] - x["visits"]]
-            event -> [y["visitors"] - x["visitors"], y["events"] - x["events"]]
-            page -> [y["visitors"] - x["visitors"], y["pageviews"] - x["pageviews"]]
-            true -> [y["visitors"] - x["visitors"], y["visits"] - x["visits"]]
-          end
+      all(
+        store,
+        """
+        SELECT value, #{Enum.map_join(@sum_keys, ", ", &"SUM(#{&1}) AS n_#{&1}")} FROM (#{Enum.join(parts, " UNION ALL ")}) t
+               #{if event, do: "", else: "WHERE value <> ''"} GROUP BY value ORDER BY #{order}, value#{text_order(store)} LIMIT ? OFFSET ?\
+        """,
+        params ++ [limit, offset]
+      )
 
-        case Enum.find(keys, &(&1 != 0)) do
-          nil -> JS.code_order(a, b) <= 0
-          d -> d < 0
-        end
-      end)
+    # The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+    rest =
+      if page and plan.rest != [] and rows != [] do
+        # Engaged time is added up per pageview first.
+        size = max(1, min(Sql.values_per_query(), Sql.max_params() - length(at) - 4))
 
-    rows
-    |> Enum.drop(offset)
-    |> Enum.take(limit)
-    |> Enum.map(fn {value, x} ->
+        rows
+        |> Enum.map(&str(&1["value"]))
+        |> in_pieces(size, fn piece ->
+          paths = " AND e.path IN (#{Enum.map_join(piece, ", ", fn _ -> "?" end)})"
+
+          all(
+            store,
+            """
+            SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
+                       SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest #{of_rest.("engagement")}#{paths}
+                       GROUP BY e.path, e.pageview) t GROUP BY value\
+            """,
+            at ++ piece
+          )
+        end)
+        |> Enum.reduce(%{}, fn row, rest ->
+          into = Map.get(rest, str(row["value"]), %{engaged: 0, scroll_sum: 0, scroll_n: 0})
+
+          Map.put(rest, str(row["value"]), %{
+            engaged: into.engaged + num(row["engaged"]),
+            scroll_sum: into.scroll_sum + num(row["scroll_sum"]),
+            scroll_n: into.scroll_n + num(row["scroll_n"])
+          })
+        end)
+      else
+        %{}
+      end
+
+    Enum.map(rows, fn row ->
+      value = str(row["value"])
+      x = Map.new(@sum_keys, &{&1, num(row["n_" <> &1])})
+
       cond do
         event ->
           JS.obj(value: value, visitors: x["visitors"], events: x["events"])
 
         page ->
+          more = Map.get(rest, value, %{engaged: 0, scroll_sum: 0, scroll_n: 0})
+          scroll_n = x["scroll_n"] + more.scroll_n
+
           JS.obj(
             value: value,
             visitors: x["visitors"],
             pageviews: x["pageviews"],
             # Over every pageview that could report its time, counting those that sent none (under a second) as none.
-            timeOnPage: if(x["views"] > 0, do: JS.round(x["engaged"] / x["views"]), else: 0),
-            scrollDepth: if(x["scroll_n"] > 0, do: JS.round(x["scroll_sum"] / x["scroll_n"]), else: 0)
+            timeOnPage: if(x["views"] > 0, do: JS.round((x["engaged"] + more.engaged) / x["views"]), else: 0),
+            scrollDepth: if(scroll_n > 0, do: JS.round((x["scroll_sum"] + more.scroll_sum) / scroll_n), else: 0)
           )
 
         true ->
@@ -892,8 +884,15 @@ defmodule Runlight.Store do
 
   @doc "Deletes every salt but those of these days, so the hashes made with them can never be made again."
   @spec drop_salts_except(t(), [String.t()]) :: :ok
-  def drop_salts_except(store, days),
-    do: run(store, "DELETE FROM rl_salts WHERE day NOT IN (#{Enum.map_join(days, ", ", fn _ -> "?" end)})", days)
+  def drop_salts_except(store, days) do
+    # Never a day after the newest of these: a process whose clock is a moment behind must not delete the salt
+    # another has just made for the day that began.
+    run(
+      store,
+      "DELETE FROM rl_salts WHERE day NOT IN (#{Enum.map_join(days, ", ", fn _ -> "?" end)}) AND day < ?",
+      days ++ [Enum.max(days)]
+    )
+  end
 
   @doc "Whether a visit to one of these sites that started in a stretch of time was still going at `since`."
   @spec visit_open?(t(), [String.t()], integer(), integer(), integer()) :: boolean()
@@ -1129,6 +1128,13 @@ defmodule Runlight.Store do
     row = first(store, "SELECT * FROM rl_links WHERE slug = ? AND deleted_at IS NULL LIMIT 1", [slug])
     row && link_row(row)
   end
+
+  @doc """
+  Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id and its
+  clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted.
+  """
+  @spec link_exists?(t(), String.t()) :: boolean()
+  def link_exists?(store, id), do: all(store, "SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1", [id]) != []
 
   @spec link_by_id(t(), String.t()) :: Object.t() | nil
   def link_by_id(store, id) do
@@ -1706,15 +1712,25 @@ defmodule Runlight.Store do
   end
 
   # A numeric event property for one row, as SQL (0 when it is not a number). Property names are checked first.
+  # Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even number
+  # of backslashes. JSON.stringify writes both for a string that holds them, and they are valid JSON.
+  @pg_unreadable_props ~S"(?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}"
+
+  # An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+  # escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props, rather
+  # than failing every report that reads its event. SQLite reads them as they are.
+  defp readable_props("postgres"), do: "(CASE WHEN e.props !~ '#{@pg_unreadable_props}' THEN e.props END)::jsonb"
+  defp readable_props("mysql"), do: "(CASE WHEN JSON_VALID(e.props) THEN e.props END)"
+
   defp prop_value(store, prop) do
     case dialect(store) do
       "postgres" ->
-        {"(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)",
+        {"(CASE WHEN (#{readable_props("postgres")} ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (#{readable_props("postgres")} ->> ?)::numeric ELSE 0 END)",
          [prop, prop]}
 
       "mysql" ->
         path = ~s($."#{prop}")
-        value = "JSON_EXTRACT(e.props, ?)"
+        value = "JSON_EXTRACT(#{readable_props("mysql")}, ?)"
 
         {"""
          (CASE
@@ -1762,7 +1778,7 @@ defmodule Runlight.Store do
             store,
             """
             SELECT j.k AS "key", COUNT(*) AS events FROM #{v_from}
-                         CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE #{Sql.mysql_collation()} PATH '$')) j
+                         CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(#{readable_props("mysql")}) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE #{Sql.mysql_collation()} PATH '$')) j
                          WHERE #{where} GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30\
             """,
             params
@@ -1772,7 +1788,7 @@ defmodule Runlight.Store do
           all(
             store,
             """
-            SELECT k AS "key", COUNT(*) AS events FROM #{v_from} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k
+            SELECT k AS "key", COUNT(*) AS events FROM #{v_from} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(#{readable_props("postgres")}) = 'object' THEN #{readable_props("postgres")} ELSE '{}'::jsonb END) AS k
                          WHERE #{where} GROUP BY k ORDER BY events DESC, k#{text_order(store)} LIMIT 30\
             """,
             params
@@ -1800,8 +1816,8 @@ defmodule Runlight.Store do
 
     value =
       case dialect do
-        "postgres" -> "(e.props::jsonb ->> ?)"
-        "mysql" -> "(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE #{Sql.mysql_collation()})"
+        "postgres" -> "(#{readable_props("postgres")} ->> ?)"
+        "mysql" -> "(JSON_UNQUOTE(JSON_EXTRACT(#{readable_props("mysql")}, ?)) COLLATE #{Sql.mysql_collation()})"
         _ -> "CAST(json_extract(e.props, ?) AS TEXT)"
       end
 

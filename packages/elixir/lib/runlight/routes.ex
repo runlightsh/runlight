@@ -304,8 +304,14 @@ defmodule Runlight.Routes do
         do: JS.slice(first, 0, JS.index_of(first, "]") + 1),
         else: String.replace(first, ~r/:\d*\z/, "")
 
-    name |> String.replace(~r/\.+\z/, "") |> String.replace(~r/^www\./, "")
+    name |> without_final_dots() |> String.replace(~r/^www\./, "")
   end
+
+  # Text without its final dots, read from the end, so a long run of dots costs no more than its length.
+  defp without_final_dots(text), do: String.trim_trailing(text, ".")
+
+  # The longest domain name there can be. Anything longer is refused before a pattern reads it.
+  @max_domain 253
 
   # Whether a domain name is one kept for private networks or tests, or has an IPv4 address inside it.
   defp private_name?(domain) do
@@ -480,9 +486,28 @@ defmodule Runlight.Routes do
     user && user["site"]
   end
 
+  # A hub's manage token and an account kept to one site reach one site's settings and nothing of the install's,
+  # so neither is taken at its word about where this app lives: the Host of a request is the caller's to choose.
+  defp restricted?(routes, request), do: managed(request) != nil or scope_site(routes, request) != nil
+
+  # Whether a request is for an OAuth path under the base, by its path alone: "/oauth/" in a query or further
+  # down another path is not one.
+  defp oauth_path?(routes, request) do
+    case Url.parse(request.url) do
+      %Url{pathname: pathname} ->
+        String.starts_with?(pathname, routes.base) and
+          pathname
+          |> binary_part(byte_size(routes.base), byte_size(pathname) - byte_size(routes.base))
+          |> String.starts_with?("/oauth/")
+
+      nil ->
+        false
+    end
+  end
+
   defp can_read(routes, request) do
     cond do
-      scope_site(routes, request) != nil and String.contains?(request.url, "/oauth/") ->
+      scope_site(routes, request) != nil and oauth_path?(routes, request) ->
         false
 
       managed(request) != nil ->
@@ -1061,19 +1086,17 @@ defmodule Runlight.Routes do
   defp vet_link_domain(routes, request, url, site, value) do
     rl = routes.rl
 
+    given = value |> JS.nullish("") |> JS.string() |> JS.trim() |> JS.lower()
+
     domain =
-      value
-      |> JS.nullish("")
-      |> JS.string()
-      |> JS.trim()
-      |> JS.lower()
+      given
       |> String.replace(~r/^https?:\/\//, "")
       |> String.replace(~r/\/.*$/s, "")
-      |> String.replace(~r/\.+\z/, "")
+      |> without_final_dots()
       |> String.replace(~r/^www\./, "")
 
     cond do
-      not domain_name?(domain) ->
+      JS.len16(given) > @max_domain or not domain_name?(domain) ->
         {:error, coded("That is not a domain name", "domain_invalid", 400)}
 
       private_name?(domain) or Runlight.Safefetch.resolves_privately?(domain) ->
@@ -1085,8 +1108,9 @@ defmodule Runlight.Routes do
            %{"domain" => domain}
          )}
 
-      # A hub cannot know every name this app answers on, so it adds none until the app knows its own address.
-      managed(request) != nil and routes.origin == nil ->
+      # A hub cannot know every name this app answers on, so it adds none until the app knows its own address,
+      # and neither does an account kept to one site, which has a hub's reach.
+      restricted?(routes, request) and routes.origin == nil ->
         {:error, origin_needed()}
 
       true ->
@@ -1626,8 +1650,9 @@ defmodule Runlight.Routes do
       length(existing) >= 50 ->
         coded("A site can send to at most 50 addresses", "report_limit", 400)
 
-      # A report made from a hub needs the configured address, where its unsubscribe link answers.
-      managed(request) != nil and routes.origin == nil ->
+      # A report made from a hub needs the configured address, where its unsubscribe link answers. So does one
+      # made by an account kept to one site.
+      restricted?(routes, request) and routes.origin == nil ->
         origin_needed()
 
       true ->
@@ -2390,9 +2415,7 @@ defmodule Runlight.Routes do
         recorded =
           Enum.count(keep, fn p ->
             # A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
-            Runlight.observe(rl, Request.new(Url.href(p.page), headers: [{"user-agent", p.user_agent}]), p.at,
-              agent_ip: p.ip
-            )
+            Runlight.observe(rl, Request.new(Url.href(p.page)), p.at, agent_ip: p.ip, user_agent: p.user_agent)
           end)
 
         # A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
@@ -2977,6 +3000,11 @@ defmodule Runlight.Routes do
             "pick_hub",
             403
           )
+
+        # An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+        # one the address its request came to.
+        hub == nil and scope_site(routes, request) != nil and origin != (routes.origin || Url.origin(url)) ->
+          coded("Your account can only pick from this dashboard's own address", "pick_own", 403)
 
         true ->
           back = if asks_back, do: %{url: address, nonce: nonce}
@@ -3689,13 +3717,16 @@ defmodule Runlight.Routes do
       rl: routes.rl,
       base: routes.base,
       is_owner: fn request -> can_read(routes, request) == true end,
+      # An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
       is_reader: fn request ->
         cond do
+          scope_site(routes, request) != nil -> true
           routes.authorize -> routes.authorize.(request) == "read"
           routes.web -> Runlight.Accounts.Web.access(routes.web, request) == "read"
           true -> false
         end
       end,
+      is_site_only: fn request -> scope_site(routes, request) != nil end,
       sign_in: routes.sign_in,
       account_of: routes.account_of,
       token_made: routes.token_made,

@@ -32,7 +32,7 @@ defmodule Runlight.Geo do
     country = if Regex.match?(~r/\A[A-Z]{2}\z/, country) and country not in ["XX", "T1"], do: country, else: ""
     # A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
     # that has no codes ("California") is kept readable, as "US-California".
-    raw = location |> Map.get(:region) |> text() |> JS.trim()
+    raw = location |> Map.get(:region) |> text() |> Runlight.Payload.tidy() |> JS.trim()
 
     region =
       if Regex.match?(~r/\A([A-Za-z]{2}-)?[A-Za-z0-9]{1,3}\z/, raw), do: JS.upper(raw), else: JS.slice(raw, 0, 80)
@@ -43,7 +43,12 @@ defmodule Runlight.Geo do
         else: region
 
     region = if country == "", do: "", else: region
-    city = if country != "", do: location |> Map.get(:city) |> text() |> JS.slice(0, 100), else: ""
+
+    city =
+      if country != "",
+        do: location |> Map.get(:city) |> text() |> Runlight.Payload.tidy() |> JS.slice(0, 100),
+        else: ""
+
     %{country: country, region: region, city: city}
   end
 

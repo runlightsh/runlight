@@ -130,6 +130,17 @@ defmodule Runlight.Http.Request do
   @spec text(t()) :: String.t()
   def text(%__MODULE__{body: body}), do: Runlight.JS.decode_utf8(body)
 
+  @doc """
+  Whether the body is longer than `max` bytes, by the length the request
+  declares or by what came. Capped where it is read, since not every host
+  caps a request body before it reaches the app.
+  """
+  @spec longer?(t(), non_neg_integer()) :: boolean()
+  def longer?(%__MODULE__{body: body} = r, max) do
+    declared = Runlight.JS.number(header(r, "content-length") || 0)
+    (is_number(declared) and declared > max) or byte_size(body) > max
+  end
+
   @doc "The body as JSON: `{:ok, value}` or `:error`, as `request.json()` resolves or rejects."
   @spec json(t()) :: {:ok, term()} | :error
   def json(%__MODULE__{} = r) do

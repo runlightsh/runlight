@@ -152,6 +152,14 @@ defmodule Runlight.Crypto do
     end
   end
 
+  @doc """
+  Whether a stored hash is one this port checks slowly: scrypt, which the Node SDK wrote and plain Elixir works
+  out in about a second. The password it matched is hashed again as PBKDF2, which every port reads, so the
+  account pays for it once.
+  """
+  @spec slow_here?(String.t()) :: boolean()
+  def slow_here?(stored), do: String.starts_with?(stored, "scrypt$")
+
   defp same_bytes?(a, b), do: byte_size(a) == byte_size(b) and :crypto.hash_equals(a, b)
 
   @doc false
@@ -159,7 +167,8 @@ defmodule Runlight.Crypto do
 
   @doc """
   scrypt (RFC 7914), for hashes the Node SDK wrote. Slow in plain Elixir,
-  about a second for N = 16384, so only an account made by Node pays it, once.
+  about a second for N = 16384, so only an account made by Node pays it, once:
+  its password is hashed again as PBKDF2 when it next signs in (see `slow_here?/1`).
   """
   @spec scrypt(binary(), binary(), pos_integer(), pos_integer(), pos_integer(), pos_integer()) :: binary()
   def scrypt(password, salt, n, r, p, length) do

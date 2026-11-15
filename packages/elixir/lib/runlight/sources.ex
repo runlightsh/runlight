@@ -17,7 +17,9 @@ defmodule Runlight.Sources do
                acc -> Map.put(acc, alias_name, source)
              end)
 
-  defp clip(value, max \\ 200), do: value |> JS.nullish("") |> JS.trim() |> JS.slice(0, max)
+  # A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character.
+  defp clip(value, max \\ 200),
+    do: value |> JS.nullish("") |> Runlight.Payload.tidy() |> JS.trim() |> Runlight.Payload.clean_text(max)
 
   @doc "The host in lowercase without a leading www."
   @spec strip_www(String.t()) :: String.t()

@@ -305,9 +305,15 @@ defmodule Runlight.Accounts do
       else
         read = if JS.truthy?(r["totp_recovery"]), do: JS.string(r["totp_recovery"])
         hashes = if read, do: JS.parse!(read), else: []
-        hash = recovery_hash(given)
+        # Every hash is compared, each in time that does not depend on where it differs.
+        mine = recovery_hash(given)
 
-        case Enum.find_index(hashes, &(&1 == hash)) do
+        found =
+          hashes
+          |> Enum.with_index()
+          |> Enum.reduce(nil, fn {hash, i}, at -> if Crypto.same_text?(JS.string(hash), mine), do: i, else: at end)
+
+        case found do
           nil ->
             false
 
@@ -329,8 +335,10 @@ defmodule Runlight.Accounts do
   def match_step(secret, code, now, after_step) do
     current = Integer.floor_div(now, @step_ms)
 
-    Enum.find([current, current - 1, current + 1], fn step ->
-      step > after_step and Crypto.totp(secret, step) == code
+    # Every step is worked out and compared in time that does not depend on where the code differs. The current
+    # step is checked last, so it is the one kept if two should match.
+    Enum.reduce([current + 1, current - 1, current], nil, fn step, found ->
+      if Crypto.same_text?(Crypto.totp(secret, step), code) and step > after_step, do: step, else: found
     end)
   end
 
@@ -666,9 +674,10 @@ defmodule Runlight.Accounts do
     end
   end
 
-  # A hash from before the cost rose is made again now that the password is here, unless it changed meanwhile.
+  # A hash from before the cost rose, or a scrypt one, which is slow to check here, is made again now that the
+  # password is here, unless it changed meanwhile.
   defp rehashed(acc, user, password) do
-    if Crypto.weaker_than_now?(user["hash"]) do
+    if Crypto.weaker_than_now?(user["hash"]) or Crypto.slow_here?(user["hash"]) do
       hash = slot(acc, fn -> Crypto.hash_password(password) end)
       run(acc, "UPDATE rl_users SET hash = ? WHERE id = ? AND hash = ?", [hash, user["id"], user["hash"]])
       by_id(acc, user["id"]) || user

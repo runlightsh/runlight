@@ -408,8 +408,13 @@ defmodule Runlight.Test.Conformance do
   end
 
   defp fill_totp(text, kept, now) do
+    # {{pad:N}} is N letters x, for text past a limit that the file should not hold; then the code and the
+    # captured values.
     out =
-      Regex.replace(~r/\{\{totp:(\w+)\}\}/, text, fn _, name ->
+      Regex.replace(~r/\{\{pad:(\d+)\}\}/, text, fn _, length -> String.duplicate("x", String.to_integer(length)) end)
+
+    out =
+      Regex.replace(~r/\{\{totp:(\w+)\}\}/, out, fn _, name ->
         Crypto.totp(Map.get(kept, name, ""), Integer.floor_div(now, 30_000))
       end)
 

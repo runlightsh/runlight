@@ -115,6 +115,7 @@ defmodule Runlight do
     :trust_proxy,
     :trust_private,
     :limit,
+    :fetch_limit,
     :now,
     :link_path,
     :mail,
@@ -153,7 +154,13 @@ defmodule Runlight do
   def session_idle_ms, do: 30 * 60 * 1000
 
   @doc "What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets."
-  def email?(value), do: is_binary(value) and Regex.match?(~r/\A[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+\z/u, value)
+  def email?(value),
+    do:
+      is_binary(value) and JS.len16(value) <= email_max() and
+        Regex.match?(~r/\A[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+\z/u, value)
+
+  @doc "The longest an address is read: no real one is longer, and the pattern is slow on a very long string."
+  def email_max, do: 320
 
   @doc "An environment variable, trimmed, or nil when it is empty."
   @spec env(String.t()) :: String.t() | nil
@@ -222,10 +229,12 @@ defmodule Runlight do
       store: store,
       managed_sites: managed,
       geo: Keyword.get(opts, :geo),
-      trust_proxy: if(is_nil(opts[:trust_proxy]), do: true, else: opts[:trust_proxy]),
+      trust_proxy: trust_proxy_option(opts[:trust_proxy]),
       # Left at its default, trust_proxy believes forwarding headers only from a private address.
       trust_private: is_nil(opts[:trust_proxy]),
       limit: limit,
+      # AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast.
+      fetch_limit: if(limit, do: RateLimit.new(table, :fetches, limit.per_minute * 10)),
       now: Keyword.get(opts, :now) || fn -> System.os_time(:millisecond) end,
       link_path: link_path,
       mail: mail,
@@ -259,6 +268,12 @@ defmodule Runlight do
 
     rl
   end
+
+  # A header's name is matched whatever its case, so "X-Forwarded-For" reads the last entry as "x-forwarded-for"
+  # does, never the whole list, whose first entries a client writes itself.
+  defp trust_proxy_option(nil), do: true
+  defp trust_proxy_option(name) when is_binary(name), do: name |> JS.trim() |> JS.lower()
+  defp trust_proxy_option(other), do: other
 
   # The `:mail` option's two forms, told apart by a `send` function: a service in code, or the app's own mailer.
   defp mail_option(mail) when is_list(mail) or is_map(mail) do
@@ -898,8 +913,20 @@ defmodule Runlight do
 
     wanted = if token_site != "", do: token_site, else: JS.prop(input, "site")
     there = Enum.find(sites, &(JS.object?(&1) and &1["id"] == wanted)) || hd(sites)
+
+    # Checked before anything is saved: a site there has an id and a name, as text.
+    unless JS.object?(there) and is_binary(there["id"]) and there["id"] != "" and JS.len16(there["id"]) <= 64 and
+             is_binary(there["name"]),
+           do:
+             raise(SettingsError,
+               message: "#{url} did not answer like a Runlight install",
+               code: "connect_not_runlight",
+               params: %{"url" => url}
+             )
+
     # An install's answer is read as given: a site without a list of hostnames has none.
-    hostnames = if is_list(there["hostnames"]), do: Enum.filter(there["hostnames"], &is_binary/1), else: []
+    hostnames =
+      if is_list(there["hostnames"]), do: Enum.filter(there["hostnames"], &(is_binary(&1) and &1 != "")), else: []
 
     # Connecting the same site again (to allow changes, or with a new token) updates it in place.
     existing = Enum.find(remotes(rl), fn {_, known} -> known["url"] == url and known["site"] == there["id"] end)
@@ -916,11 +943,18 @@ defmodule Runlight do
         site(rl, existing)
 
       nil ->
-        host = (List.first(hostnames) || Url.host(Url.new(url))) |> String.replace(~r/[^a-z0-9._-]/i, "-") |> JS.lower()
+        host =
+          (List.first(hostnames) || Url.host(Url.new(url)))
+          |> String.replace(~r/[^a-z0-9._-]/i, "-")
+          |> String.replace(~r/\A[^a-z0-9]+/i, "")
+          |> JS.lower()
+
+        host = if host == "", do: "site", else: host
         stem = JS.slice(host, 0, 56)
         id = free_id(rl, stem)
         name = input |> JS.prop("name") |> JS.nullish("") |> JS.string() |> JS.trim() |> JS.slice(0, 80)
-        name = if name == "", do: there["name"], else: name
+        name = if name == "", do: there["name"] |> JS.trim() |> JS.slice(0, 80), else: name
+        name = if name == "", do: host, else: name
         timezone = if Time.timezone?(there["timezone"]), do: there["timezone"], else: "UTC"
         # No hostnames: tracker hits never land on a site that is counted elsewhere.
         site = JS.obj(id: id, name: name, hostnames: [], timezone: timezone)
@@ -1414,8 +1448,22 @@ defmodule Runlight do
       end
 
     if forwarded && JS.trim(forwarded) != "",
-      do: JS.trim(forwarded),
+      do: forwarded |> JS.trim() |> bare_address(),
       else: request.remote_address || ""
+  end
+
+  # A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and "[2001:db8::1]:443"
+  # are the address alone.
+  defp bare_address(value) do
+    case Regex.run(~r/\A\[([^\]]*)\](?::\d+)?\z/, value) do
+      [_, inside] ->
+        inside
+
+      nil ->
+        if Regex.match?(~r/\A\d{1,3}(?:\.\d{1,3}){3}:\d+\z/, value),
+          do: value |> String.split(":") |> hd(),
+          else: value
+    end
   end
 
   # Whether a request's forwarding headers count. Left at its default, trust_proxy believes them only on a
@@ -1512,9 +1560,21 @@ defmodule Runlight do
   # The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is.
   defp forwarded_host(rl, request), do: if(trusts?(rl, request), do: Request.header(request, "x-forwarded-host"))
 
-  @doc "Handles one tracker request. Always succeeds; bad input is dropped quietly."
+  @doc """
+  Handles one tracker request. Always succeeds: bad input is dropped quietly,
+  and a hit the store could not take is logged.
+  """
   @spec collect(t(), Request.t()) :: :ok
   def collect(rl, %Request{} = request) do
+    take(rl, request)
+  rescue
+    # Analytics must never break the app it counts for.
+    error ->
+      Logger.error("Runlight: could not record an event #{Exception.message(error)}")
+      :ok
+  end
+
+  defp take(rl, %Request{} = request) do
     length = JS.number(Request.header(request, "content-length") || 0)
 
     with false <- is_number(length) and length > Payload.max_body(),
@@ -1560,8 +1620,10 @@ defmodule Runlight do
   defp progressed(done, key, value), do: Process.put({:runlight_done, done}, Map.put(progress(done), key, value))
 
   defp busy?(error) do
+    # The SDK's drivers' words, and these ones': a pool with no connection free within its queue's time
+    # (DBConnection), and a SQLite file another process is writing (Exqlite).
     Regex.match?(
-      ~r/timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked/i,
+      ~r/timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked|connection not available|database (is )?busy/i,
       Exception.message(error)
     )
   end
@@ -1705,7 +1767,14 @@ defmodule Runlight do
     end)
   end
 
-  @doc "The link domains, read at most every 30 seconds."
+  # How long the link domains last read stand after a read that failed, before the database is asked again.
+  @link_domains_retry_ms 5_000
+
+  @doc """
+  The link domains, read at most every 30 seconds. When they cannot be read,
+  the ones read before stand (none, when there were none), and the database is
+  asked again a few seconds later, not by every request until it answers.
+  """
   @spec link_domain_set(t()) :: MapSet.t()
   def link_domain_set(rl) do
     now = now(rl)
@@ -1714,11 +1783,19 @@ defmodule Runlight do
       %{at: at, domains: domains} when now - at < 30_000 ->
         domains
 
-      _ ->
-        init(rl)
-        domains = rl.store |> Store.link_domains() |> MapSet.new(&JS.string(&1["domain"]))
-        State.put(rl.table, :link_domains, %{at: now, domains: domains})
-        domains
+      cached ->
+        try do
+          init(rl)
+          domains = rl.store |> Store.link_domains() |> MapSet.new(&JS.string(&1["domain"]))
+          State.put(rl.table, :link_domains, %{at: now, domains: domains})
+          domains
+        rescue
+          error ->
+            Logger.error("Runlight: could not read the link domains: #{Exception.message(error)}")
+            domains = if cached, do: cached.domains, else: MapSet.new()
+            State.put(rl.table, :link_domains, %{at: now - 30_000 + @link_domains_retry_ms, domains: domains})
+            domains
+        end
     end
   end
 
@@ -1819,7 +1896,9 @@ defmodule Runlight do
       site = site(rl, link["site"]) || List.first(sites(rl))
       ua = Request.header(request, "user-agent") || ""
 
-      if site && Ua.ai_agent(ua) == nil && not Ua.bot?(ua) && request.method == "GET" do
+      # Past the tracker's limit for one address a click still redirects, and is not counted.
+      if site && Ua.ai_agent(ua) == nil && not Ua.bot?(ua) && request.method == "GET" &&
+           (rl.limit == nil or RateLimit.allow?(rl.limit, client_ip(rl, request), now(rl))) do
         try do
           now = now(rl)
 
@@ -1914,17 +1993,30 @@ defmodule Runlight do
   for tracker hits, or `agent_ip:` when a log reader or plugin reports it)
   is checked against the list the agent's company publishes and then
   dropped: only "verified", "mismatch", or "" is kept with the fetch.
+  `user_agent:` stands in for the request's header when given, since a
+  logged one may not be fit for a header.
   """
   @spec observe(t(), Request.t(), number() | nil, keyword()) :: boolean()
   def observe(rl, %Request{} = request, at \\ nil, opts \\ []) do
     with "GET" <- request.method,
-         agent when agent != nil <- Ua.ai_agent(Request.header(request, "user-agent") || ""),
+         agent when agent != nil <-
+           Ua.ai_agent(Keyword.get(opts, :user_agent) || Request.header(request, "user-agent") || ""),
          url = Url.new(request.url),
          ext = (Regex.run(~r/\.([a-z0-9]+)$/i, url.pathname) || [nil, nil]) |> Enum.at(1),
          true <- ext == nil or JS.lower(ext) in ["html", "htm", "md", "txt", "php"],
-         host = forwarded_host(rl, request) || Request.header(request, "host") || url.hostname,
+         host =
+           (forwarded_host(rl, request) || Request.header(request, "host") || url.hostname)
+           |> String.split(",")
+           |> hd()
+           |> JS.trim()
+           |> String.split(":")
+           |> hd(),
          :ok <- init(rl),
-         site when site != nil <- site_for(rl, host |> String.split(":") |> hd()),
+         site when site != nil <- site_for(rl, host),
+         # A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+         true <-
+           Keyword.has_key?(opts, :agent_ip) or rl.fetch_limit == nil or
+             RateLimit.allow?(rl.fetch_limit, client_ip(rl, request), now(rl)),
          now = now(rl),
          # A log reader sends when the page was served. Older than a week is dropped; a time ahead counts as now.
          false <- at != nil and JS.finite?(at) and at < now - 7 * 86_400_000 do
@@ -1938,7 +2030,7 @@ defmodule Runlight do
         session: "",
         pageview: "",
         path: JS.slice(url.pathname, 0, 1000),
-        hostname: Sources.strip_www(url.hostname),
+        hostname: Sources.strip_www(host),
         # A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when there was
         # nothing to check against. The address itself is not kept.
         title: AgentCheck.check_agent(agent, agent_ip(rl, request, opts), State.get(rl.table, :agent_ranges, %{})),
@@ -1978,22 +2070,44 @@ defmodule Runlight do
 
     saved =
       if rl.update_agent_ranges and (saved == nil or ranges_due?(now(rl), saved.at)) do
-        lists =
-          Enum.reduce(Assets.agent_range_urls(), if(saved, do: saved.lists, else: Object.new()), fn url, lists ->
+        before = if saved, do: {saved.lists, saved.fetched}, else: {Object.new(), Object.new()}
+
+        {lists, fetched} =
+          Enum.reduce(Assets.agent_range_urls(), before, fn url, {lists, fetched} ->
             case AgentCheck.download_range_list(rl.fetcher, url) do
-              nil -> lists
-              fresh -> Object.put(lists, url, fresh)
+              nil -> {lists, fetched}
+              fresh -> {Object.put(lists, url, fresh), Object.put(fetched, url, now(rl))}
             end
           end)
 
-        saved = %{at: now(rl), lists: lists}
-        Store.set_setting(rl.store, "agent-ranges", JS.stringify(JS.obj(at: saved.at, lists: lists)))
+        saved = %{at: now(rl), lists: lists, fetched: fetched}
+
+        Store.set_setting(
+          rl.store,
+          "agent-ranges",
+          JS.stringify(JS.obj(at: saved.at, lists: lists, fetched: fetched))
+        )
+
         saved
       else
         saved
       end
 
-    lists = Map.merge(Assets.agent_range_lists(), if(saved, do: Map.new(Object.to_list(saved.lists)), else: %{}))
+    # A downloaded list stands in for the one that came with this version only while it is the newer of the two.
+    shipped = JS.or_else(JS.date_parse(Assets.agent_ranges_fetched_at()), 0)
+
+    newer =
+      if saved,
+        do:
+          for(
+            {url, list} <- Object.to_list(saved.lists),
+            JS.nullish(saved.fetched[url], 0) >= shipped,
+            into: %{},
+            do: {url, list}
+          ),
+        else: %{}
+
+    lists = Map.merge(Assets.agent_range_lists(), newer)
     State.put(rl.table, :agent_ranges, compile_ranges(lists))
     :ok
   rescue
@@ -2002,7 +2116,8 @@ defmodule Runlight do
       :ok
   end
 
-  # The saved lists as `%{at, lists}`, each list read as a download is, or nil when there are none to read.
+  # The saved lists as `%{at, lists, fetched}`, each list read as a download is, or nil when there are none to
+  # read. `fetched` is when each list was downloaded; a copy saved before it was kept has only `at`, for all of them.
   defp saved_agent_ranges(nil), do: nil
 
   defp saved_agent_ranges(stored) do
@@ -2018,19 +2133,28 @@ defmodule Runlight do
             _ -> []
           end
 
-        lists =
-          Enum.reduce(lists, Object.new(), fn {url, list}, out ->
+        at = JS.or_else(JS.number(JS.prop(parsed, "at")), 0)
+        given = JS.prop(parsed, "fetched")
+
+        {lists, fetched} =
+          Enum.reduce(lists, {Object.new(), Object.new()}, fn {url, list}, {out, fetched} ->
             entries =
               if is_list(list),
                 do: Enum.map(list, &if(JS.string(&1) =~ ":", do: JS.obj(ipv6Prefix: &1), else: JS.obj(ipv4Prefix: &1)))
 
             case AgentCheck.read_range_list(JS.obj(prefixes: entries)) do
-              nil -> out
-              prefixes -> Object.put(out, url, prefixes)
+              nil ->
+                {out, fetched}
+
+              prefixes ->
+                when_fetched =
+                  JS.or_else(JS.number(JS.prop(given, url)), if(JS.truthy?(given), do: 0, else: at))
+
+                {Object.put(out, url, prefixes), Object.put(fetched, url, when_fetched)}
             end
           end)
 
-        %{at: JS.or_else(JS.number(JS.prop(parsed, "at")), 0), lists: lists}
+        %{at: at, lists: lists, fetched: fetched}
 
       {:error, _} ->
         nil

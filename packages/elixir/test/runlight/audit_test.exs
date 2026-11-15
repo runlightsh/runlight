@@ -733,7 +733,8 @@ defmodule Runlight.AuditTest do
 
   defmodule Busy do
     @moduledoc false
-    # A Db whose next few event inserts fail as a busy SQLite does.
+    # A Db whose next few event inserts fail as a busy store does here: first the pool with no connection free in
+    # time, in DBConnection's own words, then a SQLite file another process is writing, in Exqlite's.
     @behaviour Runlight.Db
 
     def new(inner, fails), do: %Db{module: __MODULE__, dialect: inner.dialect, state: %{inner: inner, fails: fails}}
@@ -743,8 +744,18 @@ defmodule Runlight.AuditTest do
 
     @impl Db
     def run(db, sql, params) do
-      if sql =~ "INSERT INTO rl_events" and Agent.get_and_update(db.state.fails, &{&1, &1 - 1}) > 0,
-        do: raise("SQLITE_BUSY: database is locked")
+      left = if sql =~ "INSERT INTO rl_events", do: Agent.get_and_update(db.state.fails, &{&1, &1 - 1}), else: 0
+
+      if left > 1,
+        do:
+          raise(
+            DBConnection.ConnectionError.exception(
+              "connection not available and request was dropped from queue after 2000ms. " <>
+                "This means requests are coming in and your connection pool cannot serve them fast enough."
+            )
+          )
+
+      if left == 1, do: raise(Exqlite.Error.exception(message: "Database busy"))
 
       Db.run(db.state.inner, sql, params)
     end

@@ -7,6 +7,7 @@ defmodule Runlight.Accounts.Web do
 
   alias Runlight.AccountError
   alias Runlight.Accounts
+  alias Runlight.Accounts.Lockout
   alias Runlight.Accounts.Pages
   alias Runlight.Accounts.Throttle
   alias Runlight.Crypto
@@ -36,6 +37,8 @@ defmodule Runlight.Accounts.Web do
   ]
 
   @device_cookie "runlight_device"
+  # The most a sign-in form or an account change may weigh: a few fields, far smaller than this.
+  @max_body_bytes 64 * 1024
   # Who made each token, kept beside it as a setting, so removing someone or making them a viewer deletes them.
   @made_by "token-by:"
 
@@ -56,13 +59,15 @@ defmodule Runlight.Accounts.Web do
     # Wrong passwords are counted three times. Per account and address, ten tries; per account from anywhere, fifty, so
     # a caller who invents a new address for every try still cannot guess on and on. And per address across every
     # account, thirty, so one caller trying made-up emails cannot keep the server hashing; a request with no known
-    # address skips that one, since it would hold up everyone at once. Six-digit codes: five wrong tries an account
-    # every fifteen minutes, and five to confirm the first one. Password re-checks in Account: ten.
+    # address skips that one, since it would hold up everyone at once. Six-digit codes: five wrong tries an account,
+    # then a lock of fifteen minutes that doubles each time the tries run out again, up to a day, so guessing on and
+    # on gets about five tries a day. A browser that signed in to the account before counts on its own, so its owner
+    # is never held up by others' guesses. Five tries to confirm the first code. Password re-checks in Account: ten.
     throttles = %{
       per_address: Throttle.new(table, {:web, id, :per_address}, 10),
       per_account: Throttle.new(table, {:web, id, :per_account}, 50),
       per_ip: Throttle.new(table, {:web, id, :per_ip}, 30),
-      code_tries: Throttle.new(table, {:web, id, :code_tries}, 5),
+      code_tries: Lockout.new(table, {:web, id, :code_tries}, 5),
       confirm_tries: Throttle.new(table, {:web, id, :confirm_tries}, 5),
       rechecks: Throttle.new(table, {:web, id, :rechecks}, 10)
     }
@@ -240,6 +245,8 @@ defmodule Runlight.Accounts.Web do
     type = (Request.header(request, "content-type") || "") |> String.split(";") |> hd() |> JS.trim() |> JS.lower()
 
     if type == "application/json" do
+      capped(request)
+
       case Request.json(request) do
         {:ok, %Object{} = parsed} -> parsed
         _ -> nil
@@ -247,7 +254,21 @@ defmodule Runlight.Accounts.Web do
     end
   end
 
-  defp form(request), do: SearchParams.parse(Request.text(request))
+  defp form(request) do
+    capped(request)
+    SearchParams.parse(Request.text(request))
+  end
+
+  # A body past the cap is refused where it is read, since not every host caps a request body before it reaches
+  # the app. Caught by within_cap/1.
+  defp capped(request), do: if(Request.longer?(request, @max_body_bytes), do: throw(:body_too_long), else: :ok)
+
+  defp within_cap(fun) do
+    fun.()
+  catch
+    :body_too_long -> coded("Send a smaller body", "body_too_large", 413)
+  end
+
   defp field(form, name), do: SearchParams.get(form, name) || ""
 
   # The first account's gate: what the setup form must carry, or why there is no form.
@@ -425,9 +446,15 @@ defmodule Runlight.Accounts.Web do
             redirect("#{base}/login?next=#{JS.encode_uri_component(next)}")
 
           user ->
-            # Counted before the check, so a burst cannot get past five.
+            # Counted before the check, so a burst cannot get past five. A browser the account signed in from before
+            # has its own count, which only someone holding that browser's mark can use up.
+            tries =
+              if Accounts.trusts_device(acc, read_cookie(request, @device_cookie), user),
+                do: "#{user["id"]}\ndevice",
+                else: user["id"]
+
             cond do
-              not Throttle.take(web.throttles.code_tries, user["id"], now(web)) ->
+              not Lockout.take(web.throttles.code_tries, tries, now(web)) ->
                 html(
                   Pages.code_page(
                     base,
@@ -456,7 +483,7 @@ defmodule Runlight.Accounts.Web do
                 )
 
               true ->
-                Throttle.clear(web.throttles.code_tries, user["id"])
+                Lockout.clear(web.throttles.code_tries, tries)
                 signed_in_to(web, request, user, next)
             end
         end
@@ -806,16 +833,18 @@ defmodule Runlight.Accounts.Web do
   end
 
   def confirm_password(web, request) do
-    case signed_in(web, request) do
-      nil ->
-        coded("Sign in first", "sign_in", 401)
+    within_cap(fn ->
+      case signed_in(web, request) do
+        nil ->
+          coded("Sign in first", "sign_in", 401)
 
-      user ->
-        case body(request) do
-          nil -> coded("Send JSON", "send_json", 415)
-          input -> recheck(web, user, input, "password", {"Your password is not right", "password_wrong"})
-        end
-    end
+        user ->
+          case body(request) do
+            nil -> coded("Send JSON", "send_json", 415)
+            input -> recheck(web, user, input, "password", {"Your password is not right", "password_wrong"})
+          end
+      end
+    end)
   end
 
   defp api_for(web, request, path, user) do
@@ -1168,7 +1197,9 @@ defmodule Runlight.Accounts.Web do
 
   @doc "Answers an account page or API request at a path under the base, or nil for anything else."
   @spec handle(t(), Request.t(), String.t()) :: Response.t() | nil
-  def handle(web, request, path) do
+  def handle(web, request, path), do: within_cap(fn -> answer(web, request, path) end)
+
+  defp answer(web, request, path) do
     cond do
       path in ["/api/account", "/api/people"] or String.starts_with?(path, "/api/account/") or
         String.starts_with?(path, "/api/people/") or

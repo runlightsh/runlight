@@ -23,6 +23,50 @@ defmodule Runlight.Importers do
   @shortener_domains ~w(bit.ly bitly.com j.mp dub.sh dub.co dub.link short.gy rebrand.ly rebrandly.com rb.gy)
   # The most clicks a day one imported link gets from a daily count.
   @max_daily 10_000
+  # The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a
+  # longer history is left behind, so no source, however much it sends, can fill memory or hold the database.
+  @max_link_clicks 100_000
+
+  @doc "The most clicks one imported link brings with it."
+  def max_link_clicks, do: @max_link_clicks
+
+  # An IPv4 address, or what reads as an IPv6 one, anywhere in a text.
+  @address ~r/(^|[^\d.])\d{1,3}(\.\d{1,3}){3}(?![\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}/i
+  # What a user agent has and a place name does not: a product with its version (Chrome/129), or its usual first
+  # words.
+  @agent ~r/[a-z]\/\d|mozilla|applewebkit/i
+  # A browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user
+  # agent.
+  @name ~r/\A[A-Za-z_][A-Za-z0-9 ._+-]{0,39}\z/
+
+  # Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in any
+  # column. A name that is not one Runlight knows is kept only when it reads as a name, and nothing else.
+  defp named(name) do
+    text = JS.trim(name)
+    if Regex.match?(@name, text) and not Regex.match?(@address, text), do: text, else: ""
+  end
+
+  @doc "Free text about a place as given, or none when it holds an address or reads as a user agent."
+  def place_name(name) when is_binary(name),
+    do: if(Regex.match?(@address, name) or Regex.match?(@agent, name), do: "", else: name)
+
+  def place_name(_), do: ""
+
+  @doc "A screen as 1440x900, or none."
+  def screen_size(value) when is_binary(value),
+    do: if(Regex.match?(~r/\A\d{1,5}x\d{1,5}\z/, JS.trim(value)), do: JS.trim(value), else: "")
+
+  def screen_size(_), do: ""
+
+  @doc "A language tag such as en or pt-BR, or none."
+  def language_tag(value) when is_binary(value),
+    do:
+      if(Regex.match?(~r/\A[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}\z/, JS.trim(value)),
+        do: JS.trim(value),
+        else: ""
+      )
+
+  def language_tag(_), do: ""
 
   # Browser and system names as other tools write them, in Runlight's spelling.
   @browsers %{
@@ -81,16 +125,16 @@ defmodule Runlight.Importers do
   @doc false
   def devices, do: @devices
 
-  @doc "A browser's name as another tool wrote it, in Runlight's spelling."
+  @doc "A browser's name in Runlight's spelling: a known one, or a name with a capital first letter, or none."
   def browser_name(value) do
     text = if is_binary(value), do: value, else: ""
-    Map.get(@browsers, JS.lower(text)) || title(text)
+    Map.get(@browsers, JS.lower(text)) || title(named(text))
   end
 
-  @doc "A system's name as another tool wrote it, in Runlight's spelling."
+  @doc "A system's name in Runlight's spelling, or a name as given, or none for anything that is not a name."
   def system_name(value) do
     text = if is_binary(value), do: value, else: ""
-    Map.get(@systems, JS.lower(text)) || JS.nullish(value, "")
+    Map.get(@systems, JS.lower(text)) || named(text)
   end
 
   @doc "A device as another tool wrote it, in Runlight's three."
@@ -135,7 +179,8 @@ defmodule Runlight.Importers do
     Runlight.init(rl)
 
     known = fn source_id, slug, url ->
-      if Store.link_by_id(rl.store, imported_link_id(source, source_id)) do
+      # A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+      if Store.link_exists?(rl.store, imported_link_id(source, source_id)) do
         true
       else
         if JS.truthy?(slug) and JS.truthy?(url) do
@@ -250,7 +295,9 @@ defmodule Runlight.Importers do
     url = foreign["url"]
 
     cond do
-      Store.link_by_id(rl.store, id) ->
+      # Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+      # left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+      Store.link_exists?(rl.store, id) ->
         %{status: "skipped", clicks: 0}
 
       (taken = Store.link_by_slug(rl.store, slug)) && same_url?(taken["url"], url) ->
@@ -348,7 +395,7 @@ defmodule Runlight.Importers do
       Enum.reduce(clicks, {0, MapSet.new()}, fn c, {count, made} ->
         ts = field(c, "ts")
 
-        if not JS.finite?(ts) do
+        if count >= @max_link_clicks or not JS.finite?(ts) do
           {count, made}
         else
           visit = field(c, "visit")
@@ -374,7 +421,7 @@ defmodule Runlight.Importers do
                 end
 
               country = c |> field("country") |> JS.or_else("") |> JS.upper() |> JS.slice(0, 2)
-              raw_region = field(c, "region")
+              raw_region = place_name(field(c, "region"))
 
               region =
                 if JS.truthy?(raw_region) do
@@ -403,14 +450,14 @@ defmodule Runlight.Importers do
                 utm_content: page.utm.content,
                 country: if(Regex.match?(~r/\A[A-Z]{2}\z/, country), do: country, else: ""),
                 region: if(country != "", do: region, else: ""),
-                city: c |> field("city") |> JS.or_else("") |> JS.slice(0, 100),
+                city: c |> field("city") |> place_name() |> JS.slice(0, 100),
                 browser: browser_name(JS.or_else(field(c, "browser"), "")),
                 browser_version: "",
                 os: system_name(field(c, "os")),
                 os_version: "",
                 device: device_name(JS.or_else(field(c, "device"), "")),
-                screen: JS.nullish(field(c, "screen"), ""),
-                language: JS.nullish(field(c, "language"), "")
+                screen: screen_size(field(c, "screen")),
+                language: language_tag(field(c, "language"))
               })
 
               Store.run_sql(store, "UPDATE rl_sessions SET imported = 1 WHERE id = ?", [session])
@@ -453,7 +500,7 @@ defmodule Runlight.Importers do
         clicks
       else
         # A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-        n = min(JS.floor(count), @max_daily)
+        n = count |> JS.floor() |> min(@max_daily) |> min(@max_link_clicks - clicks)
 
         Enum.reduce(0..(n - 1)//1, clicks, fn i, clicks ->
           Store.insert_event(store, %{

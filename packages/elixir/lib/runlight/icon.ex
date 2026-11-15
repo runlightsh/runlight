@@ -34,7 +34,9 @@ defmodule Runlight.Icon do
   @doc "Icon URLs a page links to, best first: apple-touch-icon, then SVG and PNG icons, then any icon."
   @spec icon_links(String.t(), String.t()) :: [String.t()]
   def icon_links(html, base) do
-    ~r/<link\b[^>]*>/i
+    # A tag is at most a few thousand characters; the bound keeps a page of unclosed tags from being read over
+    # and over.
+    ~r/<link\b[^<>]{0,4000}>/i
     |> Regex.scan(html)
     |> Enum.flat_map(fn [tag] ->
       attributes = attrs(tag)
@@ -107,9 +109,16 @@ defmodule Runlight.Icon do
 
       _ ->
         State.one_at_a_time(rl.table, {:icon, origin}, fn ->
-          icon = look_up(rl, origin)
-          State.put(rl.table, {:icon, origin}, %{at: now, icon: icon})
-          icon
+          # Whoever waited here for another's lookup takes what it found, as the SDK's callers share one.
+          case State.get(rl.table, {:icon, origin}) do
+            %{icon: icon} = found when found != cached ->
+              icon
+
+            _ ->
+              icon = look_up(rl, origin)
+              State.put(rl.table, {:icon, origin}, %{at: now, icon: icon})
+              icon
+          end
         end)
     end
   end

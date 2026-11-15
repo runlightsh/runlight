@@ -406,12 +406,23 @@ defmodule Runlight.Mcp do
 
   # The most messages one batch may hold, and how many of them run at once.
   @max_batch 20
+  # The most a message or batch may weigh; a real one is a few hundred bytes a call.
+  @max_body_bytes 1024 * 1024
   @batch_at_once 4
 
   @doc "Answers one POST to the MCP endpoint, already authorised."
   def response(%Request{} = request, read_api) do
     headers = [{"content-type", "application/json; charset=utf-8"}, {"cache-control", "no-store"}]
 
+    # Capped here, since not every host caps a request body before it reaches the app.
+    if Request.longer?(request, @max_body_bytes) do
+      Response.new(JS.stringify(rpc_error(nil, -32_600, "Send a smaller message")), 413, headers)
+    else
+      respond(request, read_api, headers)
+    end
+  end
+
+  defp respond(request, read_api, headers) do
     case Request.json(request) do
       {:ok, list} when is_list(list) and length(list) > @max_batch ->
         Response.new(

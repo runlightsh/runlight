@@ -52,16 +52,46 @@ if Code.ensure_loaded?(Plug.Conn) do
     alias Runlight.Http.Response
     alias Runlight.State
 
+    require Logger
+
     # The tracker's posts are under 8 KB; everything else, such as a link import of 5,000 rows, under 10 MB.
     @max_collect 16 * 1024
     @max_body 10 * 1024 * 1024
+    # Methods no route or link answers, so a request with one is the app's.
+    @unsupported ["TRACE", "TRACK", "CONNECT"]
 
     @impl Plug
     def init(opts) when is_list(opts), do: opts
 
     @impl Plug
     def call(%Plug.Conn{} = conn, opts) do
-      rl = Runlight.instance(Keyword.get(opts, :instance, Runlight))
+      case running(opts) do
+        nil -> not_running(conn)
+        rl -> serve(conn, rl, opts)
+      end
+    end
+
+    @doc false
+    # The instance the options name, or nil while none is running: before its process has started, or while it
+    # is being started again.
+    def running(opts) do
+      Runlight.instance(Keyword.get(opts, :instance, Runlight))
+    rescue
+      ArgumentError -> nil
+    end
+
+    defp not_running(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.put_resp_header("retry-after", "5")
+      |> Plug.Conn.send_resp(
+        503,
+        ~s({"error":"Runlight is not running. Start {Runlight, opts} in your supervision tree.","code":"not_running"})
+      )
+      |> Plug.Conn.halt()
+    end
+
+    defp serve(conn, rl, opts) do
       base = Keyword.get(opts, :base_path) || mount(conn)
       routes_opts = opts |> Keyword.delete(:instance) |> Keyword.put(:base_path, base)
       routes = routes(rl, routes_opts)
@@ -81,11 +111,23 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @doc false
     # A request on a link domain answered with its redirect or a 404, or the connection untouched for every other
-    # host. The body is never read here, so whatever comes next still can.
+    # host. The body is never read here, so whatever comes next still can. Nor does anything that goes wrong here
+    # stop the request: it carries on as it would on any other host.
+    def link_domain(%Plug.Conn{method: method} = conn, _rl) when method in @unsupported, do: {:pass, conn}
+
     def link_domain(conn, rl) do
       {:ok, request, _} = request(%{conn | body_params: %{}, method: "GET"}, 0)
 
-      case Runlight.link_domain_response(rl, %{request | method: conn.method, body: ""}) do
+      found =
+        try do
+          Runlight.link_domain_response(rl, %{request | method: conn.method, body: ""})
+        rescue
+          error ->
+            Logger.error("Runlight: could not look for a link domain: #{Exception.message(error)}")
+            nil
+        end
+
+      case found do
         nil -> {:pass, conn}
         response -> {:answered, answer(conn, response)}
       end
@@ -121,11 +163,12 @@ if Code.ensure_loaded?(Plug.Conn) do
       proto = scheme(conn)
       host = Enum.find_value(headers, "localhost", fn {k, v} -> if k == "host", do: v end)
       query = if conn.query_string == "", do: "", else: "?" <> conn.query_string
-      url = "#{proto}://#{host}#{conn.request_path}#{query}"
+
+      url = address(proto, host, conn.request_path <> query)
 
       case read_body(conn, limit) do
         {:ok, body, conn} ->
-          address = conn.remote_ip |> :inet.ntoa() |> to_string()
+          address = remote_address(conn)
 
           {:ok,
            %Request{
@@ -139,6 +182,39 @@ if Code.ensure_loaded?(Plug.Conn) do
 
         other ->
           other
+      end
+    end
+
+    # The request's address, or the same path on localhost when the Host header makes no address at all (a port
+    # past 65535, say), where the Node adapter falls back to localhost too. The host comes from the Host header
+    # alone: the path is written after it, so one starting // or /\ stays a path and never names a host of its own.
+    @doc false
+    def address(proto, host, target) do
+      # A Host that is empty, or holds what ends a host, would have the path or a name after an @ read as the host.
+      named = host != "" and not String.contains?(host, ["/", "\\", "?", "#", "@"])
+      url = "#{proto}://#{host}#{target}"
+      fallback = "#{proto}://localhost#{target}"
+
+      cond do
+        named and Runlight.Url.parse(url) != nil -> url
+        Runlight.Url.parse(fallback) != nil -> fallback
+        true -> "http://localhost/"
+      end
+    end
+
+    # The address the connection came from, or "" when it has none, as over a Unix socket, where a proxy on this
+    # computer is what connects.
+    @doc false
+    def remote_address(conn) do
+      case conn.remote_ip do
+        ip when is_tuple(ip) and tuple_size(ip) in [4, 8] ->
+          case :inet.ntoa(ip) do
+            {:error, _} -> ""
+            text -> to_string(text)
+          end
+
+        _ ->
+          ""
       end
     end
 
@@ -192,11 +268,19 @@ if Code.ensure_loaded?(Plug.Conn) do
       type = conn |> Plug.Conn.get_req_header("content-type") |> List.first("") |> String.downcase()
 
       cond do
-        not Regex.match?(~r/^application\/([^;]+\+)?json\s*(;|$)/, type) -> Plug.Conn.Query.encode(params)
+        not Regex.match?(~r/^application\/([^;]+\+)?json\s*(;|$)/, type) -> Plug.Conn.Query.encode(fields(params))
         Map.keys(params) == ["_json"] -> Runlight.JS.stringify(params["_json"])
         true -> Runlight.JS.stringify(params)
       end
     end
+
+    # A form's fields without its uploaded files, which nothing here reads and a query string cannot hold.
+    defp fields(%{} = params) when not is_struct(params) do
+      for {key, value} <- params, not is_struct(value), into: %{}, do: {key, fields(value)}
+    end
+
+    defp fields(list) when is_list(list), do: list |> Enum.reject(&is_struct/1) |> Enum.map(&fields/1)
+    defp fields(value), do: value
 
     defp read_all(conn, limit, acc) do
       case Plug.Conn.read_body(conn, length: limit) do
@@ -284,19 +368,26 @@ if Code.ensure_loaded?(Plug.Conn) do
     """
     @behaviour Plug
 
+    require Logger
+
     @impl Plug
     def init(opts), do: opts
 
     @impl Plug
     def call(conn, opts) do
-      rl = Runlight.instance(Keyword.get(opts, :instance, Runlight))
-
-      case Runlight.Plug.link_domain(conn, rl) do
-        {:answered, conn} ->
+      case Runlight.Plug.running(opts) do
+        # No instance yet, so no links to follow: the request is the app's.
+        nil ->
           conn
 
-        {:pass, conn} ->
-          if routed?(conn, rl), do: route(conn, rl), else: middleware(conn, rl)
+        rl ->
+          case Runlight.Plug.link_domain(conn, rl) do
+            {:answered, conn} ->
+              conn
+
+            {:pass, conn} ->
+              if routed?(conn, rl), do: route(conn, rl), else: middleware(conn, rl)
+          end
       end
     end
 
@@ -327,7 +418,18 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp middleware(conn, rl) do
       if conn.method == "GET" and own?(conn.request_path, rl.link_path) do
-        case follow(conn, rl, "GET") do
+        # A link that cannot be looked up is no reason to stop the app's own answer.
+        found =
+          try do
+            follow(conn, rl, "GET")
+          rescue
+            error ->
+              Logger.error("Runlight: could not look for a short link: #{Exception.message(error)}")
+              nil
+          end
+
+        case found do
+          nil -> conn
           %{status: 404} -> conn
           found -> Runlight.Plug.answer(conn, found)
         end
@@ -360,8 +462,10 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @impl Plug
     def call(conn, opts) do
-      rl = Runlight.instance(Keyword.get(opts, :instance, Runlight))
-      conn |> Runlight.Plug.link_domain(rl) |> elem(1)
+      case Runlight.Plug.running(opts) do
+        nil -> conn
+        rl -> conn |> Runlight.Plug.link_domain(rl) |> elem(1)
+      end
     end
   end
 
@@ -381,20 +485,25 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @impl Plug
     def call(conn, opts) do
-      rl = Runlight.instance(Keyword.get(opts, :instance, Runlight))
+      case Runlight.Plug.running(opts) do
+        nil ->
+          conn
 
-      case Runlight.Plug.link_domain(conn, rl) do
-        {:answered, conn} -> conn
-        {:pass, %Plug.Conn{method: "GET"} = conn} -> observe(conn, rl)
-        {:pass, conn} -> conn
+        rl ->
+          case Runlight.Plug.link_domain(conn, rl) do
+            {:answered, conn} -> conn
+            {:pass, %Plug.Conn{method: "GET"} = conn} -> observe(conn, rl)
+            {:pass, conn} -> conn
+          end
       end
     end
 
     defp observe(conn, rl) do
       host = Enum.find_value(conn.req_headers, conn.host, fn {k, v} -> if k == "host", do: v end)
       query = if conn.query_string == "", do: "", else: "?" <> conn.query_string
-      url = "#{Runlight.Plug.scheme(conn)}://#{host}#{conn.request_path}#{query}"
-      address = conn.remote_ip |> :inet.ntoa() |> to_string()
+      url = Runlight.Plug.address(Runlight.Plug.scheme(conn), host, conn.request_path <> query)
+
+      address = Runlight.Plug.remote_address(conn)
 
       Runlight.observe(rl, %Runlight.Http.Request{
         url: url,

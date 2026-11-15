@@ -17,7 +17,11 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     repo's `query/3`, and Runlight's tables are made on first use (`CREATE
     TABLE IF NOT EXISTS`), so a Node, PHP, or Elixir process can make them in
     any order. Statements are not logged (they would fill an app's debug log
-    with a line for every tracker hit).
+    with a line for every tracker hit), and the repo's telemetry event is not
+    sent for them either, since a statement or its values hold salts and
+    hashes that an app's tracing should never be handed. Nor do they run under
+    the repo's `:timeout`: like the SDK's drivers, Runlight sets no deadline
+    of its own on a statement, so a long report is the database's to finish.
 
     On SQLite keep ecto_sqlite3's `journal_mode: :wal` and give the repo a
     `busy_timeout` of at least 5000, as the SDK's SQLite store sets them.
@@ -59,6 +63,13 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       %Db{module: __MODULE__, dialect: dialect, state: %{repo: repo, dynamic: Keyword.get(opts, :dynamic_repo)}}
     end
 
+    # What every statement of Runlight's runs with. Not logged, and no telemetry event either: on Postgres and MySQL
+    # the values are written into the statement, and on SQLite they ride beside it, so an app's own tracing would
+    # otherwise be handed salts, visitor hashes, and password hashes. And no deadline in the client, as the SDK's
+    # drivers have none: a long report or an index being built is the database's to finish, as it already is inside
+    # a transaction or a checkout.
+    @quiet [log: false, telemetry_event: nil, timeout: :infinity]
+
     defp with_repo(%Db{state: %{repo: repo, dynamic: nil}}, fun), do: fun.(repo)
 
     defp with_repo(%Db{state: %{repo: repo, dynamic: dyn}}, fun) do
@@ -76,21 +87,29 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
         result =
           case dialect do
             :sqlite ->
-              run = fn -> repo.query(sql, Enum.map(params, &sqlite_value/1), log: false) end
+              run = fn -> repo.query(sql, Enum.map(params, &sqlite_value/1), @quiet) end
               if sqlite_frees?(sql), do: sqlite_checkout(repo, run), else: run.()
 
             :postgres ->
-              repo.query(Db.postgres_text(sql, params), [], log: false)
+              repo.query(Db.postgres_text(sql, params), [], @quiet)
 
             :mysql ->
-              mysql_checkout(repo, fn -> repo.query(Db.mysql_text(sql, params), [], log: false, query_type: :text) end)
+              mysql_checkout(repo, fn -> repo.query(Db.mysql_text(sql, params), [], [query_type: :text] ++ @quiet) end)
           end
 
         case result do
           {:ok, result} -> result
-          {:error, error} -> raise error
+          {:error, error} -> raise unstated(error)
         end
       end)
+    end
+
+    # A driver's error names the statement that failed, which on Postgres and MySQL holds its values, and the
+    # error's message ends up in logs. The database's own words stay; the statement goes.
+    defp unstated(%{__exception__: true} = error) do
+      error
+      |> then(&if(Map.has_key?(&1, :query), do: %{&1 | query: nil}, else: &1))
+      |> then(&if(Map.has_key?(&1, :statement), do: %{&1 | statement: nil}, else: &1))
     end
 
     # Values are escaped with backslashes, which a server set to NO_BACKSLASH_ESCAPES reads as text, so a quote could
@@ -105,7 +124,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       else
         repo.checkout(
           fn ->
-            case repo.query(@no_backslash_escapes_off, [], log: false, query_type: :text) do
+            case repo.query(@no_backslash_escapes_off, [], [query_type: :text] ++ @quiet) do
               {:ok, _} -> :ok
               {:error, error} -> raise error
             end
@@ -138,7 +157,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
       else
         repo.checkout(
           fn ->
-            case repo.query("PRAGMA secure_delete = FAST", [], log: false) do
+            case repo.query("PRAGMA secure_delete = FAST", [], @quiet) do
               {:ok, _} -> :ok
               {:error, error} -> raise error
             end
@@ -197,7 +216,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
     def transaction(%Db{dialect: dialect} = db, fun) do
       with_repo(db, fn repo ->
         run_in = fn ->
-          case repo.transaction(fn -> fun.(db) end, log: false, timeout: :infinity) do
+          case repo.transaction(fn -> fun.(db) end, @quiet) do
             {:ok, value} -> value
             {:error, reason} -> raise "Runlight: the transaction was rolled back: #{inspect(reason)}"
           end
@@ -209,7 +228,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
               # As Postgres does by default: each statement sees what was committed before it began, and
               # InnoDB takes no gap locks, so two writers to neighbouring rows do not deadlock.
               {:ok, _} =
-                repo.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [], log: false, query_type: :text)
+                repo.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [], [query_type: :text] ++ @quiet)
 
               run_in.()
             end)
@@ -237,7 +256,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
             until = System.monotonic_time(:millisecond) + wait
 
             wait_for = fn wait_for ->
-              case repo.query("SELECT pg_try_advisory_lock(#{@migration_lock}) AS ok", [], log: false) do
+              case repo.query("SELECT pg_try_advisory_lock(#{@migration_lock}) AS ok", [], @quiet) do
                 {:ok, %{rows: [[true]]}} ->
                   :ok
 
@@ -257,7 +276,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
               fun.(db)
             after
               # A lost connection ends its session, and the lock with it.
-              _ = repo.query("SELECT pg_advisory_unlock(#{@migration_lock})", [], log: false)
+              _ = repo.query("SELECT pg_advisory_unlock(#{@migration_lock})", [], @quiet)
             end
           end,
           timeout: :infinity
@@ -280,9 +299,10 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
             wait_for = fn wait_for ->
               left = (until - System.monotonic_time(:millisecond)) |> Kernel./(1000) |> Float.ceil() |> trunc()
 
-              case repo.query("SELECT GET_LOCK(#{name}, #{left |> min(5) |> max(1)}) AS ok", [],
-                     log: false,
-                     query_type: :text
+              case repo.query(
+                     "SELECT GET_LOCK(#{name}, #{left |> min(5) |> max(1)}) AS ok",
+                     [],
+                     [query_type: :text] ++ @quiet
                    ) do
                 {:ok, %{rows: [[1]]}} ->
                   :ok
@@ -305,7 +325,7 @@ if Code.ensure_loaded?(Ecto.Adapters.SQL) do
             try do
               fun.(db)
             after
-              _ = repo.query("DO RELEASE_LOCK(#{name})", [], log: false, query_type: :text)
+              _ = repo.query("DO RELEASE_LOCK(#{name})", [], [query_type: :text] ++ @quiet)
             end
           end
         )

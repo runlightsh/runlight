@@ -144,7 +144,7 @@ defmodule Runlight.Data.Sources do
       name: "Newsletter",
       kind: "email",
       hosts: [],
-      aliases: ["newsletter", "email", "e-mail", "mailchimp", "kit", "convertkit", "beehiiv", "buttondown"]
+      aliases: ["newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown"]
     }
   ]
 
@@ -165,7 +165,6 @@ defmodule Runlight.Data.Sources do
       {~r/(^|\.)convertkit-mail\d*\.com\z|(^|\.)kit-mail\d*\.com\z/, "Kit", "email"},
       {~r/(^|\.)(list-manage|mailchi)\.(com|mp)\z/, "Mailchimp", "email"},
       {~r/(^|\.)beehiiv\.com\z/, "beehiiv", "email"},
-      {~r/(^|\.)substack\.com\z/, "Substack", "email"},
       {~r/^(web)?mail\d*\.|(^|\.)webmail\./, nil, "email"}
     ]
   end
