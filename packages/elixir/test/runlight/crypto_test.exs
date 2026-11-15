@@ -21,6 +21,9 @@ defmodule Runlight.CryptoTest do
              "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
   end
 
+  # Each scrypt hash takes about a second of plain Elixir, and more on a CI runner shared with the other async
+  # tests, so this one gets longer than ExUnit's minute.
+  @tag timeout: 300_000
   test "passwords hashed by TypeScript check here, and new hashes check", %{fixture: f} do
     for c <- f["hashes"], do: assert(Crypto.check_password(c["password"], c["hash"]), c["hash"])
     refute Crypto.check_password("a long password!", hd(f["hashes"])["hash"])
