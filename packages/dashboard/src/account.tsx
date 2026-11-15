@@ -1,3 +1,4 @@
+import { forgetChats } from "./assistant-action.js";
 import { useEffect, useState } from "preact/hooks";
 import { ApiError, api, signOut, type InviteSent, type PendingInvite, type Person, type Site } from "./api.js";
 import { day } from "./format.js";
@@ -100,7 +101,11 @@ function SignOutEverywhere() {
     setError("");
     api
       .signOutEverywhere()
-      .then(() => (signOut ? location.assign(signOut) : location.reload()))
+      .then(() => {
+        forgetChats();
+        if (signOut) location.assign(signOut);
+        else location.reload();
+      })
       .catch((err: Error) => {
         setError(err.message);
         setBusy(false);

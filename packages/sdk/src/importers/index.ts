@@ -29,7 +29,8 @@ export async function importStep(
   if (!importer) throw new ImportError(`Runlight cannot import from ${source}`, "import_source", { source });
   await runlight.init();
   const known = async (sourceId: string, slug?: string, url?: string) => {
-    if (await runlight.store.linkById(await importedLinkId(source, sourceId))) return true;
+    // A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+    if (await runlight.store.linkExists(await importedLinkId(source, sourceId))) return true;
     if (!slug || !url) return false;
     const taken = await runlight.store.linkBySlug(slug);
     return Boolean(taken && sameUrl(taken.url, url));

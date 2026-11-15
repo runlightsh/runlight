@@ -10,14 +10,20 @@ class FakeBlob {
 }
 const text = (body: string | FakeBlob) => (typeof body === "string" ? body : body.parts.join(""));
 
-function browser(hook: string, beacon: boolean | "throws" = true, configured = true, stand: { webdriver?: boolean; manual?: boolean; ignored?: boolean; src?: string } = {}) {
+/** When each fake browser's clock starts: a real date, as the opt-out's age is counted from one. */
+const START = Date.UTC(2026, 10, 14);
+
+function browser(hook: string, beacon: boolean | "throws" = true, configured = true, stand: { webdriver?: boolean; manual?: boolean; ignored?: boolean; src?: string; query?: string; stored?: string; prerendering?: boolean } = {}) {
   const sent: string[] = [];
   const types: string[] = [];
   const via: string[] = [];
   const later: Array<() => void> = [];
-  const listeners: Record<string, () => void> = {};
-  let clock = 1000;
-  const location = new URL("https://app.example.com/s/private-token?token=secret#private");
+  const listeners: Record<string, (event?: unknown) => void> = {};
+  let clock = START;
+  const location = new URL(`https://app.example.com/s/private-token?token=secret${stand.query ?? ""}#private`);
+  // What the browser keeps for the site, and the scripts the tracker adds to the page.
+  const kept = new Map<string, string>(stand.stored !== undefined ? [["runlight_ignore", stand.stored]] : stand.ignored ? [["runlight_ignore", "1"]] : []);
+  const added: Array<{ src: string; onload?: () => void; onerror?: () => void }> = [];
   const context: Record<string, unknown> = {
     URL, Uint8Array, crypto: globalThis.crypto, Blob: FakeBlob, location, screen: { width: 1200, height: 800 }, scrollY: 0,
     Date: { now: () => clock },
@@ -29,13 +35,15 @@ function browser(hook: string, beacon: boolean | "throws" = true, configured = t
         return beacon;
       },
     },
-    localStorage: { getItem: (key: string) => (key === "runlight_ignore" && stand.ignored ? "1" : null), setItem() {}, removeItem() {} },
-    history: { pushState(_s: unknown, _t: string, to: string) { location.href = new URL(to, location.href).href; }, replaceState() {} },
+    localStorage: { getItem: (key: string) => kept.get(key) ?? null, setItem: (key: string, value: unknown) => void kept.set(key, String(value)), removeItem: (key: string) => void kept.delete(key) },
+    history: { pushState(_s: unknown, _t: string, to: string) { location.href = new URL(to, location.href).href; }, replaceState(_s: unknown, _t: string, to: string) { location.href = new URL(to, location.href).href; } },
     setTimeout: (fn: () => void) => { later.push(fn); },
     document: {
       title: "Private note title", referrer: "https://app.example.com/notes/secret-id?key=secret",
       currentScript: { src: stand.src ?? "https://analytics.example.com/s.js?site=example.com", getAttribute: (key: string) => key === "data-before-send" && configured ? "scrub" : key === "data-site" ? "example.com" : key === "data-manual" && stand.manual ? "" : null },
       visibilityState: "visible", hasFocus: () => true, documentElement: { scrollHeight: 1000, scrollTop: 0 },
+      prerendering: stand.prerendering ?? false,
+      createElement: () => ({ src: "" }), head: { appendChild: (element: { src: string }) => void added.push(element) },
       addEventListener: (name: string, fn: () => void) => { listeners[name] = fn; },
     },
     addEventListener: (name: string, fn: () => void) => { listeners[name] = fn; },
@@ -44,7 +52,7 @@ function browser(hook: string, beacon: boolean | "throws" = true, configured = t
   };
   context.window = context;
   runInNewContext(hook + "\n" + TRACKER, context);
-  return { sent, types, via, context, leave: () => { clock += 2000; listeners.pagehide!(); }, wait: () => later.splice(0).forEach((fn) => fn()) };
+  return { sent, types, via, context, kept, added, listeners, tick: (ms: number) => { clock += ms; }, leave: () => { clock += 2000; listeners.pagehide!(); }, wait: () => later.splice(0).forEach((fn) => fn()) };
 }
 
 test("the before-send hook scrubs pageviews, SPA referrers, events, and engagement on both transports", () => {
@@ -138,4 +146,81 @@ test("a copy inlined into the page, with no src, sets up without throwing", () =
   const b = browser("", true, false, { src: "" });
   assert.equal(typeof b.context.runlight, "function");
   assert.doesNotThrow(() => (b.context.runlight as (name: string) => void)("Signup"));
+});
+
+const kinds = (b: { sent: string[] }) => b.sent.map((s) => JSON.parse(s).k);
+
+test("a page loaded ahead of time counts once it is shown, and never if it is not", () => {
+  const b = browser("", true, false, { prerendering: true });
+  (b.context.runlight as (name: string) => void)("Signup");
+  assert.deepEqual(b.sent, [], "nothing leaves a page nobody has seen");
+  (b.context.document as { prerendering: boolean }).prerendering = false;
+  b.listeners.prerenderingchange!();
+  assert.deepEqual(kinds(b), ["pageview"]);
+});
+
+test("a replaced address is a new page only when its path changes; a pushed one always is", () => {
+  const b = browser("", true, false);
+  const history = b.context.history as { pushState: (s: unknown, t: string, to: string) => void; replaceState: (s: unknown, t: string, to: string) => void };
+  // A search box that keeps what is typed in the query string.
+  for (const q of ["a", "ab", "abc"]) {
+    history.replaceState({}, "", `?q=${q}`);
+    b.wait();
+  }
+  assert.deepEqual(kinds(b), ["pageview"]);
+  history.replaceState({}, "", "/pricing");
+  b.wait();
+  history.pushState({}, "", "/pricing?plan=pro");
+  b.wait();
+  assert.deepEqual(b.sent.map((s) => new URL(JSON.parse(s).u).pathname + new URL(JSON.parse(s).u).search).slice(1), ["/pricing", "/pricing?plan=pro"]);
+});
+
+test("a page the browser brings back whole on Back or Forward is counted again", () => {
+  const b = browser("", true, false);
+  b.listeners.pageshow!({ persisted: false });
+  assert.deepEqual(kinds(b), ["pageview"], "the first showing is the load already counted");
+  b.listeners.pageshow!({ persisted: true });
+  assert.deepEqual(kinds(b), ["pageview", "pageview"]);
+  assert.notEqual(JSON.parse(b.sent[0]!).i, JSON.parse(b.sent[1]!).i);
+  // A site that sends its own pageviews decides this too.
+  assert.equal(browser("", true, false, { manual: true }).listeners.pageshow, undefined);
+});
+
+test("?runlight=ignore from a link lasts a year; the flag older versions and the dashboard keep has no end", () => {
+  const year = 365 * 86_400_000;
+  const set = browser("", true, false, { query: "&runlight=ignore" });
+  assert.deepEqual(set.sent, []);
+  assert.equal(set.kept.get("runlight_ignore"), String(START), "the time it was set, not a bare flag");
+  // A flag set just under a year before still holds; one set a year before does not.
+  assert.deepEqual(browser("", true, false, { stored: String(START - year + 1) }).sent, []);
+  assert.deepEqual(kinds(browser("", true, false, { stored: String(START - year) })), ["pageview"]);
+  assert.deepEqual(browser("", true, false, { stored: "1" }).sent, []);
+  const cleared = browser("", true, false, { stored: "1", query: "&runlight=track" });
+  assert.deepEqual(kinds(cleared), ["pageview"]);
+  assert.equal(cleared.kept.has("runlight_ignore"), false);
+});
+
+test("?runlight=pick counts nothing only once the picker says its ticket was good", () => {
+  type Track = ((name: string) => void) & { pick?: number };
+  // A made-up ticket, or none: the install serves a picker that does nothing, and the visit counts.
+  for (const query of ["&runlight=pick&runlight_ticket=made-up", "&runlight=pick"]) {
+    for (const end of ["onload", "onerror"] as const) {
+      const b = browser("", true, false, { query });
+      assert.deepEqual(b.sent, [], "nothing while the picker loads");
+      assert.match(b.added[0]!.src, /^https:\/\/analytics\.example\.com\/pick\.js\?/);
+      b.added[0]![end]!();
+      (b.context.runlight as Track)("Signup");
+      assert.deepEqual(kinds(b), ["pageview", "event"], `${query} ${end}`);
+    }
+  }
+  // A good one: the picker marks runlight.pick before it finishes loading.
+  const b = browser("", true, false, { query: "&runlight=pick&runlight_ticket=good" });
+  (b.context.runlight as Track).pick = 1;
+  b.added[0]!.onload!();
+  (b.context.runlight as Track)("Signup");
+  assert.deepEqual(b.sent, []);
+  // The owner's opt-out still holds after a ticket that was not good.
+  const ignored = browser("", true, false, { query: "&runlight=pick", ignored: true });
+  ignored.added[0]!.onload!();
+  assert.deepEqual(ignored.sent, []);
 });

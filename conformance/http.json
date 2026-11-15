@@ -1,5 +1,5 @@
 {
-  "description": "HTTP requests to a fresh Runlight on a fixed clock, and the answers every implementation must give. Each scenario runs on an empty database with the scenario's site (or sites, each with its id, in place of site), its token as the routes' token (an empty string for none, null to leave them open), and its options, then plays its steps in order. Nothing from the environment counts: no RUNLIGHT_TOKEN, RUNLIGHT_SECRET, CRON_SECRET, RUNLIGHT_OBSERVE_KEY, or NODE_ENV.\n\nScenario options: accounts (sign-in accounts on, as routes({ accounts: true }), with the token as the key the first account is made with), managedSites (sites are kept in the database and managed through the API; site and sites are ignored), origin (the install's own address), secret (encrypts saved keys and signs sessions; none without it), observeKey (the install-wide key for POST /api/observe; none without it), cronSecret (the bearer secret POST and GET /api/check also take; none without it), rateLimit (tracker requests per address per minute, default 120, false for none), cms (the CMS the dashboard is shown inside, as routes({ cms })), mailServices (the ids of the mail services Settings offers, as runlight({ mailServices })), and appMailer (a mailer of the app's own as the mail option, with its via, from, and fromName when given, whose send records each message it is handed, or, when fail is given, throws an error with fail as its message).\n\nBefore each step the clock moves by advance milliseconds, and work a request starts after answering (such as deleting visits past a shorter retention) is finished before the next step. A step is method, path, headers, and a body: body is a JSON value sent as JSON text (with no content type unless headers name one), or a string sent as it is; form is fields sent as application/x-www-form-urlencoded. The request goes to https://{host}/runlight{path}, where host is the step's host or example.com. A step's to picks the entry point: routes (the default), links (the app's own short-link path, linkHandler(), with path from the host's root such as /go/sale), or linkDomain (the middleware for link domains, linkDomainResponse(), with path from the host's root). absolute: true sends a routes path from the host's root instead of under /runlight, as for /.well-known/ at the site's root.\n\nShort links in an adapter, which the steps cannot show but every implementation follows: a request on a link domain goes to linkDomain before anything else, whatever its path, so {linkPath}/{slug} there is a 404 like any other path with no link. On every other host, a GET for {linkPath}/{slug} goes to links. When links answers 404 (no link has that slug, or it is not valid percent-encoding) and Runlight runs as middleware in front of an app, the request goes on to the app untouched, so the app's own 404 page answers it; a handler the app routes the link path to answers with the framework's own not found where the framework has one. A front controller or the standalone server, which have no app behind them, send the 404 themselves.\n\nCookies: each scenario has cookie jars, named by a step's jar (default main; false sends and keeps none). Every Set-Cookie in an answer goes into the step's jar (an empty value or Max-Age=0 removes it), and a request sends its jar's cookies as one Cookie header (name=value pairs joined by '; ') unless its headers give a cookie.\n\nTemplates: {{name}} in a path, a header, a body string, or a form field is a value captured earlier (empty when nothing was), and {{totp:name}} is the six-digit TOTP code (RFC 6238: SHA-1, 30 second steps, base32 secret) for the captured secret at the step's clock. capture keeps values from an answer: a dotted path into its JSON body (a.b.0.c), header:<name> for a response header (all of its Set-Cookie lines joined by newlines for set-cookie), text for the raw body, or fetched for the bodies of the requests the step made to other servers, joined by newlines; any of them followed by ~<regex> keeps the regex's first group instead. Captures read the answer as sent, before it is normalized.\n\nAnswers: status, headers, body, text, files, found, fetched, mailed, or pass. headers holds those of content-type (its media type only), cache-control, location, set-cookie (a list, one per cookie, with each value written <value> unless it is empty), www-authenticate, allow, content-disposition, content-security-policy, x-frame-options, referrer-policy, x-content-type-options, x-robots-tag, and the access-control-allow-origin, -methods, -headers, and -max-age headers that the answer sends, and none it does not. body is a JSON answer's body. text is a text/plain or text/csv answer's body. files lists a ZIP answer's files in order, each with its name and text. A step's look lists text to find in an answer that is not JSON, such as a page or a script, and found says which of them it holds. pass: true means the link-domain middleware let the request through to the app. mailed lists the messages a step handed the app's own mailer, in order, each with its to, from, fromName (only when it is not empty), subject, and text.\n\nOther servers: upstream lists servers the scenario stands in for. A request the implementation makes to another server goes to the first upstream whose url its URL starts with (and whose method matches, when one is given), which answers with that status (default 200), headers, and body (a JSON value sent as JSON with application/json, or a string sent as it is). A request no upstream matches fails as a network error does. fetched lists every such request a step made, in order, each with its method, url, the headers the implementation set (lowercased, sorted), and its body (parsed as JSON, or as form fields when it is application/x-www-form-urlencoded, else text).\n\nNormalizing, applied to bodies, text, files, header values, fetched requests, and mailed messages alike: a string whose key is token, secret, hint, version, library, language, ticket, or recovery, or that is a whole rl_ or rlo_ token or 24 hex digits, becomes <k>, where k is its key's name (value for a string with no key). In other strings, the value of a code, ticket, secret, or code_challenge query parameter becomes <value>, every run of 24 or more lowercase hex digits not next to another letter or digit becomes <hex>, and every rl_ or rlo_ token of 20 or more characters becomes <key>.",
+  "description": "HTTP requests to a fresh Runlight on a fixed clock, and the answers every implementation must give. Each scenario runs on an empty database with the scenario's site (or sites, each with its id, in place of site), its token as the routes' token (an empty string for none, null to leave them open), and its options, then plays its steps in order. Nothing from the environment counts: no RUNLIGHT_TOKEN, RUNLIGHT_SECRET, CRON_SECRET, RUNLIGHT_OBSERVE_KEY, or NODE_ENV.\n\nScenario options: accounts (sign-in accounts on, as routes({ accounts: true }), with the token as the key the first account is made with), managedSites (sites are kept in the database and managed through the API; site and sites are ignored), origin (the install's own address), secret (encrypts saved keys and signs sessions; none without it), observeKey (the install-wide key for POST /api/observe; none without it), cronSecret (the bearer secret POST and GET /api/check also take; none without it), rateLimit (tracker requests per address per minute, default 120, false for none), cms (the CMS the dashboard is shown inside, as routes({ cms })), mailServices (the ids of the mail services Settings offers, as runlight({ mailServices })), and appMailer (a mailer of the app's own as the mail option, with its via, from, and fromName when given, whose send records each message it is handed, or, when fail is given, throws an error with fail as its message).\n\nBefore each step the clock moves by advance milliseconds, and work a request starts after answering (such as deleting visits past a shorter retention) is finished before the next step. A step is method, path, headers, and a body: body is a JSON value sent as JSON text (with no content type unless headers name one), or a string sent as it is; form is fields sent as application/x-www-form-urlencoded. The request goes to https://{host}/runlight{path}, where host is the step's host or example.com. A step's to picks the entry point: routes (the default), links (the app's own short-link path, linkHandler(), with path from the host's root such as /go/sale), or linkDomain (the middleware for link domains, linkDomainResponse(), with path from the host's root). absolute: true sends a routes path from the host's root instead of under /runlight, as for /.well-known/ at the site's root.\n\nShort links in an adapter, which the steps cannot show but every implementation follows: a request on a link domain goes to linkDomain before anything else, whatever its path, so {linkPath}/{slug} there is a 404 like any other path with no link. On every other host, a GET for {linkPath}/{slug} goes to links. When links answers 404 (no link has that slug, or it is not valid percent-encoding) and Runlight runs as middleware in front of an app, the request goes on to the app untouched, so the app's own 404 page answers it; a handler the app routes the link path to answers with the framework's own not found where the framework has one. A front controller or the standalone server, which have no app behind them, send the 404 themselves.\n\nCookies: each scenario has cookie jars, named by a step's jar (default main; false sends and keeps none). Every Set-Cookie in an answer goes into the step's jar (an empty value or Max-Age=0 removes it), and a request sends its jar's cookies as one Cookie header (name=value pairs joined by '; ') unless its headers give a cookie.\n\nTemplates: {{name}} in a path, a header, a body string, or a form field is a value captured earlier (empty when nothing was), and {{totp:name}} is the six-digit TOTP code (RFC 6238: SHA-1, 30 second steps, base32 secret) for the captured secret at the step's clock. {{pad:N}}, with N a whole number in decimal digits, is the lowercase letter x repeated N times (N bytes), filled in wherever {{name}} is, before a JSON body is written as text or form fields are encoded, so a body past a size cap is not kept in this file; the request is sent with the filled-in body and whatever length that body has. capture keeps values from an answer: a dotted path into its JSON body (a.b.0.c), header:<name> for a response header (all of its Set-Cookie lines joined by newlines for set-cookie), text for the raw body, or fetched for the bodies of the requests the step made to other servers, joined by newlines; any of them followed by ~<regex> keeps the regex's first group instead. Captures read the answer as sent, before it is normalized.\n\nAnswers: status, headers, body, text, files, found, fetched, mailed, or pass. headers holds those of content-type (its media type only), cache-control, location, set-cookie (a list, one per cookie, with each value written <value> unless it is empty), www-authenticate, allow, content-disposition, content-security-policy, x-frame-options, referrer-policy, x-content-type-options, x-robots-tag, and the access-control-allow-origin, -methods, -headers, and -max-age headers that the answer sends, and none it does not. body is a JSON answer's body. text is a text/plain or text/csv answer's body. files lists a ZIP answer's files in order, each with its name and text. A step's look lists text to find in an answer that is not JSON, such as a page or a script, and found says which of them it holds. pass: true means the link-domain middleware let the request through to the app. mailed lists the messages a step handed the app's own mailer, in order, each with its to, from, fromName (only when it is not empty), subject, and text.\n\nOther servers: upstream lists servers the scenario stands in for. A request the implementation makes to another server goes to the first upstream whose url its URL starts with (and whose method matches, when one is given), which answers with that status (default 200), headers, and body (a JSON value sent as JSON with application/json, or a string sent as it is). A request no upstream matches fails as a network error does. fetched lists every such request a step made, in order, each with its method, url, the headers the implementation set (lowercased, sorted), and its body (parsed as JSON, or as form fields when it is application/x-www-form-urlencoded, else text).\n\nNormalizing, applied to bodies, text, files, header values, fetched requests, and mailed messages alike: a string whose key is token, secret, hint, version, library, language, ticket, or recovery, or that is a whole rl_ or rlo_ token or 24 hex digits, becomes <k>, where k is its key's name (value for a string with no key). In other strings, the value of a code, ticket, secret, or code_challenge query parameter becomes <value>, every run of 24 or more lowercase hex digits not next to another letter or digit becomes <hex>, and every rl_ or rlo_ token of 20 or more characters becomes <key>.",
   "scenarios": [
     {
       "name": "a day of visits and the reports they make",
@@ -61214,6 +61214,4456 @@
             "found": [
               false
             ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "accounts: an account kept to one site on an app that does not know its own address",
+      "site": {
+        "hostnames": [],
+        "timezone": "UTC"
+      },
+      "sites": [
+        {
+          "id": "alpha",
+          "name": "Alpha",
+          "timezone": "UTC",
+          "hostnames": [
+            "alpha.example"
+          ]
+        },
+        {
+          "id": "beta",
+          "name": "Beta",
+          "timezone": "UTC",
+          "hostnames": [
+            "beta.example"
+          ]
+        }
+      ],
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "accounts": true,
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com",
+            "password": "correct horse battery",
+            "again": "correct horse battery"
+          },
+          "look": [
+            "Enter an email address"
+          ],
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "owner@example.com",
+            "password": "correct horse battery",
+            "again": "correct horse battery"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/people",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "member@example.com",
+            "role": "member",
+            "site": "alpha"
+          },
+          "capture": {
+            "memberCode": "link~code=([^&]+)"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "invite": {
+                "id": "<id>",
+                "email": "member@example.com",
+                "role": "member",
+                "site": "alpha",
+                "invitedBy": "owner@example.com",
+                "createdAt": 1791288000000,
+                "expiresAt": 1791892800000
+              },
+              "link": "https://example.com/runlight/invite?code=<value>",
+              "emailed": false
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/invite",
+          "jar": "member",
+          "form": {
+            "code": "{{memberCode}}",
+            "password": "another long password",
+            "again": "another long password"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "example.com"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Set this Runlight's own address first (RUNLIGHT_URL on the server, or origin in routes()), so a connected hub can add link domains and email reports.",
+              "code": "origin_needed"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "reader@example.org",
+            "frequency": "weekly"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Set this Runlight's own address first (RUNLIGHT_URL on the server, or origin in routes()), so a connected hub can add link domains and email reports.",
+              "code": "origin_needed"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "reader@example.org",
+            "frequency": "weekly"
+          },
+          "jar": "member",
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Set this Runlight's own address first (RUNLIGHT_URL on the server, or origin in routes()), so a connected hub can add link domains and email reports.",
+              "code": "origin_needed"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/reports",
+          "jar": "member",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "reports": [],
+              "languages": [
+                "en",
+                "de",
+                "es",
+                "fr",
+                "pt"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports?site=alpha",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "reader@example.org",
+            "frequency": "weekly"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "report": {
+                "id": "<id>",
+                "site": "alpha",
+                "email": "reader@example.org",
+                "frequency": "weekly",
+                "lang": "en",
+                "lastSentAt": null,
+                "createdAt": 1791288000000
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://elsewhere.example.net"
+          },
+          "jar": "member",
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Your account can only pick from this dashboard's own address",
+              "code": "pick_own"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://example.com"
+          },
+          "jar": "member",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://other.example.net"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick?site=alpha",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://elsewhere.example.net"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "Claude",
+            "redirect_uris": [
+              "https://claude.ai/api/mcp/auth_callback"
+            ]
+          },
+          "capture": {
+            "client": "client_id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiQ2xhdWRlIiwiciI6WyJodHRwczovL2NsYXVkZS5haS9hcGkvbWNwL2F1dGhfY2FsbGJhY2siXSwidCI6MTc5MTI4ODAwMDAwMH0.<hex>",
+              "client_name": "Claude",
+              "redirect_uris": [
+                "https://claude.ai/api/mcp/auth_callback"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{client}}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256",
+          "jar": "member",
+          "look": [
+            "Ask an owner to connect this",
+            "Your account only has access to one site, and only an owner of this Runlight can connect Claude.",
+            "signed in as a viewer"
+          ],
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              true,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "jar": "member",
+          "form": {
+            "response_type": "code",
+            "client_id": "{{client}}",
+            "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "decision": "allow",
+            "site": ""
+          },
+          "look": [
+            "Your account only has access to one site"
+          ],
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=today&compare=off&filter=page:is:/oauth/authorize",
+          "jar": "member",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "alpha",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 0,
+                "visits": 0,
+                "pageviews": 0,
+                "viewsPerVisit": 0,
+                "bounceRate": 0,
+                "visitDuration": 0
+              }
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=page&filter=page:contains:/oauth/",
+          "jar": "member",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "alpha",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "page",
+              "rows": []
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/people",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "reader@example.com",
+            "role": "viewer",
+            "allSites": true
+          },
+          "capture": {
+            "readerCode": "link~code=([^&]+)"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "invite": {
+                "id": "<id>",
+                "email": "reader@example.com",
+                "role": "viewer",
+                "invitedBy": "owner@example.com",
+                "createdAt": 1791288000000,
+                "expiresAt": 1791892800000
+              },
+              "link": "https://example.com/runlight/invite?code=<value>",
+              "emailed": false
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/invite",
+          "jar": "reader",
+          "form": {
+            "code": "{{readerCode}}",
+            "password": "another long password",
+            "again": "another long password"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{client}}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256",
+          "jar": "reader",
+          "look": [
+            "Ask an owner to connect this",
+            "You are signed in as a viewer",
+            "Your account only has access to one site"
+          ],
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              true,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/people",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com",
+            "role": "viewer",
+            "allSites": true
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Enter an email address",
+              "code": "email_invalid",
+              "params": {}
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/people",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com",
+            "role": "viewer",
+            "allSites": true
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "invite": {
+                "id": "<id>",
+                "email": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com",
+                "role": "viewer",
+                "invitedBy": "owner@example.com",
+                "createdAt": 1791288000000,
+                "expiresAt": 1791892800000
+              },
+              "link": "https://example.com/runlight/invite?code=<value>",
+              "emailed": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "accounts: an account kept to one site on an app that knows its own address",
+      "site": {
+        "hostnames": [],
+        "timezone": "UTC"
+      },
+      "sites": [
+        {
+          "id": "alpha",
+          "name": "Alpha",
+          "timezone": "UTC",
+          "hostnames": [
+            "alpha.example"
+          ]
+        },
+        {
+          "id": "beta",
+          "name": "Beta",
+          "timezone": "UTC",
+          "hostnames": [
+            "beta.example"
+          ]
+        }
+      ],
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "accounts": true,
+        "secret": "conformance-secret",
+        "origin": "https://example.com",
+        "appMailer": {
+          "via": "The app",
+          "from": "app@example.com"
+        }
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "owner@example.com",
+            "password": "correct horse battery",
+            "again": "correct horse battery"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/people",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "member@example.com",
+            "role": "member",
+            "site": "alpha"
+          },
+          "capture": {
+            "memberCode": "link~code=([^&]+)"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "invite": {
+                "id": "<id>",
+                "email": "member@example.com",
+                "role": "member",
+                "site": "alpha",
+                "invitedBy": "owner@example.com",
+                "createdAt": 1791288000000,
+                "expiresAt": 1791892800000
+              },
+              "link": "https://example.com/runlight/invite?code=<value>",
+              "emailed": true
+            },
+            "mailed": [
+              {
+                "to": "member@example.com",
+                "from": "app@example.com",
+                "subject": "owner@example.com invited you to Runlight",
+                "text": "owner@example.com invited you to the Runlight at example.com as a member, who can change the settings of alpha only.\n\nChoose a password to join:\nhttps://example.com/runlight/invite?code=<value>\n\nThe link works for seven days.\n"
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/invite",
+          "jar": "member",
+          "form": {
+            "code": "{{memberCode}}",
+            "password": "another long password",
+            "again": "another long password"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "example.com"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "example.com is where this dashboard or one of your sites lives. Use a separate domain or subdomain for short links, such as go.example.com.",
+              "code": "domain_in_use",
+              "params": {
+                "domain": "example.com"
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "reader@example.org",
+            "frequency": "weekly"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "capture": {
+            "report": "report.id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "report": {
+                "id": "<id>",
+                "site": "alpha",
+                "email": "reader@example.org",
+                "frequency": "weekly",
+                "lang": "en",
+                "lastSentAt": null,
+                "createdAt": 1791288000000
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports/{{report}}/send",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            },
+            "mailed": [
+              {
+                "to": "reader@example.org",
+                "from": "app@example.com",
+                "subject": "Alpha: 0 people last week",
+                "text": "Runlight · Your dashboard is at example.com/runlight\n\nAlpha · Sep 28 to Oct 4, 2026\n\n0 people visited last week.\n\nVisitors: 0\nVisits: 0\nPageviews: 0\nViews per visit: 0.0\nBounce rate: 0%\nVisit duration: 0s\n\nTop pages\n  Nothing in this range\n\nTop sources\n  Nothing in this range\n\nTop countries\n  Nothing in this range\n\nOpen the dashboard: https://example.com/runlight/?site=alpha\n\nYou get this weekly report for Alpha from Runlight. Unsubscribe: https://example.com/runlight/unsubscribe/<hex>"
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://other.example.net"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 403,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Your account can only pick from this dashboard's own address",
+              "code": "pick_own"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/pick",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "origin": "https://example.com"
+          },
+          "jar": "member",
+          "host": "other.example.net",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ticket": "<ticket>"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "emails and domains too long to be one",
+      "site": {
+        "hostnames": [
+          "blog.example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com",
+            "frequency": "weekly"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Enter an email address",
+              "code": "email_invalid"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "a@................................................................................................................................................................................................................................................................................................................................................................................................................@",
+            "frequency": "weekly"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Enter an email address",
+              "code": "email_invalid"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/reports",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com  ",
+            "frequency": "weekly"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "report": {
+                "id": "<id>",
+                "site": "default",
+                "email": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com",
+                "frequency": "weekly",
+                "lang": "en",
+                "lastSentAt": null,
+                "createdAt": 1791288000000
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/mail/test",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "to": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Enter an email address to send the test to",
+              "code": "test_email"
+            }
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/api/mail",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "service": "webhook",
+            "url": "https://hooks.example.net/runlight",
+            "from": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Enter the address reports come from, like reports@example.com",
+              "code": "mail_from",
+              "params": {}
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.runlight-conformance.com"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "That is not a domain name",
+              "code": "domain_invalid"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "............................................................................................................................................................................................................................................................................................................x"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "That is not a domain name",
+              "code": "domain_invalid"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "https://go.runlight-conformance.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "That is not a domain name",
+              "code": "domain_invalid"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/link-domains",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "domain": "HTTPS://WWW.Go.Runlight-Conformance.com........................................................................................................................................................................................................"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "domain": "go.runlight-conformance.com"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/link-domains",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "domains": [
+                "go.runlight-conformance.com"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bodies past the cap on sign-in, account, OAuth, and MCP paths",
+      "site": {
+        "hostnames": [],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "accounts": true,
+        "managedSites": true,
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "owner@example.com",
+            "password": "{{pad:66000}}",
+            "again": "xxxxxxxxxx"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "owner@example.com",
+            "password": "correct horse battery",
+            "again": "correct horse battery"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "{{pad:66000}}"
+          },
+          "jar": false,
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": false,
+          "form": {
+            "pending": "nope",
+            "code": "{{pad:66000}}"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/invite",
+          "jar": false,
+          "form": {
+            "code": "nope",
+            "password": "{{pad:66000}}",
+            "again": "x"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/account/password",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "current": "correct horse battery",
+            "next": "{{pad:66000}}"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/people",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "email": "new@example.com",
+            "role": "viewer",
+            "allSites": true,
+            "note": "{{pad:66000}}"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "name": "Kept",
+            "hostnames": [
+              "kept.example"
+            ]
+          },
+          "capture": {
+            "site": "site.id"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": {
+                "id": "kept.example",
+                "name": "Kept",
+                "hostnames": [
+                  "kept.example"
+                ],
+                "timezone": "UTC"
+              }
+            }
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/sites/{{site}}",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "password": "{{pad:66000}}"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "Send a smaller body",
+              "code": "body_too_large"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/sites",
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "sites": [
+                {
+                  "id": "kept.example",
+                  "name": "Kept",
+                  "hostnames": [
+                    "kept.example"
+                  ],
+                  "timezone": "UTC",
+                  "lastSeen": null,
+                  "retentionMonths": null
+                }
+              ],
+              "managed": true
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "jar": false,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "{{pad:66000}}",
+            "redirect_uris": [
+              "https://claude.ai/api/mcp/auth_callback"
+            ]
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "error": "invalid_request",
+              "error_description": "Send a smaller body"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "jar": false,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "{{pad:2000}}",
+            "redirect_uris": [
+              "https://claude.ai/api/mcp/auth_callback"
+            ]
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoieHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHgiLCJyIjpbImh0dHBzOi8vY2xhdWRlLmFpL2FwaS9tY3AvYXV0aF9jYWxsYmFjayJdLCJ0IjoxNzkxMjg4MDAwMDAwfQ.<hex>",
+              "client_name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "redirect_uris": [
+                "https://claude.ai/api/mcp/auth_callback"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "jar": false,
+          "form": {
+            "response_type": "code",
+            "client_id": "{{pad:66000}}",
+            "redirect_uri": "https://claude.ai/api/mcp/auth_callback"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "error": "invalid_request",
+              "error_description": "Send a smaller body"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "jar": false,
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{pad:66000}}"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "error": "invalid_request",
+              "error_description": "Send a smaller body"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "jar": false,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "grant_type": "authorization_code",
+            "code": "{{pad:66000}}"
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "error": "invalid_request",
+              "error_description": "Send a smaller body"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/mcp",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "params": {
+              "pad": "{{pad:70000}}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "result": {}
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/mcp",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "ping",
+            "params": {
+              "pad": "{{pad:1048576}}"
+            }
+          },
+          "expect": {
+            "status": 413,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "jsonrpc": "2.0",
+              "id": null,
+              "error": {
+                "code": -32600,
+                "message": "Send a smaller message"
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/mcp",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": "not json",
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "jsonrpc": "2.0",
+              "id": null,
+              "error": {
+                "code": -32700,
+                "message": "Send a JSON-RPC message"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "OAuth: a redirect address that is no address",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "X",
+            "redirect_uris": [
+              "https://["
+            ]
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "error": "invalid_redirect_uri",
+              "error_description": "Register at least one https redirect address"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/register",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "client_name": "X",
+            "redirect_uris": [
+              "https://[",
+              "https://exa mple.com/cb",
+              "http://localhost:99999/cb",
+              "https://claude.ai/api/mcp/auth_callback"
+            ]
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "client_id": "eyJuIjoiWCIsInIiOlsiaHR0cHM6Ly9jbGF1ZGUuYWkvYXBpL21jcC9hdXRoX2NhbGxiYWNrIl0sInQiOjE3OTEyODgwMDAwMDB9.<hex>",
+              "client_name": "X",
+              "redirect_uris": [
+                "https://claude.ai/api/mcp/auth_callback"
+              ],
+              "token_endpoint_auth_method": "none",
+              "grant_types": [
+                "authorization_code"
+              ],
+              "response_types": [
+                "code"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "accounts: wrong second-factor codes lock for longer each time",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "accounts": true,
+        "secret": "conformance-secret"
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/setup",
+          "form": {
+            "code": "conformance",
+            "email": "owner@example.com",
+            "password": "correct horse battery",
+            "again": "correct horse battery"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/account/2fa/start",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "password": "correct horse battery"
+          },
+          "capture": {
+            "totp": "secret"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store"
+            },
+            "body": {
+              "secret": "<secret>",
+              "uri": "otpauth://totp/Runlight%20(example.com)%3Aowner%40example.com?secret=<value>&issuer=Runlight%20(example.com)&algorithm=SHA1&digits=6&period=30"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/account/2fa/confirm",
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "code": "{{totp:totp}}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"
+              ]
+            },
+            "body": {
+              "recovery": [
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>",
+                "<recovery>"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "own",
+          "capture": {
+            "own": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "own",
+          "form": {
+            "pending": "{{own}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure",
+                "runlight_device=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=31536000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "guess",
+          "capture": {
+            "pending": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 429,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "guess",
+          "capture": {
+            "pending": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "advance": 899000,
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 429,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "own",
+          "capture": {
+            "own": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "own",
+          "form": {
+            "pending": "{{own}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure",
+                "runlight_device=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=31536000; Secure"
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "advance": 1000,
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "advance": 0,
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "advance": 0,
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "advance": 0,
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "abcdef",
+            "next": "/runlight/"
+          },
+          "look": [
+            "That code is not right."
+          ],
+          "advance": 0,
+          "expect": {
+            "status": 401,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "guess",
+          "capture": {
+            "pending": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "advance": 960000,
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 429,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login",
+          "form": {
+            "email": "owner@example.com",
+            "password": "correct horse battery"
+          },
+          "jar": "guess",
+          "capture": {
+            "pending": "text~name=\"pending\" value=\"([^\"]+)\""
+          },
+          "advance": 840000,
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/login/code",
+          "jar": "guess",
+          "form": {
+            "pending": "{{pending}}",
+            "code": "{{totp:totp}}",
+            "next": "/runlight/"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "/runlight/",
+              "set-cookie": [
+                "runlight_session=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure",
+                "runlight_device=<value>; Path=/runlight; HttpOnly; SameSite=Lax; Max-Age=31536000; Secure"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "the tracker: clicks over the limit, cleaned text, Kit, long user agents, and forwarded ports",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "rateLimit": 2
+      },
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/api/links",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "url": "https://example.org/sale",
+            "slug": "sale"
+          },
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "link": {
+                "id": "<id>",
+                "site": "default",
+                "domain": "",
+                "slug": "sale",
+                "name": "example.org/sale",
+                "url": "https://example.org/sale",
+                "createdAt": 1791288000000,
+                "updatedAt": 1791288000000
+              }
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/go/sale",
+          "to": "links",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.20"
+          },
+          "expect": {
+            "status": 302,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://example.org/sale",
+              "referrer-policy": "no-referrer-when-downgrade"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/go/sale",
+          "to": "links",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.20"
+          },
+          "expect": {
+            "status": 302,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://example.org/sale",
+              "referrer-policy": "no-referrer-when-downgrade"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/go/sale",
+          "to": "links",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.20"
+          },
+          "expect": {
+            "status": 302,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://example.org/sale",
+              "referrer-policy": "no-referrer-when-downgrade"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.20"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/dropped",
+            "i": "d1"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links?period=today",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "prefix": "https://example.com/go",
+              "domains": [],
+              "links": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "sale",
+                  "name": "example.org/sale",
+                  "url": "https://example.org/sale",
+                  "createdAt": 1791288000000,
+                  "updatedAt": 1791288000000,
+                  "clicks": 2,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=today&compare=off",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 0,
+                "visits": 0,
+                "pageviews": 0,
+                "viewsPerVisit": 0,
+                "bounceRate": 0,
+                "visitDuration": 0
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.21"
+          },
+          "body": "{\"k\":\"pageview\",\"u\":\"https://example.com/clean?utm_source=a%00b&utm_campaign=c%00d\",\"i\":\"c1\",\"t\":\"a\\u0000b\",\"l\":\"en\\u0000-GB\"}",
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.21"
+          },
+          "body": "{\"k\":\"event\",\"u\":\"https://example.com/clean\",\"i\":\"c1\",\"n\":\" Sign\\u0000up \",\"p\":{\"whole\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\\ude00y\",\"half\":\"a\\ud83db\",\"\\u0000\":\"gone\",\"k\\u0000ey\":\"v\\u0000al\"}}",
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=utm_source",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "utm_source",
+              "rows": [
+                {
+                  "value": "ab",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 0,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=utm_campaign",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "utm_campaign",
+              "rows": [
+                {
+                  "value": "cd",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 0,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=language",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "language",
+              "rows": [
+                {
+                  "value": "en-GB",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 0,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=event",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "event",
+              "rows": [
+                {
+                  "value": "Signup",
+                  "visitors": 1,
+                  "events": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/event-props?period=today&event=Signup",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "event": "Signup",
+              "keys": [
+                {
+                  "key": "half",
+                  "events": 1
+                },
+                {
+                  "key": "key",
+                  "events": 1
+                },
+                {
+                  "key": "whole",
+                  "events": 1
+                }
+              ],
+              "key": "half",
+              "rows": [
+                {
+                  "value": "a�b",
+                  "events": 1,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/event-props?period=today&event=Signup&key=whole",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "event": "Signup",
+              "keys": [
+                {
+                  "key": "half",
+                  "events": 1
+                },
+                {
+                  "key": "key",
+                  "events": 1
+                },
+                {
+                  "key": "whole",
+                  "events": 1
+                }
+              ],
+              "key": "whole",
+              "rows": [
+                {
+                  "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀",
+                  "events": 1,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/event-props?period=today&event=Signup&key=half",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "event": "Signup",
+              "keys": [
+                {
+                  "key": "half",
+                  "events": 1
+                },
+                {
+                  "key": "key",
+                  "events": 1
+                },
+                {
+                  "key": "whole",
+                  "events": 1
+                }
+              ],
+              "key": "half",
+              "rows": [
+                {
+                  "value": "a�b",
+                  "events": 1,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/event-props?period=today&event=Signup&key=key",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "event": "Signup",
+              "keys": [
+                {
+                  "key": "half",
+                  "events": 1
+                },
+                {
+                  "key": "key",
+                  "events": 1
+                },
+                {
+                  "key": "whole",
+                  "events": 1
+                }
+              ],
+              "key": "key",
+              "rows": [
+                {
+                  "value": "val",
+                  "events": 1,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.22"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/?utm_source=kit",
+            "i": "k1"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.23"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/?utm_source=ConvertKit",
+            "i": "k2"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.24"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/?utm_source=newsletter",
+            "i": "k3"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=source",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "source",
+              "rows": [
+                {
+                  "value": "Kit",
+                  "visitors": 2,
+                  "visits": 2,
+                  "bounceRate": 1,
+                  "pageviews": 2,
+                  "visitDuration": 0
+                },
+                {
+                  "value": "Newsletter",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                },
+                {
+                  "value": "ab",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 0,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=channel",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "channel",
+              "rows": [
+                {
+                  "value": "Email",
+                  "visitors": 3,
+                  "visits": 3,
+                  "bounceRate": 1,
+                  "pageviews": 3,
+                  "visitDuration": 0
+                },
+                {
+                  "value": "Campaign",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 0,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "x-forwarded-for": "203.0.113.25"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/long",
+            "i": "u1"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx Googlebot/2.1",
+            "x-forwarded-for": "203.0.113.26"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/long",
+            "i": "u2"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Googlebot/2.1",
+            "x-forwarded-for": "203.0.113.27"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/long",
+            "i": "u3"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?period=today&dimension=browser&filter=page:is:/long",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "browser",
+              "rows": [
+                {
+                  "value": "Chrome",
+                  "visitors": 2,
+                  "visits": 2,
+                  "bounceRate": 1,
+                  "pageviews": 2,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=today&compare=off&filter=page:is:/long",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 2,
+                "visits": 2,
+                "pageviews": 2,
+                "viewsPerVisit": 1,
+                "bounceRate": 1,
+                "visitDuration": 0
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.7:51234"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/port",
+            "i": "p1"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.7"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/port",
+            "i": "p2"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "[2001:db8::1]:443"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/port",
+            "i": "p3"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "2001:db8::1"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/port",
+            "i": "p4"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "[2001:db8::1]"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/port",
+            "i": "p5"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=today&compare=off&filter=page:is:/port",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-06",
+                "to": "2026-10-06",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 2,
+                "visits": 2,
+                "pageviews": 5,
+                "viewsPerVisit": 2.5,
+                "bounceRate": 0,
+                "visitDuration": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "connecting an install whose answer is not a site",
+      "site": {
+        "hostnames": [],
+        "timezone": "UTC"
+      },
+      "start": 1791288000000,
+      "token": "conformance",
+      "options": {
+        "managedSites": true,
+        "secret": "conformance-secret"
+      },
+      "upstream": [
+        {
+          "url": "https://noid.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              {
+                "id": "",
+                "name": "No id",
+                "hostnames": [
+                  "noid.example.net"
+                ],
+                "timezone": "UTC"
+              }
+            ]
+          }
+        },
+        {
+          "url": "https://longid.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              {
+                "id": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+                "name": "Long id",
+                "hostnames": [],
+                "timezone": "UTC"
+              }
+            ]
+          }
+        },
+        {
+          "url": "https://numbers.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              {
+                "id": 7,
+                "name": "Numbers",
+                "hostnames": [],
+                "timezone": "UTC"
+              }
+            ]
+          }
+        },
+        {
+          "url": "https://noname.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              {
+                "id": "shop",
+                "name": 5,
+                "hostnames": [
+                  "shop.example.net"
+                ],
+                "timezone": "UTC"
+              }
+            ]
+          }
+        },
+        {
+          "url": "https://nothing.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              null
+            ]
+          }
+        },
+        {
+          "url": "https://bare.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              {
+                "id": "shop",
+                "name": "",
+                "hostnames": [
+                  "",
+                  5
+                ],
+                "timezone": "UTC"
+              }
+            ]
+          }
+        },
+        {
+          "url": "https://odd.example.net/runlight/api/sites",
+          "body": {
+            "sites": [
+              {
+                "id": "shop",
+                "name": "  nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn  ",
+                "hostnames": [
+                  "-_.Shop.Example.net"
+                ],
+                "timezone": "Mars/Base"
+              }
+            ]
+          }
+        }
+      ],
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://noid.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "https://noid.example.net/runlight did not answer like a Runlight install",
+              "code": "connect_not_runlight",
+              "params": {
+                "url": "https://noid.example.net/runlight"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://noid.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://noid.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://longid.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "https://longid.example.net/runlight did not answer like a Runlight install",
+              "code": "connect_not_runlight",
+              "params": {
+                "url": "https://longid.example.net/runlight"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://longid.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://longid.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://numbers.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "https://numbers.example.net/runlight did not answer like a Runlight install",
+              "code": "connect_not_runlight",
+              "params": {
+                "url": "https://numbers.example.net/runlight"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://numbers.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://numbers.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://noname.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "https://noname.example.net/runlight did not answer like a Runlight install",
+              "code": "connect_not_runlight",
+              "params": {
+                "url": "https://noname.example.net/runlight"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://noname.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://noname.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://nothing.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "error": "https://nothing.example.net/runlight did not answer like a Runlight install",
+              "code": "connect_not_runlight",
+              "params": {
+                "url": "https://nothing.example.net/runlight"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://nothing.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://nothing.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "sites": [],
+              "managed": true
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://bare.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "advance": 1000,
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": {
+                "id": "bare.example.net",
+                "name": "bare.example.net",
+                "hostnames": [],
+                "timezone": "UTC"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://bare.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://bare.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "remote": {
+              "url": "https://odd.example.net/runlight",
+              "token": "rl_x"
+            }
+          },
+          "advance": 1000,
+          "expect": {
+            "status": 201,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": {
+                "id": "shop.example.net",
+                "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+                "hostnames": [],
+                "timezone": "UTC"
+              }
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://odd.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://odd.example.net/runlight/api/token",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/sites",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "sites": [
+                {
+                  "id": "bare.example.net",
+                  "name": "bare.example.net",
+                  "hostnames": [],
+                  "timezone": "UTC",
+                  "remote": "https://bare.example.net/runlight",
+                  "remoteSite": "shop",
+                  "manage": false,
+                  "lastSeen": null,
+                  "retentionMonths": null,
+                  "connection": "ok"
+                },
+                {
+                  "id": "shop.example.net",
+                  "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+                  "hostnames": [
+                    "-_.Shop.Example.net"
+                  ],
+                  "timezone": "UTC",
+                  "remote": "https://odd.example.net/runlight",
+                  "remoteSite": "shop",
+                  "manage": false,
+                  "lastSeen": null,
+                  "retentionMonths": null,
+                  "connection": "ok"
+                }
+              ],
+              "managed": true
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://bare.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://odd.example.net/runlight/api/sites",
+                "headers": {
+                  "authorization": "Bearer rl_x"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "imports: a link deleted since it came in stays deleted, and what a CSV may bring",
+      "site": {
+        "hostnames": [
+          "blog.example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791374400000,
+      "token": "conformance",
+      "upstream": [
+        {
+          "url": "https://api.dub.co/links",
+          "body": [
+            {
+              "id": "dub1",
+              "domain": "dub.sh",
+              "key": "launch",
+              "url": "https://example.org/launch",
+              "title": "Launch",
+              "createdAt": "2026-09-01T10:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "url": "https://api.dub.co/events",
+          "body": [
+            {
+              "timestamp": "2026-09-02T10:00:00.000Z",
+              "click": {
+                "id": "c1",
+                "country": "US",
+                "city": "Austin",
+                "device": "Mobile",
+                "browser": "Chrome",
+                "os": "iOS",
+                "referer": "twitter.com"
+              }
+            }
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/api/links/import/dub",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "credentials": {
+              "apiKey": "dub-key"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "cursor": null,
+              "done": 1,
+              "total": null,
+              "links": 1,
+              "clicks": 1,
+              "skipped": 0,
+              "failed": []
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/links?pageSize=10&showArchived=true",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/events?event=clicks&linkId=dub1&interval=all&sortOrder=asc&limit=1000&page=1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links?from=2026-09-01&to=2026-09-30",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "capture": {
+            "link": "links.0.id"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "prefix": "https://example.com/go",
+              "domains": [],
+              "links": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "launch",
+                  "name": "Launch",
+                  "url": "https://example.org/launch",
+                  "createdAt": 1788256800000,
+                  "updatedAt": 1788256800000,
+                  "clicks": 1,
+                  "visitors": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/links/{{link}}",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "ok": true
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/links/import/dub",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "credentials": {
+              "apiKey": "dub-key"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "cursor": null,
+              "done": 1,
+              "total": null,
+              "links": 0,
+              "clicks": 0,
+              "skipped": 1,
+              "failed": []
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/links?pageSize=10&showArchived=true",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links?from=2026-09-01&to=2026-09-30",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "prefix": "https://example.com/go",
+              "domains": [],
+              "links": []
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/import/csv/visits",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "rows": [
+              {
+                "time": "20240501",
+                "path": "/old",
+                "visitor": "a"
+              },
+              {
+                "time": "1999-12-31T23:59:59Z",
+                "path": "/older",
+                "visitor": "a"
+              },
+              {
+                "time": "2000-01-01",
+                "path": "/first",
+                "visitor": "a"
+              },
+              {
+                "time": "2026-03-01T10:00:00Z",
+                "path": "/a",
+                "hostname": "my site.com",
+                "visitor": "b"
+              },
+              {
+                "time": "2026-03-01T11:00:00Z",
+                "path": "/b",
+                "hostname": "evil.example/x?y",
+                "visitor": "c"
+              },
+              {
+                "time": "2026-03-01T12:00:00Z",
+                "path": "/c",
+                "hostname": "shop.example.com",
+                "visitor": "d"
+              }
+            ]
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "pageviews": 4,
+              "events": 0,
+              "visits": 4,
+              "skipped": 2,
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-01&to=2026-03-01&dimension=hostname",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-01",
+                "to": "2026-03-01",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "hostname",
+              "rows": [
+                {
+                  "value": "blog.example.com",
+                  "visitors": 2,
+                  "pageviews": 2
+                },
+                {
+                  "value": "shop.example.com",
+                  "visitors": 1,
+                  "pageviews": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-01&to=2026-03-01&dimension=page",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-01",
+                "to": "2026-03-01",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "page",
+              "rows": [
+                {
+                  "value": "/a",
+                  "visitors": 1,
+                  "pageviews": 1,
+                  "timeOnPage": 0,
+                  "scrollDepth": 0
+                },
+                {
+                  "value": "/b",
+                  "visitors": 1,
+                  "pageviews": 1,
+                  "timeOnPage": 0,
+                  "scrollDepth": 0
+                },
+                {
+                  "value": "/c",
+                  "visitors": 1,
+                  "pageviews": 1,
+                  "timeOnPage": 0,
+                  "scrollDepth": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?from=2000-01-01&to=2000-01-01&compare=off",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2000-01-01",
+                "to": "2000-01-01",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 1,
+                "visits": 1,
+                "pageviews": 1,
+                "viewsPerVisit": 1,
+                "bounceRate": 1,
+                "visitDuration": 0
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/import/csv/visits",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "rows": [
+              {
+                "time": "2026-03-02T10:00:00Z",
+                "path": "/x",
+                "visitor": "198.51.100.7",
+                "country": "CA",
+                "region": "198.51.100.7",
+                "city": "198.51.100.7",
+                "browser": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+                "os": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+                "screen": "198.51.100.7",
+                "language": "2001:db8::1"
+              },
+              {
+                "time": "2026-03-02T11:00:00Z",
+                "path": "/y",
+                "visitor": "b",
+                "country": "CA",
+                "region": "QC",
+                "city": "2001:db8::1",
+                "browser": "203.0.113.5",
+                "os": "curl/8.4.0",
+                "screen": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+                "language": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+              },
+              {
+                "time": "2026-03-02T12:00:00Z",
+                "path": "/z",
+                "visitor": "c",
+                "country": "DE",
+                "region": "DE-BB",
+                "city": "Frankfurt (Oder)",
+                "browser": "vivaldi",
+                "os": "Haiku",
+                "screen": " 1440x900 ",
+                "language": " pt-BR "
+              }
+            ]
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "pageviews": 3,
+              "events": 0,
+              "visits": 3,
+              "skipped": 0,
+              "secret": "<secret>"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=region",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-02",
+                "to": "2026-03-02",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "region",
+              "rows": [
+                {
+                  "value": "CA-QC",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                },
+                {
+                  "value": "DE-BB",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=city",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-02",
+                "to": "2026-03-02",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "city",
+              "rows": [
+                {
+                  "value": "Frankfurt (Oder)",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=browser",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-02",
+                "to": "2026-03-02",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "browser",
+              "rows": [
+                {
+                  "value": "Vivaldi",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=os",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-02",
+                "to": "2026-03-02",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "os",
+              "rows": [
+                {
+                  "value": "Haiku",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=screen",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-02",
+                "to": "2026-03-02",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "screen",
+              "rows": [
+                {
+                  "value": "1440x900",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=language",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-03-02",
+                "to": "2026-03-02",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "dimension": "language",
+              "rows": [
+                {
+                  "value": "pt-BR",
+                  "visitors": 1,
+                  "visits": 1,
+                  "bounceRate": 1,
+                  "pageviews": 1,
+                  "visitDuration": 0
+                }
+              ]
+            }
           }
         }
       ]

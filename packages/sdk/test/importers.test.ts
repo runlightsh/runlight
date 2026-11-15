@@ -108,6 +108,25 @@ test("an imported link's destination passes the checks a new link does, a refuse
   assert.equal(totals.clicks, 10_000);
 });
 
+test("a link's history stops at the most a link keeps, however much the source goes on sending", async () => {
+  const day = (n: number) => new Date(Date.UTC(2026, 0, 1 + n)).toISOString();
+  const calls = serve([
+    [/api\.dub\.co\/links\?/, () => ({ body: [
+      { id: "l1", domain: "dub.sh", key: "busy", url: "https://a.com/busy", title: "", createdAt: "2026-01-01T00:00:00Z" },
+    ] })],
+    // Full pages for ever: the same visitor again and again, so each page is one visit.
+    [/\/events\?.*linkId=l1/, (url) => ({ body: Array.from({ length: 1000 }, (_, i) => ({ timestamp: new Date(Date.UTC(2026, 1, 1) + Number(url.searchParams.get("page")) * 60_000 + i).toISOString(), click: { id: `c${url.searchParams.get("page")}` } })) })],
+  ]);
+  const rl = runlight({ store: sqlite({ path: ":memory:" }) });
+  const first = await importStep(rl, "default", "dub", { apiKey: "dub_test" }, null, 0);
+  assert.equal(calls.filter((c) => c.includes("/events")).length, 100, "it stops asking at 100,000 clicks");
+  assert.deepEqual([first.links, first.clicks], [1, 100_000]);
+  // Daily counts stop there too, on a plan without the events API.
+  const { writeLink, MAX_LINK_CLICKS } = await import("../src/importers/write.js");
+  const daily = await writeLink(rl, "default", "dub", { sourceId: "l2", slug: "daily", domain: "", name: "", url: "https://a.com/daily", createdAt: 0 }, { daily: Array.from({ length: 40 }, (_, n) => ({ day: day(n).slice(0, 10), clicks: 9_000 })) });
+  assert.deepEqual([daily.status, daily.clicks], ["created", MAX_LINK_CLICKS]);
+});
+
 test("Bitly: every group, custom back-halves, daily counts", async () => {
   serve([
     [/\/v4\/groups$/, () => ({ body: { groups: [{ guid: "G1" }, { guid: "G2" }] } })],
@@ -171,6 +190,24 @@ test("Umami: signs in with a username and password, and re-runs skip what is the
   assert.equal(again.skipped, 1);
   await assert.rejects(importStep(rl, "default", "umami", { url: "nope" }, null, 0), /Umami address/);
   await assert.rejects(importStep(rl, "default", "nowhere", {}, null, 0), /cannot import/);
+});
+
+test("a link imported once and deleted since is left deleted, with its clicks, when the import runs again", async () => {
+  const calls = serve([
+    [/api\.dub\.co\/links\?/, () => ({ body: [{ id: "l1", domain: "dub.sh", key: "sale", url: "https://a.com/sale", title: "Sale", createdAt: "2026-01-02T00:00:00Z" }] })],
+    [/\/events\?/, () => ({ body: [{ timestamp: "2026-03-01T10:00:00Z", click: { id: "c1", country: "CA" } }] })],
+  ]);
+  const { rl, totals } = await runAll("dub", { apiKey: "dub_test" });
+  assert.deepEqual([totals.links, totals.clicks], [1, 1]);
+  const [link] = await rl.store.links("default", 0, Date.now() + 1);
+  await rl.store.deleteLink(link!.id, Date.now());
+  calls.length = 0;
+  const again = await importStep(rl, "default", "dub", { apiKey: "dub_test" }, null, 0);
+  assert.deepEqual([again.links, again.skipped, again.failed.length], [0, 1, 0]);
+  assert.ok(!calls.some((c) => c.includes("/events")), "its history is not fetched again");
+  assert.deepEqual(await rl.store.links("default", 0, Date.now() + 1), []);
+  const [kept] = await rl.store.db.all<{ clicks: number; visits: number }>(`SELECT (SELECT COUNT(*) FROM rl_events WHERE link = ?) AS clicks, (SELECT COUNT(*) FROM rl_sessions) AS visits`, [link!.id]);
+  assert.deepEqual({ clicks: Number(kept!.clicks), visits: Number(kept!.visits) }, { clicks: 1, visits: 1 });
 });
 
 test("Umami: an address on the install's own network, or without https, is never asked", async () => {

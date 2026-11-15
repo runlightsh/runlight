@@ -15,12 +15,17 @@ export interface ClientHints {
   platform?: string | null;
 }
 
+/** The most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past it is parsed. */
+export const MAX_UA = 512;
+const cap = (value: string): string => (value.length > MAX_UA ? value.slice(0, MAX_UA) : value);
+
 export function aiAgent(ua: string): AiAgent | null {
-  const lower = ua.toLowerCase();
+  const lower = cap(ua).toLowerCase();
   return AI_AGENTS.find((agent) => lower.includes(agent.token)) ?? null;
 }
 
 export function isBot(ua: string): boolean {
+  ua = cap(ua);
   if (ua.length < 20 || !/mozilla|opera/i.test(ua)) return true;
   return BOT_PATTERN.test(ua);
 }
@@ -37,7 +42,7 @@ const BROWSERS: Array<[name: string, pattern: RegExp]> = [
   ["Instagram", /Instagram (\d+)/],
   ["Firefox", /(?:Firefox|FxiOS)\/(\d+)/],
   ["Chrome", /(?:CriOS|Chrome)\/(\d+)/],
-  ["Safari", /Version\/(\d+)[\d.]* (?:Mobile\/\S+ )?Safari\//],
+  ["Safari", /Version\/(\d+)(?:\.[\d.]*)? (?:Mobile\/\S+ )?Safari\//],
   ["Internet Explorer", /(?:MSIE |Trident\/.*rv:)(\d+)/],
 ];
 
@@ -55,6 +60,8 @@ function unquote(value: string | null | undefined): string {
 }
 
 export function parseClient(ua: string, hints: ClientHints = {}, screenWidth?: number): Client {
+  ua = cap(ua);
+  hints = { brands: cap(hints.brands ?? ""), mobile: cap(hints.mobile ?? ""), platform: cap(hints.platform ?? "") };
   let browser = "Other";
   let browserVersion = "";
   for (const [name, pattern] of BROWSERS) {

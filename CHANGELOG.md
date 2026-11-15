@@ -4,12 +4,76 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+This release follows a review of every package. Read the first entry under Changed before upgrading a fetch-style mount that sits behind your own proxy.
+
+### Security
+
+- Ruby: values sent to MySQL and MariaDB are written so they read the same in every SQL mode. On a server whose sessions start with `NO_BACKSLASH_ESCAPES`, the first statement after a dropped connection could be read with the wrong escaping, which allowed SQL injection through text a visitor controls. Runlight no longer changes the session's `sql_mode` at all, an app's own connection included.
+- Python: an app's own MySQL connection that reconnects has `NO_BACKSLASH_ESCAPES` dropped again before any statement, closing the same injection on servers that set that mode.
+- Rust: statements sent to Postgres read the same whatever `standard_conforming_strings` is set to. With it off, a "contains" filter could end a quoted value early.
+- A request address starting with `//` or `/\` is read as a path, never as another host, in the Node adapter and in the Go, Python, Java, .NET, and Rust adapters. Before, such a request could name its own origin, which the OAuth consent form's check that it was posted from its own page relies on.
+- PHP: an account kept to one site can no longer change that site's domains with a body that starts with a byte order mark or holds a byte that is not UTF-8.
+- An account kept to one site can no longer add a link domain or an email report until the app knows its own address, as a connected hub cannot, so a forged `Host` header cannot claim the dashboard's own host or put another address in a report's links. It gets an element picker ticket only for its own dashboard.
+- Short link clicks and AI agent fetches are rate limited per address, as tracker hits are. A click over the limit is still redirected and is not recorded.
+- An AI agent fetch can no longer be counted for another site of the same install with a forged `X-Forwarded-Host`.
+- Emails over 320 characters and domains over 253 are refused before any pattern reads them, a user agent is cut to 512 characters before it is parsed, and a site's icon lookup reads a bounded tag. Each of these could stall the server on a very long input; in Python a 60 KB user agent cost seven seconds.
+- Sign-in, account, OAuth, and MCP requests are capped in size (64 KB, and 1 MB for MCP) on hosts that do not cap bodies themselves.
+- Wrong two-factor codes lock for longer each time, from fifteen minutes up to a day, where five tries every fifteen minutes went on for good. A browser you have signed in from before is counted on its own, so others' guesses do not hold it up. Two-factor and recovery codes are compared in constant time.
+- Go: a SQLite transaction cut short by a closed browser tab, a panic, or a failed commit is rolled back. Before, later visits were held in the open transaction and lost at the next restart.
+- Java: a deeply nested JSON body can no longer overflow a thread's stack. A server that sends headers without end is refused at 64 KiB, and a mail server or webhook that stops reading can no longer hold a request or the scheduled check past its timeout.
+- Python: a Postgres URL with `sslmode=require`, `prefer`, or `allow` verifies the server's certificate and name, as the TypeScript SDK does. Use `sslrootcert` for a private certificate authority, or `sslmode=no-verify` to encrypt without verifying. The standalone server ignores request headers named with underscores, which a client could use to add to `X-Forwarded-For` behind some proxies.
+- Elixir: Runlight's statements no longer reach an app's Ecto telemetry, and a failed statement is logged without its values, so salts, hashes, and keys stay out of tracing backends and logs.
+- PHP: a sign-in for an email with no account takes as long as a wrong password, so timing no longer tells them apart. Sample reports, test emails, sign-in links, and the assistant's limits hold when several requests arrive at once.
+- Ruby: a process checks at most 30 passwords a minute, with a separate 30 for browsers an account already knows, so a flood of sign-in tries cannot stall the app Runlight is mounted in. IPv6 callers are counted by their /64.
+- Counts made from a caller's address (sign-in tries, app registrations) no longer outlive two days in PHP, Python, Ruby, Java, and .NET when the scheduled check never runs. Ruby keeps them in memory only, and the others sweep them from ordinary requests or a timer.
+- Imports keep a browser or system only when it reads as a name, and never keep a user agent or an IP address in the browser, system, city, region, screen, or language.
+- A share link or a viewer can no longer open Settings or the assistant with `?open=` in the address. The assistant's chat is kept per account, never keeps invite or share links, and is cleared on sign out.
+- Drupal and Craft: changes in the dashboard need the signed-in person's CSRF token and a request that says it comes from the site. Craft no longer shows a typed key in the settings page; leave the field blank to keep it.
+- The standalone server warns at start about a `RUNLIGHT_SECRET` or `RUNLIGHT_TOKEN` under 32 characters and limits wrong guesses at a short token.
+- An app can no longer register an OAuth redirect address that is not a valid URL, and a timezone name that is not one is no longer remembered (Rust).
+
 ### Fixed
 
+- The dashboard in the Drupal module starts in Drupal's language, not the browser's: the language of the Reports page it is framed in, or of the address it is opened at, so an English site reads in English in a French browser and /fr/runlight/ reads in French. A language the dashboard does not have (it has English, French, German, Spanish, and Portuguese) is English, and one picked in the dashboard's footer still holds. A Runlight that runs elsewhere is told the language the same way, with `?lang=` on the dashboard's address, which any page that frames or links to a dashboard can add. Thanks to xmacinfo for the report (https://www.drupal.org/project/runlight/issues/3638288).
+- The Drupal module works with the Redirect module's "Enforce clean and canonical URLs" option for good, and on sites with a language in the path. The fix in 0.4.1 held only for the first request to each path: Drupal keeps a path's route after that and no longer asks the module, so Redirect sent the dashboard, the script, and every visit to /runlight, or to /en/runlight on a site with language prefixes, which answered "Not found". The dashboard's own address, /runlight/, was never covered at all. Runlight's paths are now marked on every request, short links under /go included, and a path that does arrive with a language prefix, such as /fr/runlight/, is answered as /runlight/ is. Run `drush updb` or `drush cr` after updating, so Drupal picks up the new service. Thanks to xmacinfo for following up (https://www.drupal.org/project/runlight/issues/3636637).
+- A database that is down no longer fails the host app's own pages. The short link middleware looked up link domains on every request and passed a failure to the app as an error, in the Node middleware and in the Python, Ruby, Go, Java, .NET, Rust, Elixir, and PHP adapters. The lookup now keeps the last domains it read and asks again after five seconds.
+- Event properties that Postgres or MySQL cannot read as JSON no longer break the event properties report, goals with a revenue property, exports, or email reports. Titles, event names, properties, and campaign tags are stored without NUL characters or broken characters, and are never cut in the middle of an emoji.
+- Importing links again leaves alone a link that was imported once and deleted since, where it used to fail on it every time, and on ClickHouse or D1 could delete that link's clicks and the visits that clicked it.
+- The pages and events reports read only the page of rows asked for, however many distinct pages a site has.
+- Two servers with slightly different clocks no longer split a visitor in two at midnight.
+- Pages a browser loads ahead of time (prerender) are counted only once they are shown. A page that keeps its search or filters in the query string with `replaceState` no longer counts a pageview for each change, and a page brought back with Back or Forward from the browser's cache is counted again.
+- `?runlight=pick` no longer hides a visit unless the picker's ticket is good.
+- `utm_source=kit` and `utm_source=convertkit` count as Kit, not Newsletter.
+- An old downloaded AI agent address list no longer overrides a newer one that ships with Runlight, and a logged user agent with unusual characters no longer fails a batch of reported AI fetches.
+- A forwarded address with a port, as Azure App Service sends, is read as the address alone, so one visitor no longer counts as several.
+- A big insert into ClickHouse sent again after a dropped connection is no longer counted twice, and with ClickHouse on, a site's retention also applies to the old visits left in the other database.
+- A CSV row with a hostname that is not a hostname is imported under the site's own, where it used to fail its whole batch. A CSV row dated before 2000 is skipped.
+- An app's `authorize` can read the csrf field of the OAuth consent form, and an account kept to one site is told it cannot connect an app, where it was sent to sign in again.
+- An account kept to one site can read reports whose address contains `/oauth/` (Go, Java, .NET, Rust, and Elixir).
+- Java: dates no longer break on a server whose locale writes its own digits (Arabic, Persian, Bengali), which had emptied reports and stopped rollups.
+- .NET: Runlight starts in apps built or run with globalization turned off (`InvariantGlobalization`, Alpine and chiseled images), where it failed to load. Work done after an answer no longer stalls the connection the answer went out on, and on SQLite a sign-in link opened twice at once signs in once.
+- Rust: sign-in cookies are read over HTTP/2, where each cookie arrives as its own header field.
+- Ruby: signing in works on Rack 3 servers that refuse a line break in a header, and a site added, renamed, or moved to another timezone reaches every worker within five seconds.
+- Elixir: an app listening on a Unix socket no longer fails every request, long reports are no longer cut off at the repo's 15 second timeout, and a tracker hit is retried when the connection pool is busy.
+- Python: under ASGI, the app's own requests no longer wait for a worker thread. Tracker hits with a number too large for a double are counted, and are retried when every pooled connection is busy.
+- PHP: accounts turned on with no secret in an open or development app stay signed in between requests.
+- Go: a panic in the scheduled check or in work done after an answer no longer ends the app, and a site's icon is no longer cached as missing when the request asking for it was cancelled.
+- Drupal: behind Cloudflare, visitors are told apart by the `CF-Connecting-IP` header with nothing to set up, and the settings page warns when a proxy in front of the site is not named in `settings.php`. The settings page's check that your Runlight answers sends its token in a header. Code samples in messages show as code.
+- WordPress: when a Runlight elsewhere does not answer, AI agent reports pause for a minute, where each request used to wait on it. Craft: a site template under `/go` still shows when no short link has that name.
+- WordPress, Drupal, and Craft: an AI agent is recorded only for a page that was served, not for a missing page, a redirect, or an error.
+- The "see all" list shows an error when it cannot load or download, where it showed an empty list, and the goal form's suggestions no longer show the wrong kind after a quick switch.
+- The standalone server says a taken port in one line, and retries a failing location data download less and less often, up to every six hours.
 - Two Runlight servers starting at once against one Postgres with ClickHouse turned on no longer risk one of them failing to start. Both could try to create the table that holds visits while ClickHouse is away at the same moment, and Postgres refused the second; it is now created under the same lock as the other tables.
 
 ### Changed
 
+- Breaking for some: a fetch-style mount that passes no connection address (a Next.js route handler, Hono, or Bun) no longer believes forwarding headers such as `X-Forwarded-For` in production unless `trustProxy` is set or it runs on a hosting platform Runlight knows (Vercel, Netlify, Cloudflare, AWS Lambda, Cloud Run, Azure, Fly, Render, Railway, Deno Deploy, Heroku). Before, a client reaching such a mount directly could write those headers itself, to dodge the rate limit and the sign-in limit and to count as any number of visitors. If your mount sits behind your own nginx or Caddy, set `trustProxy: true` or the header's name when you upgrade, or every visitor with the same browser will count as one. Runlight warns once when it ignores the headers. The Node adapter and the standalone server pass the connection's address and are not affected.
+- `?runlight=ignore` from a link holds for a year, where it held for good. The dashboard's own switch, and a flag set before this release, still have no end.
+- The standalone server refuses new short link slugs that match its own pages (`login`, `api`, `setup`, and so on), which never opened on a link domain. A link that already has one keeps it.
+- A link import brings at most 100,000 clicks per link.
+- Elixir: a password hashed by the Node SDK is rehashed on sign-in, so later sign-ins are fast. The account's other sessions end once.
+- `npm publish` of `@runlight/sdk` and `@runlight/server` refuses unless run from the release tag with a clean tree, and rebuilds first.
+- The standalone server uses better-sqlite3 13.2.0, and the Go server uses pgx 5.13.0 and Echo 5.4.5.
 - The dashboard is built with Preact 11.2.0. The standalone server reads the location database with mmdb-lib 3.0.5, which no longer runs out of memory on a damaged file.
 
 ## 0.4.3 - 2026-11-10

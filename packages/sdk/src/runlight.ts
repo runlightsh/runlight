@@ -53,6 +53,10 @@ export interface RunlightOptions {
    * headers count only on a connection from this computer or a private
    * network, where proxies and load balancers connect from, so a client that
    * reaches the app straight from the internet cannot choose its own address.
+   * Where the app passes no connection address on (a fetch handler, as in
+   * Next.js), they count on a hosting platform (Vercel, Netlify, Cloudflare,
+   * and the like) and outside production; a production server of your own
+   * behind a proxy needs this set, to true or to the proxy's header.
    * True reads them from anywhere, for a CDN that connects from public
    * addresses. False reads only the socket's address.
    */
@@ -160,6 +164,8 @@ const REMOTE_MAX_BYTES = 2 * 1024 * 1024;
 /** On a database that caps statements per request (Cloudflare D1), fewer days a check, about 30 statements. */
 const METERED_ROLLUP_BATCH = 4;
 const ROLLUP_DELAY_MS = 2 * 3_600_000;
+/** How soon the link domains are asked for again after the database could not give them. */
+const LINK_DOMAINS_RETRY_MS = 5_000;
 /** The longest a tracker hit waits for the tables while another process creates or upgrades them. */
 const TRACKER_WAIT_MS = 10_000;
 
@@ -200,7 +206,10 @@ export class SettingsError extends RangeError {
 }
 
 /** What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets. */
-export const EMAIL = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
+const EMAIL_PATTERN = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
+/** The longest an address is read: no real one is longer, and the pattern is slow on a very long string. */
+export const EMAIL_MAX = 320;
+export const EMAIL = { test: (value: string): boolean => value.length <= EMAIL_MAX && EMAIL_PATTERN.test(value) };
 
 /** A tracker hit as it is recorded: no address and no user agent, so one can wait in the store for later. */
 interface Hit {
@@ -270,6 +279,15 @@ export class Runlight {
   private readonly trustPrivate: boolean;
   /** True until a public address has sent forwarding headers that the default did not believe, and been warned about once. */
   private warnDirect: boolean;
+  /**
+   * Whether, with trustProxy left at its default, a request that comes with no address of its connection has
+   * its forwarding headers believed: on a hosting platform, whose proxy is the only way in, and outside
+   * production. A production server of its own could be reached straight from the internet.
+   */
+  private readonly trustUnaddressed: boolean;
+  private warnUnaddressed: boolean;
+  /** AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast. */
+  private readonly fetchLimit: RateLimit | null;
   private readonly limit: RateLimit | null;
   private readonly updateAgentRanges: boolean;
   /** The agents' address lists in use: downloaded ones from the database when there are any, else those that came with this version. */
@@ -328,9 +346,12 @@ export class Runlight {
     this.trustProxy = options.trustProxy ?? true;
     this.trustPrivate = options.trustProxy === undefined;
     this.warnDirect = this.trustPrivate;
+    this.trustUnaddressed = envValue("NODE_ENV") !== "production" || hostingPlatform();
+    this.warnUnaddressed = this.trustPrivate && !this.trustUnaddressed;
     const perMinute = options.rateLimit ?? 120;
     // false, 0, or anything that is not a positive number means no limit, never a limit of nothing.
     this.limit = perMinute === false || !(Number(perMinute) > 0) ? null : new RateLimit(Number(perMinute), () => this.now());
+    this.fetchLimit = this.limit ? new RateLimit(Number(perMinute) * 10, () => this.now()) : null;
     this.now = options.now ?? Date.now;
     this.updateAgentRanges = options.updateAgentRanges ?? false;
     this.links = new Links(this);
@@ -608,9 +629,13 @@ export class Runlight {
       if (info?.scope === "manage") scope = "manage";
       tokenSite = String(info?.site ?? "");
     } catch {}
-    const there = body.sites.find((s) => s.id === (tokenSite || input.site)) ?? body.sites[0]!;
+    const there = body.sites.find((s) => s?.id === (tokenSite || input.site)) ?? body.sites[0]!;
+    // Checked before anything is saved: a site there has an id and a name, as text.
+    if (!there || typeof there.id !== "string" || !there.id || there.id.length > 64 || typeof there.name !== "string") {
+      throw new SettingsError(`${url} did not answer like a Runlight install`, "connect_not_runlight", { url });
+    }
     // An install's answer is read as given: a site without a list of hostnames has none.
-    const hostnames = Array.isArray(there.hostnames) ? there.hostnames.filter((h): h is string => typeof h === "string") : [];
+    const hostnames = Array.isArray(there.hostnames) ? there.hostnames.filter((h): h is string => typeof h === "string" && h !== "") : [];
     // Connecting the same site again (to allow changes, or with a new token) updates it in place.
     for (const [existing, known] of this.remotes) {
       if (known.url === url && known.site === there.id) {
@@ -622,10 +647,10 @@ export class Runlight {
         return this.site(existing)!;
       }
     }
-    const host = (hostnames[0] ?? new URL(url).host).replace(/[^a-z0-9._-]/gi, "-").toLowerCase();
+    const host = (hostnames[0] ?? new URL(url).host).replace(/[^a-z0-9._-]/gi, "-").replace(/^[^a-z0-9]+/i, "").toLowerCase() || "site";
     let id = host.slice(0, 56);
     for (let n = 2; this.configured.some((site) => site.id === id); n++) id = `${host.slice(0, 56)}-${n}`;
-    const name = String(input.name ?? "").trim().slice(0, 80) || there.name;
+    const name = String(input.name ?? "").trim().slice(0, 80) || there.name.trim().slice(0, 80) || host;
     // No hostnames: tracker hits never land on a site that is counted elsewhere.
     const site: SiteRow = { id, name, hostnames: [], timezone: isTimezone(there.timezone) ? there.timezone : "UTC" };
     const remote: Remote = { url, token, site: there.id, hostnames, scope };
@@ -933,7 +958,7 @@ export class Runlight {
       const last = (name: string) => h.get(name)?.split(",").map((x) => x.trim()).filter(Boolean).pop();
       const forwarded =
         this.trustProxy === true ? (last("x-forwarded-for") ?? h.get("x-real-ip") ?? h.get("cf-connecting-ip")) : this.trustProxy === "x-forwarded-for" ? last("x-forwarded-for") : h.get(this.trustProxy as string);
-      if (forwarded?.trim()) return forwarded.trim();
+      if (forwarded?.trim()) return bareAddress(forwarded.trim());
     }
     return context.ip ?? "";
   }
@@ -942,13 +967,25 @@ export class Runlight {
    * Whether a request's forwarding headers count. Left at its default, trustProxy believes them only on a
    * connection from this computer or a private network, or one whose address the app did not pass on (a
    * hosting platform's function), since a client reaching the server straight from the internet could write
-   * them itself.
+   * them itself. With no address passed on, they count on a hosting platform and outside production.
    */
   private trusts(request: Request, context: RequestContext): boolean {
     if (!this.trustProxy) return false;
-    if (!this.trustPrivate || !context.ip || !publicAddress(context.ip)) return true;
-    // Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
+    if (!this.trustPrivate) return true;
     const h = request.headers;
+    if (!context.ip) {
+      if (this.trustUnaddressed) return true;
+      // Said once: nothing says where this request came from, so it could have come straight from the internet.
+      if (this.warnUnaddressed && (h.has("x-forwarded-for") || h.has("x-real-ip") || h.has("cf-connecting-ip"))) {
+        this.warnUnaddressed = false;
+        console.warn(
+          "Runlight: a request came with forwarding headers and no connection address, so the headers are not believed: in production, a client that reaches this server straight from the internet could write them itself and choose its own address. Behind a proxy of your own (nginx, Caddy, a load balancer), set trustProxy to true or to the header it sets, or pass the connection's address as the context's ip. Until then every visitor with the same browser counts as one.",
+        );
+      }
+      return false;
+    }
+    if (!publicAddress(context.ip)) return true;
+    // Said once: a CDN that connects from public addresses needs trustProxy set, or its visitors all look alike.
     if (this.warnDirect && (h.has("x-forwarded-for") || h.has("x-real-ip") || h.has("cf-connecting-ip"))) {
       this.warnDirect = false;
       console.warn(
@@ -1008,12 +1045,21 @@ export class Runlight {
   }
 
   /** The host a proxy says the request was for, read only when proxy headers are trusted, as the client's address is. */
-  private forwardedHost(request: Request, context: RequestContext = {}): string | null {
+  forwardedHost(request: Request, context: RequestContext = {}): string | null {
     return this.trusts(request, context) ? request.headers.get("x-forwarded-host") : null;
   }
 
-  /** Handles one tracker request. Always resolves; bad input is dropped quietly. */
+  /** Handles one tracker request. Always resolves: bad input is dropped quietly, and a hit the store could not take is logged. */
   async collect(request: Request, context: RequestContext = {}): Promise<void> {
+    try {
+      await this.take(request, context);
+    } catch (error) {
+      // Analytics must never break the app it counts for.
+      console.error("Runlight: could not record an event", error);
+    }
+  }
+
+  private async take(request: Request, context: RequestContext): Promise<void> {
     const length = Number(request.headers.get("content-length") ?? 0);
     if (length > MAX_BODY) return;
     // Read no more than a tracker hit can be, whatever the length header says (or when there is none).
@@ -1231,9 +1277,18 @@ export class Runlight {
   private async linkDomainSet(): Promise<Set<string>> {
     const now = this.now();
     if (this.linkDomainCache && now - this.linkDomainCache.at < 30_000) return this.linkDomainCache.domains;
-    await this.init();
-    const domains = new Set((await this.store.linkDomains()).map((d) => d.domain));
-    this.linkDomainCache = { at: now, domains };
+    let domains: Set<string>;
+    try {
+      await this.init();
+      domains = new Set((await this.store.linkDomains()).map((d) => d.domain));
+      this.linkDomainCache = { at: now, domains };
+    } catch (error) {
+      // Middleware asks on every request to the app, so a database that is down must not take the app down
+      // with it: the domains last read stand (none, when there were none), and it is asked again in a few seconds.
+      domains = this.linkDomainCache?.domains ?? new Set();
+      this.linkDomainCache = { at: now - 30_000 + LINK_DOMAINS_RETRY_MS, domains };
+      console.error("Runlight: could not read the link domains", error);
+    }
     return domains;
   }
 
@@ -1316,7 +1371,8 @@ export class Runlight {
     if (!link || (domain !== "" && link.domain !== domain)) return null;
     const site = this.site(link.site) ?? this.sites[0];
     const ua = request.headers.get("user-agent") ?? "";
-    if (site && !aiAgent(ua) && !isBot(ua) && request.method === "GET") {
+    // Past the tracker's limit for one address a click still redirects, and is not counted.
+    if (site && !aiAgent(ua) && !isBot(ua) && request.method === "GET" && (!this.limit || (await this.limit.allow(this.clientIp(request, context))))) {
       try {
         const now = this.now();
         const language = (request.headers.get("accept-language") ?? "").split(",")[0]?.split(";")[0]?.trim().slice(0, 35) ?? "";
@@ -1385,20 +1441,24 @@ export class Runlight {
    * for tracker hits, or `agentIp` when a log reader or plugin reports it)
    * is checked against the list the agent's company publishes and then
    * dropped: only "verified", "mismatch", or "" is kept with the fetch.
+   * `userAgent` stands in for the request's header when given.
    */
-  async observe(request: Request, at?: number, context: RequestContext & { agentIp?: string } = {}): Promise<boolean> {
+  async observe(request: Request, at?: number, context: RequestContext & { agentIp?: string; userAgent?: string } = {}): Promise<boolean> {
     try {
       if (request.method !== "GET") return false;
-      const agent = aiAgent(request.headers.get("user-agent") ?? "");
+      // A log reader gives the user agent as text, since a logged one may not be fit for a header.
+      const agent = aiAgent(context.userAgent ?? request.headers.get("user-agent") ?? "");
       if (!agent) return false;
       const url = new URL(request.url);
       // Pages, not their assets.
       const ext = /\.([a-z0-9]+)$/i.exec(url.pathname)?.[1]?.toLowerCase();
       if (ext && !["html", "htm", "md", "txt", "php"].includes(ext)) return false;
-      const host = this.forwardedHost(request) ?? request.headers.get("host") ?? url.hostname;
+      const host = (this.forwardedHost(request, context) ?? request.headers.get("host") ?? url.hostname).split(",")[0]!.trim().split(":")[0] ?? "";
       await this.init();
-      const site = this.siteFor(host.split(":")[0] ?? host);
+      const site = this.siteFor(host);
       if (!site) return false;
+      // A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+      if (context.agentIp === undefined && this.fetchLimit && !(await this.fetchLimit.allow(this.clientIp(request, context)))) return false;
       // A log reader sends when the page was served. Older than a week is dropped, so a first run over
       // an old log does not land as one spike on today; a time ahead of now counts as now.
       const now = this.now();
@@ -1412,7 +1472,7 @@ export class Runlight {
         session: "",
         pageview: "",
         path: url.pathname.slice(0, 1000),
-        hostname: stripWww(url.hostname),
+        hostname: stripWww(host),
         name: agent.name,
         props: { company: agent.company, kind: agent.kind },
         // A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when
@@ -1462,29 +1522,40 @@ export class Runlight {
   private async refreshAgentRanges(): Promise<void> {
     try {
       const stored = await this.store.setting("agent-ranges");
-      let saved: { at: number; lists: Record<string, string[]> } | null = null;
+      // `fetched` is when each list was downloaded; a copy saved before it was kept has only `at`, for all of them.
+      let saved: { at: number; lists: Record<string, string[]>; fetched: Record<string, number> } | null = null;
       if (stored) {
         try {
-          const parsed = JSON.parse(stored) as { at?: unknown; lists?: Record<string, unknown> };
+          const parsed = JSON.parse(stored) as { at?: unknown; lists?: Record<string, unknown>; fetched?: Record<string, unknown> };
+          const at = Number(parsed.at) || 0;
           const lists: Record<string, string[]> = {};
+          const fetched: Record<string, number> = {};
           for (const [url, list] of Object.entries(parsed.lists ?? {})) {
             const prefixes = readRangeList({ prefixes: Array.isArray(list) ? list.map((p) => (String(p).includes(":") ? { ipv6Prefix: p } : { ipv4Prefix: p })) : null });
-            if (prefixes) lists[url] = prefixes;
+            if (!prefixes) continue;
+            lists[url] = prefixes;
+            fetched[url] = Number(parsed.fetched?.[url]) || (parsed.fetched ? 0 : at);
           }
-          saved = { at: Number(parsed.at) || 0, lists };
+          saved = { at, lists, fetched };
         } catch {}
       }
       if (this.updateAgentRanges && (!saved || this.now() - saved.at >= AGENT_RANGES_EVERY_MS)) {
         const urls = [...new Set(Object.keys(AGENT_RANGES.lists))];
         const lists: Record<string, string[]> = { ...saved?.lists };
+        const fetched: Record<string, number> = { ...saved?.fetched };
         for (const url of urls) {
           const fresh = await downloadRangeList(url);
-          if (fresh) lists[url] = fresh;
+          if (!fresh) continue;
+          lists[url] = fresh;
+          fetched[url] = this.now();
         }
-        saved = { at: this.now(), lists };
+        saved = { at: this.now(), lists, fetched };
         await this.store.setSetting("agent-ranges", JSON.stringify(saved));
       }
-      this.agentRanges = { ...AGENT_RANGES.lists, ...saved?.lists };
+      // A downloaded list stands in for the one that came with this version only while it is the newer of the two.
+      const shipped = Date.parse(AGENT_RANGES.fetchedAt) || 0;
+      const newer = Object.fromEntries(Object.entries(saved?.lists ?? {}).filter(([url]) => (saved!.fetched[url] ?? 0) >= shipped));
+      this.agentRanges = { ...AGENT_RANGES.lists, ...newer };
     } catch (error) {
       console.error("Runlight: could not update the AI agents' address lists", error);
     }
@@ -1526,4 +1597,18 @@ function busy(error: unknown): boolean {
 /** A request body as text, or null when it is longer than `max` bytes or breaks off. */
 async function readCapped(request: Request, max: number): Promise<string | null> {
   return readTextCapped(request, max).catch(() => null);
+}
+
+/** A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and "[2001:db8::1]:443" are the address alone. */
+function bareAddress(value: string): string {
+  const bracketed = /^\[([^\]]*)\](?::\d+)?$/.exec(value);
+  if (bracketed) return bracketed[1]!;
+  return /^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(value) ? value.slice(0, value.lastIndexOf(":")) : value;
+}
+
+/** Whether this runs on a hosting platform that puts its own proxy in front of every request, so forwarding headers are its own. */
+function hostingPlatform(): boolean {
+  const names = ["VERCEL", "NETLIFY", "CF_PAGES", "AWS_LAMBDA_FUNCTION_NAME", "K_SERVICE", "WEBSITE_SITE_NAME", "FLY_APP_NAME", "RENDER", "RAILWAY_ENVIRONMENT", "DENO_DEPLOYMENT_ID", "DYNO"];
+  if (names.some((name) => envValue(name))) return true;
+  return typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers";
 }

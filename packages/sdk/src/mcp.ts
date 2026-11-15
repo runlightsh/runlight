@@ -4,6 +4,7 @@
  * the caller's own credentials, so the MCP server can see exactly what the
  * token can and nothing more.
  */
+import { BodyTooLong, readJsonCapped } from "./body.js";
 import { DIMENSIONS, MAX_FILTERS } from "./query.js";
 import { VERSION } from "./version.js";
 
@@ -265,10 +266,20 @@ async function answer(message: unknown, readApi: ApiRead): Promise<Json | null> 
 export const MAX_BATCH = 20;
 const BATCH_AT_ONCE = 4;
 
+/** The most a message or batch may weigh; a real one is a few hundred bytes a call. */
+const MAX_BODY_BYTES = 1024 * 1024;
+
 /** Answers one POST to the MCP endpoint, already authorised. */
 export async function mcpResponse(request: Request, readApi: ApiRead): Promise<Response> {
   const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
-  const body = (await request.json().catch(() => undefined)) as unknown;
+  let body: unknown;
+  try {
+    body = await readJsonCapped(request, MAX_BODY_BYTES);
+  } catch (error) {
+    // Capped here, since not every host caps a request body before it reaches the app.
+    if (error instanceof BodyTooLong) return new Response(JSON.stringify(rpcError(null, -32600, "Send a smaller message")), { status: 413, headers });
+    body = undefined;
+  }
   if (body === undefined || body === null || typeof body !== "object") {
     return new Response(JSON.stringify(rpcError(null, -32700, "Send a JSON-RPC message")), { status: 400, headers });
   }

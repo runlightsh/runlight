@@ -1,4 +1,4 @@
-import { actionDraft, type ChatAction } from "./assistant-action.js";
+import { actionDraft, chatKey, keptChat, type ChatAction } from "./assistant-action.js";
 import { ActionCard } from "./assistant-action-card.js";
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
@@ -85,8 +85,8 @@ function Reply({ text }: { text: string }) {
 const SUGGESTIONS = ["assistant.ask1", "assistant.ask2", "assistant.ask3", "assistant.ask4"] as const;
 
 /** The chat drawer, opened from the robot button beside Filter. */
-export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetup, onClose }: { site: Site; view: View; owner: boolean; canWrite: boolean; canInvite: boolean; onSetup: () => void; onClose: () => void }) {
-  const key = `runlight_assistant:${site.id}`;
+export function AssistantDrawer({ site, view, who, owner, canWrite, canInvite, onSetup, onClose }: { site: Site; view: View; who: string; owner: boolean; canWrite: boolean; canInvite: boolean; onSetup: () => void; onClose: () => void }) {
+  const key = chatKey(who, site.id);
   const dialog = useRef<HTMLDivElement>(null);
   useDialogFocus(dialog);
   const [state, setState] = useState<AssistantState | null>(() => api.cachedAssistant() ?? null);
@@ -122,7 +122,7 @@ export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetu
   }, []);
   useEffect(() => {
     try {
-      sessionStorage.setItem(key, JSON.stringify(messages.slice(-40)));
+      sessionStorage.setItem(key, keptChat(messages));
     } catch {}
     list.current?.scrollTo({ top: list.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
@@ -152,7 +152,7 @@ export function AssistantDrawer({ site, view, owner, canWrite, canInvite, onSetu
   const updateAction = (index: number, action: ChatAction) => {
     setMessages((all) => {
       const next = all.map((m, i) => i === index ? { ...m, action } : m);
-      try { sessionStorage.setItem(key, JSON.stringify(next.slice(-40))); } catch {}
+      try { sessionStorage.setItem(key, keptChat(next)); } catch {}
       return next;
     });
   };

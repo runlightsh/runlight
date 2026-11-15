@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -207,6 +207,22 @@ test("the Craft plugin's settings read environment variables, check the address,
       }
       $out["keys"] = $keys;
 
+      // The page never shows a typed key again, so its field comes back blank, which keeps the key, at the same
+      // address only. A key named by an environment variable is shown, so blanking that one clears it.
+      $blank = [];
+      foreach (["https://stats.example.com/runlight", "https://evil.example/runlight"] as $address) {
+        $s = new Settings();
+        $s->address = $address; $s->observeKey = ""; $s->dashboardKey = "";
+        $s->keepBlankKeys($before);
+        $s->forgetKeysIfMoved($before);
+        $blank[] = [$s->observeKey, $s->dashboardKey];
+      }
+      $s = new Settings();
+      $s->address = "https://stats.example.com/runlight"; $s->observeKey = "rlo_new";
+      $s->keepBlankKeys($before);
+      $blank[] = [$s->observeKey, $s->dashboardKey];
+      $out["blank"] = $blank;
+
       $s = new Settings();
       $s->site = '$RUNLIGHT_SITE';
       $out["site"] = $s->getSite();
@@ -240,6 +256,7 @@ test("the Craft plugin's settings read environment variables, check the address,
   }
   assert.deepEqual(JSON.parse(answer), {
     keys: [["rlo_saved", "$RUNLIGHT_DASHBOARD_KEY"], ["", ""], ["rlo_new", "$OTHER_KEY"]],
+    blank: [["rlo_saved", ""], ["", ""], ["rlo_new", ""]],
     site: "blog.example.com",
     address: [true, true, false, false, true],
     "site ok": [true, true, false],
@@ -308,6 +325,47 @@ test("the WordPress plugin counts a visitor by an address no visitor can choose"
     "",
     "192.0.2.44",
     "203.0.113.9",
+  ]);
+});
+
+test("the WordPress plugin reports an AI agent only for a page it served, and leaves a Runlight that is down alone for a minute", (t) => {
+  const answer = wordpressPhp(t, `
+    foreach (["Agents", "Settings", "Tracker"] as $class) { require ${JSON.stringify(WORDPRESS + "includes/")} . $class . ".php"; }
+    update_option("runlight_settings", ["mode" => "remote", "address" => "https://stats.example.com", "observe_key" => "rlo_key"]);
+    $GLOBALS["wp_test"]["now"] = 1000;
+    $_SERVER = ["REQUEST_METHOD" => "GET", "HTTP_USER_AGENT" => "Mozilla/5.0 (compatible; GPTBot/1.2)", "REQUEST_URI" => "/a-page/", "REMOTE_ADDR" => "203.0.113.9"];
+    // One fetch: what was sent, and whether the pause is on afterwards.
+    $fetch = static function (): array {
+      $GLOBALS["wp_test"]["hooks"] = [];
+      $GLOBALS["wp_test"]["requests"] = [];
+      Runlight\\WordPress\\Tracker::observe();
+      do_action("shutdown");
+      return [$GLOBALS["wp_test"]["requests"], false !== get_transient("runlight_down")];
+    };
+    $out = [];
+    // A page that is not there is no page read.
+    $GLOBALS["wp_test"]["404"] = true;
+    $out[] = $fetch();
+    $GLOBALS["wp_test"]["404"] = false;
+    // A page served is reported; the Runlight does not answer, so the next fetch is not.
+    $out[] = $fetch();
+    $out[] = $fetch();
+    // A minute on, it is asked again.
+    $GLOBALS["wp_test"]["now"] = 1061;
+    $out[] = $fetch();
+    // A person's browser is never reported.
+    $_SERVER["HTTP_USER_AGENT"] = "Mozilla/5.0 Firefox/130.0";
+    $GLOBALS["wp_test"]["now"] = 2000;
+    $out[] = $fetch();
+    echo json_encode($out);
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [
+    [[], false],
+    [["https://stats.example.com/api/observe"], true],
+    [[], true],
+    [["https://stats.example.com/api/observe"], true],
+    [[], false],
   ]);
 });
 
@@ -406,9 +464,14 @@ test("the WordPress plugin's zip serves the dashboard, counts a visit, and runs 
   const php = spawnSync("php", ["--version"]);
   if (php.error && !process.env.CI) return t.skip("PHP is not installed");
   const dir = mkdtempSync(path.join(tmpdir(), "runlight-wp-zip-"));
+  // An earlier build's zip is cleared out of the way; a file that is not the build's own stays.
+  writeFileSync(path.join(dir, "runlight-0.1.0.zip"), "old");
+  writeFileSync(path.join(dir, "runlight-notes.zip"), "kept");
   const built = execFileSync("php", [WORDPRESS + "build.php", dir], { encoding: "utf8" });
   const zip = /build: (\S+\.zip)/.exec(built)?.[1];
   assert.ok(zip, built);
+  assert.equal(existsSync(path.join(dir, "runlight-0.1.0.zip")), false);
+  assert.equal(existsSync(path.join(dir, "runlight-notes.zip")), true);
   execFileSync("php", ["-r", `$z = new ZipArchive(); $z->open($argv[1]); $z->extractTo($argv[2]); $z->close();`, zip, dir]);
   const plugin = path.join(dir, "runlight");
   assert.ok(existsSync(path.join(plugin, "vendor/runlight/runlight/src/Runlight.php")));
@@ -593,6 +656,61 @@ test("the Drupal module sends every path under /runlight to its one route, out o
   ]);
 });
 
+test("the Drupal module knows its own paths under a language prefix, and no one else's", (t) => {
+  const answer = drupalPhp(t, `
+    namespace DrupalTest {
+      $url = ["source" => "path_prefix", "prefixes" => ["en" => "", "fr" => "fr", "pt-br" => "pt-br"]];
+      $prefixes = fn (): array => \\Drupal\\runlight\\PathProcessor\\RunlightPaths::prefixes($url);
+      $asked = 0;
+      $counted = function () use ($prefixes, &$asked): array { $asked++; return $prefixes(); };
+      $paths = ["/runlight", "/runlight/", "/runlight/s.js", "/runlight/api/stats?x", "/go/sale", "/go/sale/", "/fr/runlight", "/fr/runlight/", "/fr/runlight/api/stats", "/pt-br/go/sale",
+        "/de/runlight/s.js", "/fr/runlightish", "/runlightish", "/go", "/go/a/b", "/fr/go/a/b", "/fr/fr/runlight", "/node/1", "/", "/runlight/a\nb", "/fr/blog/runlight"];
+      $ours = array_map(fn (string $path) => \\Drupal\\runlight\\PathProcessor\\RunlightPaths::ours($path, $prefixes), $paths);
+      \\Drupal\\runlight\\PathProcessor\\RunlightPaths::ours("/node/1", $counted);
+      \\Drupal\\runlight\\PathProcessor\\RunlightPaths::ours("/runlight/s.js", $counted);
+      echo json_encode([$ours, $asked, $prefixes(),
+        \\Drupal\\runlight\\PathProcessor\\RunlightPaths::prefixes(null),
+        \\Drupal\\runlight\\PathProcessor\\RunlightPaths::prefixes(["source" => "domain", "prefixes" => ["fr" => "fr"]]),
+      ]);
+    }
+  `);
+  if (answer === null) return;
+  const [ours, asked, prefixes, none, byDomain] = JSON.parse(answer);
+  assert.deepEqual(ours, [
+    "/runlight", "/runlight/", "/runlight/s.js", "/runlight/api/stats?x", "/go/sale", "/go/sale/",
+    // A language prefix comes off, so Runlight reads the path it knows.
+    "/runlight", "/runlight/", "/runlight/api/stats", "/go/sale",
+    // Not a prefix of this site's, not Runlight's path, or more than a short link's one name.
+    null, null, null, null, null, null, null, null, null,
+    "/runlight/a\nb",
+    null,
+  ]);
+  // The site's languages are read only for a path that may have one in front.
+  assert.equal(asked, 0);
+  assert.deepEqual(prefixes, ["fr", "pt-br"]);
+  // Without the Language module, or with languages told apart by domain, no path has a prefix.
+  assert.deepEqual(none, []);
+  assert.deepEqual(byDomain, []);
+});
+
+test("the Drupal module names Drupal's language on the dashboard's page, and on no other", async (t) => {
+  // The page as Runlight writes it, so a change to its markup shows here.
+  const { runlight } = await import("../src/index.js");
+  const { freshStore } = await import("./helpers.js");
+  const { handler } = runlight({ store: freshStore("sqlite"), secret: "s".repeat(64) }).routes({ basePath: "/runlight", token: null, authorize: () => true, cms: "Drupal" });
+  const page = await (await handler(new Request("http://site.test/runlight/"))).text();
+  const answer = drupalPhp(t, `
+    namespace DrupalTest {
+      $page = ${JSON.stringify(page)};
+      $in = fn (string $page, string $code) => \\Drupal\\runlight\\Local::inLanguage($page, $code);
+      echo json_encode([$in($page, "fr") === $page, substr_count($in($page, "fr"), '<div id="app" data-lang="fr" data-base="/runlight"'), substr_count($in($page, "pt-br"), 'data-lang="pt-br"'),
+        $in($page, 'x" onload="y') === $page, $in($page, "") === $page, $in("<p>Not found</p>", "fr")]);
+    }
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [false, 1, 1, true, true, "<p>Not found</p>"]);
+});
+
 test("the Drupal module keeps its tables under Drupal's prefix, beside anyone else's, and drops only its own by name", (t) => {
   const run = (tables: string[], options: { prefix?: string; owner?: string | null; kept?: string; type?: string; version?: string; privatePath?: boolean } = {}) =>
     drupalPhp(t, `
@@ -688,6 +806,25 @@ test("the Drupal module counts a visitor by the address Drupal works out, and ta
       // A proxy Drupal is told about: the address it passes on.
       Request::$trusted = ["10.0.0.2"];
       $out[] = $address(new Request(["x-forwarded-for" => "203.0.113.7"], "10.0.0.2"));
+      // Cloudflare's header names the visitor from Cloudflare's own addresses, straight or through a proxy Drupal is
+      // told about, and only when it holds an address.
+      Request::$trusted = [];
+      $out[] = [
+        $address(new Request(["cf-connecting-ip" => "198.51.100.24"], "173.245.48.9"))[0],
+        $address(new Request(["cf-connecting-ip" => "not an address"], "173.245.48.9"))[0],
+        $address(new Request([], "173.245.48.9"))[0],
+      ];
+      Request::$trusted = ["10.0.0.2"];
+      $out[] = $address(new Request(["x-forwarded-for" => "198.51.100.24, 104.16.1.1", "cf-connecting-ip" => "198.51.100.24"], "10.0.0.2"))[0];
+      // A proxy on a private network that Drupal is not told about hides every visitor's address, which the settings say.
+      $unnamed = static fn (string $remote, array $headers): bool => Drupal\\runlight\\Local::proxyUnnamed(new Request($headers, $remote));
+      $out[] = [
+        $unnamed("10.0.0.3", ["x-forwarded-for" => "203.0.113.7"]),
+        $unnamed("100.64.0.9", ["x-forwarded-for" => "203.0.113.7"]),
+        $unnamed("10.0.0.2", ["x-forwarded-for" => "203.0.113.7"]),
+        $unnamed("10.0.0.3", []),
+        $unnamed("203.0.113.9", ["x-forwarded-for" => "203.0.113.7"]),
+      ];
       // Location headers count from Cloudflare's addresses and from a proxy Drupal trusts, and from no one else.
       Request::$trusted = ["10.0.0.2"];
       $platform = static fn (string $remote): bool => Drupal\\runlight\\Local::visitorRequest(new Request(["cf-ipcountry" => "NZ"], $remote))->platformHeaders;
@@ -710,9 +847,67 @@ test("the Drupal module counts a visitor by the address Drupal works out, and ta
   assert.deepEqual(JSON.parse(answer), [
     ["203.0.113.9", "203.0.113.9"],
     ["203.0.113.7", "203.0.113.7"],
+    ["198.51.100.24", "173.245.48.9", "173.245.48.9"],
+    "198.51.100.24",
+    [true, true, false, false, false],
     [true, true, true, true, false, false, false, true, false],
-    [true, false, false, false, true, true, true],
+    // A change that does not say where it comes from is refused.
+    [true, false, false, false, true, false, true],
   ]);
+});
+
+test("the Drupal module takes a change in Runlight only with the signed-in person's token, from the site's own pages", (t) => {
+  const answer = drupalPhp(t, `
+    namespace DrupalTest {
+      // Local with only who is signed in, which is all access() asks of it.
+      $as = static function (Account $account, \\Runlight\\Http\\Request $request): mixed {
+        $class = new \\ReflectionClass(\\Drupal\\runlight\\Local::class);
+        $local = $class->newInstanceWithoutConstructor();
+        $class->getProperty("currentUser")->setValue($local, $account);
+        return $local->access($request);
+      };
+      $goals = "https://www.example.com/runlight/api/goals";
+      $token = ["sec-fetch-site" => "same-origin", "x-runlight-csrf" => "token-for-runlight"];
+      $post = new \\Runlight\\Http\\Request($goals, "POST", $token);
+      $read = new \\Runlight\\Http\\Request($goals, "GET");
+      $owner = new Account(1, ["administer runlight"]);
+      $viewer = new Account(2, ["view runlight"]);
+      echo json_encode([
+        [$as($owner, $post), $as($viewer, $post), $as(new Account(3), $post), $as($viewer, $read), $as(new Account(3), $read)],
+        [
+          // No token, the wrong one, and the right one from another site.
+          $as($owner, new \\Runlight\\Http\\Request($goals, "POST", ["sec-fetch-site" => "same-origin"])),
+          $as($owner, new \\Runlight\\Http\\Request($goals, "DELETE", ["sec-fetch-site" => "same-origin", "x-runlight-csrf" => "guess"])),
+          $as($owner, new \\Runlight\\Http\\Request($goals, "POST", ["sec-fetch-site" => "cross-site", "x-runlight-csrf" => "token-for-runlight"])),
+          // The right one from a request that does not say where it comes from.
+          $as($owner, new \\Runlight\\Http\\Request($goals, "POST", ["x-runlight-csrf" => "token-for-runlight"])),
+          // The OAuth consent form sends it in its csrf field.
+          $as($owner, new \\Runlight\\Http\\Request("https://www.example.com/runlight/oauth/authorize", "POST", ["origin" => "https://www.example.com", "content-type" => "application/x-www-form-urlencoded"], "decision=allow&csrf=token-for-runlight")),
+          // A visitor with the permission to view reads, and changes nothing: no token is made for one.
+          $as(new Account(0, ["view runlight"]), $read),
+          $as(new Account(0, ["view runlight", "administer runlight"]), $post),
+        ],
+      ]);
+    }
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [
+    [true, "read", false, "read", false],
+    [false, false, false, false, true, "read", false],
+  ]);
+});
+
+test("the Drupal settings page's check sends Drupal's session token in a header, never in the address", () => {
+  // A token in the address reaches the script through drupalSettings, where Drupal leaves its placeholder unfilled.
+  const routes = readFileSync(DRUPAL + "runlight.routing.yml", "utf8");
+  const check = /^runlight\.check:\n(?:[ #].*\n|\n)+/m.exec(routes)?.[0] ?? "";
+  assert.match(check, /methods: \[POST\]/);
+  assert.match(check, /_permission: 'administer runlight'/);
+  assert.match(check, /_csrf_request_header_token: 'TRUE'/);
+  assert.doesNotMatch(check, /_csrf_token:/);
+  const script = readFileSync(DRUPAL + "js/settings.js", "utf8");
+  assert.match(script, /fetch\(Drupal\.url\("session\/token"\)/);
+  assert.match(script, /"X-CSRF-Token": token/);
 });
 
 test("the Drupal module's Connect gets the site's keys from a Runlight over OAuth, and keeps them in state", (t) => {
@@ -891,8 +1086,13 @@ test("the Craft plugin counts a visitor by an address no visitor can choose, and
         $address("10.0.0.2", ["x-forwarded-for" => "8.8.8.8"], ["10.0.0.0/8" => ["X-Forwarded-For"]]),
         $address("203.0.113.9", ["x-forwarded-for" => "198.51.100.23"], ["any" => ["X-Forwarded-For"]]),
       ];
-      $post = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["sec-fetch-site" => "same-origin"]);
-      $crossSite = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["origin" => "https://evil.example"]);
+      $post = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["sec-fetch-site" => "same-origin", "x-runlight-csrf" => "craft-csrf-token"]);
+      $crossSite = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["origin" => "https://evil.example", "x-runlight-csrf" => "craft-csrf-token"]);
+      // A change with no token, with the wrong one, with the token in a form's csrf field, and one that does not say where it comes from.
+      $bare = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["sec-fetch-site" => "same-origin"]);
+      $wrong = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["sec-fetch-site" => "same-origin", "x-runlight-csrf" => "guess"]);
+      $form = new \\Runlight\\Http\\Request("https://www.example.com/runlight/oauth/authorize", "POST", ["origin" => "https://www.example.com", "content-type" => "application/x-www-form-urlencoded"], "decision=allow&csrf=craft-csrf-token");
+      $unsaid = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/goals", "POST", ["x-runlight-csrf" => "craft-csrf-token"]);
       $read = new \\Runlight\\Http\\Request("https://www.example.com/runlight/api/stats", "GET");
       $as = static function (User $user, \\Runlight\\Http\\Request $request): mixed {
         \\Craft::$app->user = $user;
@@ -906,6 +1106,13 @@ test("the Craft plugin counts a visitor by an address no visitor can choose, and
         $as(new User(guest: true), $read),
         $as(new User(admin: true), $crossSite),
       ];
+      $out[] = [
+        $as(new User(admin: true), $bare),
+        $as(new User(admin: true), $wrong),
+        $as(new User(admin: true), $form),
+        $as(new User(admin: true), $unsaid),
+        $as(new User(guest: true), $post),
+      ];
       echo json_encode($out);
     }
   `);
@@ -914,6 +1121,7 @@ test("the Craft plugin counts a visitor by an address no visitor can choose, and
     ["203.0.113.9", "203.0.113.9", "https://www.example.com/runlight/e"],
     ["198.51.100.7", "198.51.100.4", "203.0.113.9", "203.0.113.7", "8.8.8.8", "8.8.8.8", "203.0.113.9"],
     [true, true, "read", false, false, false],
+    [false, false, true, false, false],
   ]);
 });
 

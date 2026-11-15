@@ -37,3 +37,12 @@ test("a secret file read empty or short is waited for, and refused rather than u
   writeFileSync(path.join(dir, "secret"), `${own}\n`);
   assert.equal(secretIn(dir), own, "one that is whole is kept as it is");
 });
+
+test("a secret or token set by hand is warned about when it is short enough to guess, and only then", async () => {
+  const { shortWarning } = await import("../src/secret.js");
+  assert.equal(shortWarning("RUNLIGHT_SECRET", undefined), null, "one the server made itself");
+  assert.equal(shortWarning("RUNLIGHT_SECRET", "s".repeat(32)), null);
+  assert.equal(shortWarning("RUNLIGHT_TOKEN", "t".repeat(64)), null);
+  assert.match(shortWarning("RUNLIGHT_SECRET", "changeme")!, /RUNLIGHT_SECRET is only 8 characters long.*signs every session.*32 or more/);
+  assert.match(shortWarning("RUNLIGHT_TOKEN", "test")!, /RUNLIGHT_TOKEN is only 4 characters long.*whole API/);
+});

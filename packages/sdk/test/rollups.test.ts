@@ -138,6 +138,52 @@ for (const kind of STORES) {
     assert.ok((await t.rl.buildRollups()) >= 1);
     assert.deepEqual(await order(), expected, "read from rollups");
   });
+
+  test(`${kind}: a page of a breakdown is sorted and cut by the database, never read whole`, async () => {
+    const t = setup(kind, { site: { hostnames: ["example.com"], timezone: "UTC" } });
+    // Twelve pages and six events over three days, some on several, so built days and the rest must be added together.
+    t.advance(-48 * HOUR);
+    let n = 0;
+    for (const day of [0, 1, 2]) {
+      for (let p = 0; p < 8; p++) {
+        for (let v = 0; v <= p % 3; v++) {
+          n++;
+          const ip = `203.0.113.${n}`;
+          await t.send({ k: "pageview", u: `https://example.com/p${p + day * 2}`, r: "", i: `pv${n}` }, { ip });
+          await t.send({ k: "engagement", u: `https://example.com/p${p + day * 2}`, i: `pv${n}`, e: 2_000 + n * 10, d: 10 + n }, { ip });
+          await t.send({ k: "event", u: `https://example.com/p${p + day * 2}`, i: `pv${n}`, n: `E${(p + day) % 6}` }, { ip });
+          t.advance(1_000);
+        }
+      }
+      if (day < 2) t.advance(24 * HOUR);
+    }
+    const query = { site: "default", from: t.now - 5 * 24 * HOUR, to: t.now + HOUR, filters: [] };
+    const db = visitsDb(t.rl.store);
+    const all = db.all.bind(db);
+    let most = 0;
+    db.all = async (sql: string, params?: unknown[]) => {
+      const rows = await all(sql, params);
+      if (/GROUP BY/.test(sql)) most = Math.max(most, rows.length);
+      return rows as never[];
+    };
+    const check = async (label: string) => {
+      for (const dimension of ["page", "event"] as const) {
+        most = 0;
+        const whole = await t.rl.store.breakdown(query, dimension, 100, 0);
+        assert.ok(whole.length >= 6 && most >= 6, `${label}: ${dimension} has rows to cut`);
+        most = 0;
+        const paged = [...(await t.rl.store.breakdown(query, dimension, 4, 0)), ...(await t.rl.store.breakdown(query, dimension, 4, 4)), ...(await t.rl.store.breakdown(query, dimension, 100, 8))];
+        assert.deepEqual(paged, whole, `${label}: ${dimension} pages join into the whole`);
+        most = 0;
+        await t.rl.store.breakdown(query, dimension, 3, 2);
+        assert.ok(most <= 3, `${label}: ${dimension} read ${most} rows for a page of 3`);
+      }
+    };
+    await check("from every visit");
+    if (!t.rl.store.keepsRollups) return;
+    assert.ok((await t.rl.buildRollups()) >= 1);
+    await check("from rollups and the rest");
+  });
 }
 
 for (const kind of ROLLUP_STORES) {

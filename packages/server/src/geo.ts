@@ -49,6 +49,9 @@ export class Geo {
   private reader: Reader<Record> | null = null;
   private loaded = "";
   private fetching: Promise<void> | null = null;
+  /** After a try that left this month's file missing: how long the next waits, and when it may start. */
+  private wait = 0;
+  private retryAt = 0;
   /** The release actually available for lookups, for monitoring download failures and stale data. */
   get release(): string { return this.loaded; }
   readonly lookup: GeoLookup = (ip) => (this.reader ? lookupFrom(this.reader)(ip) : null);
@@ -66,7 +69,11 @@ export class Geo {
     return path.join(this.dir, `dbip-${this.mode}-lite-${release}.mmdb`);
   }
 
-  /** Opens the newest file on disk, then fetches this month's if it is missing. Safe to call often. */
+  /**
+   * Opens the newest file on disk, then fetches this month's if it is missing. Safe to call often: while the
+   * month's file is not published yet, or a download keeps failing, each try waits twice as long as the last,
+   * from five minutes up to six hours, so neither DB-IP nor the disk is asked for the whole file every few minutes.
+   */
   async refresh(now = Date.now()): Promise<void> {
     const current = month(now);
     if (this.loaded === current) return;
@@ -76,7 +83,15 @@ export class Geo {
       .pop();
     if (newest && newest !== path.basename(this.file(this.loaded || "none"))) this.open(path.join(this.dir, newest));
     if (existsSync(this.file(current))) return;
-    this.fetching ??= this.fetch(current, now).finally(() => (this.fetching = null));
+    if (now < this.retryAt) return this.fetching ?? undefined;
+    this.fetching ??= this.fetch(current, now).finally(() => {
+      this.fetching = null;
+      if (existsSync(this.file(current))) this.wait = 0;
+      else {
+        this.wait = Math.min(this.wait * 2 || FIRST_WAIT, LONGEST_WAIT);
+        this.retryAt = now + this.wait;
+      }
+    });
     return this.fetching;
   }
 
@@ -113,6 +128,10 @@ export class Geo {
     }
   }
 }
+
+/** How long after a first failed try the next one waits, and the longest any waits. */
+const FIRST_WAIT = 5 * 60_000;
+const LONGEST_WAIT = 6 * 3_600_000;
 
 /** The most a database may unpack to, several times the city file's size, so a bad download cannot fill the disk. */
 const MOST_BYTES = 512 * 1024 * 1024;

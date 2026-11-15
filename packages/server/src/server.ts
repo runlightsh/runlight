@@ -4,8 +4,9 @@
  * answered on any domain pointed at it.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { SHORTEST } from "./secret.js";
 import { ICON_PATHS, iconResponse, withAppIcons } from "./icons.js";
-import { DOMAIN_NAME, LINK_DOMAIN_CHECK, accountsWeb, coded, hostName, runlight, setupCode as newSetupCode, type Accounts, type Runlight, type RequestContext, type SqlStore, type GeoLookup } from "@runlight/sdk";
+import { DOMAIN_NAME, LINK_DOMAIN_CHECK, Throttle, accountsWeb, coded, hostName, runlight, setupCode as newSetupCode, type Accounts, type Runlight, type RequestContext, type SqlStore, type GeoLookup } from "@runlight/sdk";
 
 export interface ServerOptions {
   store: SqlStore;
@@ -19,7 +20,11 @@ export interface ServerOptions {
    * link to it whatever Host header a request carries.
    */
   url?: string;
-  /** Trust X-Forwarded-For and friends for the visitor's address. Default true. */
+  /**
+   * Whether X-Forwarded-For and friends count, for the visitor's address and the name a request came in on. Left
+   * unset they count only from a proxy on this computer or a private network; true believes them from anywhere,
+   * false never, and a header's name reads that one alone.
+   */
   trustProxy?: boolean | "x-forwarded-for" | "x-real-ip" | "cf-connecting-ip";
   geo?: GeoLookup;
   /** Credit DB-IP in the dashboard, when its free data supplies locations. */
@@ -64,8 +69,14 @@ export function createServer(options: ServerOptions): RunlightServer {
   const publicUrl = options.url ? new URL(options.url) : null;
   const publicHost = publicUrl ? hostName(publicUrl.host) : null;
 
-  /** The name a request came in on, read as link domains read it. */
-  const hostOf = (request: Request) => hostName(((options.trustProxy ?? true) ? request.headers.get("x-forwarded-host") : null) ?? request.headers.get("host") ?? new URL(request.url).host);
+  // Where each request came from, as the handler was told, for the routes' callbacks, which get the request alone.
+  const contexts = new WeakMap<Request, RequestContext>();
+  /**
+   * The name a request came in on, read as link domains read it: a proxy's X-Forwarded-Host only where the
+   * library believes a proxy's headers at all, so a client that reaches the server straight from the internet
+   * cannot name the host itself.
+   */
+  const hostOf = (request: Request) => hostName(rl.forwardedHost(request, contexts.get(request)) ?? request.headers.get("host") ?? new URL(request.url).host);
 
   // The names the owner and admins signed in from, kept in the database, so a link domain can never be one of them
   // even when whoever adds it picks another Host header. Only they teach them, since anyone else could fill the list
@@ -123,7 +134,15 @@ export function createServer(options: ServerOptions): RunlightServer {
     accounts: web,
     authorize: async (request) => {
       const auth = request.headers.get("authorization") ?? "";
-      if (options.token && auth.toLowerCase().startsWith("bearer ") && equal(auth.slice(7).trim(), options.token)) return true;
+      const given = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+      // A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
+      if (options.token && given && (!given.startsWith("rl_") || options.token.startsWith("rl_"))) {
+        const from = rl.clientIp(request, contexts.get(request)) || "unknown";
+        if (!(guessable && (await guesses.blocked(from, now())))) {
+          if (equal(given, options.token)) return true;
+          if (guessable) await guesses.fail(from, now());
+        }
+      }
       const access = await web.access(request);
       if (access === true) await learnHost(request);
       return access;
@@ -132,10 +151,19 @@ export function createServer(options: ServerOptions): RunlightServer {
     ownHosts: knownHosts,
   });
   const links = rl.linkHandler();
+  // A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that address's
+  // tries are all refused until the time is up. A long one cannot be guessed, so nothing is counted for it and
+  // nobody's wrong tries can keep a script that shares their address out.
+  const guessable = Boolean(options.token && options.token.length < SHORTEST);
+  const guesses = new Throttle(10);
+  // A link at one of the server's own paths would open at /go/<slug> and never on a link domain, where the
+  // server's page answers first, so no new link takes one. /cronwatch is the server's only with monitoring on.
+  rl.links.reserved = new Set([...SERVER_PATHS, ...(options.monitoring ? ["/cronwatch"] : [])].map((path) => path.slice(1)));
 
   const handler: Handler = async (request, context = {}) => {
     const url = new URL(request.url);
     const path = url.pathname;
+    contexts.set(request, context);
     try {
       if (options.monitoring && (path === "/cronwatch" || path.startsWith("/cronwatch/"))) {
         const user = await web.signedIn(request);

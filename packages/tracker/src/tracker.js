@@ -15,6 +15,7 @@
 //   data-before-send="fn"  synchronous window function that scrubs each payload
 //
 // The server swaps the string below for each site's click goals.
+// Arrow functions keep it under its size budget; every browser with sendBeacon or fetch has them.
 (function () {
   var w = window;
   var d = document;
@@ -23,9 +24,10 @@
   var script = d.currentScript;
   if (!script) return;
 
-  var attr = function (name) {
-    return script.getAttribute("data-" + name);
-  };
+  var attr = (name) => script.getAttribute("data-" + name);
+  var has = (name) => attr(name) !== null;
+  var now = Date.now;
+  var on = (target, name, fn, options) => target.addEventListener(name, fn, options);
   var base = script.src.replace(/s\.js(\?.*)?$/, "");
   var endpoint = base + "e";
   // To the page's own site, JSON, which web application firewalls expect: OWASP's rule set, on many shared
@@ -34,48 +36,59 @@
   // new URL, cannot throw, even on an inlined copy with no src.
   var type = endpoint.indexOf(loc.origin + "/") ? "text/plain" : "application/json";
   var site = attr("site");
-  var useHash = attr("hash") !== null;
-  var manual = attr("manual") !== null;
+  var useHash = has("hash");
+  var manual = has("manual");
   var beforeSend = attr("before-send");
   // A pattern with * as a wildcard, everything else literal.
-  var glob = function (p) {
-    return new RegExp("^" + p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$");
-  };
-  var excludes = (attr("exclude") || "").split(",").filter(Boolean).map(function (p) {
-    return glob(p.trim());
-  });
+  var glob = (p) => new RegExp("^" + p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$");
+  var excludes = (attr("exclude") || "").split(",").filter(Boolean).map((p) => glob(p.trim()));
   var skip = false;
   var queued = (w.runlight && w.runlight.q) || [];
   var all = "__RUNLIGHT_RULES__";
   var rules = (typeof all === "object" && (all[site] || all[loc.hostname.replace(/^www\./, "")] || all["*"])) || [];
 
-  // ?runlight=pick with a ticket, opened from the dashboard, loads the element picker and counts nothing. The
-  // dashboard leaves this tab no handle on itself, so the ticket, which the install checks, is what tells.
-  var pick = /[?&]runlight=pick\b/.test(loc.search) && /[?&]runlight_ticket=/.test(loc.search);
-  if (pick) {
+  // ?runlight=ignore stops counting this browser on this site for a year, from when it was last opened;
+  // ?runlight=track starts again. The owner's opt-out, never a visitor id. It holds the time it was set, so a
+  // link someone else spread cannot hide a visitor for good. The "1" older versions kept, and the dashboard's
+  // own switch still keeps, has no end.
+  // Standing down sends nothing, but the script still sets up, so every call a site makes, runlight.pageview()
+  // included, still works.
+  var off = n.webdriver || (has("dnt") && (n.doNotTrack == 1 || w.doNotTrack == 1));
+  var mode = (/[?&]runlight=(ignore|track|pick)\b/.exec(loc.search) || [])[1];
+  try {
+    var store = localStorage;
+    var key = "runlight_ignore";
+    if (mode === "ignore") store.setItem(key, now());
+    if (mode === "track") store.removeItem(key);
+    var since = store.getItem(key);
+    if (since == 1 || now() - since < 31536e6) off = true;
+  } catch (e) {}
+
+  // Counts the page afresh: one the browser brought back whole, or one whose picker never started.
+  var fresh = () => {
+    pageUrl = "";
+    manual || pageview();
+  };
+
+  // ?runlight=pick, opened from the dashboard with a ticket, loads the element picker and counts nothing. The
+  // dashboard leaves this tab no handle on itself, so the ticket, which the install checks, is what tells: the
+  // picker it serves for a good one says so on runlight.pick. For any other, or none, counting carries on once
+  // the picker has loaded and said nothing, so a made-up ticket in a link hides nobody.
+  var picking = mode === "pick";
+  if (picking) {
     var picker = d.createElement("script");
     picker.src = base + "pick.js" + loc.search;
+    picker.onload = picker.onerror = () => {
+      picking = track.pick;
+      fresh();
+    };
     d.head.appendChild(picker);
   }
 
-  // ?runlight=ignore stops counting this browser on this site;
-  // ?runlight=track starts again. The owner's opt-out, never a visitor id.
-  var ignored = false;
-  try {
-    var flag = /[?&]runlight=(ignore|track)\b/.exec(loc.search);
-    var store = localStorage;
-    if (flag) flag[1] === "ignore" ? store.setItem("runlight_ignore", "1") : store.removeItem("runlight_ignore");
-    ignored = store.getItem("runlight_ignore") === "1";
-  } catch (e) {}
-  // Standing down sends nothing, but the script still sets up, so every call a site makes, runlight.pageview()
-  // included, still works.
-  var off = pick || n.webdriver || ignored || (attr("dnt") !== null && (n.doNotTrack === "1" || w.doNotTrack === "1"));
-
-  var send = function (kind, extra) {
-    if (skip || off) return;
-    var body = { k: kind, u: pageUrl };
-    if (site) body.s = site;
-    for (var key in extra) body[key] = extra[key];
+  var send = (kind, extra) => {
+    // A page loaded ahead of time, which may never be opened, sends nothing until it is shown.
+    if (skip || off || picking || d.prerendering) return;
+    var body = Object.assign({ k: kind, u: pageUrl }, site && { s: site }, extra);
     // A configured scrubber fails closed, including when it has not loaded.
     if (beforeSend !== null) {
       try {
@@ -89,42 +102,33 @@
     try {
       if (n.sendBeacon(endpoint, data)) return;
     } catch (e) {}
-    if (w.fetch) fetch(endpoint, { method: "POST", body: data, keepalive: true }).catch(function () {});
-  };
-
-  var randomId = function () {
-    var bytes = new Uint8Array(6);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes, function (b) { return (b + 256).toString(36).slice(-2); }).join("");
+    if (w.fetch) fetch(endpoint, { method: "POST", body: data, keepalive: true }).catch(() => {});
   };
 
   // Engaged time: visible and focused. Sent as a delta on every hide, so
   // the server adds them up per pageview.
-  var notFound = attr("404") !== null;
+  var notFound = has("404");
   var pageUrl = "";
   var pageviewId = "";
   var engaged = 0;
   var activeSince = 0;
   var scrolled = 0;
 
-  var active = function () {
-    return d.visibilityState === "visible" && d.hasFocus();
-  };
-  var pause = function () {
-    if (activeSince) engaged += Date.now() - activeSince;
+  var pause = () => {
+    if (activeSince) engaged += now() - activeSince;
     activeSince = 0;
   };
-  var resume = function () {
-    if (!activeSince && active()) activeSince = Date.now();
+  var resume = () => {
+    if (!activeSince && !d.hidden && d.hasFocus()) activeSince = now();
   };
-  var flush = function () {
+  var flush = () => {
     pause();
     if (pageviewId && engaged >= 1000) {
       send("engagement", { i: pageviewId, e: engaged, d: scrolled });
       engaged = 0;
     }
   };
-  var measureScroll = function () {
+  var measureScroll = () => {
     var el = d.documentElement;
     var total = Math.max(el.scrollHeight, d.body ? d.body.scrollHeight : 0);
     var seen = w.scrollY + w.innerHeight;
@@ -132,23 +136,19 @@
     if (depth > scrolled) scrolled = depth;
   };
 
-  var currentUrl = function () {
-    // The page's origin is its scheme and host, never a username or password in the address.
-    return loc.origin + loc.pathname + loc.search + (useHash ? loc.hash : "");
-  };
 
-  var pageview = function (to) {
+  var pageview = (to) => {
+    // Counted once the page is shown, when it was loaded ahead of time.
+    if (d.prerendering) return on(d, "prerenderingchange", () => pageview(to));
     // Listeners pass events; only a string is a URL from runlight.pageview().
-    var url = typeof to == "string" ? new URL(to, loc.href).href : currentUrl();
+    // The page's origin is its scheme and host, never a username or password in the address.
+    var url = typeof to == "string" ? new URL(to, loc.href).href : loc.origin + loc.pathname + loc.search + (useHash ? loc.hash : "");
     if (url === pageUrl) return;
     var referrer = pageUrl || d.referrer;
     flush();
     pageUrl = url;
-    var path = new URL(url).pathname;
-    skip = excludes.some(function (x) {
-      return x.test(path);
-    });
-    pageviewId = randomId();
+    skip = excludes.some((x) => x.test(new URL(url).pathname));
+    pageviewId = Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => (b + 256).toString(36).slice(-2)).join("");
     engaged = 0;
     scrolled = 0;
     measureScroll();
@@ -165,73 +165,76 @@
     notFound = false;
   };
 
-  var track = function (name, props) {
+  var track = (name, props) => {
     if (typeof name !== "string" || !name) return;
     send("event", { i: pageviewId, n: name, p: props && typeof props === "object" ? props : undefined });
   };
 
-  // Single page apps.
-  var wrap = function (method) {
+  // Single page apps. A replaced address is a new page only when its path changed: a page that keeps a search
+  // box or its filters in the query string replaces it on every keystroke.
+  var wrap = (method, replaces) => {
     var original = history[method];
     history[method] = function () {
+      var path = loc.pathname;
       var result = original.apply(this, arguments);
       // The router sets the new page's title after the address, so the pageview waits a turn for it.
-      setTimeout(pageview);
+      if (!replaces || path !== loc.pathname) setTimeout(pageview);
       return result;
     };
   };
   if (!manual) {
     wrap("pushState");
-    wrap("replaceState");
-    w.addEventListener("popstate", pageview);
-    if (useHash) w.addEventListener("hashchange", pageview);
+    wrap("replaceState", 1);
+    on(w, "popstate", pageview);
+    if (useHash) on(w, "hashchange", pageview);
+    // Back or Forward to a page the browser kept whole runs no script again, so it is counted here.
+    on(w, "pageshow", (event) => event.persisted && fresh());
   }
 
-  d.addEventListener("visibilitychange", function () {
-    d.visibilityState === "hidden" ? flush() : resume();
+  on(d, "visibilitychange", () => {
+    d.hidden ? flush() : resume();
   });
-  w.addEventListener("pagehide", flush);
-  w.addEventListener("blur", pause);
-  w.addEventListener("focus", resume);
-  w.addEventListener("scroll", function () {
+  on(w, "pagehide", flush);
+  on(w, "blur", pause);
+  on(w, "focus", resume);
+  on(w, "scroll", () => {
     measureScroll();
     resume();
   }, { passive: true });
   // A page can load without window focus; any input means someone is there.
-  d.addEventListener("pointerdown", resume, true);
-  d.addEventListener("keydown", resume, true);
+  on(d, "pointerdown", resume, true);
+  on(d, "keydown", resume, true);
 
   var downloads = /\.(pdf|zip|gz|tgz|dmg|pkg|exe|msi|apk|docx?|xlsx?|pptx?|csv|txt|rtf|epub|mp3|wav|mp4|mov|avi|mkv|psd|ai|svg|key|numbers|pages)$/i;
 
-  d.addEventListener(
+  on(
+    d,
     "click",
-    function (event) {
+    (event) => {
       var target = event.target;
       if (!target || !target.closest) return;
 
       var link = target.closest("a[href]");
       // Click goals from the dashboard: a CSS selector, or a link whose address matches.
-      for (var r = 0; r < rules.length; r++) {
+      rules.forEach((rule) => {
         try {
-          var rule = rules[r];
           var match = rule[1];
           if (
             rule[0] === "s"
               ? target.closest(match)
               : link &&
-                glob(match).test(match.charAt(0) === "/" ? link.pathname : link.href)
+                glob(match).test(match[0] === "/" ? link.pathname : link.href)
           )
             track(rule[2]);
         } catch (e) {}
-      }
+      });
 
       var tagged = target.closest("[data-runlight]");
       if (tagged) {
         var props = {};
-        for (var i = 0; i < tagged.attributes.length; i++) {
-          var a = tagged.attributes[i];
-          if (a.name.indexOf("data-runlight-") === 0) props[a.name.slice(14)] = a.value;
-        }
+        Array.from(tagged.attributes).forEach((a) => {
+          if (!a.name.indexOf("data-runlight-")) props[a.name.slice(14)] = a.value;
+        });
         track(tagged.getAttribute("data-runlight"), props);
       }
 
@@ -250,5 +253,5 @@
   w.runlight = track;
   track.pageview = pageview;
   if (!manual) pageview();
-  for (var q = 0; q < queued.length; q++) track.apply(null, queued[q]);
+  queued.forEach((q) => track.apply(null, q));
 })();

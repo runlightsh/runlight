@@ -20,7 +20,27 @@ export const MAX_BODY = 8 * 1024;
 const MAX_ENGAGED_MS = 30 * 60 * 1000;
 const MAX_PROPS = 30;
 
+/** A string as it came, cut to `max` UTF-16 units: for a URL, which the parser then encodes. */
 const str = (value: unknown, max: number): string => (typeof value === "string" ? value.slice(0, max) : "");
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Text as every database can keep it: without U+0000, which Postgres refuses, and with half a surrogate pair
+ * (which is no character) as U+FFFD.
+ */
+export function tidy(text: string): string {
+  return text.replace(/\u0000/g, "").replace(LONE_SURROGATE, "\uFFFD");
+}
+
+/** Tidied text cut to `max` characters (code points), so a character such as an emoji is never cut in half. */
+export function cleanText(text: string, max: number): string {
+  const clean = tidy(text);
+  return clean.length <= max ? clean : Array.from(clean).slice(0, max).join("");
+}
+
+/** A string the tracker sent, as it is stored. */
+const stored = (value: unknown, max: number): string => (typeof value === "string" ? cleanText(value, max) : "");
 
 function int(value: unknown, min: number, max: number): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
@@ -34,9 +54,9 @@ function props(value: unknown): Record<string, string> | null {
   let count = 0;
   for (const [key, raw] of Object.entries(value)) {
     if (count >= MAX_PROPS) break;
-    const k = key.trim().slice(0, 60);
+    const k = cleanText(tidy(key).trim(), 60);
     if (!k) continue;
-    if (typeof raw === "string") out[k] = raw.slice(0, 500);
+    if (typeof raw === "string") out[k] = cleanText(raw, 500);
     else if (typeof raw === "number" && Number.isFinite(raw)) out[k] = String(raw);
     else if (typeof raw === "boolean") out[k] = String(raw);
     else continue;
@@ -81,7 +101,7 @@ export function parsePayload(text: string): Payload | null {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
 
-  const name = str(body.n, 120).trim();
+  const name = stored(body.n, 120).trim();
   if (kind === "event" && !name) return null;
 
   const pageviewId = str(body.i, 32);
@@ -90,13 +110,13 @@ export function parsePayload(text: string): Payload | null {
 
   return {
     kind,
-    site: str(body.s, 64),
+    site: stored(body.s, 64),
     url,
     referrer: str(body.r, 2048),
-    title: str(body.t, 500),
+    title: stored(body.t, 500),
     screenWidth: int(body.w, 0, 20000),
     screenHeight: int(body.h, 0, 20000),
-    language: str(body.l, 35),
+    language: stored(body.l, 35),
     name,
     props: kind === "event" ? linkProps(name, props(body.p)) : null,
     pageviewId,

@@ -18,7 +18,7 @@ import { getJson } from "./http.js";
 import { ImportError } from "./types.js";
 import { umamiSignIn } from "./umami.js";
 import { CSV_BATCH, csvFormat, csvHit } from "./csvvisits.js";
-import { browserName, deviceName, hexId, systemName } from "./write.js";
+import { browserName, deviceName, hexId, languageTag, placeName, screenSize, systemName } from "./write.js";
 
 const DAY = 86_400_000;
 /** Each step reads at most this many days, or stops after this many events. */
@@ -261,6 +261,15 @@ function fromUmami(e: UmamiEvent & { ts: number }, session: UmamiSession | undef
   };
 }
 
+/** Whether a hostname can be the host of an address, and nothing more than a host. */
+function validHost(host: string): boolean {
+  try {
+    return host !== "" && new URL(`https://${host}/`).hostname !== "" && !/[/?#@\\]/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Writes one imported pageview or event as part of a Runlight visit. Visitors
  * are hashed per day from the hit's key, as live visitors are hashed per day,
@@ -274,7 +283,10 @@ async function writeEvent(store: SqlStore, site: { id: string; hostnames: string
   const visitor = await hexId(`${ns}:${e.key}:${day}`, 16);
   // A visit that runs past midnight keeps the id it started with, as a live one does.
   const yesterday = await hexId(`${ns}:${e.key}:${addDays(day, -1)}`, 16);
-  const host = (e.hostname || site.hostnames[0] || "imported.invalid").toLowerCase();
+  let host = (e.hostname || site.hostnames[0] || "imported.invalid").toLowerCase();
+  // A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
+  // row under the site's name rather than a failed batch.
+  if (!validHost(host)) host = validHost(site.hostnames[0] ?? "") ? site.hostnames[0]!.toLowerCase() : "imported.invalid";
   let page;
   try {
     page = parsePage(new URL(`https://${host}${e.path || "/"}${e.query ? `?${e.query.replace(/^\?/, "")}` : ""}`));
@@ -288,7 +300,7 @@ async function writeEvent(store: SqlStore, site: { id: string; hostnames: string
     await store.deleteSession(id);
     const referrer = e.referrer;
     const country = (e.country || "").toUpperCase().slice(0, 2);
-    const rawRegion = e.region;
+    const rawRegion = placeName(e.region);
     const region = rawRegion ? (rawRegion.includes("-") ? rawRegion : `${country}-${rawRegion}`).toUpperCase().slice(0, 10) : "";
     await store.insertSession({
       id,
@@ -304,14 +316,14 @@ async function writeEvent(store: SqlStore, site: { id: string; hostnames: string
       utmContent: page.utm.content,
       country: /^[A-Z]{2}$/.test(country) ? country : "",
       region: /^[A-Z]{2}$/.test(country) ? region : "",
-      city: (e.city || "").slice(0, 100),
+      city: placeName(e.city || "").slice(0, 100),
       browser: browserName(e.browser || ""),
       browserVersion: "",
       os: systemName(e.os || ""),
       osVersion: "",
       device: deviceName(e.device || ""),
-      screen: e.screen.slice(0, 20),
-      language: e.language.slice(0, 35),
+      screen: screenSize(e.screen),
+      language: languageTag(e.language),
     });
     // No engaged time is known, so duration falls back to first-to-last pageview.
     await store.markImported(id, true);

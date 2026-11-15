@@ -13,6 +13,12 @@ export type CsvFormat = "umami" | "runlight";
 /** At most this many rows in one request. */
 export const CSV_BATCH = 2000;
 
+/**
+ * The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a date written
+ * 20240501 would otherwise land in 1970, and the site's history would begin there.
+ */
+export const CSV_EARLIEST = Date.UTC(2000, 0, 1);
+
 /** Which shape a file is, from its header row (lower case, as the dashboard reads it). */
 export function csvFormat(columns: string[]): CsvFormat | null {
   const has = (c: string) => columns.includes(c);
@@ -22,10 +28,15 @@ export function csvFormat(columns: string[]): CsvFormat | null {
 }
 
 /**
- * A row's time in milliseconds, or NaN. ISO 8601 with or without a zone, "2024-05-01 12:34:56"
+ * A row's time in milliseconds, or NaN, as it also is for a time before CSV_EARLIEST. ISO 8601 with or without a zone, "2024-05-01 12:34:56"
  * (both read as UTC when no zone is given, as Umami writes them), or a Unix time in seconds or milliseconds.
  */
 export function rowTime(row: Record<string, string>, format: CsvFormat): number {
+  const ts = readTime(row, format);
+  return ts >= CSV_EARLIEST ? ts : NaN;
+}
+
+function readTime(row: Record<string, string>, format: CsvFormat): number {
   const text = (format === "umami" ? row.created_at : row.time)?.trim() ?? "";
   if (!text) return NaN;
   if (/^\d+(\.\d+)?$/.test(text)) {

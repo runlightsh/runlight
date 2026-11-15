@@ -30,18 +30,44 @@ export function currentLocale(): string {
   return locale;
 }
 
-/** The language to start in: the one picked before, else the browser's, else English. */
-export function initialLocale(): string {
-  let stored: string | null = null;
+/**
+ * The language the dashboard's host is in, when it says: a CMS page that frames or links to the dashboard adds
+ * ?lang= to the address, and a CMS that runs Runlight also names its own in data-lang, for an address without.
+ */
+const HOST_LANGUAGE = ((): string => {
   try {
-    stored = localStorage.getItem(STORAGE);
-  } catch {}
-  const wanted = [stored, ...(navigator.languages ?? [navigator.language])].filter(Boolean) as string[];
-  for (const tag of wanted) {
-    const code = tag.toLowerCase().split("-")[0]!;
-    if (LANGUAGES.some(([c]) => c === code)) return code;
+    return new URLSearchParams(location.search).get("lang") || (document.getElementById("app")?.dataset.lang ?? "");
+  } catch {
+    return "";
+  }
+  // Read as the page loads: the dashboard rewrites its address once it starts, without what it does not know.
+})();
+
+/**
+ * The language to start in: the one picked here before; else the host's, or English when the dashboard does
+ * not have the host's; else the browser's; else English.
+ */
+export function initialLocale(stored: string | null = storedLocale(), host = HOST_LANGUAGE, browser: readonly string[] = navigator.languages ?? [navigator.language]): string {
+  const known = (tag: string | null | undefined): string | undefined => {
+    const code = (tag ?? "").toLowerCase().split(/[-_]/)[0]!;
+    return LANGUAGES.some(([c]) => c === code) ? code : undefined;
+  };
+  const picked = known(stored);
+  if (picked) return picked;
+  if (host) return known(host) ?? "en";
+  for (const tag of browser) {
+    const code = known(tag);
+    if (code) return code;
   }
   return "en";
+}
+
+function storedLocale(): string | null {
+  try {
+    return localStorage.getItem(STORAGE);
+  } catch {
+    return null;
+  }
 }
 
 /** Loads a language (only English is in the bundle) and makes it current. */

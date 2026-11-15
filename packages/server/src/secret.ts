@@ -3,7 +3,17 @@ import { chmodSync, linkSync, readFileSync, unlinkSync, writeFileSync } from "no
 import path from "node:path";
 
 /** Shorter than any secret this file has ever been given, so a file caught half written is never used. */
-const SHORTEST = 32;
+export const SHORTEST = 32;
+
+/**
+ * What to say at start about a secret or token someone set by hand that is short enough to guess, or null. The
+ * server still starts, since refusing would stop an install that ran before this was checked.
+ */
+export function shortWarning(name: "RUNLIGHT_SECRET" | "RUNLIGHT_TOKEN", value: string | undefined): string | null {
+  if (value === undefined || value.length >= SHORTEST) return null;
+  const does = name === "RUNLIGHT_SECRET" ? "It signs every session and encrypts the saved mail and assistant keys" : "Anyone who guesses it has the whole API, as the owner";
+  return `Runlight: WARNING: ${name} is only ${value.length} characters long. ${does}. Set it to ${SHORTEST} or more random characters, such as the output of: openssl rand -hex 32`;
+}
 
 /**
  * The secret kept in `dataDir`, made on first run, readable only by this user. Two servers starting at once

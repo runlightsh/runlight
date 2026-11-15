@@ -20,6 +20,9 @@
   // The ticket also names the site it was made for, so a ticket for one site does nothing on another's pages.
   var hosts = JSON.parse("__RUNLIGHT_PICK_HOSTS__");
   if (hosts.length && hosts.indexOf(location.hostname.toLowerCase().replace(/^www\./, "")) < 0) return;
+  // The ticket is good, so the tracker, which waits to hear, counts nothing on this page. After any other
+  // ticket this is never reached, and the visit counts like any other.
+  if (w.runlight) w.runlight.pick = 1;
 
   var words = {
     en: ["Click what you want to count", "Use this", "Pick again", "Cancel", "Matches {n} on this page", "Sent to Runlight. You can close this tab."],

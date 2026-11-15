@@ -265,10 +265,12 @@ function AllRows({ title, tab, view, onFilter, onClose }: { title: Key; tab: Tab
   const dialog = useRef<HTMLDivElement>(null);
   useDialogFocus(dialog);
   const [rows, setRows] = useState<Row[] | null>(null);
+  // Why the rows, or their download, could not be had: said, never shown as a list with nothing in it.
+  const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const search = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    api.breakdown(view, tab.dimension, ALL).then((r) => setRows(r.rows)).catch(() => setRows([]));
+    api.breakdown(view, tab.dimension, ALL).then((r) => setRows(r.rows)).catch((e: Error) => setError(e.message));
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", onKey);
     document.body.classList.add("locked");
@@ -295,7 +297,8 @@ function AllRows({ title, tab, view, onFilter, onClose }: { title: Key; tab: Tab
               params.set("dimension", tab.dimension);
               params.set("limit", String(ALL));
               params.set("format", "csv");
-              void download("breakdown", params).catch(() => {});
+              setError("");
+              void download("breakdown", params).catch((e: Error) => setError(e.message));
             }}
           >
             <Icon name="upload" />
@@ -332,7 +335,8 @@ function AllRows({ title, tab, view, onFilter, onClose }: { title: Key; tab: Tab
           </span>
         </div>
         <div class="sheet-body">
-          {!rows ? <Loading /> : null}
+          {error ? <p class="failure" role="alert">{error}</p> : null}
+          {!rows && !error ? <Loading /> : null}
           {rows && shown.length === 0 ? (
             needle ? <Empty size="line" icon="list" title={t("empty.search", { q: needle })} /> : <Empty size="line" icon="chart" title={t("empty.mini")} />
           ) : null}

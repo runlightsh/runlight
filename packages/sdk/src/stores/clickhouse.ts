@@ -479,9 +479,12 @@ export function clickhouseDb(options: { url: string; maxQueries?: number; queryT
       if (!rows.length) return;
       const lines = rows.map((row) => JSON.stringify(row));
       if (opts.batched) {
-        // Sent again after a dropped connection, the same rows must go in; ClickHouse Cloud would otherwise
-        // drop a block it saw before, such as a piece of the copy tried a second time.
-        await writes(() => send(`INSERT INTO ${table} FORMAT JSONEachRow\n${lines.join("\n")}`, { insert_deduplicate: "0" }));
+        // A token of this call's own, kept through its retries: a request sent again after the connection
+        // dropped, when ClickHouse may already have taken it, goes in once, while the same rows sent by a
+        // later call, such as a piece of the copy tried a second time, go in again, which by their content
+        // alone ClickHouse Cloud would drop.
+        const settings = { insert_deduplicate: "1", insert_deduplication_token: crypto.randomUUID() };
+        await writes(() => send(`INSERT INTO ${table} FORMAT JSONEachRow\n${lines.join("\n")}`, settings));
         return;
       }
       await new Promise<void>((resolve, reject) => {
@@ -1048,6 +1051,9 @@ export class ClickHouseStore extends SqlStore {
    * asks every few minutes, so it first looks whether anything is that old, which costs next to nothing.
    */
   override async dropBefore(site: string, ts: number): Promise<void> {
+    // The other store too: until drop-old empties it, it still holds the visits from before ClickHouse took
+    // over, and those are no more to be kept than ClickHouse's. Cheap when it holds none that old.
+    await this.rows.dropBefore(site, ts);
     // Only the months before the cutoff are read, which once retention has run hold nothing.
     const any = await this.clickhouse.all(
       `SELECT 1 AS x FROM (SELECT 1 FROM rl_visits WHERE site = ? AND started_at < ? LIMIT 1 UNION ALL SELECT 1 FROM rl_events WHERE site = ? AND ts < ? LIMIT 1)`,

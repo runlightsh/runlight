@@ -433,3 +433,119 @@ test("standalone sessions retain site restrictions and deletion confirmation wit
   assert.ok(server.runlight.site(beta.id));
   assert.equal((await handle(req(`/api/sites/${beta.id}`, { method: "DELETE", headers, body: JSON.stringify({ password }) }))).status, 200);
 });
+
+test("what Settings and the assistant ask for is refused to a share link, and to a viewer wherever it changes or reveals anything", async () => {
+  // The dashboard hides these controls from both; this is the server refusing the calls behind them anyway.
+  const { server, handle } = make();
+  await server.accounts.setPassword("owner@example.com", "a long password", Date.now());
+  const owner = cookieOf(await handle(req("/login", form({ email: "owner@example.com", password: "a long password" }))));
+  const call = (headers: Record<string, string>, method: string, path: string, body?: unknown) =>
+    handle(req(path, { method, headers: { ...headers, ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+  assert.equal((await call({ cookie: owner }, "POST", "/api/sites", { hostnames: "blog.example.com" })).status, 201);
+  const s = "?site=blog.example.com";
+  const share = ((await (await call({ cookie: owner }, "POST", `/api/shares${s}`, { name: "Board" })).json()) as { share: { id: string } }).share.id;
+  const invite = ((await (await call({ cookie: owner }, "POST", "/api/people", { allSites: true, email: "viewer@example.com", role: "viewer" })).json()) as { link: string }).link;
+  const viewer = cookieOf(await handle(req("/invite", form({ code: new URL(invite).searchParams.get("code")!, password: "a long password", again: "a long password" }))));
+
+  const reads = ["/api/tokens", "/api/people", "/api/mail", `/api/reports${s}`, `/api/shares${s}`, `/api/link-domains${s}`, `/api/observe-key${s}`];
+  const changes: Array<[string, string, unknown?]> = [
+    ["PATCH", "/api/sites/blog.example.com", { name: "Mine" }],
+    ["DELETE", "/api/sites/blog.example.com", {}],
+    ["POST", "/api/sites", { hostnames: "new.example.com" }],
+    ["POST", "/api/sites/connect", { url: "https://other.example.com" }],
+    ["POST", "/api/tokens", { name: "x", site: "" }],
+    ["POST", "/api/people", { allSites: true, email: "friend@example.com", role: "admin" }],
+    ["PUT", "/api/mail", { service: "smtp" }],
+    ["DELETE", "/api/mail"],
+    ["PUT", "/api/assistant", { provider: "anthropic", model: "m", baseUrl: "", key: "k" }],
+    ["PUT", "/api/assistant/limits", { viewerDaily: 500 }],
+    ["POST", "/api/assistant/models", { provider: "anthropic", baseUrl: "", key: "k" }],
+    ["POST", `/api/shares${s}`, { name: "Another" }],
+    ["POST", `/api/goals${s}`, { name: "Signup", kind: "page", match: "/thanks", clickBy: "", valueMode: "none", value: 0, valueProp: "", currency: "USD" }],
+    ["POST", `/api/funnels${s}`, { name: "Buy", steps: [{ kind: "page", match: "/a" }, { kind: "page", match: "/b" }] }],
+    ["POST", `/api/reports${s}`, { email: "a@example.com", frequency: "weekly", lang: "en" }],
+    ["POST", `/api/link-domains${s}`, { domain: "go.example.org" }],
+    ["POST", `/api/observe-key/new${s}`, {}],
+    ["POST", `/api/links${s}`, { url: "https://example.com" }],
+    ["POST", `/api/pick${s}`, { origin }],
+  ];
+  // A share link's visitor has no session: everything behind Settings and the assistant is refused outright.
+  for (const path of [...reads, "/api/assistant", "/api/account"]) assert.equal((await call({ "x-runlight-share": share }, "GET", path)).status, 401, `share GET ${path}`);
+  for (const [method, path, body] of [...changes, ["POST", "/api/assistant/chat", { site: "blog.example.com", messages: [{ role: "user", content: "hi" }], view: "", language: "en" }] as [string, string, unknown]]) {
+    assert.equal((await call({ "x-runlight-share": share }, method, path, body)).status, 401, `share ${method} ${path}`);
+  }
+  // A viewer is signed in, and is told so, but changes nothing and reads none of the owner's lists.
+  for (const path of reads) assert.equal((await call({ cookie: viewer }, "GET", path)).status, 403, `viewer GET ${path}`);
+  for (const [method, path, body] of changes) assert.equal((await call({ cookie: viewer }, method, path, body)).status, 403, `viewer ${method} ${path}`);
+  assert.equal(((await (await call({ cookie: owner }, "GET", "/api/sites")).json()) as { sites: unknown[] }).sites.length, 1, "nothing was added or removed");
+});
+
+test("no new link takes a slug that is one of the server's own pages, which a link domain could never open", async () => {
+  const signedIn = async (server: ReturnType<typeof createServer>) => {
+    await server.accounts.setPassword("owner@example.com", "a long password", Date.now());
+    const cookie = cookieOf(await server.handler(req("/login", form({ email: "owner@example.com", password: "a long password" }))));
+    const call = (method: string, path: string, body: unknown) => server.handler(req(path, { method, headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body) }));
+    assert.equal((await call("POST", "/api/sites", { hostnames: "blog.example.com" })).status, 201);
+    return call;
+  };
+  const { server } = make();
+  const call = await signedIn(server);
+  const link = (slug: string) => call("POST", "/api/links?site=blog.example.com", { url: "https://blog.example.com/launch", slug });
+  for (const slug of ["login", "logout", "setup", "invite", "healthz", "api", "mcp", "e", "embed", "pick-return"]) {
+    const refused = await link(slug);
+    assert.deepEqual([refused.status, ((await refused.json()) as { code: string }).code], [400, "link_reserved"], slug);
+  }
+  assert.equal((await link("launch")).status, 201);
+  assert.equal((await link("cronwatch")).status, 201, "the server's own only with monitoring on");
+
+  // A link made before the slug was kept back still opens at /go/<slug>, and keeps its slug when it is changed.
+  const kept = server.runlight.links.reserved;
+  server.runlight.links.reserved = new Set();
+  const old = ((await (await link("api")).json()) as { link: { id: string } }).link;
+  server.runlight.links.reserved = kept;
+  const renamed = await call("PATCH", `/api/links/${old.id}?site=blog.example.com`, { name: "Old", slug: "api" });
+  assert.equal(renamed.status, 200);
+  assert.equal((await call("PATCH", `/api/links/${old.id}?site=blog.example.com`, { slug: "login" })).status, 400);
+
+  const monitored = createServer({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64), monitoring: async () => new Response("ok") });
+  const refused = await (await signedIn(monitored))("POST", "/api/links?site=blog.example.com", { url: "https://blog.example.com/launch", slug: "cronwatch" });
+  assert.deepEqual([refused.status, ((await refused.json()) as { code: string }).code], [400, "link_reserved"]);
+});
+
+test("a forwarded host counts only from a proxy the library believes, never from a client straight off the internet", async () => {
+  const { server, handle } = make();
+  const owner = await server.accounts.setPassword("jon@example.com", "a long password", Date.now());
+  const cookie = `runlight_session=${encodeURIComponent(await server.accounts.sessionFor(owner, Date.now()))}`;
+  const names = async () => JSON.parse((await server.runlight.store.setting("server-hosts")) ?? "[]") as string[];
+  // Straight from a public address, the name is the Host header's, whatever X-Forwarded-Host says.
+  await handle(req("/api/sites", { headers: { cookie, "x-forwarded-host": "made-up.example.org" } }), { ip: "8.8.8.8" });
+  assert.deepEqual(await names(), ["stats.example.com"]);
+  // From a proxy on a private network, it is the name the proxy passed on.
+  await handle(req("/api/sites", { headers: { cookie, "x-forwarded-host": "analytics.example.com" } }), { ip: "10.0.0.2" });
+  assert.deepEqual(await names(), ["stats.example.com", "analytics.example.com"]);
+  // TRUST_PROXY=false believes no proxy at all.
+  const alone = createServer({ store: sqlite({ path: ":memory:" }), secret: "s".repeat(64), trustProxy: false });
+  const user = await alone.accounts.setPassword("jon@example.com", "a long password", Date.now());
+  await alone.handler(req("/api/sites", { headers: { cookie: `runlight_session=${encodeURIComponent(await alone.accounts.sessionFor(user, Date.now()))}`, "x-forwarded-host": "analytics.example.com" } }), { ip: "10.0.0.2" });
+  assert.deepEqual(JSON.parse((await alone.runlight.store.setting("server-hosts")) ?? "[]"), ["stats.example.com"]);
+});
+
+test("wrong guesses at a short token run out; a long token counts none, and tokens made in Settings are never guesses", async () => {
+  const bearer = (token: string) => ({ headers: { authorization: `Bearer ${token}` } });
+  const { handle, advance } = make("short");
+  const from = { ip: "8.8.8.8" };
+  assert.equal((await handle(req("/api/sites", bearer("short")), from)).status, 200);
+  // A token made in Settings is checked by the routes, and counts as no guess however often it comes.
+  for (let i = 0; i < 20; i++) assert.equal((await handle(req("/api/sites", bearer("rl_made-up")), from)).status, 401);
+  assert.equal((await handle(req("/api/sites", bearer("short")), from)).status, 200);
+  for (let i = 0; i < 10; i++) assert.equal((await handle(req("/api/sites", bearer(`guess${i}`)), from)).status, 401);
+  assert.equal((await handle(req("/api/sites", bearer("short")), from)).status, 401, "the eleventh try is refused even when right");
+  assert.equal((await handle(req("/api/sites", bearer("short")), { ip: "8.8.4.4" })).status, 200, "another address is not held up");
+  advance(16 * 60_000);
+  assert.equal((await handle(req("/api/sites", bearer("short")), from)).status, 200, "and the wait ends");
+
+  // A token too long to guess: nobody's wrong tries keep its owner out.
+  const long = make("t".repeat(48));
+  for (let i = 0; i < 30; i++) assert.equal((await long.handle(req("/api/sites", bearer(`guess${i}`)), from)).status, 401);
+  assert.equal((await long.handle(req("/api/sites", bearer("t".repeat(48))), from)).status, 200);
+});

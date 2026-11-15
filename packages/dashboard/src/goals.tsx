@@ -285,10 +285,15 @@ function GoalForm({ site, goal, view, onDone }: { site: Site; goal: Goal | null;
   // Names already seen, so an event goal is a pick rather than a guess.
   useEffect(() => {
     if (input.kind === "click") return setSuggest([]);
+    // Only the kind chosen last suggests, so a slow answer for the one before cannot land under it.
+    let live = true;
     api
       .breakdown({ ...view, period: "90d", from: "", to: "", filters: [] }, input.kind === "event" ? "event" : "page", 50)
-      .then((r) => setSuggest(r.rows.map((x) => x.value).filter(Boolean)))
-      .catch(() => setSuggest([]));
+      .then((r) => live && setSuggest(r.rows.map((x) => x.value).filter(Boolean)))
+      .catch(() => live && setSuggest([]));
+    return () => {
+      live = false;
+    };
   }, [input.kind]);
 
   // The choice comes back from the relay page on this origin, which the picker's tab goes to; only the pick

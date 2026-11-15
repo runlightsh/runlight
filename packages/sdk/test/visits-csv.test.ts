@@ -138,4 +138,40 @@ test("CSV times and formats", () => {
   assert.equal(rowTime({ time: String(iso) }, "runlight"), iso, "Unix milliseconds");
   assert.equal(rowTime({ created_at: "2026-03-01 10:00:00" }, "umami"), iso);
   assert.ok(Number.isNaN(rowTime({ time: "" }, "runlight")));
+  // A date written as a bare number would be a Unix time in 1970; nothing before 2000 is a row's time.
+  for (const time of ["20240501", "2024", "0", "1999-12-31T23:59:59Z"]) assert.ok(Number.isNaN(rowTime({ time }, "runlight")), time);
+  assert.equal(rowTime({ time: "2000-01-01" }, "runlight"), Date.UTC(2000, 0, 1));
+});
+
+test("a CSV row dated before 2000 is skipped, and a hostname no address can hold becomes the site's own", async () => {
+  const { rl, get } = make();
+  const step = await importCsvVisits(rl, "default", [
+    { time: "20240501", path: "/old", visitor: "a" },
+    { time: "2026-03-01T10:00:00Z", path: "/a", hostname: "my site.com", visitor: "b" },
+    { time: "2026-03-01T11:00:00Z", path: "/b", hostname: "evil.example/x?y", visitor: "c" },
+    { time: "2026-03-01T12:00:00Z", path: "/c", hostname: "shop.example.com", visitor: "d" },
+  ]);
+  assert.deepEqual([step.pageviews, step.visits, step.skipped], [3, 3, 1]);
+  assert.equal(await rl.store.firstSeen("default"), Date.parse("2026-03-01T10:00:00Z"));
+  assert.deepEqual((await get(`/api/breakdown?${range}&dimension=hostname`)).rows.map((r: any) => [r.value, r.pageviews]), [["blog.example.com", 2], ["shop.example.com", 1]]);
+  assert.deepEqual((await get(`/api/breakdown?${range}&dimension=page`)).rows.map((r: any) => r.value).sort(), ["/a", "/b", "/c"]);
+});
+
+test("a CSV never brings in a user agent or an IP address, whichever column holds it", async () => {
+  const { rl } = make();
+  const agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+  await importCsvVisits(rl, "default", [
+    { time: "2026-03-01T10:00:00Z", path: "/a", visitor: "198.51.100.7", country: "CA", region: "198.51.100.7", city: "198.51.100.7", browser: agent, os: agent, screen: "198.51.100.7", language: "2001:db8::1" },
+    { time: "2026-03-01T11:00:00Z", path: "/b", visitor: "b", country: "CA", region: "QC", city: "2001:db8::1", browser: "203.0.113.5", os: "curl/8.4.0", screen: agent, language: agent },
+    { time: "2026-03-01T12:00:00Z", path: "/c", visitor: "c", country: "DE", region: "DE-BB", city: "Frankfurt (Oder)", browser: "vivaldi", os: "Haiku", screen: "1440x900", language: "pt-BR" },
+  ]);
+  const rows = await rl.store.db.all<Record<string, unknown>>(`SELECT * FROM rl_sessions ORDER BY started_at`);
+  const kept = rows.map((r) => [r.region, r.city, r.browser, r.os, r.screen, r.language]);
+  assert.deepEqual(kept, [
+    ["", "", "", "", "", ""],
+    ["CA-QC", "", "", "", "", ""],
+    ["DE-BB", "Frankfurt (Oder)", "Vivaldi", "Haiku", "1440x900", "pt-BR"],
+  ]);
+  const stored = JSON.stringify([rows, await rl.store.db.all(`SELECT * FROM rl_events`)]);
+  for (const secret of ["198.51.100.7", "203.0.113.5", "2001:db8", "Mozilla", "AppleWebKit", "curl/"]) assert.ok(!stored.includes(secret), secret);
 });

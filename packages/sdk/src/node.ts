@@ -28,6 +28,9 @@ const MAX_BODY = 10 * 1024 * 1024;
  */
 const MAX_DRAIN = 64 * 1024 * 1024;
 
+/** Methods a fetch Request cannot be made with. No route or link answers them, so they are the app's. */
+const UNSUPPORTED = ["TRACE", "TRACK", "CONNECT"];
+
 /** A body past the limit, answered with 413 rather than passed on empty. */
 export class BodyTooLarge extends Error {}
 
@@ -37,7 +40,9 @@ function toUrl(req: NodeRequest): string {
   const host = String(req.headers.host ?? "localhost");
   const target = req.originalUrl ?? req.url ?? "/";
   try {
-    return new URL(target.startsWith("/") ? target : `/${target}`, `${proto === "https" ? "https" : "http"}://${host}`).toString();
+    // Joined as text after the host, never resolved against it: a target that starts with // or /\ would
+    // otherwise be read as naming a host of its own, and the request would seem to be for another origin.
+    return new URL(`${proto === "https" ? "https" : "http"}://${host}${target.startsWith("/") ? target : `/${target}`}`).toString();
   } catch {
     return "http://localhost/";
   }
@@ -156,6 +161,11 @@ export function toNodeHandler(handler: FetchHandler): NodeHandler {
     if (next && typeof base === "string" && base !== "" && path !== base && !path.startsWith(`${base}/`) && !["GET", "HEAD", "OPTIONS"].includes(req.method ?? "GET")) {
       return next();
     }
+    if (UNSUPPORTED.includes((req.method ?? "GET").toUpperCase())) {
+      if (next) return next();
+      res.statusCode = 405;
+      return void res.end();
+    }
     try {
       const response = await handler(await toRequest(req, res), { ip: req.socket?.remoteAddress ?? "" });
       if (response.status === 404 && next && response.headers.get("content-type")?.includes("json")) {
@@ -194,6 +204,10 @@ export function shortLinks(runlight: Runlight): (req: IncomingMessage, res: Serv
   const own = new RegExp(`^${runlight.linkPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[^/]+$`);
   const follow = runlight.linkHandler();
   return async (req, res, next) => {
+    if (UNSUPPORTED.includes((req.method ?? "GET").toUpperCase())) {
+      next?.();
+      return false;
+    }
     try {
       // Only the address and headers are read, so the app still gets the body.
       const request = new Request(toUrl(req as NodeRequest), { method: (req.method ?? "GET").toUpperCase(), headers: headersOf(req) });

@@ -13,6 +13,7 @@ import { LinksPanel, Sheet } from "./links.js";
 import { AddSiteForm, AllSites, FirstSite, SiteMenu } from "./sites.js";
 import { AccountSheet } from "./account.js";
 import { AssistantDrawer } from "./assistant.js";
+import { forgetChats } from "./assistant-action.js";
 import { Panel, Rhythm, bounce, timeOnPage, type Tab } from "./panel.js";
 import { ComparePicker, DEFAULT_PERIOD, PERIODS, Picker, rangeText, type CompareMode } from "./picker.js";
 import { RealtimeModal } from "./realtime.js";
@@ -231,12 +232,18 @@ function App() {
   const isOwner = accounts ? me?.role === "owner" || me?.role === "admin" : true;
   /** A shared dashboard, the dashboard inside a CMS, and a viewer see the numbers and change nothing. */
   const readOnly = shared || me?.role === "viewer";
+  // Settings open only for someone who may change things, and with accounts only once the account says who that
+  // is, so a link that asks for them (?open=settings:people) shows a share's visitor or a viewer nothing.
+  const canSet = !readOnly && (!accounts || me !== null);
   // Inside a CMS, a session that runs out shows a way to reload the admin page in place of the numbers.
   const [expired, setExpired] = useState(false);
   useEffect(() => onEmbedExpired(() => setExpired(true)), []);
 
-  const fail = (e: Error) =>
+  const fail = (e: Error) => {
+    // A session that ended takes this tab's chats with it, so whoever signs in next does not read them.
+    if (e instanceof ApiError && e.status === 401) forgetChats();
     setFailure(e instanceof ApiError && e.status === 401 ? "signed-out" : share && e instanceof ApiError && e.status === 404 ? t("share.gone") : e.message);
+  };
 
   useEffect(() => {
     // Check setup before heavy reports run, so opening the assistant needs no loading screen.
@@ -527,7 +534,7 @@ function App() {
         </p>
       ) : null}
       {failure ? <p class="failure">{failure}</p> : null}
-      {settingsOpen && site && sites ? (
+      {settingsOpen && site && sites && canSet ? (
         <SettingsModal
           key={site.id}
           site={site}
@@ -594,10 +601,11 @@ function App() {
         </Sheet>
       ) : null}
       {filtering ? <FilterDrawer view={view} onApply={(filters) => update({ filters })} onClose={() => setFiltering(false)} /> : null}
-      {asking && site ? (
+      {asking && site && !shared ? (
         <AssistantDrawer
           site={site}
           view={view}
+          who={me?.id ?? ""}
           owner={isOwner}
           canWrite={!readOnly && !site.remote}
           canInvite={accounts && (me?.role === "owner" || me?.role === "admin")}
@@ -717,7 +725,7 @@ function App() {
           </button>
         ) : null}
         {signOut ? (
-          <a class="sign-out" href={signOut}>
+          <a class="sign-out" href={signOut} onClick={() => forgetChats()}>
             {t("app.signOut")}
           </a>
         ) : null}

@@ -5,9 +5,10 @@ import { EMAIL_LOGO } from "../brand.js";
  */
 import type { Runlight, RequestContext } from "../runlight.js";
 import type { TokenRow } from "../store.js";
-import { AccountError, Accounts, SESSION_COOKIE, SESSION_MS, Throttle, otpauthUri, type Invite, type Role, type User } from "./auth.js";
+import { AccountError, Accounts, Lockout, SESSION_COOKIE, SESSION_MS, Throttle, otpauthUri, type Invite, type Role, type User } from "./auth.js";
 import { randomBytes, base64url, sameText } from "./crypto.js";
 import { acceptedLanguage, translator } from "../messages.js";
+import { BodyTooLong, readJsonCapped, readTextCapped } from "../body.js";
 import { AUTH_CSS, authJs, codePage, inviteGonePage, invitePage, loginPage, roleText, setupLockedPage, setupNeedsTokenPage, setupPage } from "./pages.js";
 
 /** Who may create the first account: the server's printed one-time code, the app's token, or anyone (development). */
@@ -51,6 +52,8 @@ const HTML = {
 };
 
 const DEVICE_COOKIE = "runlight_device";
+/** The most a sign-in form or an account change may weigh: a few fields, far smaller than this. */
+const MAX_BODY_BYTES = 64 * 1024;
 /** Who made each token, kept beside it as a setting, so removing someone or making them a viewer deletes them. */
 const MADE_BY = "token-by:";
 
@@ -89,9 +92,11 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   const perAddress = new Throttle(10);
   const perAccount = new Throttle(50);
   const perIp = new Throttle(30);
-  // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-  // Password re-checks in Account: ten.
-  const codeTries = new Throttle(5);
+  // Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the
+  // tries run out again, up to a day, so guessing on and on gets about five tries a day. A browser that
+  // signed in to the account before counts on its own, so its owner is never held up by others' guesses.
+  // Five tries to confirm the first code. Password re-checks in Account: ten.
+  const codeTries = new Lockout(5);
   const confirmTries = new Throttle(5);
   const rechecks = new Throttle(10);
   // When each account was last sent a sign-in link, at most one a minute.
@@ -159,7 +164,10 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
   /** A JSON body by its media type, which a cross-site form cannot send. */
   const body = async (request: Request): Promise<Record<string, unknown> | null> => {
     if ((request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase() !== "application/json") return null;
-    const parsed = (await request.json().catch(() => null)) as unknown;
+    const parsed = (await readJsonCapped(request, MAX_BODY_BYTES).catch((error) => {
+      if (error instanceof BodyTooLong) throw error;
+      return null;
+    })) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
   };
 
@@ -248,7 +256,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
         return setupOk(code) ? html(setupPage(base, { code }, lang)) : setupLocked(lang);
       }
       if (method === "POST") {
-        const form = new URLSearchParams(await request.text());
+        const form = new URLSearchParams(await readTextCapped(request, MAX_BODY_BYTES));
         const code = form.get("code") ?? "";
         if (!setupOk(code)) {
           if (asksForToken) return html(setupPage(base, { code: "", askCode: true, error: t("auth.tokenWrong"), email: form.get("email") ?? "" }, lang), 403);
@@ -273,7 +281,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       if (!(await hasAccount())) return first === "locked" ? setupLocked(lang) : first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked(lang);
       if (method === "GET") return html(loginPage(base, { next: safeNext(url.searchParams.get("next")), forgot: options.forgot }, lang));
       if (method === "POST") {
-        const form = new URLSearchParams(await request.text());
+        const form = new URLSearchParams(await readTextCapped(request, MAX_BODY_BYTES));
         const email = form.get("email") ?? "";
         const password = form.get("password") ?? "";
         const next = safeNext(form.get("next"));
@@ -325,16 +333,18 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     }
 
     if (path === "/login/code" && method === "POST") {
-      const form = new URLSearchParams(await request.text());
+      const form = new URLSearchParams(await readTextCapped(request, MAX_BODY_BYTES));
       const next = safeNext(form.get("next"));
       const user = await accounts.fromPending(form.get("pending") ?? "", now());
       if (!user) return redirect(`${base}/login?next=${encodeURIComponent(next)}`);
-      // Counted before the check, so a burst cannot get past five.
-      if (!(await codeTries.take(user.id, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: t("error.too_many_tries") }, lang), 429);
+      // Counted before the check, so a burst cannot get past five. A browser the account signed in from
+      // before has its own count, which only someone holding that browser's mark can use up.
+      const tries = (await accounts.trustsDevice(readCookie(request, DEVICE_COOKIE), user)) ? `${user.id}\ndevice` : user.id;
+      if (!(await codeTries.take(tries, now()))) return html(codePage(base, { pending: form.get("pending") ?? "", next, error: t("error.too_many_tries") }, lang), 429);
       if (!(await accounts.checkSecondFactor(user.id, form.get("code") ?? "", now()))) {
         return html(codePage(base, { pending: form.get("pending") ?? "", next, error: t("auth.codeWrong") }, lang), 401);
       }
-      await codeTries.clear(user.id);
+      await codeTries.clear(tries);
       return signedInTo(request, user, next);
     }
 
@@ -350,7 +360,7 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
         return invite ? html(invitePage(base, { code, email: invite.email, role: invite.role, ...(invite.site === undefined ? {} : { site: invite.site }), host: url.host }, lang)) : html(inviteGonePage(base, lang), 410);
       }
       if (method === "POST") {
-        const form = new URLSearchParams(await request.text());
+        const form = new URLSearchParams(await readTextCapped(request, MAX_BODY_BYTES));
         const code = form.get("code") ?? "";
         const invite = await accounts.inviteByCode(code, now());
         if (!invite) return html(inviteGonePage(base, lang), 410);
@@ -368,6 +378,16 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
       }
     }
     return null;
+  }
+
+  /** A body past the cap is refused here, since not every host caps a request body before it reaches the app. */
+  async function capped<T>(run: () => Promise<T>): Promise<T | Response> {
+    try {
+      return await run();
+    } catch (error) {
+      if (error instanceof BodyTooLong) return coded("Send a smaller body", "body_too_large", 413);
+      throw error;
+    }
   }
 
   async function recheck(user: User, input: Record<string, unknown>, field: string, wrong: [string, string]): Promise<Response | null> {
@@ -547,13 +567,14 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     accounts,
     signedIn,
     hasAccount,
-    async confirmPassword(request) {
-      const user = await signedIn(request);
-      if (!user) return coded("Sign in first", "sign_in", 401);
-      const input = await body(request);
-      if (!input) return coded("Send JSON", "send_json", 415);
-      return recheck(user, input, "password", ["Your password is not right", "password_wrong"]);
-    },
+    confirmPassword: (request) =>
+      capped(async () => {
+        const user = await signedIn(request);
+        if (!user) return coded("Sign in first", "sign_in", 401);
+        const input = await body(request);
+        if (!input) return coded("Send JSON", "send_json", 415);
+        return recheck(user, input, "password", ["Your password is not right", "password_wrong"]);
+      }),
     async access(request) {
       const user = await signedIn(request);
       if (!user) return false;
@@ -571,21 +592,23 @@ export function accountsWeb(options: AccountsWebOptions): AccountsWeb {
     async tokensOf(by) {
       return new Set((await store.settingsStartingWith(MADE_BY)).filter(({ value }) => value === by).map(({ key }) => key.slice(MADE_BY.length)));
     },
-    async handle(request, path, context = {}) {
-      if (path === "/api/account" || path.startsWith("/api/account/") || path === "/api/people" || path.startsWith("/api/people/") || path.startsWith("/api/invites/")) {
-        return api(request, path);
-      }
-      const page = await pages(request, path, context);
-      if (page) return page;
-      // The dashboard itself: straight to sign-in, or to setting up the first account.
-      if ((path === "/" || path === "") && request.method === "GET" && !(await signedIn(request))) {
-        if (!(await hasAccount())) return first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked(acceptedLanguage(request));
-        const search = new URL(request.url).search;
-        return redirect(`${base}/login${search ? `?next=${encodeURIComponent(`${home}${search}`)}` : ""}`);
-      }
-      return null;
-    },
+    handle: (request, path, context = {}) => capped(() => answer(request, path, context)),
   };
+
+  async function answer(request: Request, path: string, context: RequestContext): Promise<Response | null> {
+    if (path === "/api/account" || path.startsWith("/api/account/") || path === "/api/people" || path.startsWith("/api/people/") || path.startsWith("/api/invites/")) {
+      return api(request, path);
+    }
+    const page = await pages(request, path, context);
+    if (page) return page;
+    // The dashboard itself: straight to sign-in, or to setting up the first account.
+    if ((path === "/" || path === "") && request.method === "GET" && !(await signedIn(request))) {
+      if (!(await hasAccount())) return first === "open" || asksForToken ? redirect(`${base}/setup`) : setupLocked(acceptedLanguage(request));
+      const search = new URL(request.url).search;
+      return redirect(`${base}/login${search ? `?next=${encodeURIComponent(`${home}${search}`)}` : ""}`);
+    }
+    return null;
+  }
 }
 
 /** A random one-time code, such as the one a server prints to unlock its first account. */

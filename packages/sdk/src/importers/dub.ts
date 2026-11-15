@@ -1,5 +1,6 @@
 import { HttpError, getJson } from "./http.js";
 import { ImportError, type DailyClicks, type ForeignClick, type Importer } from "./types.js";
+import { MAX_LINK_CLICKS } from "./write.js";
 
 /** https://dub.co/docs/api-reference */
 const BASE = "https://api.dub.co";
@@ -72,7 +73,8 @@ export const dub: Importer = {
                 os: e.click?.os,
               });
             }
-            if (events.length < 1000) break;
+            // No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+            if (events.length < 1000 || clicks.length >= MAX_LINK_CLICKS) break;
           }
           state.history = "events";
         } catch (error) {

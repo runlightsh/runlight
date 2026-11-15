@@ -6,6 +6,7 @@
  * and the address is not in it, and "" when there is nothing to check against: no list for that agent,
  * or no usable address. The address is only compared, never kept.
  */
+import { readTextCapped } from "./body.js";
 import type { AiAgent } from "./data/agents.js";
 
 export type AgentCheck = "verified" | "mismatch" | "";
@@ -131,11 +132,8 @@ export async function downloadRangeList(url: string, timeoutMs = 15_000): Promis
   try {
     const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "Runlight (+https://runlight.sh)" }, redirect: "follow", signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return null;
-    const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > MAX_LIST_BYTES) return null;
-    const text = await response.text();
-    if (text.length > MAX_LIST_BYTES) return null;
-    return readRangeList(JSON.parse(text));
+    // Read no further than a list can be, whatever length the reply declares, or when it declares none.
+    return readRangeList(JSON.parse(await readTextCapped(response, MAX_LIST_BYTES)));
   } catch {
     return null;
   }

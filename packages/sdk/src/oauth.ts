@@ -17,6 +17,7 @@
  * only opens its read-only dashboard in the CMS, and the answer also carries
  * the site's agents key, so connecting fills in the plugin's settings.
  */
+import { BodyTooLong, readJsonCapped, readTextCapped } from "./body.js";
 import { hmac, randomId, sha256 } from "./hash.js";
 import { seal, unseal } from "./mail/secret.js";
 import { RateLimit } from "./limit.js";
@@ -129,6 +130,12 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", ...CORS } });
 }
 
+/** A body that is not JSON reads as none; one past the cap is still refused. */
+const notJson = (error: unknown): null => {
+  if (error instanceof BodyTooLong) throw error;
+  return null;
+};
+
 const oauthError = (error: string, description: string, status = 400) => json({ error, error_description: description }, status);
 
 /** base64url of SHA-256, as PKCE's S256 method compares. */
@@ -139,8 +146,11 @@ export async function s256(verifier: string): Promise<string> {
   return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Redirect addresses a client may register: https, or a local app's own loopback address. */
-const allowedRedirect = (value: string) => /^https:\/\/[^/]+/.test(value) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//.test(value);
+/** Redirect addresses a client may register: https, or a local app's own loopback address, and one that parses as an address at all. */
+const allowedRedirect = (value: string) => (/^https:\/\/[^/]+/.test(value) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//.test(value)) && URL.canParse(value);
+
+/** The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller. */
+const MAX_BODY_BYTES = 64 * 1024;
 
 export interface OAuthContext {
   runlight: Runlight;
@@ -151,6 +161,8 @@ export interface OAuthContext {
   signIn?: string;
   /** Whether the request comes from someone signed in who may only read, such as a viewer. */
   isReader?: (request: Request) => Promise<boolean>;
+  /** Whether the request comes from an account kept to one site, which connects no apps and is told so in its own words. */
+  isSiteOnly?: (request: Request) => Promise<boolean>;
   /** The account a request comes from, where the app has accounts. */
   accountOf?: (request: Request) => Promise<string | null>;
   /** Notes who made a token; false when they can no longer make one, which takes it back. */
@@ -168,6 +180,16 @@ export const resourceMetadataUrl = (origin: string, base: string) => `${origin}$
  * at the site's root (`/.well-known/...`) for clients that look there.
  */
 export async function oauthResponse(ctx: OAuthContext, request: Request, path: string, url: URL, context: RequestContext = {}): Promise<Response | null> {
+  try {
+    return await respond(ctx, request, path, url, context);
+  } catch (error) {
+    // Capped here, since not every host caps a request body before it reaches the app.
+    if (error instanceof BodyTooLong) return oauthError("invalid_request", "Send a smaller body", 413);
+    throw error;
+  }
+}
+
+async function respond(ctx: OAuthContext, request: Request, path: string, url: URL, context: RequestContext): Promise<Response | null> {
   const { runlight, base } = ctx;
   const issuer = `${url.origin}${base}`;
   const known = path;
@@ -195,7 +217,7 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     let limit = registrations.get(runlight);
     if (!limit) registrations.set(runlight, (limit = new RateLimit(REGISTRATIONS_PER_MINUTE, () => runlight.now())));
     if (!(await limit.allow(runlight.clientIp(request, context)))) return oauthError("invalid_client_metadata", "Too many registrations from this address. Wait a minute and try again.", 429);
-    const body = (await request.json().catch(() => null)) as { client_name?: unknown; redirect_uris?: unknown } | null;
+    const body = (await readJsonCapped(request, MAX_BODY_BYTES).catch(notJson)) as { client_name?: unknown; redirect_uris?: unknown } | null;
     const redirects = Array.isArray(body?.redirect_uris) ? body!.redirect_uris.map(String).filter(allowedRedirect).slice(0, 10) : [];
     if (!redirects.length) return oauthError("invalid_redirect_uri", "Register at least one https redirect address");
     return register(runlight, String(body?.client_name ?? "An app"), redirects);
@@ -205,12 +227,16 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     await runlight.init();
     const { html, lang } = translator(acceptedLanguage(request));
     const page = (title: string, body: string, status = 200) => pageIn(lang, title, body, status);
-    const form = request.method === "POST" ? new URLSearchParams(await request.text()) : url.searchParams;
+    const posted = request.method === "POST" ? await readTextCapped(request, MAX_BODY_BYTES) : null;
+    const form = posted === null ? url.searchParams : new URLSearchParams(posted);
+    // The app's own check of who is asking gets the form unread each time, so it can find the csrf field there.
+    const asker = () => (posted === null ? request : new Request(request.url, { method: "POST", headers: request.headers, body: posted }));
     const clientId = form.get("client_id") ?? "";
     const client = (await clientFor(runlight, clientId))?.client ?? null;
     const redirect = form.get("redirect_uri") ?? "";
     // Without a known client and one of its own addresses there is nowhere safe to send an answer.
-    if (!client || !client.redirects.includes(redirect)) return page(html("oauth.unregisteredTitle"), `<p>${html("oauth.startAgain")}</p>`, 400);
+    // An address that does not parse, from an app registered before those were refused, is no address of its own.
+    if (!client || !client.redirects.includes(redirect) || !URL.canParse(redirect)) return page(html("oauth.unregisteredTitle"), `<p>${html("oauth.startAgain")}</p>`, 400);
     const back = (params: Record<string, string>) => {
       const to = new URL(redirect);
       for (const [k, v] of Object.entries(params)) to.searchParams.set(k, v);
@@ -234,10 +260,11 @@ export async function oauthResponse(ctx: OAuthContext, request: Request, path: s
     const local = runlight.sites.filter((s) => !runlight.remote(s.id));
     const counting = local.length === 1 && local[0]!.hostnames.length === 0 ? local : local.filter((s) => s.hostnames.includes(host));
 
-    if (!(await ctx.isOwner(request))) {
+    if (!(await ctx.isOwner(asker()))) {
       // Someone signed in who may only read would be sent to sign in again and again.
-      if (ctx.isReader && (await ctx.isReader(request))) {
-        return page(html("oauth.viewerTitle"), `<p>${html("oauth.viewer", { app: esc(client.name) })}</p>`, 403);
+      if (ctx.isReader && (await ctx.isReader(asker()))) {
+        const siteOnly = ctx.isSiteOnly ? await ctx.isSiteOnly(asker()) : false;
+        return page(html("oauth.viewerTitle"), `<p>${html(siteOnly ? "oauth.siteAccount" : "oauth.viewer", { app: esc(client.name) })}</p>`, 403);
       }
       // The site stays, since on the way in it only says which one to offer first.
       const here = `${url.pathname}?${new URLSearchParams([...form.entries()].filter(([k]) => k !== "decision")).toString()}`;
@@ -315,7 +342,7 @@ ${sendsTo}
     if (site && !runlight.site(site)) return back({ error: "invalid_request", error_description: "Unknown site" });
     if (manage && (!site || runlight.remote(site))) return back({ error: "invalid_request", error_description: "Pick the site to manage" });
     const code = randomId(32);
-    const by = (await ctx.accountOf?.(request)) ?? null;
+    const by = (await ctx.accountOf?.(asker())) ?? null;
     const grant: Code = { client: clientId, redirect, challenge, site, scope: cms ? "cms" : manage ? "manage" : "read", expires: runlight.now() + CODE_MS, ...(by ? { by } : {}) };
     await runlight.store.setSetting(`oauth-code:${await sha256(code)}`, JSON.stringify(grant));
     return back({ code });
@@ -324,7 +351,7 @@ ${sendsTo}
   if (path === "/oauth/token" && request.method === "POST") {
     await runlight.init();
     const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim();
-    const form = type === "application/json" ? new URLSearchParams(Object.entries(((await request.json().catch(() => ({}))) as Record<string, string>) ?? {})) : new URLSearchParams(await request.text());
+    const form = type === "application/json" ? new URLSearchParams(Object.entries(((await readJsonCapped(request, MAX_BODY_BYTES).catch(notJson)) as Record<string, string> | null) ?? {})) : new URLSearchParams(await readTextCapped(request, MAX_BODY_BYTES));
     if (form.get("grant_type") !== "authorization_code") return oauthError("unsupported_grant_type", "Only authorization_code is supported");
     const key = `oauth-code:${await sha256(form.get("code") ?? "")}`;
     // A code works once: it is gone before anything else is checked, and of two swaps at once only one gets it.

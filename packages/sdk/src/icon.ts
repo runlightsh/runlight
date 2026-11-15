@@ -33,7 +33,8 @@ function attrs(tag: string): Map<string, string> {
 /** Icon URLs a page links to, best first: apple-touch-icon, then SVG and PNG icons, then any icon. */
 export function iconLinks(html: string, base: string): string[] {
   const found: Array<{ url: string; score: number }> = [];
-  for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
+  // A tag is at most a few thousand characters; the bound keeps a page of unclosed tags from being read over and over.
+  for (const tag of html.match(/<link\b[^<>]{0,4000}>/gi) ?? []) {
     const attributes = attrs(tag);
     const rel = (attributes.get("rel") ?? "").toLowerCase().split(/\s+/);
     const href = attributes.get("href") ?? "";

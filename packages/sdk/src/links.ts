@@ -53,6 +53,12 @@ function defaultName(url: string): string {
 
 /** Short links: create, change, delete, and import, with the rules every route shares. */
 export class Links {
+  /**
+   * Slugs no new link may take, for a host whose own pages sit where a link domain's links do: the standalone
+   * server answers /login, /api, and the rest on every name, so a link there would never open on its own domain.
+   */
+  reserved: ReadonlySet<string> = new Set();
+
   constructor(private readonly runlight: Runlight) {}
 
   private async domainFor(site: string, value: unknown): Promise<string> {
@@ -69,11 +75,13 @@ export class Links {
       if (!SLUG_PATTERN.test(wanted)) throw new LinkError("A slug is letters, digits, dashes, and underscores, up to 100", "link_slug");
       const taken = await this.runlight.store.linkBySlug(wanted);
       if (taken && taken.id !== except) throw new LinkError(`/${wanted} is already taken`, "link_taken", { slug: wanted });
+      // A link made before the slug was kept back keeps it.
+      if (this.reserved.has(wanted) && !taken) throw new LinkError(`/${wanted} is one of this server's own pages, so a link there would never open on a link domain`, "link_reserved", { slug: wanted });
       return wanted;
     }
     for (let i = 0; i < 8; i++) {
       const slug = randomSlug();
-      if (!(await this.runlight.store.linkBySlug(slug))) return slug;
+      if (!this.reserved.has(slug) && !(await this.runlight.store.linkBySlug(slug))) return slug;
     }
     throw new LinkError("Could not find a free slug; try again", "link_no_slug");
   }

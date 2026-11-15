@@ -118,7 +118,8 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "TZ=UTC node --import tsx --test test/*.test.ts"
+    "test": "TZ=UTC node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "node ../../scripts/prepublish.mjs"
   },
   "peerDependencies": {
     "@libsql/client": ">=0.14",

@@ -345,17 +345,6 @@ const MAX_PARAMS = 96;
 /** The built days inside a range, as a subquery taking (site, from, to). */
 const BUILT_DAYS = "SELECT day FROM rl_rollup_days WHERE site = ? AND start_at >= ? AND end_at <= ?";
 
-/** Orders text by code point, as SQLite and Postgres's "C" collation do (JavaScript's < compares UTF-16 units). */
-function codeOrder(a: string, b: string): number {
-  const x = [...a];
-  const y = [...b];
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    const d = x[i]!.codePointAt(0)! - y[i]!.codePointAt(0)!;
-    if (d) return d;
-  }
-  return x.length - y.length;
-}
-
 /** Runs a query over pieces of a list and joins the answers, in order. */
 async function inPieces<T, R>(items: T[], size: number, run: (piece: T[]) => Promise<R[]>): Promise<R[]> {
   const out: R[] = [];
@@ -631,6 +620,23 @@ const like = (dialect: Db["dialect"], col: string): string => (dialect === "clic
 
 /** Text in lower case, any letter: ClickHouse's LOWER folds ASCII letters only, and lowerUTF8 the rest. */
 const lower = (dialect: Db["dialect"], col: string): string => (dialect === "clickhouse" ? `lowerUTF8(${col})` : `LOWER(${col})`);
+
+/**
+ * Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even
+ * number of backslashes. JSON.stringify writes both for a string that holds them, and they are valid JSON.
+ */
+const PG_UNREADABLE_PROPS = String.raw`(?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}`;
+
+/**
+ * An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+ * escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props,
+ * rather than failing every report that reads its event. SQLite and ClickHouse read them as they are.
+ */
+function readableProps(dialect: Db["dialect"]): string {
+  if (dialect === "postgres") return `(CASE WHEN e.props !~ '${PG_UNREADABLE_PROPS}' THEN e.props END)::jsonb`;
+  if (dialect === "mysql") return `(CASE WHEN JSON_VALID(e.props) THEN e.props END)`;
+  return "e.props";
+}
 
 function column(dimension: Filter["dimension"]): string {
   return isSessionDimension(dimension) ? `s.${SESSION_DIMENSIONS[dimension]}` : `e.${EVENT_DIMENSIONS[dimension]}`;
@@ -1238,7 +1244,7 @@ export class SqlStore {
 
   /**
    * A breakdown of a visit dimension or of pages from rollups and the visits
-   * left over, merged, then sorted and cut to the page asked for.
+   * left over, merged, sorted, and cut to the page asked for by the database.
    */
   private async rolledBreakdown(query: Query, dimension: Dimension, limit: number, offset: number): Promise<BreakdownRow[] | null> {
     const page = dimension === "page";
@@ -1248,94 +1254,101 @@ export class SqlStore {
     // Pages and events always go this way without filters, so a range gives the same answer whether its days are built or not.
     const plan = (await this.rollupPlan(query, query.from, query.to)) ?? (page || event ? { days: [], rest: [[query.from, query.to]] as Array<[number, number]> } : null);
     if (!plan) return null;
-    type Sums = { visitors: number; visits: number; pageviews: number; bounced: number; duration: number; engaged: number; views: number; scroll_sum: number; scroll_n: number; events: number };
-    const sums = new Map<string, Sums>();
-    const bump = (row: Record<string, unknown>) => {
-      const key = String(row.value);
-      const into: Sums = sums.get(key) ?? { visitors: 0, visits: 0, pageviews: 0, bounced: 0, duration: 0, engaged: 0, views: 0, scroll_sum: 0, scroll_n: 0, events: 0 };
-      for (const k of Object.keys(into) as Array<keyof Sums>) into[k] += num(row[k]);
-      sums.set(key, into);
-    };
+    // Each source adds up its own rows by value, and the database adds the sources together, sorts them,
+    // and cuts them to the page asked for, so no more than that page is ever read into memory.
+    const COLUMNS = ["visitors", "visits", "pageviews", "bounced", "duration", "engaged", "views", "scroll_sum", "scroll_n", "events"] as const;
+    const part = (value: string, counted: Partial<Record<(typeof COLUMNS)[number], string>>) => `${value} AS value, ${COLUMNS.map((c) => `${counted[c] ?? "0"} AS ${c}`).join(", ")}`;
+    const parts: string[] = [];
+    const params: unknown[] = [];
     if (plan.days.length) {
-      const rolled = await this.db.all(
-        `SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (${BUILT_DAYS}) GROUP BY value`,
-        [query.site, dimension, query.site, query.from, query.to],
-      );
-      for (const row of rolled) bump(row);
+      parts.push(`SELECT value, ${COLUMNS.join(", ")} FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (${BUILT_DAYS})`);
+      params.push(query.site, dimension, query.site, query.from, query.to);
     }
     const w = SqlStore.within(plan.rest);
-    if ((page || event) && plan.rest.length) {
-      // A visit's pageviews and events belong to the day it started, as in the rollups.
-      // Bounded by time as well, so the events index finds them (see buildRollupDay).
-      const lo = Math.min(...plan.rest.map(([a]) => a));
-      const hi = Math.max(...plan.rest.map(([, b]) => b)) + EVENT_TAIL_MS;
-      // ClickHouse's events carry the start of their visit, which saves joining each one to it: a pageview or
-      // an event is counted into its visit, and an engagement belongs to a pageview, so the visit counts.
-      const own = this.db.dialect === "clickhouse";
-      const started = own ? SqlStore.within(plan.rest, "e.started_at") : w;
-      const ofRest = (kind: string) =>
-        own
-          ? `FROM rl_events e WHERE e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${started.sql}`
-          : `FROM ${eventKindTable(this.db.dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${IS_VISIT} AND ${w.sql}`;
-      const at = [query.site, lo, hi, ...started.params];
+    // A visit's pageviews and events belong to the day it started, as in the rollups.
+    // Bounded by time as well, so the events index finds them (see buildRollupDay).
+    const lo = Math.min(...plan.rest.map(([a]) => a));
+    const hi = Math.max(...plan.rest.map(([, b]) => b)) + EVENT_TAIL_MS;
+    // ClickHouse's events carry the start of their visit, which saves joining each one to it: a pageview or
+    // an event is counted into its visit, and an engagement belongs to a pageview, so the visit counts.
+    const own = this.db.dialect === "clickhouse";
+    const started = own ? SqlStore.within(plan.rest, "e.started_at") : w;
+    const ofRest = (kind: string) =>
+      own
+        ? `FROM rl_events e WHERE e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${started.sql}`
+        : `FROM ${eventKindTable(this.db.dialect)} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '${kind}' AND e.ts >= ? AND e.ts < ? AND ${IS_VISIT} AND ${w.sql}`;
+    const at = [query.site, lo, hi, ...started.params];
+    if (plan.rest.length) {
       if (page) {
-        for (const row of await this.db.all(`SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS pageviews, ${LIVE_VIEWS} AS views ${ofRest("pageview")} GROUP BY e.path`, at)) bump(row);
-        // Engaged time is added up per pageview first. On ClickHouse a big range goes in slices by when each visit
-        // started, so each pageview is in one slice, and each slice reads only its own stretch of the events and
-        // holds about ENGAGED_PER_SLICE of them in memory at once.
+        parts.push(`SELECT ${part("e.path", { visitors: "COUNT(DISTINCT e.visitor)", pageviews: "COUNT(*)", views: LIVE_VIEWS })} ${ofRest("pageview")} GROUP BY e.path`);
+        params.push(...at);
+      } else if (event) {
+        parts.push(`SELECT ${part("e.name", { visitors: "COUNT(DISTINCT e.visitor)", events: "COUNT(*)" })} ${ofRest("event")} GROUP BY e.name`);
+        params.push(...at);
+      } else {
+        const col = `s.${SESSION_DIMENSIONS[dimension as SessionDimension]}`;
+        const counted = { visitors: "COUNT(DISTINCT s.visitor)", visits: "COUNT(*)", pageviews: "SUM(s.pageviews)", bounced: `SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END)`, duration: `SUM(${DURATION})` };
+        parts.push(`SELECT ${part(col, counted)} FROM rl_sessions s WHERE s.site = ? AND ${IS_VISIT} AND ${w.sql} AND ${col} <> '' GROUP BY ${col}`);
+        params.push(query.site, ...w.params);
+      }
+    }
+    const entryExit = dimension === "entry" || dimension === "exit";
+    const order = entryExit ? "n_visits DESC" : event ? "n_visitors DESC, n_events DESC" : page ? "n_visitors DESC, n_pageviews DESC" : "n_visitors DESC, n_visits DESC";
+    const rows = await this.db.all(
+      `SELECT value, ${COLUMNS.map((c) => `SUM(${c}) AS n_${c}`).join(", ")} FROM (${parts.join(" UNION ALL ")}) t
+       ${event ? "" : "WHERE value <> ''"} GROUP BY value ORDER BY ${order}, value${this.textOrder} LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
+    );
+    // The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+    const rest = new Map<string, { engaged: number; scroll_sum: number; scroll_n: number }>();
+    if (page && plan.rest.length && rows.length) {
+      // Engaged time is added up per pageview first. On ClickHouse a big range goes in slices by when each visit
+      // started, so each pageview is in one slice, and each slice reads only its own stretch of the events and
+      // holds about ENGAGED_PER_SLICE of them in memory at once.
+      const size = Math.max(1, Math.min(VALUES_PER_QUERY, MAX_PARAMS - at.length - 4));
+      const engaged = await inPieces(rows.map((row) => String(row.value)), size, async (piece) => {
+        const paths = ` AND e.path IN (${piece.map(() => "?").join(", ")})`;
         let slices: Array<[number, number] | null> = [null];
         if (own) {
-          const [n] = await this.db.all(`SELECT COUNT(*) AS n ${ofRest("engagement")}`, at);
+          const [n] = await this.db.all(`SELECT COUNT(*) AS n ${ofRest("engagement")}${paths}`, [...at, ...piece]);
           const count = Math.min(64, Math.max(1, Math.ceil(num(n?.n) / this.engagedPerSlice)));
-          const from = lo;
           const span = hi - EVENT_TAIL_MS - lo;
-          if (count > 1) slices = Array.from({ length: count }, (_, i) => [from + Math.floor((span * i) / count), from + Math.floor((span * (i + 1)) / count)]);
+          if (count > 1) slices = Array.from({ length: count }, (_, i) => [lo + Math.floor((span * i) / count), lo + Math.floor((span * (i + 1)) / count)]);
         }
-        const engaged = await Promise.all(
+        const found = await Promise.all(
           slices.map((slice) =>
             this.db.all(
               `SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest ${ofRest("engagement")}${slice ? " AND e.started_at >= ? AND e.started_at < ? AND e.ts >= ? AND e.ts < ?" : ""}
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest ${ofRest("engagement")}${paths}${slice ? " AND e.started_at >= ? AND e.started_at < ? AND e.ts >= ? AND e.ts < ?" : ""}
                  GROUP BY e.path, e.pageview) t GROUP BY value`,
-              slice ? [...at, slice[0], slice[1], slice[0], slice[1] + EVENT_TAIL_MS] : at,
+              slice ? [...at, ...piece, slice[0], slice[1], slice[0], slice[1] + EVENT_TAIL_MS] : [...at, ...piece],
             ),
           ),
         );
-        for (const row of engaged.flat()) bump(row);
-      } else {
-        for (const row of await this.db.all(`SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events ${ofRest("event")} GROUP BY e.name`, at)) bump(row);
+        return found.flat();
+      });
+      for (const row of engaged) {
+        const into = rest.get(String(row.value)) ?? { engaged: 0, scroll_sum: 0, scroll_n: 0 };
+        into.engaged += num(row.engaged);
+        into.scroll_sum += num(row.scroll_sum);
+        into.scroll_n += num(row.scroll_n);
+        rest.set(String(row.value), into);
       }
-    } else if (page || event) {
-      // Every day of the range is built.
-    } else {
-      const col = `s.${SESSION_DIMENSIONS[dimension as SessionDimension]}`;
-      for (const row of await this.db.all(
-        `SELECT ${col} AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-           SUM(CASE WHEN ${BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM(${DURATION}) AS duration
-         FROM rl_sessions s WHERE s.site = ? AND ${IS_VISIT} AND ${w.sql} AND ${col} <> '' GROUP BY ${col}`,
-        [query.site, ...w.params],
-      )) bump(row);
     }
-    const entryExit = dimension === "entry" || dimension === "exit";
-    const rows = [...sums.entries()].filter(([value, x]) => (event || value !== "") && (page ? x.pageviews > 0 : event ? x.events > 0 : x.visits > 0));
-    rows.sort(([a, x], [b, y]) =>
-      entryExit ? y.visits - x.visits || codeOrder(a, b)
-      : event ? y.visitors - x.visitors || y.events - x.events || codeOrder(a, b)
-      : page ? y.visitors - x.visitors || y.pageviews - x.pageviews || codeOrder(a, b)
-      : y.visitors - x.visitors || y.visits - x.visits || codeOrder(a, b),
-    );
-    return rows.slice(offset, offset + limit).map(([value, x]) => {
+    return rows.map((row) => {
+      const value = String(row.value);
+      const x = Object.fromEntries(COLUMNS.map((c) => [c, num(row[`n_${c}`])])) as Record<(typeof COLUMNS)[number], number>;
       if (event) return { value, visitors: x.visitors, events: x.events };
       if (page) {
+        const more = rest.get(value);
+        const scrollN = x.scroll_n + (more?.scroll_n ?? 0);
         return {
           value,
           visitors: x.visitors,
           pageviews: x.pageviews,
           // Over every pageview that could report its time, counting those that sent none (under a second) as none.
-          timeOnPage: x.views > 0 ? Math.round(x.engaged / x.views) : 0,
-          scrollDepth: x.scroll_n > 0 ? Math.round(x.scroll_sum / x.scroll_n) : 0,
+          timeOnPage: x.views > 0 ? Math.round((x.engaged + (more?.engaged ?? 0)) / x.views) : 0,
+          scrollDepth: scrollN > 0 ? Math.round((x.scroll_sum + (more?.scroll_sum ?? 0)) / scrollN) : 0,
         };
       }
       const out: BreakdownRow = { value, visitors: x.visitors, visits: x.visits, bounceRate: x.visits > 0 ? x.bounced / x.visits : 0 };
@@ -1414,7 +1427,10 @@ export class SqlStore {
 
   /** Deletes every salt but those of these days, so the hashes made with them can never be made again. */
   async dropSaltsExcept(days: string[]): Promise<void> {
-    await this.db.run(`DELETE FROM rl_salts WHERE day NOT IN (${days.map(() => "?").join(", ")})`, days);
+    // Never a day after the newest of these: a process whose clock is a moment behind must not delete the
+    // salt another has just made for the day that began.
+    const newest = days.reduce((a, b) => (a > b ? a : b));
+    await this.db.run(`DELETE FROM rl_salts WHERE day NOT IN (${days.map(() => "?").join(", ")}) AND day < ?`, [...days, newest]);
   }
 
   /** Whether a visit to one of these sites that started in a stretch of time was still going at `since`. */
@@ -1638,6 +1654,14 @@ export class SqlStore {
   async linkById(id: string): Promise<LinkRow | null> {
     const rows = await this.db.all(`SELECT * FROM rl_links WHERE id = ? AND deleted_at IS NULL LIMIT 1`, [id]);
     return rows[0] ? linkRow(rows[0]) : null;
+  }
+
+  /**
+   * Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id and
+   * its clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted.
+   */
+  async linkExists(id: string): Promise<boolean> {
+    return (await this.db.all(`SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1`, [id])).length > 0;
   }
 
   async insertLink(link: LinkRow): Promise<void> {
@@ -2019,7 +2043,7 @@ export class SqlStore {
   private propValue(prop: string): { sql: string; params: unknown[] } {
     if (this.db.dialect === "postgres") {
       return {
-        sql: `(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)`,
+        sql: `(CASE WHEN (${readableProps("postgres")} ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (${readableProps("postgres")} ->> ?)::numeric ELSE 0 END)`,
         params: [prop, prop],
       };
     }
@@ -2034,7 +2058,7 @@ export class SqlStore {
     const path = `$."${prop}"`;
     if (this.db.dialect === "mysql") {
       // As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-      const value = `JSON_EXTRACT(e.props, ?)`;
+      const value = `JSON_EXTRACT(${readableProps("mysql")}, ?)`;
       return {
         sql: `(CASE
           WHEN JSON_TYPE(${value}) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN CAST(${value} AS DOUBLE)
@@ -2065,7 +2089,7 @@ export class SqlStore {
         ? // Each key as a row of its own, compared and sorted by code point like every other value.
           await this.db.all(
             `SELECT j.k AS "key", COUNT(*) AS events FROM ${v.from}
-             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE ${MYSQL_COLLATION} PATH '$')) j
+             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(${readableProps("mysql")}) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE ${MYSQL_COLLATION} PATH '$')) j
              WHERE ${where} GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30`,
             params,
           )
@@ -2077,7 +2101,7 @@ export class SqlStore {
           )
         : this.db.dialect === "postgres"
         ? await this.db.all(
-            `SELECT k AS "key", COUNT(*) AS events FROM ${v.from} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k
+            `SELECT k AS "key", COUNT(*) AS events FROM ${v.from} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(${readableProps("postgres")}) = 'object' THEN ${readableProps("postgres")} ELSE '{}'::jsonb END) AS k
              WHERE ${where} GROUP BY k ORDER BY events DESC, k${this.textOrder} LIMIT 30`,
             params,
           )
@@ -2095,9 +2119,9 @@ export class SqlStore {
     // ClickHouse's value names the key three times: text as it is, anything else as its JSON, and JSON null as none.
     const value =
       this.db.dialect === "postgres"
-        ? `(e.props::jsonb ->> ?)`
+        ? `(${readableProps("postgres")} ->> ?)`
         : this.db.dialect === "mysql"
-          ? `(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE ${MYSQL_COLLATION})`
+          ? `(JSON_UNQUOTE(JSON_EXTRACT(${readableProps("mysql")}, ?)) COLLATE ${MYSQL_COLLATION})`
           : this.db.dialect === "clickhouse"
             ? `multiIf(JSONType(e.props, ?) = 'String', JSONExtractString(e.props, ?), JSONType(e.props, ?) = 'Null', NULL, JSONExtractRaw(e.props, ?))`
             : `CAST(json_extract(e.props, ?) AS TEXT)`;
@@ -2351,8 +2375,8 @@ export class SqlStore {
   // Reports
 
   /**
-   * Ties are broken by the value in code point order, the order the rolled-up path sorts in, so a report
-   * reads the same before and after its days are built. Postgres would otherwise use its locale's order.
+   * Ties are broken by the value in code point order, in every database alike, so a report reads the same
+   * before and after its days are built. Postgres would otherwise use its locale's order.
    * MySQL's columns already sort this way; a value worked out from JSON may not.
    */
   private get textOrder(): string {

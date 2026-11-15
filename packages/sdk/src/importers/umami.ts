@@ -1,5 +1,6 @@
 import { getJson } from "./http.js";
 import { ImportError, type ForeignClick, type Importer } from "./types.js";
+import { MAX_LINK_CLICKS } from "./write.js";
 
 interface UmamiLink {
   id: string;
@@ -74,7 +75,10 @@ export const umami: Importer = {
       const out: T[] = [];
       for (let page = 1; ; page++) {
         const body = await getJson<{ data: T[]; count: number }>(`${base}/api${path}&page=${page}&pageSize=1000`, { headers });
-        out.push(...body.data);
+        // One at a time: spreading a page far bigger than was asked for would pass the call stack's limit.
+        for (const row of body.data) out.push(row);
+        // No more than a link keeps: a longer history, or a server that never stops, ends here.
+        if (out.length >= MAX_LINK_CLICKS) return out.slice(0, MAX_LINK_CLICKS);
         if (out.length >= body.count || body.data.length === 0) return out;
       }
     };

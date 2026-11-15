@@ -1879,4 +1879,290 @@ const ESCAPES: Scenario[] = [
   },
 ];
 
-export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...PICKING, ...ESCAPES, ...CMS];
+const HOME = "https://example.com";
+const asks = (client: string) => `/oauth/authorize?response_type=code&client_id={{${client}}}&redirect_uri=${encodeURIComponent(CALLBACK)}&code_challenge=${CHALLENGE}&code_challenge_method=S256`;
+const jsonOnly = { "content-type": "application/json" };
+/** The owner, and someone invited to the site alpha alone who has joined, in the jar named after their role. */
+const alphaOnly = (role: "member" | "viewer"): Step[] => [
+  { method: "POST", path: "/setup", form: { code: "conformance", email: OWNER.email, password: OWNER.password, again: OWNER.password } },
+  { ...post("/api/people", { email: `${role}@example.com`, role, site: "alpha" }, jsonOnly), capture: { [`${role}Code`]: "link~code=([^&]+)" } },
+  { method: "POST", path: "/invite", jar: role, form: { code: `{{${role}Code}}`, password: "another long password", again: "another long password" } },
+];
+const TWO_SITES = [{ id: "alpha", name: "Alpha", timezone: "UTC", hostnames: ["alpha.example"] }, { id: "beta", name: "Beta", timezone: "UTC", hostnames: ["beta.example"] }];
+/** Text of a given length, for fields at a limit. */
+const pad = (length: number) => "x".repeat(length);
+/** Text of a given length written as {{pad:N}}, which the runner fills in, so a body past a cap is not kept in the file. */
+const long = (length: number) => `{{pad:${length}}}`;
+/** A tracker hit whose body is sent as the text given, for escapes a JSON file should not hold decoded. */
+const rawHit = (body: string, ip: string): Step => ({ method: "POST", path: "/e", headers: { "user-agent": CHROME, "x-forwarded-for": ip }, body });
+/** A user agent of more than 512 characters that starts as Chrome's. */
+const LONG_CHROME = `${CHROME} ${pad(600 - CHROME.length - 1)}`;
+
+const REVIEW: Scenario[] = [
+  {
+    name: "accounts: an account kept to one site on an app that does not know its own address",
+    site: { hostnames: [], timezone: "UTC" },
+    sites: TWO_SITES,
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { accounts: true, secret: "conformance-secret" },
+    steps: [
+      // An address too long to be one makes no first account.
+      { method: "POST", path: "/setup", form: { code: "conformance", email: `${pad(309)}@example.com`, password: OWNER.password, again: OWNER.password }, look: ["Enter an email address"] },
+      ...alphaOnly("member"),
+      // Like a hub, it adds no link domain and no report until the app knows where it lives, whatever Host it sends.
+      { ...post("/api/link-domains", { domain: "example.com" }, jsonOnly), jar: "member", host: "other.example.net" },
+      { ...post("/api/reports", { email: "reader@example.org", frequency: "weekly" }, jsonOnly), jar: "member", host: "other.example.net" },
+      { ...post("/api/reports", { email: "reader@example.org", frequency: "weekly" }, jsonOnly), jar: "member" },
+      { method: "GET", path: "/api/reports", jar: "member" },
+      // The owner is taken at their word.
+      post("/api/reports?site=alpha", { email: "reader@example.org", frequency: "weekly" }, jsonOnly),
+      // A picker ticket only for the dashboard it asked from.
+      { ...post("/api/pick", { origin: "https://elsewhere.example.net" }, jsonOnly), jar: "member" },
+      { ...post("/api/pick", { origin: HOME }, jsonOnly), jar: "member" },
+      { ...post("/api/pick", { origin: "https://other.example.net" }, jsonOnly), jar: "member", host: "other.example.net" },
+      post("/api/pick?site=alpha", { origin: "https://elsewhere.example.net" }, jsonOnly),
+      // It connects no app, and is told so in its own words, not sent to sign in again.
+      register("Claude", CALLBACK, "client"),
+      { method: "GET", path: asks("client"), jar: "member", look: ["Ask an owner to connect this", "Your account only has access to one site, and only an owner of this Runlight can connect Claude.", "signed in as a viewer"] },
+      { method: "POST", path: "/oauth/authorize", jar: "member", form: { response_type: "code", client_id: "{{client}}", redirect_uri: CALLBACK, code_challenge: CHALLENGE, code_challenge_method: "S256", decision: "allow", site: "" }, look: ["Your account only has access to one site"] },
+      // Only a path under /oauth/ is refused that way: the same words in a query are just a filter.
+      { method: "GET", path: "/api/stats?period=today&compare=off&filter=page:is:/oauth/authorize", jar: "member" },
+      { method: "GET", path: "/api/breakdown?period=today&dimension=page&filter=page:contains:/oauth/", jar: "member" },
+      // Someone who reads every site still hears that they are a viewer.
+      { ...post("/api/people", { email: "reader@example.com", role: "viewer", allSites: true }, jsonOnly), capture: { readerCode: "link~code=([^&]+)" } },
+      { method: "POST", path: "/invite", jar: "reader", form: { code: "{{readerCode}}", password: "another long password", again: "another long password" } },
+      { method: "GET", path: asks("client"), jar: "reader", look: ["Ask an owner to connect this", "You are signed in as a viewer", "Your account only has access to one site"] },
+      // An invitation takes no address over 320 characters, and one of exactly 320 is an address.
+      post("/api/people", { email: `${pad(309)}@example.com`, role: "viewer", allSites: true }, jsonOnly),
+      post("/api/people", { email: `${pad(308)}@example.com`, role: "viewer", allSites: true }, jsonOnly),
+    ],
+  },
+  {
+    name: "accounts: an account kept to one site on an app that knows its own address",
+    site: { hostnames: [], timezone: "UTC" },
+    sites: TWO_SITES,
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { accounts: true, secret: "conformance-secret", origin: HOME, appMailer: { via: "The app", from: "app@example.com" } },
+    steps: [
+      ...alphaOnly("member"),
+      // The dashboard's own name is refused as a link domain whatever Host the request names.
+      { ...post("/api/link-domains", { domain: "example.com" }, jsonOnly), jar: "member", host: "other.example.net" },
+      // A report's links point at the configured address, not at the Host its request came with.
+      { ...post("/api/reports", { email: "reader@example.org", frequency: "weekly" }, jsonOnly), jar: "member", host: "other.example.net", capture: { report: "report.id" } },
+      { ...post("/api/reports/{{report}}/send", undefined, jsonOnly), jar: "member", host: "other.example.net" },
+      // The picker goes to the configured address alone.
+      { ...post("/api/pick", { origin: "https://other.example.net" }, jsonOnly), jar: "member", host: "other.example.net" },
+      { ...post("/api/pick", { origin: HOME }, jsonOnly), jar: "member", host: "other.example.net" },
+    ],
+  },
+  {
+    name: "emails and domains too long to be one",
+    site: { hostnames: ["blog.example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { secret: "conformance-secret" },
+    steps: [
+      // 320 characters is the longest address; one more is refused before it is read as one.
+      post("/api/reports", { email: `${pad(309)}@example.com`, frequency: "weekly" }),
+      post("/api/reports", { email: `a@${".".repeat(400)}@`, frequency: "weekly" }),
+      post("/api/reports", { email: `  ${pad(308)}@example.com  `, frequency: "weekly" }),
+      post("/api/mail/test", { to: `${pad(309)}@example.com` }),
+      put("/api/mail", { service: "webhook", url: "https://hooks.example.net/runlight", from: `${pad(309)}@example.com` }),
+      // A domain is 253 characters at most, counted as it was typed, with its scheme and path.
+      post("/api/link-domains", { domain: `${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.runlight-conformance.com` }),
+      post("/api/link-domains", { domain: `${".".repeat(300)}x` }),
+      post("/api/link-domains", { domain: `https://go.runlight-conformance.com/${pad(230)}` }),
+      // Dots on the end are dropped, however many.
+      post("/api/link-domains", { domain: `HTTPS://WWW.Go.Runlight-Conformance.com${".".repeat(200)}` }),
+      get("/api/link-domains"),
+    ],
+  },
+  {
+    name: "bodies past the cap on sign-in, account, OAuth, and MCP paths",
+    site: { hostnames: [], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { accounts: true, managedSites: true, secret: "conformance-secret" },
+    steps: [
+      // 65,536 bytes is the most a form or an account change may be.
+      { method: "POST", path: "/setup", form: { code: "conformance", email: OWNER.email, password: long(66_000), again: pad(10) } },
+      { method: "POST", path: "/setup", form: { code: "conformance", email: OWNER.email, password: OWNER.password, again: OWNER.password } },
+      { ...signIn(OWNER.email, long(66_000)), jar: false },
+      { method: "POST", path: "/login/code", jar: false, form: { pending: "nope", code: long(66_000) } },
+      { method: "POST", path: "/invite", jar: false, form: { code: "nope", password: long(66_000), again: "x" } },
+      post("/api/account/password", { current: OWNER.password, next: long(66_000) }, jsonOnly),
+      post("/api/people", { email: "new@example.com", role: "viewer", allSites: true, note: long(66_000) }, jsonOnly),
+      { ...post("/api/sites", { name: "Kept", hostnames: ["kept.example"] }, jsonOnly), capture: { site: "site.id" } },
+      call("DELETE", "/api/sites/{{site}}", { password: long(66_000) }, jsonOnly),
+      { method: "GET", path: "/api/sites" },
+      // OAuth takes the same, and answers in its own shape. A long name under the cap is cut, not refused.
+      { method: "POST", path: "/oauth/register", jar: false, headers: jsonOnly, body: { client_name: long(66_000), redirect_uris: [CALLBACK] } },
+      { method: "POST", path: "/oauth/register", jar: false, headers: jsonOnly, body: { client_name: long(2_000), redirect_uris: [CALLBACK] } },
+      { method: "POST", path: "/oauth/authorize", jar: false, form: { response_type: "code", client_id: long(66_000), redirect_uri: CALLBACK } },
+      { method: "POST", path: "/oauth/token", jar: false, form: { grant_type: "authorization_code", code: long(66_000) } },
+      { method: "POST", path: "/oauth/token", jar: false, headers: jsonOnly, body: { grant_type: "authorization_code", code: long(66_000) } },
+      // MCP takes 1,048,576 bytes: a long message under it is read, one past it is not.
+      post("/mcp", { jsonrpc: "2.0", id: 1, method: "ping", params: { pad: long(70_000) } }, jsonOnly),
+      post("/mcp", { jsonrpc: "2.0", id: 2, method: "ping", params: { pad: long(1_048_576) } }, jsonOnly),
+      post("/mcp", "not json", jsonOnly),
+    ],
+  },
+  {
+    name: "OAuth: a redirect address that is no address",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    steps: [
+      { method: "POST", path: "/oauth/register", headers: jsonOnly, body: { client_name: "X", redirect_uris: ["https://["] } },
+      { method: "POST", path: "/oauth/register", headers: jsonOnly, body: { client_name: "X", redirect_uris: ["https://[", "https://exa mple.com/cb", "http://localhost:99999/cb", CALLBACK] } },
+    ],
+  },
+  {
+    name: "accounts: wrong second-factor codes lock for longer each time",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { accounts: true, secret: "conformance-secret" },
+    steps: [
+      { method: "POST", path: "/setup", form: { code: "conformance", email: OWNER.email, password: OWNER.password, again: OWNER.password } },
+      { ...post("/api/account/2fa/start", { password: OWNER.password }, jsonOnly), capture: { totp: "secret" } },
+      post("/api/account/2fa/confirm", { code: "{{totp:totp}}" }, jsonOnly),
+      // The owner's own browser signs in with a code, and is marked as one that has.
+      later(MINUTE, { ...signIn(OWNER.email, OWNER.password, {}, "own"), capture: { own: 'text~name="pending" value="([^"]+)"' } }),
+      { method: "POST", path: "/login/code", jar: "own", form: { pending: "{{own}}", code: "{{totp:totp}}", next: "/runlight/" } },
+      // Someone else has the password: five wrong codes, and the sixth is not looked at.
+      { ...signIn(OWNER.email, OWNER.password, {}, "guess"), capture: { pending: 'text~name="pending" value="([^"]+)"' } },
+      ...[1, 2, 3, 4, 5].map((): Step => ({ method: "POST", path: "/login/code", jar: "guess", form: { pending: "{{pending}}", code: "abcdef", next: "/runlight/" }, look: ["That code is not right."] })),
+      { method: "POST", path: "/login/code", jar: "guess", form: { pending: "{{pending}}", code: "abcdef", next: "/runlight/" } },
+      // The first lock is fifteen minutes from the fifth try: a right code a second short of it is refused.
+      later(15 * MINUTE - 1000, { ...signIn(OWNER.email, OWNER.password, {}, "guess"), capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
+      { method: "POST", path: "/login/code", jar: "guess", form: { pending: "{{pending}}", code: "{{totp:totp}}", next: "/runlight/" } },
+      // The owner's own browser is not held up by it.
+      { ...signIn(OWNER.email, OWNER.password, {}, "own"), capture: { own: 'text~name="pending" value="([^"]+)"' } },
+      { method: "POST", path: "/login/code", jar: "own", form: { pending: "{{own}}", code: "{{totp:totp}}", next: "/runlight/" } },
+      // Once it ends there are five more tries, and the lock after those is thirty minutes.
+      ...[1, 2, 3, 4, 5].map((n): Step => later(n === 1 ? 1000 : 0, { method: "POST", path: "/login/code", jar: "guess", form: { pending: "{{pending}}", code: "abcdef", next: "/runlight/" }, look: ["That code is not right."] })),
+      later(16 * MINUTE, { ...signIn(OWNER.email, OWNER.password, {}, "guess"), capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
+      { method: "POST", path: "/login/code", jar: "guess", form: { pending: "{{pending}}", code: "{{totp:totp}}", next: "/runlight/" } },
+      later(14 * MINUTE, { ...signIn(OWNER.email, OWNER.password, {}, "guess"), capture: { pending: 'text~name="pending" value="([^"]+)"' } }),
+      // A right code then gets in, and clears the count.
+      { method: "POST", path: "/login/code", jar: "guess", form: { pending: "{{pending}}", code: "{{totp:totp}}", next: "/runlight/" } },
+    ],
+  },
+  {
+    name: "the tracker: clicks over the limit, cleaned text, Kit, long user agents, and forwarded ports",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { rateLimit: 2 },
+    steps: [
+      // A click past the limit for its address still redirects, and is not counted. Hits share the count.
+      post("/api/links", { url: "https://example.org/sale", slug: "sale" }),
+      ...[1, 2, 3].map((): Step => ({ method: "GET", path: "/go/sale", to: "links", headers: { "user-agent": CHROME, "x-forwarded-for": "203.0.113.20" } })),
+      hit({ k: "pageview", u: "https://example.com/dropped", i: "d1" }, "203.0.113.20"),
+      get("/api/links?period=today"),
+      get("/api/stats?period=today&compare=off"),
+      // Stored text loses NUL, half a surrogate pair becomes U+FFFD, and a cut never splits a character.
+      // These two bodies are written out as text, so the file itself holds no NUL and no half pair, only their escapes.
+      later(MINUTE, rawHit(String.raw`{"k":"pageview","u":"https://example.com/clean?utm_source=a%00b&utm_campaign=c%00d","i":"c1","t":"a\u0000b","l":"en\u0000-GB"}`, "203.0.113.21")),
+      rawHit(String.raw`{"k":"event","u":"https://example.com/clean","i":"c1","n":" Sign\u0000up ","p":{"whole":"${pad(499)}\ud83d\ude00y","half":"a\ud83db","\u0000":"gone","k\u0000ey":"v\u0000al"}}`, "203.0.113.21"),
+      get("/api/breakdown?period=today&dimension=utm_source"),
+      get("/api/breakdown?period=today&dimension=utm_campaign"),
+      get("/api/breakdown?period=today&dimension=language"),
+      get("/api/breakdown?period=today&dimension=event"),
+      get("/api/event-props?period=today&event=Signup"),
+      get("/api/event-props?period=today&event=Signup&key=whole"),
+      get("/api/event-props?period=today&event=Signup&key=half"),
+      get("/api/event-props?period=today&event=Signup&key=key"),
+      // utm_source=kit is Kit, an email, in any case; a newsletter is still a newsletter.
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/?utm_source=kit", i: "k1" }, "203.0.113.22")),
+      hit({ k: "pageview", u: "https://example.com/?utm_source=ConvertKit", i: "k2" }, "203.0.113.23"),
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/?utm_source=newsletter", i: "k3" }, "203.0.113.24")),
+      get("/api/breakdown?period=today&dimension=source"),
+      get("/api/breakdown?period=today&dimension=channel"),
+      // A user agent of 600 characters is still Chrome, and a bot named past its 512th character is not seen.
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/long", i: "u1" }, "203.0.113.25", LONG_CHROME)),
+      hit({ k: "pageview", u: "https://example.com/long", i: "u2" }, "203.0.113.26", `${LONG_CHROME} Googlebot/2.1`),
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/long", i: "u3" }, "203.0.113.27", `${CHROME} Googlebot/2.1`)),
+      get("/api/breakdown?period=today&dimension=browser&filter=page:is:/long"),
+      get("/api/stats?period=today&compare=off&filter=page:is:/long"),
+      // A forwarded address with a port is the same visitor as without it, in IPv4 and in IPv6.
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/port", i: "p1" }, "203.0.113.7:51234")),
+      hit({ k: "pageview", u: "https://example.com/port", i: "p2" }, "203.0.113.7"),
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/port", i: "p3" }, "[2001:db8::1]:443")),
+      hit({ k: "pageview", u: "https://example.com/port", i: "p4" }, "2001:db8::1"),
+      later(MINUTE, hit({ k: "pageview", u: "https://example.com/port", i: "p5" }, "[2001:db8::1]")),
+      get("/api/stats?period=today&compare=off&filter=page:is:/port"),
+    ],
+  },
+  {
+    name: "connecting an install whose answer is not a site",
+    site: { hostnames: [], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 12, 0),
+    token: "conformance",
+    options: { managedSites: true, secret: "conformance-secret" },
+    upstream: [
+      { url: "https://noid.example.net/runlight/api/sites", body: { sites: [{ id: "", name: "No id", hostnames: ["noid.example.net"], timezone: "UTC" }] } },
+      { url: "https://longid.example.net/runlight/api/sites", body: { sites: [{ id: "i".repeat(65), name: "Long id", hostnames: [], timezone: "UTC" }] } },
+      { url: "https://numbers.example.net/runlight/api/sites", body: { sites: [{ id: 7, name: "Numbers", hostnames: [], timezone: "UTC" }] } },
+      { url: "https://noname.example.net/runlight/api/sites", body: { sites: [{ id: "shop", name: 5, hostnames: ["shop.example.net"], timezone: "UTC" }] } },
+      { url: "https://nothing.example.net/runlight/api/sites", body: { sites: [null] } },
+      { url: "https://bare.example.net/runlight/api/sites", body: { sites: [{ id: "shop", name: "", hostnames: ["", 5], timezone: "UTC" }] } },
+      { url: "https://odd.example.net/runlight/api/sites", body: { sites: [{ id: "shop", name: `  ${"n".repeat(90)}  `, hostnames: ["-_.Shop.Example.net"], timezone: "Mars/Base" }] } },
+    ],
+    steps: [
+      ...["noid", "longid", "numbers", "noname", "nothing"].map((name): Step => post("/api/sites", { remote: { url: `https://${name}.example.net/runlight`, token: "rl_x" } })),
+      get("/api/sites"),
+      // A hostname that is empty is none, so the id comes from the address, and so does a missing name.
+      later(1000, post("/api/sites", { remote: { url: "https://bare.example.net/runlight", token: "rl_x" } })),
+      // An id starts with a letter or a digit, and a name is 80 characters at most.
+      later(1000, post("/api/sites", { remote: { url: "https://odd.example.net/runlight", token: "rl_x" } })),
+      get("/api/sites"),
+    ],
+  },
+  {
+    name: "imports: a link deleted since it came in stays deleted, and what a CSV may bring",
+    site: { hostnames: ["blog.example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 7, 12, 0),
+    token: "conformance",
+    upstream: [
+      { url: "https://api.dub.co/links", body: [{ id: "dub1", domain: "dub.sh", key: "launch", url: "https://example.org/launch", title: "Launch", createdAt: "2026-09-01T10:00:00.000Z" }] },
+      { url: "https://api.dub.co/events", body: [{ timestamp: "2026-09-02T10:00:00.000Z", click: { id: "c1", country: "US", city: "Austin", device: "Mobile", browser: "Chrome", os: "iOS", referer: "twitter.com" } }] },
+    ],
+    steps: [
+      post("/api/links/import/dub", { credentials: { apiKey: "dub-key" } }),
+      { ...get("/api/links?from=2026-09-01&to=2026-09-30"), capture: { link: "links.0.id" } },
+      del("/api/links/{{link}}"),
+      // The second run finds the link it brought in before, deleted or not, and leaves it alone.
+      post("/api/links/import/dub", { credentials: { apiKey: "dub-key" } }),
+      get("/api/links?from=2026-09-01&to=2026-09-30"),
+      // A row dated before 2000 is skipped, and a hostname no address can hold becomes the site's own.
+      post("/api/import/csv/visits", {
+        rows: [
+          { time: "20240501", path: "/old", visitor: "a" },
+          { time: "1999-12-31T23:59:59Z", path: "/older", visitor: "a" },
+          { time: "2000-01-01", path: "/first", visitor: "a" },
+          { time: "2026-03-01T10:00:00Z", path: "/a", hostname: "my site.com", visitor: "b" },
+          { time: "2026-03-01T11:00:00Z", path: "/b", hostname: "evil.example/x?y", visitor: "c" },
+          { time: "2026-03-01T12:00:00Z", path: "/c", hostname: "shop.example.com", visitor: "d" },
+        ],
+      }),
+      get("/api/breakdown?from=2026-03-01&to=2026-03-01&dimension=hostname"),
+      get("/api/breakdown?from=2026-03-01&to=2026-03-01&dimension=page"),
+      get("/api/stats?from=2000-01-01&to=2000-01-01&compare=off"),
+      // A column never brings in an IP address or a user agent: such a value is left blank.
+      post("/api/import/csv/visits", {
+        rows: [
+          { time: "2026-03-02T10:00:00Z", path: "/x", visitor: "198.51.100.7", country: "CA", region: "198.51.100.7", city: "198.51.100.7", browser: CHROME, os: CHROME, screen: "198.51.100.7", language: "2001:db8::1" },
+          { time: "2026-03-02T11:00:00Z", path: "/y", visitor: "b", country: "CA", region: "QC", city: "2001:db8::1", browser: "203.0.113.5", os: "curl/8.4.0", screen: CHROME, language: CHROME },
+          { time: "2026-03-02T12:00:00Z", path: "/z", visitor: "c", country: "DE", region: "DE-BB", city: "Frankfurt (Oder)", browser: "vivaldi", os: "Haiku", screen: " 1440x900 ", language: " pt-BR " },
+        ],
+      }),
+      ...["region", "city", "browser", "os", "screen", "language"].map((d) => get(`/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=${d}`)),
+    ],
+  },
+];
+
+export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...PICKING, ...ESCAPES, ...CMS, ...REVIEW];

@@ -85,6 +85,7 @@ export interface RoutesOptions {
    * A token the dashboard sends back with every change it makes, in an x-runlight-csrf header, and the OAuth
    * consent form in a csrf field, for an `authorize` that checks where a change comes from, as a CMS checks
    * its own forms. Asked for each time the dashboard or the form is shown. The WordPress plugin gives a nonce.
+   * The consent form reaches `authorize` with its body unread, so the csrf field can be read from it.
    */
   csrf?: () => string;
   /**
@@ -171,12 +172,23 @@ function isJson(request: Request): boolean {
   return (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase() === "application/json";
 }
 
+/** Text without its final dots, read from the end, so a long run of dots costs no more than its length. */
+function withoutFinalDots(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === ".") end--;
+  return text.slice(0, end);
+}
+
 /** A Host or X-Forwarded-Host value as a bare name: lowercase, with no port, no final dot, and no www. */
 export function hostName(value: string): string {
   const first = value.split(",")[0]!.trim().toLowerCase();
   const name = first.startsWith("[") ? first.slice(0, first.indexOf("]") + 1) : first.replace(/:\d*$/, "");
-  return name.replace(/\.+$/, "").replace(/^www\./, "");
+  return withoutFinalDots(name).replace(/^www\./, "");
 }
+
+/** The longest email address and domain name there can be. Anything longer is refused before a pattern reads it. */
+const MAX_EMAIL = 320;
+const MAX_DOMAIN = 253;
 
 /** A domain name, such as go.example.com. */
 export const DOMAIN_NAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -484,6 +496,9 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
   const managed = new WeakMap<Request, TokenRow>();
   // A session's site restriction is checked on every API call, including assistant and MCP reads.
   const sessionScope = async (request: Request) => web ? web.signedIn(request) : null;
+  // A hub's manage token and an account kept to one site reach one site's settings and nothing of the install's,
+  // so neither is taken at its word about where this app lives: the Host of a request is the caller's to choose.
+  const restricted = async (request: Request) => managed.has(request) || (await sessionScope(request))?.site !== undefined;
   // Requests from a member: full access apart from the install-wide controls.
   const members = new WeakSet<Request>();
   /** The controls a member cannot change: the mail service and its keys, the assistant's settings, a site's agents key, and deleting a site. */
@@ -627,14 +642,16 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
    * is kept, or the refusal to send.
    */
   async function checkLinkDomain(request: Request, url: URL, site: string, value: unknown): Promise<string | Response> {
-    const domain = String(value ?? "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.+$/, "").replace(/^www\./, "");
+    const given = String(value ?? "").trim().toLowerCase();
+    if (given.length > MAX_DOMAIN) return coded("That is not a domain name", "domain_invalid", 400);
+    const domain = withoutFinalDots(given.replace(/^https?:\/\//, "").replace(/\/.*$/, "")).replace(/^www\./, "");
     if (!DOMAIN_NAME.test(domain)) return coded("That is not a domain name", "domain_invalid", 400);
     if (privateName(domain) || (await resolvesPrivately(domain))) return coded(`${domain} is not a public domain name. Use one that browsers anywhere can reach.`, "domain_not_public", 400, { domain });
     // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
     // The request's own Host is the caller's to choose, so the configured address and the names people
     // signed in from count too. A hub cannot know every name this app answers on, so it adds none until
-    // the app knows its own address.
-    if (managed.has(request) && !origin) return originNeeded();
+    // the app knows its own address, and neither does an account kept to one site, which has a hub's reach.
+    if ((await restricted(request)) && !origin) return originNeeded();
     const here = [request.headers.get("host"), request.headers.get("x-forwarded-host"), url.host].filter((h): h is string => Boolean(h));
     const own = [...(origin ? [new URL(origin).host] : []), ...here, ...((await options.ownHosts?.()) ?? [])].map(hostName);
     const taken = new Set([...own, ...runlight.sites.flatMap((s) => s.hostnames), ...runlight.sites.flatMap((s) => runlight.remote(s.id)?.hostnames ?? [])]);
@@ -993,7 +1010,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         const body = await readJson(request);
         if (body instanceof Response) return body;
         const to = String(body.to ?? "").trim();
-        if (!EMAIL.test(to)) return coded("Enter an email address to send the test to", "test_email", 400);
+        if (to.length > MAX_EMAIL || !EMAIL.test(to)) return coded("Enter an email address to send the test to", "test_email", 400);
         const settings = await runlight.mailSettings();
         if (!settings) return coded("Set up a mail service first", "mail_unset", 400);
         // One test a minute through each mail service, as samples are held, so the button cannot flood an inbox
@@ -1017,7 +1034,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
           const body = await readJson(request);
           if (body instanceof Response) return body;
           const email = String(body.email ?? "").trim().toLowerCase();
-          if (!EMAIL.test(email)) return coded("Enter an email address", "email_invalid", 400);
+          if (email.length > MAX_EMAIL || !EMAIL.test(email)) return coded("Enter an email address", "email_invalid", 400);
           const frequency = body.frequency === "monthly" ? "monthly" : "weekly";
           const existing = await runlight.store.reports(site.id);
           if (existing.some((r) => r.email === email && r.frequency === frequency)) return coded(`${email} already gets the ${frequency} report`, "report_exists", 400, { email });
@@ -1025,8 +1042,9 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
           // Links in the email point back to the configured address, or else to this dashboard at the address
           // the request came to. An address in the body is never used, so whoever adds a report cannot point
           // its links somewhere else. A report made from a hub needs the configured address, where its
-          // unsubscribe link answers, since the Host its request names is the hub's to choose.
-          if (managed.has(request) && !origin) return originNeeded();
+          // unsubscribe link answers, since the Host its request names is the hub's to choose. So does one
+          // made by an account kept to one site.
+          if ((await restricted(request)) && !origin) return originNeeded();
           const home = `${origin ?? url.origin}${base}`;
           // A period already due counts as sent, so a report added mid-week first goes out on the next Monday, as the form says.
           const due = lastPeriod(frequency, runlight.now(), site.timezone);
@@ -1418,7 +1436,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       }
       let recorded = 0;
       // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
-      for (const p of keep) if (await runlight.observe(new Request(p.page, { headers: { "user-agent": p.userAgent } }), p.at, { agentIp: p.ip ?? "" })) recorded++;
+      for (const p of keep) if (await runlight.observe(new Request(p.page), p.at, { agentIp: p.ip ?? "", userAgent: p.userAgent })) recorded++;
       // A single report, as the CMS plugins send, needs no answer; a batch learns what was kept.
       if (!Array.isArray(body.fetches)) return new Response(null, { status: 204 });
       return json({ recorded, skipped: pages.length - recorded });
@@ -1717,6 +1735,11 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
       const hub = managed.get(request);
       if (hub && (await runlight.store.setting(`token-origin:${hub.id}`)) !== origin) {
         return coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403);
+      }
+      // An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+      // one the address its request came to.
+      if (!hub && (await sessionScope(request))?.site !== undefined && origin !== (options.origin ? new URL(options.origin).origin : url.origin)) {
+        return coded("Your account can only pick from this dashboard's own address", "pick_own", 403);
       }
       return json({ ticket: await pickTicket(origin, site.id, back) });
     }
@@ -2090,7 +2113,9 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     runlight,
     base,
     isOwner: async (request: Request) => (await canRead(request)) === true,
-    isReader: async (request: Request) => (options.authorize ? (await options.authorize(request)) === "read" : web ? (await web.access(request)) === "read" : false),
+    // An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+    isReader: async (request: Request) => (await sessionScope(request))?.site !== undefined || (options.authorize ? (await options.authorize(request)) === "read" : web ? (await web.access(request)) === "read" : false),
+    isSiteOnly: async (request: Request) => (await sessionScope(request))?.site !== undefined,
     ...(signIn ? { signIn } : {}),
     ...(accountOf ? { accountOf } : {}),
     ...(tokenMade ? { tokenMade } : {}),

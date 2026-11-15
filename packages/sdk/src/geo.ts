@@ -1,3 +1,5 @@
+import { tidy } from "./payload.js";
+
 export interface Location {
   /** ISO 3166-1 alpha-2, upper case. */
   country: string;
@@ -25,11 +27,11 @@ function clean(location: Partial<Location>): Location {
   if (!/^[A-Z]{2}$/.test(country) || country === "XX" || country === "T1") country = "";
   // A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
   // that has no codes ("California") is kept readable, as "US-California".
-  const raw = (location.region ?? "").trim();
+  const raw = tidy(location.region ?? "").trim();
   let region = /^([A-Za-z]{2}-)?[A-Za-z0-9]{1,3}$/.test(raw) ? raw.toUpperCase() : raw.slice(0, 80);
   if (region && !/^[A-Z]{2}-/.test(region) && country) region = `${country}-${region}`;
   if (!country) region = "";
-  const city = country ? (location.city ?? "").slice(0, 100) : "";
+  const city = country ? tidy(location.city ?? "").slice(0, 100) : "";
   return { country, region, city };
 }
 

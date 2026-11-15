@@ -48,3 +48,37 @@ export interface ChatAction {
   result?: string;
   link?: string;
 }
+
+const CHATS = "runlight_assistant:";
+
+/** Where a person's chat about a site is kept for the tab's session: by who is signed in, so nobody reads another's. */
+export const chatKey = (who: string, site: string): string => `${CHATS}${who}:${site}`;
+
+/**
+ * The last of a chat as it is kept. A link an action made, such as an invite's, which lets whoever opens it
+ * choose the account's password, shows once and is never kept.
+ */
+export function keptChat<M extends { action?: ChatAction }>(messages: M[]): string {
+  return JSON.stringify(
+    messages.slice(-40).map((m) => {
+      if (!m.action?.link) return m;
+      const { link: _link, ...action } = m.action;
+      return { ...m, action };
+    }),
+  );
+}
+
+/** Forgets every chat this tab kept, when its person signs out or their session ends. */
+export function forgetChats(storage: Pick<Storage, "length" | "key" | "removeItem"> | undefined = globalThis.sessionStorage): void {
+  try {
+    if (!storage) return;
+    const keys: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(CHATS)) keys.push(key);
+    }
+    for (const key of keys) storage.removeItem(key);
+  } catch {
+    // No storage to clear.
+  }
+}

@@ -1,3 +1,4 @@
+import { cleanText, tidy } from "./payload.js";
 import { SOURCE_PATTERNS, SOURCES, type KnownSource, type SourceKind } from "./data/sources.js";
 
 export type Channel = "Direct" | "Organic Search" | "Paid Search" | "Social" | "Email" | "AI" | "Referral" | "Campaign";
@@ -39,7 +40,8 @@ for (const source of SOURCES) {
   for (const alias of source.aliases ?? []) byAlias.set(alias, source);
 }
 
-const clip = (value: string | null, max = 200): string => (value ?? "").trim().slice(0, max);
+/** A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character. */
+const clip = (value: string | null, max = 200): string => cleanText(tidy(value ?? "").trim(), max);
 
 export function stripWww(host: string): string {
   return host.toLowerCase().replace(/^www\./, "");

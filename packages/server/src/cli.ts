@@ -25,7 +25,7 @@ import type { SqlStore } from "@runlight/sdk";
 import type { ClickHouseStore } from "@runlight/sdk/clickhouse";
 import { BodyTooLarge, toRequest, writeResponse } from "@runlight/sdk/node";
 import { Geo, fileLookup } from "./geo.js";
-import { secretIn } from "./secret.js";
+import { secretIn, shortWarning } from "./secret.js";
 import { createServer } from "./server.js";
 import { VERSION } from "./version.js";
 import { createMonitoring } from "./monitoring.js";
@@ -225,6 +225,11 @@ async function main(): Promise<void> {
   if (command && command !== "start") throw new Error(`Unknown command "${command}". Run npx @runlight/server --help.`);
 
   await server.runlight.init();
+  // Said at every start, loudly, and the server still runs: an install with a short one must keep working.
+  for (const name of ["RUNLIGHT_SECRET", "RUNLIGHT_TOKEN"] as const) {
+    const warning = shortWarning(name, env(name));
+    if (warning) console.warn(`\n${warning}\n`);
+  }
   if (mailTo) {
     if (!(await server.runlight.mailSettings())) throw new Error("Configure Runlight's mail service before enabling CronWatch alerts");
     monitoring = createMonitoring({ runlight: server.runlight, dataDir, to: mailTo, ...(url ? { url } : {}), ...(geo ? { geo } : {}) });
@@ -243,13 +248,23 @@ async function main(): Promise<void> {
       if (!res.headersSent) res.writeHead(500).end();
     }
   });
+  // A port already taken, or an address that cannot be listened on, is said in a line, like any other trouble at start.
+  http.on("error", (error) => {
+    console.error(`Runlight: could not listen on ${host}:${port}: ${error.message}`);
+    process.exit(1);
+  });
   http.listen(port, host, async () => {
     const shown = host === "0.0.0.0" || host === "::" ? "localhost" : host;
     console.log(`Runlight ${VERSION} is listening on http://${shown}:${port}`);
     console.log(`Data: ${rowDatabase(dataDir)}`);
-    if (env("CLICKHOUSE_URL")) console.log(`Visits: ClickHouse, ${new URL(env("CLICKHOUSE_URL")!).host}`);
-    if ((await server.accounts.count()) === 0) {
-      console.log(`\nNo account yet. Open this link to create the first one:\n  http://${shown}:${port}/setup?code=${server.setupCode}\n`);
+    try {
+      if (env("CLICKHOUSE_URL")) console.log(`Visits: ClickHouse, ${new URL(env("CLICKHOUSE_URL")!).host}`);
+      if ((await server.accounts.count()) === 0) {
+        console.log(`\nNo account yet. Open this link to create the first one:\n  http://${shown}:${port}/setup?code=${server.setupCode}\n`);
+      }
+    } catch (error) {
+      // The server is up and answering; only the setup link could not be worked out, which /setup still serves.
+      console.error("Runlight: could not check for a first account", error);
     }
   });
 

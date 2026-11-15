@@ -4,6 +4,8 @@ import { accounts, api, base, signOut, cms, download, install, type ApiToken, ty
 import { Secret } from "./secret.js";
 import { People } from "./account.js";
 import { AssistantSettings } from "./assistant.js";
+import { forgetChats } from "./assistant-action.js";
+import { ignoreHolds } from "./ignore.js";
 import { EmailReports, EmailService } from "./email.js";
 import { Funnels } from "./funnels.js";
 import { Goals } from "./goals.js";
@@ -40,7 +42,7 @@ const SECTIONS: Array<[Section, Key]> = [
 export const isSection = (name: string): name is Section => name === "people" || SECTIONS.some(([id]) => id === name);
 
 function SettingsSignOut({ menu = false }: { menu?: boolean }) {
-  return signOut ? <div class="settings-sign-out-row"><a class="settings-sign-out" role={menu ? "menuitem" : undefined} href={signOut} onClick={(e) => { if (!window.confirm(t("app.signOutConfirm"))) e.preventDefault(); }}><Icon name="signOut" />{t("app.signOut")}</a></div> : null;
+  return signOut ? <div class="settings-sign-out-row"><a class="settings-sign-out" role={menu ? "menuitem" : undefined} href={signOut} onClick={(e) => { if (!window.confirm(t("app.signOutConfirm"))) e.preventDefault(); else forgetChats(); }}><Icon name="signOut" />{t("app.signOut")}</a></div> : null;
 }
 
 /** On a phone the tabs give way to the section's name as a menu of every section. */
@@ -585,7 +587,8 @@ function Import({ site }: { site: Site }) {
 function OwnVisits({ site }: { site: Site }) {
   const [ignored, setIgnored] = useState(() => {
     try {
-      return localStorage.getItem("runlight_ignore") === "1";
+      // "1" is what this switch keeps, with no end; the site's ?runlight=ignore link keeps the time, good for a year.
+      return ignoreHolds(localStorage.getItem("runlight_ignore"), Date.now());
     } catch {
       return false;
     }

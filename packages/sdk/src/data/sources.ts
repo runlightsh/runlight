@@ -71,7 +71,7 @@ export const SOURCES: KnownSource[] = [
   { name: "Yahoo Mail", kind: "email", hosts: ["mail.yahoo.com"], aliases: ["yahoomail"] },
   { name: "Fastmail", kind: "email", hosts: ["app.fastmail.com", "fastmail.com"], aliases: ["fastmail"] },
   { name: "Proton Mail", kind: "email", hosts: ["mail.proton.me"], aliases: ["protonmail"] },
-  { name: "Newsletter", kind: "email", hosts: [], aliases: ["newsletter", "email", "e-mail", "mailchimp", "kit", "convertkit", "beehiiv", "buttondown"] },
+  { name: "Newsletter", kind: "email", hosts: [], aliases: ["newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown"] },
 ];
 
 /**
@@ -84,6 +84,5 @@ export const SOURCE_PATTERNS: Array<{ pattern: RegExp; name: string | null; kind
   { pattern: /(^|\.)convertkit-mail\d*\.com$|(^|\.)kit-mail\d*\.com$/, name: "Kit", kind: "email" },
   { pattern: /(^|\.)(list-manage|mailchi)\.(com|mp)$/, name: "Mailchimp", kind: "email" },
   { pattern: /(^|\.)beehiiv\.com$/, name: "beehiiv", kind: "email" },
-  { pattern: /(^|\.)substack\.com$/, name: "Substack", kind: "email" },
   { pattern: /^(web)?mail\d*\.|(^|\.)webmail\./, name: null, kind: "email" },
 ];

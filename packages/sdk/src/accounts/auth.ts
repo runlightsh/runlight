@@ -121,6 +121,9 @@ function recoveryCodes(): string[] {
 const recoveryHash = async (code: string) => hex(await sha256(code.replace(/[^a-z0-9]/gi, "").toLowerCase()));
 
 const EMAIL = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
+/** The longest an address can be. Anything longer is refused before the pattern reads it. */
+const MAX_EMAIL = 320;
+const isEmail = (address: string) => address.length <= MAX_EMAIL && EMAIL.test(address);
 
 /** How long an invite link works. */
 export const INVITE_MS = 7 * 86_400_000;
@@ -335,7 +338,12 @@ export class Accounts {
     }
     const read = row.totp_recovery ? String(row.totp_recovery) : null;
     const hashes = read ? (JSON.parse(read) as string[]) : [];
-    const at = hashes.indexOf(await recoveryHash(given));
+    // Every hash is compared, each in time that does not depend on where it differs.
+    const mine = await recoveryHash(given);
+    let at = -1;
+    hashes.forEach((hash, i) => {
+      if (sameText(hash, mine)) at = i;
+    });
     if (at < 0) return false;
     hashes.splice(at, 1);
     // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
@@ -487,7 +495,7 @@ export class Accounts {
     await this.init();
     if (site !== undefined && (!site || (role !== "member" && role !== "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
     const address = email.trim().toLowerCase();
-    if (!EMAIL.test(address)) throw new AccountError("Enter an email address", "email_invalid");
+    if (!isEmail(address)) throw new AccountError("Enter an email address", "email_invalid");
     if (password.length < MIN_PASSWORD) throw new AccountError(`Use a password of at least ${MIN_PASSWORD} characters`, "password_short", { min: String(MIN_PASSWORD) });
     const hash = await hashPassword(password);
     const existing = await this.byEmail(address);
@@ -525,7 +533,7 @@ export class Accounts {
   private async inviteNow(email: string, role: Role, invitedBy: string, now: number, site?: string): Promise<{ invite: Invite; code: string }> {
     if (site !== undefined && (!site || (role !== "member" && role !== "viewer"))) throw new AccountError("Choose member or viewer for one site", "role_scope");
     const address = email.trim().toLowerCase();
-    if (!EMAIL.test(address)) throw new AccountError("Enter an email address", "email_invalid");
+    if (!isEmail(address)) throw new AccountError("Enter an email address", "email_invalid");
     if (await this.byEmail(address)) throw new AccountError(`${address} already has an account`, "account_exists", { email: address });
     const code = base64url(randomBytes(24));
     const invite: Invite = { ...(site === undefined ? {} : { site }), id: hex(randomBytes(12)), email: address, role, invitedBy, createdAt: now, expiresAt: now + INVITE_MS };
@@ -657,10 +665,66 @@ export class Accounts {
 /** The time step a code matches, one step either side for clocks that drift, newer than `after`; else null. */
 async function matchStep(secret: string, code: string, now: number, after: number): Promise<number | null> {
   const current = Math.floor(now / STEP_MS);
-  for (const step of [current, current - 1, current + 1]) {
-    if (step > after && (await totp(secret, step)) === code) return step;
+  // Every step is worked out and compared in time that does not depend on where the code differs. The
+  // current step is checked last, so it is the one kept if two should match.
+  let found: number | null = null;
+  for (const step of [current + 1, current - 1, current]) {
+    if (sameText(await totp(secret, step), code) && step > after) found = step;
   }
-  return null;
+  return found;
+}
+
+/**
+ * Counts wrong second-factor codes under a key and locks it for longer each time the tries run out: five
+ * tries, then fifteen minutes, then thirty, then an hour, doubling up to a day. A right code clears the
+ * key, and so does a week with no lock and no try. A lock always ends, at most a day later, so nobody is
+ * shut out for good. Keys are hashed with a key made at start, as Throttle's are.
+ */
+export class Lockout {
+  private readonly entries = new Map<string, { count: number; until: number; locks: number; forget: number }>();
+  private readonly salt = randomBytes(16);
+
+  constructor(
+    private readonly limit = 5,
+    private readonly windowMs = 15 * 60_000,
+    private readonly longestMs = 86_400_000,
+    private readonly forgetMs = 7 * 86_400_000,
+  ) {}
+
+  private async id(key: string): Promise<string> {
+    return base64url(await hmac("SHA-256", this.salt, key)).slice(0, 22);
+  }
+
+  /**
+   * Counts a try before the code is checked, so a burst cannot get past the limit. False, counting
+   * nothing, while the key is locked. The try that uses up the last one starts the lock.
+   */
+  async take(key: string, now: number): Promise<boolean> {
+    const id = await this.id(key);
+    let entry = this.entries.get(id);
+    if (entry && entry.forget <= now) entry = undefined;
+    if (entry && entry.count >= this.limit && entry.until > now) return false;
+    if (!entry) entry = { count: 0, until: now + this.windowMs, locks: 0, forget: 0 };
+    else if (entry.until <= now) {
+      entry.count = 0;
+      entry.until = now + this.windowMs;
+    }
+    entry.count++;
+    if (entry.count >= this.limit) {
+      entry.until = now + Math.min(this.windowMs * 2 ** entry.locks, this.longestMs);
+      entry.locks++;
+    }
+    entry.forget = entry.until + this.forgetMs;
+    this.entries.set(id, entry);
+    // Keys are accounts that passed the password step, so there are few; anything long forgotten goes.
+    if (this.entries.size > MAX_THROTTLED) for (const [k, v] of this.entries) if (v.forget <= now) this.entries.delete(k);
+    return true;
+  }
+
+  /** Forgets a key, for a code that turned out right. */
+  async clear(key: string): Promise<void> {
+    this.entries.delete(await this.id(key));
+  }
 }
 
 /**

@@ -281,6 +281,23 @@ for (const kind of process.env.RUNLIGHT_TEST_CLICKHOUSE ? FROM : []) {
     assert.deepEqual(left.map((r) => r.entry_path), ["/late"]);
   });
 
+  test(`${kind}: retention empties the other store of old visits too, before drop-old has run`, async () => {
+    const clock = { now: Date.now() };
+    const rows = freshStore(kind);
+    await history(server(rows, clock), clock);
+    const store = switched(rows, false);
+    await store.migrate();
+    assert.equal((await store.copy())?.done, true);
+    const cutoff = clock.now - 5 * DAY;
+    const old = async (db: SqlStore["db"], table: string, col: string) => Number((await db.all<{ n: unknown }>(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} < ?`, [cutoff]))[0]?.n);
+    assert.ok((await old(rows.db, "rl_sessions", "started_at")) > 0 && (await old(store.clickhouse, "rl_sessions", "started_at")) > 0);
+    await store.dropBefore("default", cutoff);
+    for (const db of [rows.db, store.clickhouse]) assert.deepEqual([await old(db, "rl_sessions", "started_at"), await old(db, "rl_events", "ts")], [0, 0]);
+    // What is newer stays in both.
+    const [kept] = await rows.db.all<{ n: unknown }>(`SELECT COUNT(*) AS n FROM rl_sessions`);
+    assert.ok(Number(kept?.n) > 0);
+  });
+
   test(`${kind}: on ClickHouse that drops repeated inserts, as Cloud does, a piece tried again still copies its visits`, async () => {
     const clock = { now: Date.now() };
     const rows = freshStore(kind);

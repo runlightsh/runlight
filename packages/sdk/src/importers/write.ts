@@ -10,6 +10,12 @@ const SHORTENER_DOMAINS = new Set(["bit.ly", "bitly.com", "j.mp", "dub.sh", "dub
 /** The most clicks a day one imported link gets from a daily count. */
 const MAX_DAILY = 10_000;
 
+/**
+ * The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a
+ * longer history is left behind, so no source, however much it sends, can fill memory or hold the database.
+ */
+export const MAX_LINK_CLICKS = 100_000;
+
 export const hexId = async (value: string, length = 24) => (await sha256(value)).slice(0, length);
 
 /** The Runlight id an imported link gets, from its source and its id there. */
@@ -38,10 +44,31 @@ const known = (table: Record<string, string>, name: string): string | undefined 
   const key = name.toLowerCase();
   return Object.hasOwn(table, key) ? table[key] : undefined;
 };
-/** A browser name in Runlight's spelling: a known one, or the name with a capital first letter. */
-export const browserName = (name: string) => known(BROWSERS, name) ?? title(name);
-/** A system name in Runlight's spelling, or the name as given. */
-export const systemName = (name: string) => known(SYSTEMS, name) ?? name;
+/** An IPv4 address, or what reads as an IPv6 one, anywhere in a text. */
+const ADDRESS = /(^|[^\d.])\d{1,3}(\.\d{1,3}){3}(?![\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}/i;
+/** What a user agent has and a place name does not: a product with its version (Chrome/129), or its usual first words. */
+const AGENT = /[a-z]\/\d|mozilla|applewebkit/i;
+/** A browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user agent. */
+const NAME = /^[A-Za-z_][A-Za-z0-9 ._+-]{0,39}$/;
+
+/**
+ * Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in
+ * any column. A name that is not one Runlight knows is kept only when it reads as a name, and nothing else.
+ */
+const named = (name: string): string => {
+  const text = name.trim();
+  return NAME.test(text) && !ADDRESS.test(text) ? text : "";
+};
+/** A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for anything else. */
+export const browserName = (name: string) => known(BROWSERS, name) ?? title(named(name));
+/** A system name in Runlight's spelling, or a name as given, or none for anything that is not a name. */
+export const systemName = (name: string) => known(SYSTEMS, name) ?? named(name);
+/** Free text about a place as given, or none when it holds an address or reads as a user agent. */
+export const placeName = (name: string): string => (ADDRESS.test(name) || AGENT.test(name) ? "" : name);
+/** A screen as 1440x900, or none. */
+export const screenSize = (value: string): string => (/^\d{1,5}x\d{1,5}$/.test(value.trim()) ? value.trim() : "");
+/** A language tag such as en or pt-BR, or none. */
+export const languageTag = (value: string): string => (/^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}$/.test(value.trim()) ? value.trim() : "");
 export const deviceName = (name: string) => known(DEVICES, name) ?? "";
 
 export interface WriteResult {
@@ -69,7 +96,9 @@ export async function writeLink(
   linkDomain: (domain: string) => Promise<string | null> = async () => null,
 ): Promise<WriteResult> {
   const id = await importedLinkId(source, foreign.sourceId);
-  if (await runlight.store.linkById(id)) return { status: "skipped", clicks: 0 };
+  // Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+  // left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+  if (await runlight.store.linkExists(id)) return { status: "skipped", clicks: 0 };
   // As for visits: a piece of the copy tried again would clear clicks written into its days meanwhile.
   if (await runlight.store.moving()) throw new ImportError("Visits are still being copied into ClickHouse. Import once that has finished.", "import_moving");
   const taken = await runlight.store.linkBySlug(foreign.slug);
@@ -100,10 +129,12 @@ export async function writeLink(
     // On a database without transactions (D1), a failed earlier try can have left
     // some of this link's clicks behind. Clear them, then write the link row last,
     // so a link only counts as imported once all of its history is in.
+    // The link has no row (checked above), so these are only ever what such a try left.
     await store.deleteLinkHistory(id);
 
     const made = new Set<string>();
     for (const c of history.clicks ?? []) {
+      if (clicks >= MAX_LINK_CLICKS) break;
       if (!Number.isFinite(c.ts)) continue;
       const visitKey = c.visit ?? `${c.ts}:${clicks}`;
       const session = await hexId(`${source}:${foreign.sourceId}:${visitKey}`);
@@ -120,7 +151,8 @@ export async function writeLink(
           page = parsePage(new URL(`https://${host}/${foreign.slug}`));
         }
         const country = (c.country || "").toUpperCase().slice(0, 2);
-        const region = c.region ? (c.region.includes("-") ? c.region : `${country}-${c.region}`).toUpperCase().slice(0, 10) : "";
+        const rawRegion = placeName(c.region || "");
+        const region = rawRegion ? (rawRegion.includes("-") ? rawRegion : `${country}-${rawRegion}`).toUpperCase().slice(0, 10) : "";
         await store.insertSession({
           id: session,
           site,
@@ -135,14 +167,14 @@ export async function writeLink(
           utmContent: page.utm.content,
           country: /^[A-Z]{2}$/.test(country) ? country : "",
           region: country ? region : "",
-          city: (c.city || "").slice(0, 100),
+          city: placeName(c.city || "").slice(0, 100),
           browser: browserName(c.browser || ""),
           browserVersion: "",
           os: systemName(c.os || ""),
           osVersion: "",
           device: deviceName(c.device || ""),
-          screen: c.screen ?? "",
-          language: c.language ?? "",
+          screen: screenSize(c.screen ?? ""),
+          language: languageTag(c.language ?? ""),
         });
         await store.markImported(session, false);
       }
@@ -159,7 +191,7 @@ export async function writeLink(
       const start = Date.parse(`${d.day}T00:00:00Z`);
       if (!Number.isFinite(start) || d.clicks <= 0) continue;
       // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-      const n = Math.min(Math.floor(d.clicks), MAX_DAILY);
+      const n = Math.min(Math.floor(d.clicks), MAX_DAILY, MAX_LINK_CLICKS - clicks);
       for (let i = 0; i < n; i++) {
         await store.insertEvent({
           site, ts: start + Math.floor(((i + 0.5) / n) * 86_400_000), kind: "click", visitor: "", session: "", pageview: "",

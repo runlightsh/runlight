@@ -36,3 +36,24 @@ test("a failed download leaves lookups empty and the folder clean, and is tried 
   await geo.refresh(Date.UTC(2026, 9, 1, 4));
   assert.equal(asked.length, 4, "tried again on the next check");
 });
+
+test("a file that keeps being missing or bad is asked for less and less often, up to every six hours", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "rl-geo-"));
+  let asked = 0;
+  const geo = new Geo(dir, "city", () => {}, (async () => {
+    asked++;
+    return new Response("nope", { status: 404 });
+  }) as never);
+  const start = Date.UTC(2026, 9, 1, 3);
+  const minute = 60_000;
+  // The server checks every five minutes; each try asks for this month's file and last month's.
+  const tries: number[] = [];
+  for (let at = 0; at <= 24 * 60; at += 5) {
+    const before = asked;
+    await geo.refresh(start + at * minute);
+    if (asked > before) tries.push(at);
+  }
+  assert.deepEqual(tries.slice(0, 8), [0, 5, 15, 35, 75, 155, 315, 635], "each wait is twice the last");
+  assert.deepEqual(tries.slice(8), [995, 1355], "and none is longer than six hours");
+  assert.equal(asked, tries.length * 2);
+});

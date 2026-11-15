@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createServer } from "node:http";
 import { runlight } from "../src/index.js";
 import { SqlStore } from "../src/store.js";
 import { ClickHouseStore, bindPlaceholders, clickhouse, clickhouseDb, limiter, plainAcross } from "../src/stores/clickhouse.js";
@@ -84,6 +85,37 @@ test("an error ClickHouse sends after the first rows fails the query rather than
     store.clickhouse.all(`SELECT throwIf(number = 200000, 'stopped part way') AS x FROM numbers(300000) SETTINGS max_block_size = 1000, http_response_buffer_size = 1`),
     /stopped part way/,
   );
+});
+
+test("a big insert whose answer is lost and that is sent again goes in once, and the same rows sent by a later call go in again", { skip: !CLICKHOUSE }, async (t) => {
+  // In front of ClickHouse: passes every request on, and for the first insert of events drops the connection
+  // once ClickHouse has taken it, before its answer goes back.
+  const real = new URL(CLICKHOUSE!);
+  let dropped = 0;
+  const proxy = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", async () => {
+      const body = Buffer.concat(chunks);
+      const headers: Record<string, string> = {};
+      for (const name of ["x-clickhouse-user", "x-clickhouse-key", "content-type"]) if (typeof req.headers[name] === "string") headers[name] = req.headers[name];
+      const answer = await fetch(`${real.protocol}//${real.host}${req.url}`, { method: "POST", headers, body });
+      const text = await answer.text();
+      if (body.subarray(0, 40).toString().startsWith("INSERT INTO rl_events") && !dropped++) return void req.socket.destroy();
+      res.writeHead(answer.status).end(text);
+    });
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const { store } = await own(t, `http://${real.username}:${real.password}@127.0.0.1:${(proxy.address() as { port: number }).port}`);
+  t.after(async () => void proxy.close());
+  await store.migrate();
+  const rows = [1, 2, 3].map((n) => ({ site: "default", ts: 1_760_000_000_000 + n, kind: "pageview", visitor: "v", session: "", started_at: 0, pageview: "", path: `/p${n}`, hostname: "example.com", title: "", name: "", props: null, engaged_ms: 0, scroll: null, link: "" }));
+  const count = async () => Number((await store.clickhouse.all<{ n: unknown }>(`SELECT count() AS n FROM rl_events`))[0]?.n);
+  await store.clickhouse.insert("rl_events", rows, { batched: true });
+  assert.equal(dropped, 2, "the insert was sent twice");
+  assert.equal(await count(), 3);
+  await store.clickhouse.insert("rl_events", rows, { batched: true });
+  assert.equal(await count(), 6);
 });
 
 test("the pages report adds up engaged time the same in slices as in one query", { skip: !CLICKHOUSE }, async (t) => {
