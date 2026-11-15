@@ -115,7 +115,8 @@ pub async fn import_step_with_domains(
     let known: &Known = &move |source_id: String, slug: Option<String>, url: Option<String>| {
         let (store, source) = (store.clone(), source_name.clone());
         Box::pin(async move {
-            if store.link_by_id(&imported_link_id(&source, &source_id)).await?.is_some() {
+            // A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+            if store.link_exists(&imported_link_id(&source, &source_id)).await? {
                 return Ok(true);
             }
             let (Some(slug), Some(url)) = (slug.filter(|s| !s.is_empty()), url.filter(|u| !u.is_empty())) else {

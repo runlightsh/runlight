@@ -234,7 +234,10 @@ pub trait Db: Send + Sync {
 /// SQL written with `?` placeholders and "double quoted" names, with each placeholder outside quotes
 /// filled in by `fill`, as node-postgres and mysql2 send values in the statement's text. For MySQL,
 /// a "quoted" name goes in backticks and a backslash inside 'text' is doubled, since MySQL reads it as
-/// an escape where standard SQL takes it literally.
+/// an escape where standard SQL takes it literally. Otherwise (Postgres) 'text' with a backslash in it is
+/// written as `E'...'` with the backslash doubled, which reads the same whatever
+/// standard_conforming_strings says: with that off, a plain `'\'` would not end at its closing quote, and
+/// the value after it would be read as SQL.
 pub fn fill_placeholders(
     sql: &str,
     params: &[Param],
@@ -244,12 +247,22 @@ pub fn fill_placeholders(
     let mut out = String::with_capacity(sql.len() + params.len() * 8);
     let mut n = 0;
     let mut quote: Option<char> = None;
+    // Where the 'text' being read began, whether it holds a backslash, and whether it has its E yet.
+    let (mut opened, mut escaped, mut marked) = (0, false, false);
+    // Where the last 'text' ended, since a quote right after it is a doubled one, inside the same text.
+    let mut closed = usize::MAX;
     for ch in sql.chars() {
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
                 out.push(if mysql && ch == '"' { '`' } else { ch });
-            } else if mysql && q == '\'' && ch == '\\' {
+                if !mysql && q == '\'' && escaped && !marked {
+                    out.insert(opened, 'E');
+                    marked = true;
+                }
+                closed = out.len();
+            } else if q == '\'' && ch == '\\' {
+                escaped = true;
                 out.push_str("\\\\");
             } else if mysql && q == '"' && ch == '`' {
                 out.push_str("``");
@@ -258,6 +271,9 @@ pub fn fill_placeholders(
             }
         } else if ch == '\'' || ch == '"' || (mysql && ch == '`') {
             quote = Some(ch);
+            if !(ch == '\'' && closed == out.len()) {
+                (opened, escaped, marked) = (out.len(), false, false);
+            }
             out.push(if mysql && ch == '"' { '`' } else { ch });
         } else if ch == '?' {
             let p = params
@@ -344,7 +360,16 @@ mod tests {
         );
         assert_eq!(
             fill_placeholders(sql, &params, false, postgres_literal).unwrap(),
-            r#"SELECT "key", 'a?b\c' FROM t WHERE x = '3' AND y LIKE E'o''k\\' ESCAPE '\'"#
+            r#"SELECT "key", E'a?b\\c' FROM t WHERE x = '3' AND y LIKE E'o''k\\' ESCAPE E'\\'"#
+        );
+        // Text with no backslash stays as it was written, a doubled quote included.
+        assert_eq!(
+            fill_placeholders("SELECT 'it''s', '{}'", &[], false, postgres_literal).unwrap(),
+            "SELECT 'it''s', '{}'"
+        );
+        assert_eq!(
+            fill_placeholders(r"SELECT 'a''b\c''d\e', '\'", &[], false, postgres_literal).unwrap(),
+            r"SELECT E'a''b\\c''d\\e', E'\\'"
         );
         assert!(fill_placeholders("?", &[], false, postgres_literal).is_err());
     }

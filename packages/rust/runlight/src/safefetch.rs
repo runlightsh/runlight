@@ -618,7 +618,9 @@ pub async fn service_fetch(
             if ips.len() != addresses.len() {
                 return Err(FetchError::Failed(format!("{name} has no address to connect to")).into());
             }
-            pin = vec![(name.to_string(), port, ips)];
+            // Under the host as the URL writes it, a final dot included: the Fetcher looks the pin up by the
+            // name it connects to, and one it did not find it would look up again itself.
+            pin = vec![(host.to_lowercase(), port, ips)];
         }
         // The first hop has the whole limit; each after it, what is left of it.
         let left =

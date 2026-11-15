@@ -706,6 +706,8 @@ async fn a_service_is_fetched_from_the_address_its_name_was_checked_at() {
         ("http://local.example.com:11434/v1", 11434, vec!["127.0.0.1"]),
         ("https://lan.example.com/v1", 443, vec!["192.168.1.20", "10.0.0.5"]),
         ("http://127.0.0.1/v1", 80, vec!["127.0.0.1"]),
+        // A final dot stays on the name the pin is under, as it stays on the name the request connects to.
+        ("https://lan.example.com./v1", 443, vec!["192.168.1.20", "10.0.0.5"]),
     ] {
         let fake = ok();
         let answer = service_fetch(&Pinning(fake.clone()), url, FetchInit::default(), 5, Some(&lookup)).await;

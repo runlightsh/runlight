@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::geo::{Found, GeoLookup};
 use crate::js::{self, Object, Value};
@@ -34,10 +34,17 @@ enum Source {
 
 /// An MMDB database.
 pub struct Mmdb {
-    source: Source,
-    size: u64,
+    /// Shared, so a lookup in a file can do its reading off the async runtime's threads.
+    reader: Arc<Reader>,
     /// The database's metadata.
     pub metadata: Value,
+}
+
+/// The database itself: where its bytes are, and what its metadata says of them.
+struct Reader {
+    source: Source,
+    size: u64,
+    metadata: Value,
     node_count: u64,
     record_size: u64,
     node_bytes: u64,
@@ -65,7 +72,7 @@ impl Mmdb {
     /// A database held in memory.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Mmdb, MmdbError> {
         let size = bytes.len() as u64;
-        Mmdb::with(Source::Bytes(bytes), size)
+        Mmdb::over(Reader::with(Source::Bytes(bytes), size)?)
     }
 
     /// A database read from its file as lookups need it.
@@ -73,11 +80,23 @@ impl Mmdb {
         let path = path.as_ref();
         let file = File::open(path).map_err(|_| MmdbError(format!("Could not read {}", path.display())))?;
         let size = file.metadata().map_err(|e| MmdbError(e.to_string()))?.len();
-        Mmdb::with(Source::File(Mutex::new((file, HashMap::new()))), size)
+        Mmdb::over(Reader::with(Source::File(Mutex::new((file, HashMap::new()))), size)?)
     }
 
-    fn with(source: Source, size: u64) -> Result<Mmdb, MmdbError> {
-        let mut db = Mmdb {
+    fn over(reader: Reader) -> Result<Mmdb, MmdbError> {
+        Ok(Mmdb { metadata: reader.metadata.clone(), reader: Arc::new(reader) })
+    }
+
+    /// The record for an address, or `None`. An error for text that is not
+    /// an IP address, or an IPv6 address in an IPv4-only database.
+    pub fn get(&self, ip: &str) -> Result<Option<Value>, MmdbError> {
+        self.reader.get(ip)
+    }
+}
+
+impl Reader {
+    fn with(source: Source, size: u64) -> Result<Reader, MmdbError> {
+        let mut db = Reader {
             source,
             size,
             metadata: Value::Null,
@@ -153,9 +172,7 @@ impl Mmdb {
         self.read(at, 1)?.first().map(|b| u64::from(*b)).ok_or_else(|| bad("Invalid MaxMind DB: read past the end"))
     }
 
-    /// The record for an address, or `None`. An error for text that is not
-    /// an IP address, or an IPv6 address in an IPv4-only database.
-    pub fn get(&self, ip: &str) -> Result<Option<Value>, MmdbError> {
+    fn get(&self, ip: &str) -> Result<Option<Value>, MmdbError> {
         let address: IpAddr = ip.parse().map_err(|_| MmdbError(format!("Not an IP address: {ip}")))?;
         let packed: Vec<u8> = match address {
             IpAddr::V4(a) => a.octets().to_vec(),
@@ -357,7 +374,15 @@ pub fn found_in(record: &Value) -> Option<Found> {
 impl GeoLookup for Mmdb {
     fn lookup<'a>(&'a self, ip: &'a str) -> BoxFuture<'a, Result<Option<Found>, BoxError>> {
         Box::pin(async move {
-            Ok(match self.get(ip) {
+            // A database in a file is read from disk, a page at a time behind one lock, so that is done off the
+            // async runtime's threads, where a slow disk would hold up every other request with it.
+            let record = if matches!(self.reader.source, Source::File(_)) {
+                let (reader, ip) = (self.reader.clone(), ip.to_string());
+                tokio::task::spawn_blocking(move || reader.get(&ip)).await.map_err(|e| Box::new(e) as BoxError)?
+            } else {
+                self.reader.get(ip)
+            };
+            Ok(match record {
                 Ok(Some(record)) => found_in(&record),
                 _ => None,
             })

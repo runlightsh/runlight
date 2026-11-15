@@ -419,7 +419,63 @@ async fn every_read_passed_to_a_connected_install_has_a_byte_ceiling_and_past_it
         }
         let ceilings: Vec<Option<usize>> =
             reads.ceilings.lock().unwrap().iter().filter(|c| !c.0.contains("/api/token")).map(|c| c.1).collect();
-        assert_eq!(ceilings, [Some(100 * 1024 * 1024), Some(100 * 1024 * 1024), Some(4 * 1024 * 1024)]);
+        // A report is JSON held whole in memory, so it gets far less room than an export's file does.
+        assert_eq!(ceilings, [Some(8 * 1024 * 1024), Some(100 * 1024 * 1024), Some(4 * 1024 * 1024)]);
         assert_eq!(statuses, if too_long { [502, 502, 502] } else { [200, 200, 200] }, "too long: {too_long}");
     }
+}
+
+/// An install that answers its list of sites with whatever it is given.
+struct Answers(String);
+
+impl Fetcher for Answers {
+    fn fetch<'a>(&'a self, url: &'a str, _init: FetchInit) -> BoxFuture<'a, Result<Response, FetchError>> {
+        Box::pin(async move {
+            let body = if url.contains("/api/sites") { self.0.clone() } else { "{}".to_string() };
+            Ok(Response::new(body, 200, Headers::new().with("content-type", "application/json")))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_connected_site_has_an_id_and_a_name_as_text_or_nothing_is_saved() {
+    let connect = |sites: &str| {
+        let sites = sites.to_string();
+        async move {
+            let mut options = RunlightOptions::new(runlight_sqlx::connect(":memory:").await.unwrap());
+            options.managed_sites = true;
+            options.secret = Some("k".repeat(32));
+            options.fetcher = Some(Arc::new(Answers(format!(r#"{{"sites":{sites}}}"#))));
+            options.local_installs = true;
+            let hub = Runlight::new(options).unwrap();
+            hub.init().await.unwrap();
+            let input = js::parse(&format!(r#"{{"remote":{{"url":"{APP}","token":"rl_x"}}}}"#)).unwrap();
+            let added = hub.add_site(&input).await;
+            (added, hub.sites().len())
+        }
+    };
+    let long = "x".repeat(65);
+    for sites in [
+        r#"[{"id":"","name":"Blog"}]"#.to_string(),
+        r#"[{"id":7,"name":"Blog"}]"#.to_string(),
+        r#"[{"name":"Blog"}]"#.to_string(),
+        r#"[{"id":"blog"}]"#.to_string(),
+        r#"[{"id":"blog","name":null}]"#.to_string(),
+        r#"[null]"#.to_string(),
+        format!(r#"[{{"id":"{long}","name":"Blog"}}]"#),
+    ] {
+        let (added, kept) = connect(&sites).await;
+        match added {
+            Err(runlight::Error::Settings(refused)) => assert_eq!(refused.code, "connect_not_runlight", "{sites}"),
+            other => panic!("{sites}: {other:?}"),
+        }
+        assert_eq!(kept, 0, "{sites}");
+    }
+    // Empty hostnames are left out, an id starts with a letter or digit, and a long or missing name is cut or stood in for.
+    let (added, _) = connect(r#"[{"id":"blog","name":"  ","hostnames":["", "..Blog.example.com"]}]"#).await;
+    let site = added.unwrap();
+    assert_eq!((site.id.as_str(), site.name.as_str()), ("blog.example.com", "blog.example.com"));
+    let (added, _) = connect(&format!(r#"[{{"id":"blog","name":"{}","hostnames":["---"]}}]"#, "n".repeat(100))).await;
+    let site = added.unwrap();
+    assert_eq!((site.id.as_str(), site.name.len()), ("site", 80));
 }

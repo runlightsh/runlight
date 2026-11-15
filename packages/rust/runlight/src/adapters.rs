@@ -54,18 +54,31 @@ where
     let remote = remote_address(&request);
     let method = request.method().as_str().to_ascii_uppercase();
     let mut headers = Headers::new();
+    let mut cookies: Vec<String> = Vec::new();
     for (name, value) in request.headers() {
-        headers.append(name.as_str(), &String::from_utf8_lossy(value.as_bytes()));
+        let value = String::from_utf8_lossy(value.as_bytes());
+        // HTTP/2 sends each cookie as a header field of its own, and they are one header again joined with
+        // "; " (RFC 9113, 8.2.3), never with the comma other repeated headers take.
+        if name == http::header::COOKIE {
+            cookies.push(value.into_owned());
+        } else {
+            headers.append(name.as_str(), &value);
+        }
+    }
+    if !cookies.is_empty() {
+        headers.set("cookie", &cookies.join("; "));
     }
     let forwarded = headers.get("x-forwarded-proto").unwrap_or_default();
     let proto = js::trim(forwarded.split(',').next().unwrap_or("")).to_lowercase();
     let proto = if proto.is_empty() { uri.scheme_str().unwrap_or("http").to_lowercase() } else { proto };
     let host =
         headers.get("host").or_else(|| uri.authority().map(|a| a.to_string())).unwrap_or_else(|| "localhost".into());
-    let target = uri.path_and_query().map_or("/", |p| p.as_str()).to_string();
-    let base = format!("{}://{host}", if proto == "https" { "https" } else { "http" });
-    let url =
-        crate::http::Url::parse_with_base(&target, &base).map_or_else(|| "http://localhost/".to_string(), |u| u.href());
+    let target = uri.path_and_query().map_or("/", |p| p.as_str());
+    // Written after the host, never resolved against it: a target of "//other.example/" resolved as a link is
+    // would name its own host, and with it the origin a form's Origin header is checked against.
+    let slash = if target.starts_with('/') { "" } else { "/" };
+    let written = format!("{}://{host}{slash}{target}", if proto == "https" { "https" } else { "http" });
+    let url = crate::http::Url::parse(&written).map_or_else(|| "http://localhost/".to_string(), |u| u.href());
     let mut body = Vec::new();
     if method != "GET" && method != "HEAD" {
         let limit = if uri.path().ends_with("/e") { MAX_COLLECT_BODY } else { MAX_BODY };
@@ -101,6 +114,18 @@ pub fn to_http(response: Response) -> http::Response<Full<Bytes>> {
 
 type Answer = Pin<Box<dyn Future<Output = Result<http::Response<Full<Bytes>>, Infallible>> + Send>>;
 
+/// Methods no route or link answers (the SDK's Request cannot even be made with them), so they are the app's.
+fn unsupported(method: &http::Method) -> bool {
+    ["TRACE", "TRACK", "CONNECT"].iter().any(|m| method.as_str().eq_ignore_ascii_case(m))
+}
+
+/// The answer to such a method where there is no app to hand it to.
+fn not_allowed() -> http::Response<Full<Bytes>> {
+    let mut r = http::Response::new(Full::new(Bytes::new()));
+    *r.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
+    r
+}
+
 /// The answer for a request that arrived on a link domain added in Settings, before anything else looks
 /// at it, or `None` for every other host and for the dashboard's own paths on a link domain.
 async fn on_link_domain(runlight: &Runlight, request: &Request) -> Option<Response> {
@@ -130,6 +155,9 @@ where
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
         let routes = self.clone();
         Box::pin(async move {
+            if unsupported(request.method()) {
+                return Ok(not_allowed());
+            }
             Ok(to_http(match to_request(request).await {
                 Ok(request) => match on_link_domain(routes.rl(), &request).await {
                     Some(answer) => answer,
@@ -166,6 +194,9 @@ where
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
         let runlight = self.0.clone();
         Box::pin(async move {
+            if unsupported(request.method()) {
+                return Ok(not_allowed());
+            }
             let answer = match to_request(request).await {
                 Ok(request) => match on_link_domain(&runlight, &request).await {
                     Some(answer) => answer,
@@ -230,6 +261,9 @@ pub mod axum_support {
         request: axum::extract::Request,
         next: axum::middleware::Next,
     ) -> axum::response::Response {
+        if unsupported(request.method()) {
+            return next.run(request).await;
+        }
         let (parts, body) = request.into_parts();
         let head = http::Request::from_parts(parts.clone(), http_body_util::Empty::<Bytes>::new());
         if let Ok(probe) = to_request(head).await {

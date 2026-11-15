@@ -263,12 +263,6 @@ pub(crate) fn schema(dialect: Dialect) -> Vec<String> {
     statements
 }
 
-/// Orders text by code point, as SQLite and Postgres's "C" collation do (JavaScript's `<` compares
-/// UTF-16 units). Rust compares strings by their UTF-8 bytes, which is code point order.
-pub(crate) fn code_order(a: &str, b: &str) -> std::cmp::Ordering {
-    a.cmp(b)
-}
-
 /// Compares as JavaScript's `<` does: by UTF-16 code units.
 pub fn js_order(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())

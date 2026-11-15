@@ -40,9 +40,29 @@ pub const MAX_BODY: usize = 8 * 1024;
 const MAX_ENGAGED_MS: i64 = 30 * 60 * 1000;
 const MAX_PROPS: usize = 30;
 
+/// A string as it came, cut to `max` UTF-16 units: for a URL, which the parser then encodes.
 fn str_(value: Option<&Value>, max: usize) -> String {
     match value {
         Some(Value::String(s)) => js::head16(s, max),
+        _ => String::new(),
+    }
+}
+
+/// Text as every database can keep it: without U+0000, which Postgres refuses. Half a surrogate pair, which is
+/// no character, is U+FFFD already by the time text is a Rust string.
+pub fn tidy(text: &str) -> String {
+    text.chars().filter(|c| *c != '\0').collect()
+}
+
+/// Tidied text cut to `max` characters (code points), so a character such as an emoji is never cut in half.
+pub fn clean_text(text: &str, max: usize) -> String {
+    text.chars().filter(|c| *c != '\0').take(max).collect()
+}
+
+/// A string the tracker sent, as it is stored.
+fn stored(value: Option<&Value>, max: usize) -> String {
+    match value {
+        Some(Value::String(s)) => clean_text(s, max),
         _ => String::new(),
     }
 }
@@ -77,12 +97,12 @@ fn props(value: Option<&Value>) -> Option<Object> {
         if count >= MAX_PROPS {
             break;
         }
-        let k = js::head16(js::trim(key), 60);
+        let k = clean_text(js::trim(&tidy(key)), 60);
         if k.is_empty() {
             continue;
         }
         let text = match raw {
-            Value::String(s) => js::head16(s, 500),
+            Value::String(s) => clean_text(s, 500),
             Value::Number(n) if n.is_finite() => js::format_number(*n),
             Value::Bool(b) => b.to_string(),
             _ => continue,
@@ -114,7 +134,7 @@ pub fn parse_payload(text: &str) -> Option<Payload> {
     if protocol != "http:" && protocol != "https:" {
         return None;
     }
-    let name = js::trim(&str_(body.get("n"), 120)).to_string();
+    let name = js::trim(&stored(body.get("n"), 120)).to_string();
     if kind == "event" && name.is_empty() {
         return None;
     }
@@ -128,13 +148,13 @@ pub fn parse_payload(text: &str) -> Option<Payload> {
     let props = if kind == "event" { link_props(&name, props(body.get("p"))) } else { None };
     Some(Payload {
         kind,
-        site: str_(body.get("s"), 64),
+        site: stored(body.get("s"), 64),
         url,
         referrer: str_(body.get("r"), 2048),
-        title: str_(body.get("t"), 500),
+        title: stored(body.get("t"), 500),
         screen_width: int(body.get("w"), 0, 20000),
         screen_height: int(body.get("h"), 0, 20000),
-        language: str_(body.get("l"), 35),
+        language: stored(body.get("l"), 35),
         name,
         props,
         pageview_id,

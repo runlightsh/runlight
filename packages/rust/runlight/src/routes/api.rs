@@ -482,6 +482,19 @@ impl Routes {
                     None,
                 ));
             }
+            // An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+            // one the address its request came to.
+            if !call.is_managed()
+                && scoped_account.as_ref().is_some_and(|user| user.site.is_some())
+                && origin != self.0.origin.clone().unwrap_or_else(|| url.origin())
+            {
+                return Ok(coded(
+                    "Your account can only pick from this dashboard's own address",
+                    "pick_own",
+                    403,
+                    None,
+                ));
+            }
             let back = back.as_ref().map(|(address, nonce)| (address.as_str(), nonce.as_str()));
             return Ok(json(&obj! { "ticket" => self.pick_ticket(&origin, &site.id, back).await? }, 200, &[]));
         }
@@ -1338,8 +1351,8 @@ impl Routes {
         let mut recorded = 0;
         // A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
         for (page, ua, at, ip) in keep {
-            let observed = Request::get(page.href()).header("user-agent", ua);
-            if rl.observe_with(&observed, *at, Some(ip)).await {
+            let observed = Request::get(page.href());
+            if rl.observe_as(&observed, *at, Some(ip), Some(ua)).await {
                 recorded += 1;
             }
         }

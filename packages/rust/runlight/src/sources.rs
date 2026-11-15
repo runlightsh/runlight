@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 use crate::data::sources::{KnownSource, SOURCE_PATTERNS, SOURCES, SourceKind};
 use crate::http::Url;
 use crate::js;
+use crate::payload::{clean_text, tidy};
 use crate::re::{js_re, test};
 
 /// What a page's URL says: its host, its path, its campaign tags.
@@ -92,8 +93,9 @@ static MAPS: LazyLock<Maps> = LazyLock::new(|| {
 });
 
 /// `clip`: trimmed, at most `max` UTF-16 code units.
+/// A query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character.
 fn clip(value: Option<&str>, max: usize) -> String {
-    js::head16(js::trim(value.unwrap_or("")), max)
+    clean_text(js::trim(&tidy(value.unwrap_or(""))), max)
 }
 
 /// The host lower case, without a leading `www.`.

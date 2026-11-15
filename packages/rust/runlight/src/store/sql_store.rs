@@ -1,6 +1,6 @@
 //! Runlight's tables, on any database a `Db` reaches: store.ts's `SqlStore`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -40,36 +40,6 @@ pub struct SqlStore {
 struct Plan {
     days: Vec<(String, i64, i64)>,
     rest: Vec<(i64, i64)>,
-}
-
-/// The rows sums are added into, by value.
-#[derive(Clone, Copy, Default)]
-struct Sums {
-    visitors: f64,
-    visits: f64,
-    pageviews: f64,
-    bounced: f64,
-    duration: f64,
-    engaged: f64,
-    views: f64,
-    scroll_sum: f64,
-    scroll_n: f64,
-    events: f64,
-}
-
-impl Sums {
-    fn bump(&mut self, row: &Row) {
-        self.visitors += row.num("visitors");
-        self.visits += row.num("visits");
-        self.pageviews += row.num("pageviews");
-        self.bounced += row.num("bounced");
-        self.duration += row.num("duration");
-        self.engaged += row.num("engaged");
-        self.views += row.num("views");
-        self.scroll_sum += row.num("scroll_sum");
-        self.scroll_n += row.num("scroll_n");
-        self.events += row.num("events");
-    }
 }
 
 fn goal_row(r: &Row) -> GoalRow {
@@ -135,6 +105,21 @@ fn report_row(r: &Row) -> ReportRow {
 
 fn share_row(r: &Row) -> ShareRow {
     ShareRow { id: r.text("id"), site: r.text("site"), name: r.text_or("name", ""), created_at: r.int("created_at") }
+}
+
+/// Text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each after an even
+/// number of backslashes. JSON.stringify writes both for a string that holds them, and they are valid JSON.
+const PG_UNREADABLE_PROPS: &str = r"(?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}";
+
+/// An event's props as the database can read them as JSON, or NULL for a row it cannot: Postgres refuses an
+/// escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one with no props,
+/// rather than failing every report that reads its event. SQLite reads them as they are.
+fn readable_props(dialect: Dialect) -> String {
+    match dialect {
+        Dialect::Postgres => format!("(CASE WHEN e.props !~ '{PG_UNREADABLE_PROPS}' THEN e.props END)::jsonb"),
+        Dialect::Mysql => "(CASE WHEN JSON_VALID(e.props) THEN e.props END)".to_string(),
+        Dialect::Sqlite => "e.props".to_string(),
+    }
 }
 
 /// Funnel steps as stored, read as the SDK reads them.
@@ -672,161 +657,169 @@ impl SqlStore {
             None if page || event => Plan { days: vec![], rest: vec![(query.from, query.to)] },
             None => return Ok(None),
         };
-        let mut sums: BTreeMap<String, Sums> = BTreeMap::new();
-        let mut order: Vec<String> = Vec::new();
-        let mut bump = |row: &Row| {
-            let key = row.text("value");
-            if !sums.contains_key(&key) {
-                order.push(key.clone());
-            }
-            sums.entry(key).or_default().bump(row);
+        // Each source adds up its own rows by value, and the database adds the sources together, sorts them,
+        // and cuts them to the page asked for, so no more than that page is ever read into memory.
+        const COLUMNS: [&str; 10] = [
+            "visitors",
+            "visits",
+            "pageviews",
+            "bounced",
+            "duration",
+            "engaged",
+            "views",
+            "scroll_sum",
+            "scroll_n",
+            "events",
+        ];
+        let part = |value: &str, counted: &[(&str, &str)]| {
+            let columns: Vec<String> = COLUMNS
+                .iter()
+                .map(|c| format!("{} AS {c}", counted.iter().find(|(name, _)| name == c).map_or("0", |(_, sql)| sql)))
+                .collect();
+            format!("{value} AS value, {}", columns.join(", "))
         };
+        let mut parts: Vec<String> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
         if !plan.days.is_empty() {
-            let rolled = self
-                .all(
-                    &format!(
-                        "SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN ({BUILT_DAYS}) GROUP BY value"
-                    ),
-                    params![&query.site, dimension, &query.site, query.from, query.to],
-                )
-                .await?;
-            for row in &rolled {
-                bump(row);
-            }
+            parts.push(format!(
+                "SELECT value, {} FROM rl_rollups WHERE site = ? AND dim = ? AND day IN ({BUILT_DAYS})",
+                COLUMNS.join(", ")
+            ));
+            params.extend(params![&query.site, dimension, &query.site, query.from, query.to]);
         }
         let w = within(&plan.rest);
-        if (page || event) && !plan.rest.is_empty() {
-            // A visit's pageviews and events belong to the day it started, as in the rollups.
-            let lo = plan.rest.iter().map(|r| r.0).min().unwrap_or(0);
-            let hi = plan.rest.iter().map(|r| r.1).max().unwrap_or(0) + EVENT_TAIL_MS;
-            let of_rest = |kind: &str| {
-                format!(
-                    "FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '{kind}' AND e.ts >= ? AND e.ts < ? AND {IS_VISIT} AND {}",
-                    w.sql
-                )
-            };
-            let at = concat(vec![params![&query.site, lo, hi], w.params.clone()]);
+        // A visit's pageviews and events belong to the day it started, as in the rollups.
+        // Bounded by time as well, so the events index finds them (see build_rollup_day).
+        let lo = plan.rest.iter().map(|r| r.0).min().unwrap_or(0);
+        let hi = plan.rest.iter().map(|r| r.1).max().unwrap_or(0) + EVENT_TAIL_MS;
+        let of_rest = |kind: &str| {
+            format!(
+                "FROM {} CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '{kind}' AND e.ts >= ? AND e.ts < ? AND {IS_VISIT} AND {}",
+                event_kind_table(self.dialect()),
+                w.sql
+            )
+        };
+        let at = concat(vec![params![&query.site, lo, hi], w.params.clone()]);
+        if !plan.rest.is_empty() {
             if page {
-                for row in self
-                    .all(
-                        &format!(
-                            "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, {LIVE_VIEWS} AS views {} GROUP BY e.path",
-                            of_rest("pageview")
-                        ),
-                        at.clone(),
-                    )
-                    .await?
-                {
-                    bump(&row);
-                }
-                for row in self
-                    .all(
-                        &format!(
-                            "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest {} GROUP BY e.path, e.pageview) t GROUP BY value",
-                            of_rest("engagement")
-                        ),
-                        at,
-                    )
-                    .await?
-                {
-                    bump(&row);
-                }
-            } else {
-                for row in self
-                    .all(
-                        &format!(
-                            "SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events {} GROUP BY e.name",
-                            of_rest("event")
-                        ),
-                        at,
-                    )
-                    .await?
-                {
-                    bump(&row);
-                }
-            }
-        } else if page || event {
-            // Every day of the range is built.
-        } else {
-            let col = format!("s.{}", SESSION_DIMENSIONS.iter().find(|d| d.0 == dimension).map_or("", |d| d.1));
-            for row in self
-                .all(
-                    &format!(
-                        "SELECT {col} AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-           SUM(CASE WHEN {BOUNCE} THEN 1 ELSE 0 END) AS bounced, SUM({DURATION}) AS duration
-         FROM rl_sessions s WHERE s.site = ? AND {IS_VISIT} AND {} AND {col} <> '' GROUP BY {col}",
-                        w.sql
+                parts.push(format!(
+                    "SELECT {} {} GROUP BY e.path",
+                    part(
+                        "e.path",
+                        &[("visitors", "COUNT(DISTINCT e.visitor)"), ("pageviews", "COUNT(*)"), ("views", LIVE_VIEWS)]
                     ),
-                    concat(vec![params![&query.site], w.params.clone()]),
-                )
-                .await?
-            {
-                bump(&row);
+                    of_rest("pageview")
+                ));
+                params.extend(at.clone());
+            } else if event {
+                parts.push(format!(
+                    "SELECT {} {} GROUP BY e.name",
+                    part("e.name", &[("visitors", "COUNT(DISTINCT e.visitor)"), ("events", "COUNT(*)")]),
+                    of_rest("event")
+                ));
+                params.extend(at.clone());
+            } else {
+                let col = format!("s.{}", SESSION_DIMENSIONS.iter().find(|d| d.0 == dimension).map_or("", |d| d.1));
+                let bounced = format!("SUM(CASE WHEN {BOUNCE} THEN 1 ELSE 0 END)");
+                let duration = format!("SUM({DURATION})");
+                let counted = [
+                    ("visitors", "COUNT(DISTINCT s.visitor)"),
+                    ("visits", "COUNT(*)"),
+                    ("pageviews", "SUM(s.pageviews)"),
+                    ("bounced", bounced.as_str()),
+                    ("duration", duration.as_str()),
+                ];
+                parts.push(format!(
+                    "SELECT {} FROM rl_sessions s WHERE s.site = ? AND {IS_VISIT} AND {} AND {col} <> '' GROUP BY {col}",
+                    part(&col, &counted),
+                    w.sql
+                ));
+                params.push(Param::from(&query.site));
+                params.extend(w.params.clone());
             }
         }
         let entry_exit = dimension == "entry" || dimension == "exit";
-        let mut rows: Vec<(String, Sums)> = order
-            .into_iter()
-            .map(|k| {
-                let s = sums[&k];
-                (k, s)
+        let order = if entry_exit {
+            "n_visits DESC"
+        } else if event {
+            "n_visitors DESC, n_events DESC"
+        } else if page {
+            "n_visitors DESC, n_pageviews DESC"
+        } else {
+            "n_visitors DESC, n_visits DESC"
+        };
+        let sums: Vec<String> = COLUMNS.iter().map(|c| format!("SUM({c}) AS n_{c}")).collect();
+        params.extend(params![limit, offset]);
+        let rows = self
+            .all(
+                &format!(
+                    "SELECT value, {} FROM ({}) t
+       {} GROUP BY value ORDER BY {order}, value{} LIMIT ? OFFSET ?",
+                    sums.join(", "),
+                    parts.join(" UNION ALL "),
+                    if event { "" } else { "WHERE value <> ''" },
+                    self.text_order()
+                ),
+                params,
+            )
+            .await?;
+        // The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+        let mut rest: HashMap<String, (f64, f64, f64)> = HashMap::new();
+        if page && !plan.rest.is_empty() && !rows.is_empty() {
+            // Engaged time is added up per pageview first.
+            let size = VALUES_PER_QUERY.min(MAX_PARAMS.saturating_sub(at.len() + 4)).max(1);
+            let paths: Vec<String> = rows.iter().map(|row| row.text("value")).collect();
+            let engaged = in_pieces(&paths, size, |piece| {
+                let sql = format!(
+                    "SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest {} AND e.path IN ({})
+                 GROUP BY e.path, e.pageview) t GROUP BY value",
+                    of_rest("engagement"),
+                    piece.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+                );
+                let params = concat(vec![at.clone(), piece.iter().map(Param::from).collect()]);
+                async move { self.all(&sql, params).await }
             })
-            .filter(|(value, x)| {
-                (event || !value.is_empty())
-                    && if page {
-                        x.pageviews > 0.0
-                    } else if event {
-                        x.events > 0.0
-                    } else {
-                        x.visits > 0.0
-                    }
-            })
-            .collect();
-        let desc = |a: f64, b: f64| b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal);
-        rows.sort_by(|(a, x), (b, y)| {
-            if entry_exit {
-                desc(x.visits, y.visits).then_with(|| code_order(a, b))
-            } else if event {
-                desc(x.visitors, y.visitors).then(desc(x.events, y.events)).then_with(|| code_order(a, b))
-            } else if page {
-                desc(x.visitors, y.visitors).then(desc(x.pageviews, y.pageviews)).then_with(|| code_order(a, b))
-            } else {
-                desc(x.visitors, y.visitors).then(desc(x.visits, y.visits)).then_with(|| code_order(a, b))
+            .await?;
+            for row in &engaged {
+                let into = rest.entry(row.text("value")).or_default();
+                into.0 += row.num("engaged");
+                into.1 += row.num("scroll_sum");
+                into.2 += row.num("scroll_n");
             }
-        });
-        let start = offset.max(0) as usize;
-        let end = (offset + limit).max(0) as usize;
+        }
         Ok(Some(
-            rows.into_iter()
-                .skip(start)
-                .take(end.saturating_sub(start))
-                .map(|(value, x)| {
+            rows.iter()
+                .map(|row| {
+                    let value = row.text("value");
+                    let n = |c: &str| row.num(&format!("n_{c}"));
                     if event {
-                        return obj! { "value" => value, "visitors" => x.visitors, "events" => x.events };
+                        return obj! { "value" => value, "visitors" => n("visitors"), "events" => n("events") };
                     }
                     if page {
+                        let more = rest.get(&value).copied().unwrap_or_default();
+                        let scroll_n = n("scroll_n") + more.2;
+                        let views = n("views");
                         return obj! {
                             "value" => value,
-                            "visitors" => x.visitors,
-                            "pageviews" => x.pageviews,
+                            "visitors" => n("visitors"),
+                            "pageviews" => n("pageviews"),
                             // Over every pageview that could report its time, counting those that sent none (under a second) as none.
-                            "timeOnPage" => if x.views > 0.0 { js::round(x.engaged / x.views) } else { 0.0 },
-                            "scrollDepth" => if x.scroll_n > 0.0 { js::round(x.scroll_sum / x.scroll_n) } else { 0.0 },
+                            "timeOnPage" => if views > 0.0 { js::round((n("engaged") + more.0) / views) } else { 0.0 },
+                            "scrollDepth" => if scroll_n > 0.0 { js::round((n("scroll_sum") + more.1) / scroll_n) } else { 0.0 },
                         };
                     }
+                    let visits = n("visits");
                     let mut out = obj! {
                         "value" => value,
-                        "visitors" => x.visitors,
-                        "visits" => x.visits,
-                        "bounceRate" => if x.visits > 0.0 { x.bounced / x.visits } else { 0.0 },
+                        "visitors" => n("visitors"),
+                        "visits" => visits,
+                        "bounceRate" => if visits > 0.0 { n("bounced") / visits } else { 0.0 },
                     };
                     if !entry_exit {
                         let o = out.as_object_mut().expect("an object");
-                        o.set("pageviews", x.pageviews);
-                        o.set("visitDuration", if x.visits > 0.0 { js::round(x.duration / x.visits) } else { 0.0 });
+                        o.set("pageviews", n("pageviews"));
+                        o.set("visitDuration", if visits > 0.0 { js::round(n("duration") / visits) } else { 0.0 });
                     }
                     out
                 })
@@ -930,9 +923,13 @@ impl SqlStore {
 
     /// Deletes every salt but those of these days, so the hashes made with them can never be made again.
     pub async fn drop_salts_except(&self, days: &[String]) -> R<()> {
+        // Never a day after the newest of these: a process whose clock is a moment behind must not delete the
+        // salt another has just made for the day that began.
+        let Some(newest) = days.iter().max() else { return Ok(()) };
         let marks = days.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        self.run(&format!("DELETE FROM rl_salts WHERE day NOT IN ({marks})"), days.iter().map(Param::from).collect())
-            .await?;
+        let mut params: Vec<Param> = days.iter().map(Param::from).collect();
+        params.push(Param::from(newest));
+        self.run(&format!("DELETE FROM rl_salts WHERE day NOT IN ({marks}) AND day < ?"), params).await?;
         Ok(())
     }
 
@@ -1152,6 +1149,14 @@ impl SqlStore {
     }
 
     /// Records a link.
+    /// Whether a link with this id was ever made, a deleted one included: its row stays, hidden, with its id
+    /// and its clicks. An import asks this, so a link it brought in once and that was deleted since is left
+    /// deleted.
+    pub async fn link_exists(&self, id: &str) -> R<bool> {
+        Ok(!self.all("SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1", params![id]).await?.is_empty())
+    }
+
+    /// Records a new link.
     pub async fn insert_link(&self, link: &LinkRow) -> R<()> {
         self.run(
             "INSERT INTO rl_links (id, site, domain, slug, name, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1698,13 +1703,16 @@ impl SqlStore {
     fn prop_value(&self, prop: &str) -> Frag {
         match self.dialect() {
             Dialect::Postgres => Frag {
-                sql: "(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)".into(),
+                sql: format!(
+                    "(CASE WHEN ({props} ->> ?) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN ({props} ->> ?)::numeric ELSE 0 END)",
+                    props = readable_props(Dialect::Postgres)
+                ),
                 params: params![prop, prop],
             },
             Dialect::Mysql => {
                 let path = format!("$.\"{prop}\"");
                 // As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-                let value = "JSON_EXTRACT(e.props, ?)";
+                let value = &format!("JSON_EXTRACT({}, ?)", readable_props(Dialect::Mysql));
                 Frag {
                     sql: format!(
                         "(CASE
@@ -1743,15 +1751,17 @@ impl SqlStore {
             // Each key as a row of its own, compared and sorted by code point like every other value.
             Dialect::Mysql => format!(
                 "SELECT j.k AS \"key\", COUNT(*) AS events FROM {}
-             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{{}}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE {MYSQL_COLLATION} PATH '$')) j
+             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE({}) = 'OBJECT' THEN e.props ELSE '{{}}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE {MYSQL_COLLATION} PATH '$')) j
              WHERE {where_} GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30",
-                v.from
+                v.from,
+                readable_props(Dialect::Mysql)
             ),
             Dialect::Postgres => format!(
-                "SELECT k AS \"key\", COUNT(*) AS events FROM {} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{{}}'::jsonb END) AS k
+                "SELECT k AS \"key\", COUNT(*) AS events FROM {} CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof({props}) = 'object' THEN {props} ELSE '{{}}'::jsonb END) AS k
              WHERE {where_} GROUP BY k ORDER BY events DESC, k{} LIMIT 30",
                 v.from,
-                self.text_order()
+                self.text_order(),
+                props = readable_props(Dialect::Postgres)
             ),
             Dialect::Sqlite => format!(
                 "SELECT j.key AS \"key\", COUNT(*) AS events FROM {}, json_each(e.props) j
@@ -1773,8 +1783,10 @@ impl SqlStore {
     ) -> R<Vec<(String, f64, f64)>> {
         let v = visit_rows(&query.filters, &query.site, query.from, query.to, self.dialect());
         let value = match self.dialect() {
-            Dialect::Postgres => "(e.props::jsonb ->> ?)".to_string(),
-            Dialect::Mysql => format!("(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE {MYSQL_COLLATION})"),
+            Dialect::Postgres => format!("({} ->> ?)", readable_props(Dialect::Postgres)),
+            Dialect::Mysql => {
+                format!("(JSON_UNQUOTE(JSON_EXTRACT({}, ?)) COLLATE {MYSQL_COLLATION})", readable_props(Dialect::Mysql))
+            }
             Dialect::Sqlite => "CAST(json_extract(e.props, ?) AS TEXT)".to_string(),
         };
         let path = if self.dialect() == Dialect::Postgres { key.to_string() } else { format!("$.\"{key}\"") };

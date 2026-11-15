@@ -214,18 +214,26 @@ const ALIASES: &[(&str, &str)] = &[
     ("zulu", "Etc/UTC"),
 ];
 
-static ZONES: LazyLock<Mutex<HashMap<String, Option<TimeZone>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static ZONES: LazyLock<Mutex<HashMap<String, TimeZone>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The zone `Intl.DateTimeFormat` would use for a `timeZone` option, or
 /// `None` where it throws a RangeError.
+/// The longest a timezone's name is taken to be: the longest in the database is under forty.
+const MAX_ZONE_NAME: usize = 64;
+
 fn zone(timezone: &str) -> Option<TimeZone> {
-    let mut zones = ZONES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(found) = zones.get(timezone) {
-        return found.clone();
+    // A name sent to be checked may be any text of any length, so only a real zone is remembered.
+    if timezone.len() > MAX_ZONE_NAME {
+        return None;
     }
-    let opened = open(timezone);
-    zones.insert(timezone.to_string(), opened.clone());
-    opened
+    // Names are matched without regard to case, so one zone is kept once however it is spelled.
+    let key = timezone.to_ascii_lowercase();
+    if let Some(found) = ZONES.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Some(found.clone());
+    }
+    let opened = open(timezone)?;
+    ZONES.lock().unwrap_or_else(|e| e.into_inner()).insert(key, opened.clone());
+    Some(opened)
 }
 
 fn open(timezone: &str) -> Option<TimeZone> {
@@ -567,4 +575,25 @@ pub fn local_weekday_hour(ts: i64, timezone: &str) -> (i64, i64) {
     let days = date_utc(y, m - 1, d, 0, 0, 0, 0).div_euclid(86_400_000);
     // getUTCDay counts from Sunday, and 1970-01-01 was a Thursday.
     (((days + 4).rem_euclid(7) + 6) % 7, h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_real_timezones_are_remembered() {
+        let kept = |name: &str| ZONES.lock().unwrap().contains_key(name);
+        assert!(is_timezone("Europe/Paris"));
+        // A zone spelled another way is the one already kept.
+        assert!(is_timezone("europe/PARIS"));
+        assert!(kept("europe/paris") && !kept("europe/PARIS") && !kept("Europe/Paris"));
+        // Text that names no zone, however much of it is sent, is checked and forgotten.
+        assert!(!is_timezone("Nowhere/Town"));
+        assert!(!kept("nowhere/town"));
+        let long = format!("Europe/Paris{}", "x".repeat(100_000));
+        assert!(!is_timezone(&long));
+        assert!(!kept(&long.to_ascii_lowercase()));
+        assert!(!is_timezone(&"+".repeat(MAX_ZONE_NAME + 1)));
+    }
 }

@@ -38,9 +38,18 @@ fn get<'a>(row: &'a Object, name: &str) -> Option<&'a str> {
     row.get(name).and_then(Value::as_str)
 }
 
-/// A row's time in milliseconds, or NaN. ISO 8601 with or without a zone, "2024-05-01 12:34:56" (both
+/// A row's time in milliseconds, or NaN, as it also is for a time before [`CSV_EARLIEST`]. ISO 8601 with or without a zone, "2024-05-01 12:34:56" (both
 /// read as UTC when no zone is given, as Umami writes them), or a Unix time in seconds or milliseconds.
 pub fn row_time(row: &Object, format: CsvFormat) -> f64 {
+    let ts = read_time(row, format);
+    if ts >= CSV_EARLIEST { ts } else { f64::NAN }
+}
+
+/// The earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so a date
+/// written 20240501 would otherwise land in 1970, and the site's history would begin there.
+pub const CSV_EARLIEST: f64 = 946_684_800_000.0;
+
+fn read_time(row: &Object, format: CsvFormat) -> f64 {
     let text = js::trim(get(row, if format == CsvFormat::Umami { "created_at" } else { "time" }).unwrap_or(""));
     if text.is_empty() {
         return f64::NAN;

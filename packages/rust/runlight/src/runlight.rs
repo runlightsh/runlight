@@ -39,6 +39,10 @@ const METERED_ROLLUP_BATCH: usize = 4;
 const ROLLUP_DELAY_MS: i64 = 2 * 3_600_000;
 /// The longest a tracker hit waits for the tables while another process creates or upgrades them.
 const TRACKER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest a request waits to learn the link domains from a database that is slow to answer.
+const LINK_DOMAINS_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long the link domains are left unread after the database failed to give them.
+const LINK_DOMAINS_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 /// The choices for how long a site keeps its visits.
 pub const RETENTION_MONTHS: [i64; 5] = [6, 12, 24, 36, 60];
 /// Thirty minutes without a request ends a session.
@@ -237,9 +241,15 @@ pub fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|v| js::trim(&v).to_string()).filter(|v| !v.is_empty())
 }
 
+/// The longest an address is read, in UTF-16 units.
+pub const EMAIL_MAX: usize = 320;
+
 /// What passes for an email address: something@somewhere.tld, with no spaces, quotes, or angle brackets.
 pub fn is_email(text: &str) -> bool {
-    crate::re::uni_re!(r#"^[^@<>"]+@[^@<>"]+\.[^@<>"]+$"#).is_match(text) && !text.chars().any(js::is_space)
+    // No real address is longer, and nothing longer is read by the pattern.
+    js::len16(text) <= EMAIL_MAX
+        && crate::re::uni_re!(r#"^[^@<>"]+@[^@<>"]+\.[^@<>"]+$"#).is_match(text)
+        && !text.chars().any(js::is_space)
 }
 
 fn site_row(options: &SiteOptions, index: usize) -> Result<SiteRow, String> {
@@ -267,6 +277,8 @@ struct State {
     remotes: Vec<(String, Remote)>,
     remote_seen: HashMap<String, (i64, RemoteInfo)>,
     link_domains: Option<(i64, HashSet<String>)>,
+    /// When the link domains last could not be read, after which they are not asked for again for a while.
+    link_domains_failed: Option<std::time::Instant>,
     salts: HashMap<String, (String, String, Option<String>)>,
     optimized_at: i64,
     /// When statistics were last checked for staleness, which reports do at most hourly.
@@ -291,6 +303,13 @@ pub(crate) struct Inner {
     trust_private: bool,
     /// True until a public address has sent forwarding headers that the default did not believe, and been warned about once.
     warn_direct: AtomicBool,
+    /// Whether, with trust_proxy left at its default, a request that comes with no address of its connection has
+    /// its forwarding headers believed: on a hosting platform, whose proxy is the only way in, and outside
+    /// production. A production server of its own could be reached straight from the internet.
+    trust_unaddressed: bool,
+    warn_unaddressed: AtomicBool,
+    /// AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast.
+    fetch_limit: Option<RateLimit>,
     direct_warnings: AtomicU32,
     limit: Option<RateLimit>,
     clock: Clock,
@@ -311,12 +330,19 @@ pub(crate) struct Inner {
     ready: tokio::sync::Mutex<bool>,
     /// Set once init() has finished, so a tracker hit after that does not wait for it.
     initialized: AtomicBool,
+    /// The init() tracker hits are waiting on while it runs, so however many arrive they share one.
+    starting: Mutex<Option<Starting>>,
+    /// Held by the one request reading the link domains.
+    link_domains_turn: tokio::sync::Mutex<()>,
     checking: tokio::sync::Mutex<()>,
     turns: Turns,
     pruning: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     prune_turn: Arc<tokio::sync::Mutex<()>>,
     pub(crate) route_bases: Mutex<Vec<String>>,
 }
+
+/// How an init() run for tracker hits ended, once it has: `None` while it is still running.
+type Starting = tokio::sync::watch::Receiver<Option<Result<(), Error>>>;
 
 /// Privacy friendly web analytics that lives inside your app. A cheap handle to clone.
 #[derive(Clone)]
@@ -364,6 +390,8 @@ impl Runlight {
         let per_minute = options.rate_limit.unwrap_or(120.0);
         // Zero, or anything that is not a positive number, means no limit, never a limit of nothing.
         let limit = (per_minute > 0.0).then(|| RateLimit::new(per_minute));
+        let fetch_limit = limit.is_some().then(|| RateLimit::new(per_minute * 10.0));
+        let trust_unaddressed = env_value("NODE_ENV").as_deref() != Some("production") || hosting_platform();
         let clock: Clock = options.now.clone().unwrap_or_else(|| {
             Arc::new(|| {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
@@ -378,6 +406,9 @@ impl Runlight {
             geo: options.geo,
             trust_private: options.trust_proxy.is_none(),
             warn_direct: AtomicBool::new(options.trust_proxy.is_none()),
+            trust_unaddressed,
+            warn_unaddressed: AtomicBool::new(options.trust_proxy.is_none() && !trust_unaddressed),
+            fetch_limit,
             direct_warnings: AtomicU32::new(0),
             trust_proxy: options.trust_proxy.unwrap_or_default(),
             limit,
@@ -395,6 +426,8 @@ impl Runlight {
             state: Mutex::new(State { configured, ..State::default() }),
             ready: tokio::sync::Mutex::new(false),
             initialized: AtomicBool::new(false),
+            starting: Mutex::new(None),
+            link_domains_turn: tokio::sync::Mutex::new(()),
             checking: tokio::sync::Mutex::new(()),
             turns: Turns::default(),
             pruning: Mutex::new(Vec::new()),
@@ -534,11 +567,29 @@ impl Runlight {
         if self.0.initialized.load(Ordering::Acquire) {
             return Ok(true);
         }
-        // Run on its own, so giving up the wait does not stop it part way.
-        let rl = self.clone();
-        let init = tokio::spawn(async move { rl.init().await });
-        match tokio::time::timeout(wait, init).await {
-            Ok(Ok(done)) => done.map(|()| true),
+        // Run on its own, so giving up the wait does not stop it part way, and one run for every hit that
+        // arrives meanwhile: while another process holds the tables for minutes, hits each starting their own
+        // would queue up behind it without end.
+        let mut running = {
+            let mut starting = self.0.starting.lock().unwrap_or_else(|e| e.into_inner());
+            match &*starting {
+                Some(running) => running.clone(),
+                None => {
+                    let (done, running) = tokio::sync::watch::channel(None);
+                    *starting = Some(running.clone());
+                    let rl = self.clone();
+                    tokio::spawn(async move {
+                        let result = rl.init().await;
+                        // Forgotten before it is told, so a run that failed is tried again by the next hit.
+                        *rl.0.starting.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        let _ = done.send(Some(result));
+                    });
+                    running
+                }
+            }
+        };
+        match tokio::time::timeout(wait, running.wait_for(Option::is_some)).await {
+            Ok(Ok(done)) => done.clone().unwrap_or(Ok(())).map(|()| true),
             Ok(Err(stopped)) => Err(Error::Other(format!("Runlight: {stopped}"))),
             Err(_) => Ok(false),
         }
@@ -766,11 +817,21 @@ impl Runlight {
             _ => false,
         });
         let there = there.unwrap_or(&sites[0]).clone();
+        // Checked before anything is saved: a site there has an id and a name, as text.
+        let named = matches!(there.get("id"), Some(Value::String(id)) if !id.is_empty() && js::len16(id) <= 64)
+            && there.get("name").is_some_and(Value::is_string);
+        if !named {
+            return Err(Error::settings(
+                format!("{url} did not answer like a Runlight install"),
+                "connect_not_runlight",
+                &[("url", &url)],
+            ));
+        }
         // An install's answer is read as given: a site without a list of hostnames has none.
         let hostnames: Vec<String> = there
             .get("hostnames")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|h| h.as_str().map(str::to_string)).collect())
+            .map(|a| a.iter().filter_map(|h| h.as_str().filter(|h| !h.is_empty()).map(str::to_string)).collect())
             .unwrap_or_default();
         let there_id = js::str_or_empty(there.get("id"));
         // Connecting the same site again (to allow changes, or with a new token) updates it in place.
@@ -800,7 +861,9 @@ impl Runlight {
         }
         let host_source =
             hostnames.first().cloned().unwrap_or_else(|| Url::parse(&url).map(|u| u.host()).unwrap_or_default());
-        let host = crate::re::replace_all(js_re!(r"(?i)[^a-z0-9._-]"), &host_source, "-").to_lowercase();
+        let host = crate::re::replace_all(js_re!(r"(?i)[^a-z0-9._-]"), &host_source, "-");
+        let host = crate::re::replace_first(js_re!(r"(?i)^[^a-z0-9]+"), &host, "").to_lowercase();
+        let host = if host.is_empty() { "site".to_string() } else { host };
         let stem = js::head16(&host, 56);
         let mut id = stem.clone();
         let mut n = 2;
@@ -809,7 +872,14 @@ impl Runlight {
             n += 1;
         }
         let given = js::head16(js::trim(&js::str_or_empty(name)), 80);
-        let site_name = if given.is_empty() { js::str_or_empty(there.get("name")) } else { given };
+        let theirs = js::head16(js::trim(&js::str_or_empty(there.get("name"))), 80);
+        let site_name = if !given.is_empty() {
+            given
+        } else if !theirs.is_empty() {
+            theirs
+        } else {
+            host.clone()
+        };
         let tz = js::str_or_empty(there.get("timezone"));
         // No hostnames: tracker hits never land on a site that is counted elsewhere.
         let site = SiteRow {
@@ -1231,7 +1301,7 @@ impl Runlight {
         if let Some(f) = forwarded
             && !js::trim(&f).is_empty()
         {
-            return js::trim(&f).to_string();
+            return bare_address(js::trim(&f));
         }
         request.remote_address.clone()
     }
@@ -1239,16 +1309,34 @@ impl Runlight {
     /// Whether a request's forwarding headers count. Left at its default, trust_proxy believes them only on a
     /// connection from this computer or a private network, or one whose address the app did not pass on (a
     /// hosting platform's function), since a client reaching the server straight from the internet could write
-    /// them itself.
+    /// them itself. With no address passed on, they count on a hosting platform and outside production.
     fn trusts(&self, request: &Request) -> bool {
         if self.0.trust_proxy == TrustProxy::Off {
             return false;
         }
-        if !self.0.trust_private || request.remote_address.is_empty() || !public_address(&request.remote_address) {
+        if !self.0.trust_private {
+            return true;
+        }
+        let h = &request.headers;
+        if request.remote_address.is_empty() {
+            if self.0.trust_unaddressed {
+                return true;
+            }
+            // Said once: nothing says where this request came from, so it could have come straight from the internet.
+            if self.0.warn_unaddressed.load(Ordering::Relaxed)
+                && (h.has("x-forwarded-for") || h.has("x-real-ip") || h.has("cf-connecting-ip"))
+                && self.0.warn_unaddressed.swap(false, Ordering::Relaxed)
+            {
+                eprintln!(
+                    "Runlight: a request came with forwarding headers and no connection address, so the headers are not believed: in production, a client that reaches this server straight from the internet could write them itself and choose its own address. Behind a proxy of your own (nginx, Caddy, a load balancer), set trust_proxy to Some(TrustProxy::On) or to the header it sets, or pass the connection's address as the request's remote_address. Until then every visitor with the same browser counts as one."
+                );
+            }
+            return false;
+        }
+        if !public_address(&request.remote_address) {
             return true;
         }
         // Said once: a CDN that connects from public addresses needs trust_proxy set, or its visitors all look alike.
-        let h = &request.headers;
         if self.0.warn_direct.load(Ordering::Relaxed)
             && (h.has("x-forwarded-for") || h.has("x-real-ip") || h.has("cf-connecting-ip"))
             && self.0.warn_direct.swap(false, Ordering::Relaxed)
@@ -1344,8 +1432,17 @@ impl Runlight {
         if self.trusts(request) { request.headers.get("x-forwarded-host") } else { None }
     }
 
-    /// Handles one tracker request. Always succeeds unless the database fails; bad input is dropped quietly.
+    /// Handles one tracker request. Always `Ok`: bad input is dropped quietly, and a hit the store could not
+    /// take is logged, since analytics must never break the app it counts for. (It answers a `Result` only
+    /// because it always has.)
     pub async fn collect(&self, request: &Request) -> Result<(), Error> {
+        if let Err(error) = self.take(request).await {
+            eprintln!("Runlight: could not record an event {error}");
+        }
+        Ok(())
+    }
+
+    async fn take(&self, request: &Request) -> Result<(), Error> {
         let length = request.headers.get("content-length").map_or(0.0, |l| js::text_number(&l));
         if length > MAX_BODY as f64 {
             return Ok(());
@@ -1541,22 +1638,73 @@ impl Runlight {
     }
 
     /// The link domains, read at most every 30 seconds.
+    ///
+    /// Middleware asks this for every request the app gets, so a database that is down must not hold them all
+    /// up: one request at a time does the reading, for a few seconds at most, and after a failure the domains
+    /// last read stand (none, when there were none), and the database is left alone for a few seconds more.
     async fn link_domain_set(&self) -> Result<HashSet<String>, Error> {
         let now = self.now();
-        if let Some((at, domains)) = &self.state().link_domains
-            && now - at < 30_000
-        {
-            return Ok(domains.clone());
+        let known = {
+            let state = self.state();
+            if let Some((at, domains)) = &state.link_domains
+                && now - at < 30_000
+            {
+                return Ok(domains.clone());
+            }
+            let known = state.link_domains.as_ref().map(|(_, domains)| domains.clone());
+            if state.link_domains_failed.is_some_and(|at| at.elapsed() < LINK_DOMAINS_RETRY) {
+                return Ok(known.unwrap_or_default());
+            }
+            known
+        };
+        // While one request reads them, the others go on with what was last read, when anything was.
+        let _turn = match (self.0.link_domains_turn.try_lock(), &known) {
+            (Ok(turn), _) => turn,
+            (Err(_), Some(known)) => return Ok(known.clone()),
+            (Err(_), None) => {
+                let turn = self.0.link_domains_turn.lock().await;
+                let state = self.state();
+                if let Some((_, domains)) = &state.link_domains {
+                    return Ok(domains.clone());
+                }
+                if state.link_domains_failed.is_some_and(|at| at.elapsed() < LINK_DOMAINS_RETRY) {
+                    return Ok(HashSet::new());
+                }
+                drop(state);
+                turn
+            }
+        };
+        let read = async {
+            if !self.ready_within(LINK_DOMAINS_WAIT).await? {
+                return Err(Error::Other("Runlight: the database took too long to answer for the link domains".into()));
+            }
+            match tokio::time::timeout(LINK_DOMAINS_WAIT, self.0.store.link_domains()).await {
+                Ok(rows) => Ok(rows?.into_iter().map(|(d, _)| d).collect::<HashSet<String>>()),
+                Err(_) => {
+                    Err(Error::Other("Runlight: the database took too long to answer for the link domains".into()))
+                }
+            }
+        };
+        match read.await {
+            Ok(domains) => {
+                let mut state = self.state();
+                state.link_domains = Some((now, domains.clone()));
+                state.link_domains_failed = None;
+                Ok(domains)
+            }
+            Err(error) => {
+                self.state().link_domains_failed = Some(std::time::Instant::now());
+                eprintln!("Runlight: could not read the link domains {error}");
+                Ok(known.unwrap_or_default())
+            }
         }
-        self.init().await?;
-        let domains: HashSet<String> = self.0.store.link_domains().await?.into_iter().map(|(d, _)| d).collect();
-        self.state().link_domains = Some((now, domains.clone()));
-        Ok(domains)
     }
 
     /// Clears the cached link domains after one is added or removed.
     pub fn forget_link_domains(&self) {
-        self.state().link_domains = None;
+        let mut state = self.state();
+        state.link_domains = None;
+        state.link_domains_failed = None;
     }
 
     /// Handles `{link_path}/{slug}` on the app's own domain.
@@ -1627,6 +1775,8 @@ impl Runlight {
             && ai_agent(&ua).is_none()
             && !is_bot(&ua)
             && request.method == "GET"
+            // Past the tracker's limit for one address a click still redirects, and is not counted.
+            && self.0.limit.as_ref().is_none_or(|limit| limit.allow(&self.client_ip(request), self.now()))
         {
             let recorded = async {
                 let now = self.now();
@@ -1727,7 +1877,20 @@ impl Runlight {
     /// [`Runlight::observe`] for a fetch a log reader or plugin reports, with the address the agent's
     /// request came from (`agent_ip`), which is checked in place of the request's own and then dropped.
     pub async fn observe_with(&self, request: &Request, at: Option<f64>, agent_ip: Option<&str>) -> bool {
-        match self.observe_inner(request, at, agent_ip).await {
+        self.observe_as(request, at, agent_ip, None).await
+    }
+
+    /// [`Runlight::observe_with`] with the user agent as text (`user_agent`), which stands in for the
+    /// request's header when given: a log reader gives it this way, since a logged one may not be fit for a
+    /// header.
+    pub async fn observe_as(
+        &self,
+        request: &Request,
+        at: Option<f64>,
+        agent_ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> bool {
+        match self.observe_inner(request, at, agent_ip, user_agent).await {
             Ok(done) => done,
             Err(error) => {
                 // Analytics must never break the page it watches, but a failure should still be seen.
@@ -1737,11 +1900,21 @@ impl Runlight {
         }
     }
 
-    async fn observe_inner(&self, request: &Request, at: Option<f64>, agent_ip: Option<&str>) -> Result<bool, Error> {
+    async fn observe_inner(
+        &self,
+        request: &Request,
+        at: Option<f64>,
+        agent_ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<bool, Error> {
         if request.method != "GET" {
             return Ok(false);
         }
-        let Some(agent) = ai_agent(&request.headers.get("user-agent").unwrap_or_default()) else { return Ok(false) };
+        let ua = match user_agent {
+            Some(ua) => ua.to_string(),
+            None => request.headers.get("user-agent").unwrap_or_default(),
+        };
+        let Some(agent) = ai_agent(&ua) else { return Ok(false) };
         let Some(url) = Url::parse(&request.url) else { return Err(Error::Other("TypeError: Invalid URL".into())) };
         // Pages, not their assets.
         let pathname = url.pathname();
@@ -1750,10 +1923,19 @@ impl Runlight {
         {
             return Ok(false);
         }
-        let host =
+        let given =
             self.forwarded_host(request).or_else(|| request.headers.get("host")).unwrap_or_else(|| url.hostname());
+        // The first name a proxy gives, without its port.
+        let host = js::trim(given.split(',').next().unwrap_or("")).split(':').next().unwrap_or("").to_string();
         self.init().await?;
-        let Some(site) = self.site_for(host.split(':').next().unwrap_or(&host), None) else { return Ok(false) };
+        let Some(site) = self.site_for(&host, None) else { return Ok(false) };
+        // A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+        if agent_ip.is_none()
+            && let Some(limit) = &self.0.fetch_limit
+            && !limit.allow(&self.client_ip(request), self.now())
+        {
+            return Ok(false);
+        }
         // A log reader sends when the page was served. Older than a week is dropped; ahead of now counts as now.
         let now = self.now();
         if let Some(at) = at
@@ -1787,7 +1969,7 @@ impl Runlight {
                 session: String::new(),
                 pageview: String::new(),
                 path: js::head16(&pathname, 1000),
-                hostname: strip_www(&url.hostname()),
+                hostname: strip_www(&host),
                 title,
                 name: agent.name.into(),
                 props: Some(props),
@@ -1868,45 +2050,64 @@ impl Runlight {
     async fn refresh_agent_ranges_inner(&self) -> Result<(), Error> {
         let store = &self.0.store;
         let stored = store.setting("agent-ranges").await?;
-        // What was saved: when, and the lists that still read as lists, in their saved order.
-        let mut saved: Option<(f64, Object)> = None;
+        // What was saved: when, the lists that still read as lists, in their saved order, and when each was
+        // downloaded (`fetched`; a copy saved before that was kept has only `at`, for all of them).
+        let mut saved: Option<(f64, Object, Object)> = None;
         if let Some(stored) = stored.filter(|s| !s.is_empty())
             && let Ok(parsed) = js::parse(&stored)
             && !parsed.is_null()
         {
+            let at = js::opt_number(parsed.get("at"));
+            let at = if at.is_nan() { 0.0 } else { at };
             let mut lists = Object::new();
+            let mut fetched = Object::new();
             let entries: Vec<(String, Value)> = match parsed.get("lists") {
                 Some(Value::Object(o)) => o.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
                 Some(Value::Array(a)) => a.iter().enumerate().map(|(i, v)| (i.to_string(), v.clone())).collect(),
                 _ => Vec::new(),
             };
+            let kept = parsed.get("fetched").filter(|f| js::truthy(f));
             for (url, list) in entries {
-                if let Some(prefixes) = read_stored_list(&list) {
-                    lists.set(url, Value::Array(prefixes.into_iter().map(Value::from).collect()));
-                }
+                let Some(prefixes) = read_stored_list(&list) else { continue };
+                lists.set(url.clone(), Value::Array(prefixes.into_iter().map(Value::from).collect()));
+                let when = kept.and_then(|f| f.get(&url)).map_or(f64::NAN, js::js_number);
+                let when = if when.is_nan() || when == 0.0 { if kept.is_some() { 0.0 } else { at } } else { when };
+                fetched.set(url, when);
             }
-            let at = js::opt_number(parsed.get("at"));
-            saved = Some((if at.is_nan() { 0.0 } else { at }, lists));
+            saved = Some((at, lists, fetched));
         }
         let now = self.now();
-        if self.0.update_agent_ranges && saved.as_ref().is_none_or(|(at, _)| now as f64 - at >= AGENT_RANGES_EVERY_MS) {
-            let mut lists = saved.map(|(_, lists)| lists).unwrap_or_default();
+        if self.0.update_agent_ranges
+            && saved.as_ref().is_none_or(|(at, _, _)| now as f64 - at >= AGENT_RANGES_EVERY_MS)
+        {
+            let (mut lists, mut fetched) = saved.map(|(_, lists, fetched)| (lists, fetched)).unwrap_or_default();
             for url in &AGENT_RANGES.urls {
                 if let Some(fresh) = download_range_list(&*self.0.fetcher, url, 15_000).await {
                     lists.set(url.clone(), Value::Array(fresh.into_iter().map(Value::from).collect()));
+                    fetched.set(url.clone(), self.now());
                 }
             }
             let now = self.now();
             store
-                .set_setting("agent-ranges", Some(&crate::obj! { "at" => now, "lists" => lists.clone() }.to_json()))
+                .set_setting(
+                    "agent-ranges",
+                    Some(
+                        &crate::obj! { "at" => now, "lists" => lists.clone(), "fetched" => fetched.clone() }.to_json(),
+                    ),
+                )
                 .await?;
-            saved = Some((now as f64, lists));
+            saved = Some((now as f64, lists, fetched));
         }
+        // A downloaded list stands in for the one that came with this version only while it is the newer of the two.
+        let shipped = crate::importers::http::date_parse(&AGENT_RANGES.fetched_at);
+        let shipped = if shipped.is_nan() { 0.0 } else { shipped };
         let mut in_use: RangeLists = (*AGENT_RANGES.lists).clone();
-        if let Some((_, lists)) = saved {
+        if let Some((_, lists, fetched)) = saved {
             for (url, list) in lists.iter() {
-                let prefixes = list.as_array().map(|a| a.iter().map(js::js_string).collect()).unwrap_or_default();
-                in_use.insert(url.to_string(), Arc::new(RangeList::new(prefixes)));
+                if js::opt_number(fetched.get(url)) >= shipped {
+                    let prefixes = list.as_array().map(|a| a.iter().map(js::js_string).collect()).unwrap_or_default();
+                    in_use.insert(url.to_string(), Arc::new(RangeList::new(prefixes)));
+                }
             }
         }
         *self.0.agent_ranges.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(in_use);
@@ -1948,6 +2149,38 @@ fn minus_months(now: i64, months: i64) -> i64 {
     let last = js::date_utc(y, m - 1 - months + 1, 0, 0, 0, 0, 0).div_euclid(86_400_000);
     let (_, _, last_day) = js::civil_from_days(last);
     js::date_utc(y, m - 1 - months, d.min(last_day), 0, 0, 0, 0) + rest
+}
+
+/// A forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and
+/// "[2001:db8::1]:443" are the address alone.
+fn bare_address(value: &str) -> String {
+    if let Some(inside) = crate::re::group(js_re!(r"^\[([^\]]*)\](?::\d+)?$"), value, 1) {
+        return inside;
+    }
+    if test(js_re!(r"^\d{1,3}(?:\.\d{1,3}){3}:\d+$"), value) {
+        return value[..value.rfind(':').unwrap_or(value.len())].to_string();
+    }
+    value.to_string()
+}
+
+/// Whether this runs on a hosting platform that puts its own proxy in front of every request, so forwarding
+/// headers are its own.
+fn hosting_platform() -> bool {
+    [
+        "VERCEL",
+        "NETLIFY",
+        "CF_PAGES",
+        "AWS_LAMBDA_FUNCTION_NAME",
+        "K_SERVICE",
+        "WEBSITE_SITE_NAME",
+        "FLY_APP_NAME",
+        "RENDER",
+        "RAILWAY_ENVIRONMENT",
+        "DENO_DEPLOYMENT_ID",
+        "DYNO",
+    ]
+    .iter()
+    .any(|name| env_value(name).is_some())
 }
 
 fn not_found() -> Response {

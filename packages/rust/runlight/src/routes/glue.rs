@@ -91,8 +91,16 @@ impl crate::oauth::OAuthHost for Routes {
         Box::pin(async move { self.can_read(request, &Call::default()).await == CanRead::Yes })
     }
 
+    fn is_site_only<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, bool> {
+        Box::pin(async move { self.session_scope(request).await.ok().flatten().is_some_and(|u| u.site.is_some()) })
+    }
+
     fn is_reader<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, bool> {
         Box::pin(async move {
+            // An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+            if self.session_scope(request).await.ok().flatten().is_some_and(|u| u.site.is_some()) {
+                return true;
+            }
             match (&self.0.options.authorize, &self.0.web) {
                 (Some(authorize), _) => authorize(request).await == Access::Read,
                 (None, Some(web)) => web_access(web, request).await == Access::Read,

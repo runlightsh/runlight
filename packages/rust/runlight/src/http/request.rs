@@ -67,6 +67,15 @@ impl Request {
         SearchParams::parse_bytes(&self.body)
     }
 
+    /// Whether the body is longer than `max` bytes, by what was read of it or by what content-length declares,
+    /// as the SDK's capped reader refuses one. A request with no body is never too long.
+    pub fn body_over(&self, max: usize) -> bool {
+        if self.body.is_empty() {
+            return false;
+        }
+        self.body.len() > max || self.headers.get("content-length").is_some_and(|l| js::text_number(&l) > max as f64)
+    }
+
     /// The URL, parsed.
     pub fn parsed_url(&self) -> Url {
         Url::parse(&self.url).unwrap_or_else(|| Url::parse("http://localhost/").expect("a URL"))

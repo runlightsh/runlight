@@ -45,14 +45,23 @@ pub struct ClientHints {
     pub platform: Option<String>,
 }
 
+/// The most of a user agent, or of a client hint, that is read, in UTF-16 units: a real one is far shorter, and
+/// nothing past it is parsed.
+pub const MAX_UA: usize = 512;
+
+fn cap(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.len() <= MAX_UA { value.into() } else { js::head16(value, MAX_UA).into() }
+}
+
 /// The AI agent a user agent names, if any.
 pub fn ai_agent(ua: &str) -> Option<&'static AiAgent> {
-    let lower = ua.to_lowercase();
+    let lower = cap(ua).to_lowercase();
     AI_AGENTS.iter().find(|agent| lower.contains(agent.token))
 }
 
 /// Whether a user agent is anything but a person in a browser.
 pub fn is_bot(ua: &str) -> bool {
+    let ua = &*cap(ua);
     if js::len16(ua) < 20 || !test(js_re!(r"(?i)mozilla|opera"), ua) {
         return true;
     }
@@ -84,6 +93,12 @@ fn unquote(value: Option<&str>) -> String {
 /// The browser, system, and device a user agent names, with the client
 /// hints and the screen's width where they say more.
 pub fn parse_client(ua: &str, hints: &ClientHints, screen_width: Option<f64>) -> Client {
+    let ua = &*cap(ua);
+    let hints = &ClientHints {
+        brands: hints.brands.as_deref().map(|v| cap(v).into_owned()),
+        mobile: hints.mobile.as_deref().map(|v| cap(v).into_owned()),
+        platform: hints.platform.as_deref().map(|v| cap(v).into_owned()),
+    };
     let browsers: [(&str, &regex::bytes::Regex); 11] = [
         ("Edge", js_re!(r"(?:Edg|EdgA|EdgiOS|Edge)/(\d+)")),
         ("Opera", js_re!(r"(?:OPR|OPiOS|Opera)/(\d+)")),
@@ -102,7 +117,7 @@ pub fn parse_client(ua: &str, hints: &ClientHints, screen_width: Option<f64>) ->
         (
             "Safari",
             uni_re!(
-                r"Version/([0-9]+)[0-9.]* (?:Mobile/[^\t\n\x{0B}\f\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]+ )?Safari/"
+                r"Version/([0-9]+)(?:\.[0-9.]*)? (?:Mobile/[^\t\n\x{0B}\f\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]+ )?Safari/"
             ),
         ),
         ("Internet Explorer", uni_re!(r"(?:MSIE |Trident/[^\n\r\x{2028}\x{2029}]*rv:)([0-9]+)")),

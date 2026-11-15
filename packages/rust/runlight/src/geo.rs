@@ -7,6 +7,7 @@ use base64::Engine;
 
 use crate::http::Headers;
 use crate::js::{self, Value};
+use crate::payload::tidy;
 use crate::re::{js_re, test};
 use crate::sources::decode_uri_component;
 use crate::{BoxError, BoxFuture};
@@ -78,7 +79,7 @@ pub fn clean(location: &Found) -> Location {
     }
     // A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
     // that has no codes ("California") is kept readable, as "US-California".
-    let raw = js::trim(location.region.as_deref().unwrap_or("")).to_string();
+    let raw = js::trim(&tidy(location.region.as_deref().unwrap_or(""))).to_string();
     let mut region = if test(js_re!(r"^([A-Za-z]{2}-)?[A-Za-z0-9]{1,3}$"), &raw) {
         raw.to_uppercase()
     } else {
@@ -90,7 +91,8 @@ pub fn clean(location: &Found) -> Location {
     if country.is_empty() {
         region = String::new();
     }
-    let city = if country.is_empty() { String::new() } else { js::head16(location.city.as_deref().unwrap_or(""), 100) };
+    let city =
+        if country.is_empty() { String::new() } else { js::head16(&tidy(location.city.as_deref().unwrap_or("")), 100) };
     Location { country, region, city }
 }
 
@@ -130,7 +132,7 @@ pub fn location_from_headers(headers: &Headers) -> Option<Location> {
         let mut found = clean(&Found { country: Some(country), region: Some(region), city: Some(String::new()) });
         // The city is read only once there is a country.
         if !found.country.is_empty() {
-            found.city = js::head16(&city.ok()?, 100);
+            found.city = js::head16(&tidy(&city.ok()?), 100);
         }
         return Some(found);
     }

@@ -9,6 +9,9 @@ use crate::time::{Range, RangeInput, compare_range, local_date, local_weekday_ho
 
 pub(crate) type R = Result<Response, Error>;
 
+/// The most a connected install's JSON answer may weigh: far past any report, a thousand rows at most.
+const PASS_THROUGH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 /// A view's query: its site, range, and filters, the range itself, and the range it is compared with.
 pub(crate) struct Read {
     pub query: Query,
@@ -127,6 +130,10 @@ impl Routes {
         let rl = self.rl();
         let store = rl.store();
         let raw = js::trim(value).to_lowercase();
+        // The longest a domain name can be. Anything longer is refused before a pattern reads it.
+        if js::len16(&raw) > 253 {
+            return Ok(Err(coded("That is not a domain name", "domain_invalid", 400, None)));
+        }
         let domain = crate::re::replace_first(js_re!(r"^https?://"), &raw, "");
         let domain = crate::re::replace_first(js_re!(r"/[^\n\r]*$"), &domain, "");
         let domain = domain.trim_end_matches('.').to_string();
@@ -143,7 +150,8 @@ impl Routes {
             )));
         }
         // A link domain answers every path on it, so it must never be where the dashboard or a counted site lives.
-        if call.is_managed() && self.0.origin.is_none() {
+        // Neither does an account kept to one site, which has a hub's reach.
+        if self.0.origin.is_none() && self.restricted(request, call).await? {
             return Ok(Err(self.origin_needed()));
         }
         let mut own: Vec<String> = Vec::new();
@@ -571,7 +579,8 @@ impl Routes {
                 // the request came to. An address in the body is never used, so whoever adds a report cannot point
                 // its links somewhere else. A report made from a hub needs the configured address, where its
                 // unsubscribe link answers, since the Host its request names is the hub's to choose.
-                if call.is_managed() && self.0.origin.is_none() {
+                // So does one made by an account kept to one site.
+                if self.0.origin.is_none() && self.restricted(request, call).await? {
                     return Ok(self.origin_needed());
                 }
                 let home = format!("{}{}", self.0.origin.clone().unwrap_or_else(|| url.origin()), self.0.base);
@@ -854,9 +863,13 @@ impl Routes {
                 .header("authorization", format!("Bearer {}", remote.token))
                 .timeout(if write { 30_000 } else { 120_000 });
         init.manual_redirect = true;
-        // The hub reads an install's live answer for a share or embed, so it reads no more than a live answer needs.
-        if path == "/api/realtime" {
-            init.max_bytes = Some(4 * 1024 * 1024);
+        // An export is a file and may be large. Every other answer is JSON, held whole in memory here before it
+        // is handed on, so it is read no further than a report could run to: an install that answers without
+        // end costs each dashboard, or share link, reading through this server only that much.
+        let download =
+            path == "/api/export" || (path == "/api/breakdown" && url.search_params().get("format") == Some("csv"));
+        if !download {
+            init.max_bytes = Some(if path == "/api/realtime" { 4 * 1024 * 1024 } else { PASS_THROUGH_MAX_BYTES });
         }
         if write && let Some(r) = request {
             if let Some(ct) = r.headers.get("content-type").filter(|c| !c.is_empty()) {
@@ -880,8 +893,6 @@ impl Routes {
             }
         };
         // What comes back is shown from this server's origin, so it is never taken as a page.
-        let download =
-            path == "/api/export" || (path == "/api/breakdown" && url.search_params().get("format") == Some("csv"));
         let content_type = if download {
             if answer.headers.get("content-type").unwrap_or_default().starts_with("text/csv") {
                 "text/csv; charset=utf-8"

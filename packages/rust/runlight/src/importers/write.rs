@@ -24,6 +24,10 @@ const SHORTENER_DOMAINS: [&str; 10] =
 /// The most clicks a day one imported link gets from a daily count.
 const MAX_DAILY: f64 = 10_000.0;
 
+/// The most clicks one imported link brings with it, each click or each one of a daily count. The rest of a
+/// longer history is left behind, so no source, however much it sends, can fill memory or hold the database.
+pub const MAX_LINK_CLICKS: i64 = 100_000;
+
 /// The first `length` hex digits of a value's SHA-256.
 pub fn hex_id(value: &str, length: usize) -> String {
     sha256(value)[..length].to_string()
@@ -90,6 +94,59 @@ pub fn title(v: &str) -> String {
         Some(c) if (c as u32) > 0xFFFF => v.to_string(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
+}
+
+/// Whether a text holds an IPv4 address, or what reads as an IPv6 one, anywhere in it. The SDK's pattern ends
+/// its IPv4 half with a lookahead, `(?![\d.])`; here the character after is matched instead, which finds the
+/// same texts.
+fn has_address(text: &str) -> bool {
+    test(js_re!(r"(?i)(^|[^\d.])\d{1,3}(\.\d{1,3}){3}($|[^\d.])|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}"), text)
+}
+
+/// What a user agent has and a place name does not: a product with its version (Chrome/129), or its usual
+/// first words.
+fn reads_as_agent(text: &str) -> bool {
+    test(js_re!(r"(?i)[a-z]/\d|mozilla|applewebkit"), text)
+}
+
+/// Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in
+/// any column. A name that is not one Runlight knows is kept only when it reads as a name (a word or a few,
+/// not starting with a digit, without the punctuation of a user agent), and nothing else.
+pub fn named(name: &str) -> String {
+    let text = js::trim(name);
+    if test(js_re!(r"^[A-Za-z_][A-Za-z0-9 ._+-]{0,39}$"), text) && !has_address(text) {
+        text.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// A browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for
+/// anything else.
+pub fn browser(name: &str) -> String {
+    browser_name(&name.to_lowercase()).map_or_else(|| title(&named(name)), str::to_string)
+}
+
+/// A system name in Runlight's spelling, or a name as given, or none for anything that is not a name.
+pub fn system(name: &str) -> String {
+    system_name(&name.to_lowercase()).map_or_else(|| named(name), str::to_string)
+}
+
+/// Free text about a place as given, or none when it holds an address or reads as a user agent.
+pub fn place_name(name: &str) -> String {
+    if has_address(name) || reads_as_agent(name) { String::new() } else { name.to_string() }
+}
+
+/// A screen as 1440x900, or none.
+pub fn screen_size(value: &str) -> String {
+    let text = js::trim(value);
+    if test(js_re!(r"^\d{1,5}x\d{1,5}$"), text) { text.to_string() } else { String::new() }
+}
+
+/// A language tag such as en or pt-BR, or none.
+pub fn language_tag(value: &str) -> String {
+    let text = js::trim(value);
+    if test(js_re!(r"^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}$"), text) { text.to_string() } else { String::new() }
 }
 
 /// A value as a template literal writes it: `undefined` for a missing one.
@@ -162,7 +219,9 @@ pub async fn write_link(
     let given_url = tpl(field(f, "url"));
     let id = imported_link_id(source, &source_id);
     let store = rl.store();
-    if store.link_by_id(&id).await?.is_some() {
+    // Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+    // left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+    if store.link_exists(&id).await? {
         return Ok(WriteResult::skipped());
     }
     let taken = store.link_by_slug(&slug).await?;
@@ -246,6 +305,9 @@ pub async fn write_link(
                 let mut clicks: i64 = 0;
                 let mut made: HashSet<String> = HashSet::new();
                 for c in clicks_in {
+                    if clicks >= MAX_LINK_CLICKS {
+                        break;
+                    }
                     let c = Some(c);
                     let ts = match field(c, "ts") {
                         Some(Value::Number(n)) if n.is_finite() => *n,
@@ -275,16 +337,16 @@ pub async fn write_link(
                             None => page_of(&format!("https://{host}/{slug}")).ok_or_else(|| fail(ImportError::other("TypeError: Invalid URL")))?,
                         };
                         let country = js::head16(&text_or_empty(field(c, "country")).to_uppercase(), 2);
-                        let region_value = field(c, "region");
-                        let region = if js::opt_truthy(region_value) {
-                            let r = tpl(region_value);
+                        let raw_region = place_name(&text_or_empty(field(c, "region")));
+                        let region = if !raw_region.is_empty() {
+                            let r = raw_region;
                             js::head16(&(if r.contains('-') { r } else { format!("{country}-{r}") }).to_uppercase(), 10)
                         } else {
                             String::new()
                         };
                         let referrer = text_or_blank(field(c, "referrer"));
                         let a = attribute(&page, &referrer, &[]);
-                        let browser = text_or_empty(field(c, "browser"));
+                        let browser_given = text_or_empty(field(c, "browser"));
                         let os = field(c, "os");
                         store
                             .insert_session(&SessionRow {
@@ -304,14 +366,14 @@ pub async fn write_link(
                                 utm_content: page.utm.content.clone(),
                                 country: if test(js_re!(r"^[A-Z]{2}$"), &country) { country.clone() } else { String::new() },
                                 region: if country.is_empty() { String::new() } else { region },
-                                city: js::head16(&text_or_empty(field(c, "city")), 100),
-                                browser: browser_name(&browser.to_lowercase()).map_or_else(|| title(&browser), str::to_string),
+                                city: js::head16(&place_name(&text_or_empty(field(c, "city"))), 100),
+                                browser: browser(&browser_given),
                                 browser_version: String::new(),
-                                os: system_name(&text_or_empty(os).to_lowercase()).map_or_else(|| text_or_empty(os), str::to_string),
+                                os: system(&text_or_empty(os)),
                                 os_version: String::new(),
                                 device: device_kind(&text_or_empty(field(c, "device")).to_lowercase()).unwrap_or("").to_string(),
-                                screen: text_or_blank(field(c, "screen")),
-                                language: text_or_blank(field(c, "language")),
+                                screen: screen_size(&text_or_blank(field(c, "screen"))),
+                                language: language_tag(&text_or_blank(field(c, "language"))),
                             })
                             .await?;
                         db.run("UPDATE rl_sessions SET imported = 1 WHERE id = ?", params![&session]).await?;
@@ -347,7 +409,7 @@ pub async fn write_link(
                         continue;
                     }
                     // A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-                    let n = count.floor().min(MAX_DAILY);
+                    let n = count.floor().min(MAX_DAILY).min((MAX_LINK_CLICKS - clicks) as f64);
                     let mut i = 0.0;
                     while i < n {
                         store

@@ -597,6 +597,13 @@ impl Routes {
         &self.0.runlight
     }
 
+    /// A hub's manage token and an account kept to one site reach one site's settings and nothing of the
+    /// install's, so neither is taken at its word about where this app lives: the Host of a request is the
+    /// caller's to choose.
+    pub(crate) async fn restricted(&self, request: &Request, call: &Call) -> Result<bool, crate::Error> {
+        Ok(call.is_managed() || self.session_scope(request).await?.is_some_and(|user| user.site.is_some()))
+    }
+
     /// Whether this request acts as the owner.
     pub(crate) async fn session_scope(&self, request: &Request) -> Result<Option<crate::accounts::User>, crate::Error> {
         if let Some(web) = &self.0.web {
@@ -622,7 +629,17 @@ impl Routes {
             }
             match self.session_scope(request).await {
                 Err(_) => return CanRead::No,
-                Ok(Some(user)) if user.site.is_some() && request.url.contains("/oauth/") => return CanRead::No,
+                // By the path under the base alone: a query may well name a page whose path has /oauth/ in it.
+                Ok(Some(user))
+                    if user.site.is_some()
+                        && request
+                            .parsed_url()
+                            .pathname()
+                            .strip_prefix(inner.base.as_str())
+                            .is_some_and(|path| path.starts_with("/oauth/")) =>
+                {
+                    return CanRead::No;
+                }
                 _ => {}
             }
             let answer = match &inner.options.authorize {
@@ -1074,9 +1091,8 @@ impl Routes {
                     None,
                 ));
             }
-            if let Err(error) = self.rl().collect(request).await {
-                eprintln!("Runlight: could not record an event {error}");
-            }
+            // It logs what it could not record, and never fails.
+            let _ = self.rl().collect(request).await;
             // The same answer whatever happened, so the endpoint reveals nothing.
             return Ok(Response::new(Vec::new(), 202, Headers::new().with("access-control-allow-origin", "*")));
         }

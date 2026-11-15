@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::auth::{
-    AccountError, Accounts, AuthError, Invite, Role, SESSION_COOKIE, SESSION_MS, Throttle, User, otpauth_uri,
+    AccountError, Accounts, AuthError, Invite, Lockout, Role, SESSION_COOKIE, SESSION_MS, Throttle, User, otpauth_uri,
 };
 use super::crypto::{base64url, random_bytes, same_text};
 use super::pages::{
@@ -188,6 +188,23 @@ fn body(request: &Request) -> Option<Value> {
     request.json().ok().filter(|v| matches!(v, Value::Object(_)))
 }
 
+/// The most a sign-in form or an account change may weigh: a few fields, far smaller than this.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// The answer to a body past the cap, refused here since not every host caps a request body before it reaches
+/// the app.
+fn too_long() -> Response {
+    coded("Send a smaller body", "body_too_large", 413, None)
+}
+
+/// A JSON body, or the answer that refuses the request: one past the cap, or one that is not JSON.
+fn json_body(request: &Request) -> Result<Value, Response> {
+    if media_type(request) == "application/json" && request.body_over(MAX_BODY_BYTES) {
+        return Err(too_long());
+    }
+    body(request).ok_or_else(|| coded("Send JSON", "send_json", 415, None))
+}
+
 /// `String(input[field] ?? "")`.
 fn field(input: &Value, name: &str) -> String {
     js::str_or_empty(input.get(name))
@@ -232,9 +249,11 @@ struct Inner {
     per_address: Throttle,
     per_account: Throttle,
     per_ip: Throttle,
-    // Six-digit codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-    // Password re-checks in Account: ten.
-    code_tries: Throttle,
+    // Six-digit codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the
+    // tries run out again, up to a day, so guessing on and on gets about five tries a day. A browser that
+    // signed in to the account before counts on its own, so its owner is never held up by others' guesses.
+    // Five tries to confirm the first code. Password re-checks in Account: ten.
+    code_tries: Lockout,
     confirm_tries: Throttle,
     rechecks: Throttle,
     /// When each account was last sent a sign-in link, at most one a minute.
@@ -265,7 +284,7 @@ pub fn accounts_web(options: AccountsWebOptions) -> AccountsWeb {
         per_address: Throttle::new(10, window),
         per_account: Throttle::new(50, window),
         per_ip: Throttle::new(30, window),
-        code_tries: Throttle::new(5, window),
+        code_tries: Lockout::default(),
         confirm_tries: Throttle::new(5, window),
         rechecks: Throttle::new(10, window),
         link_sent: Mutex::new(HashMap::new()),
@@ -617,6 +636,9 @@ impl AccountsWeb {
                 }));
             }
             if method == "POST" {
+                if request.body_over(MAX_BODY_BYTES) {
+                    return Ok(Some(too_long()));
+                }
                 let form = SearchParams::parse(&request.text());
                 let code = form.get("code").unwrap_or("");
                 let email = form.get("email").unwrap_or("");
@@ -711,14 +733,23 @@ impl AccountsWeb {
         }
 
         if path == "/login/code" && method == "POST" {
+            if request.body_over(MAX_BODY_BYTES) {
+                return Ok(Some(too_long()));
+            }
             let form = SearchParams::parse(&request.text());
             let next = self.safe_next(form.get("next"));
             let given = form.get("pending").unwrap_or("");
             let Some(user) = self.0.accounts.from_pending(given, self.now()).await? else {
                 return Ok(Some(redirect(&format!("{base}/login?next={}", encode_uri_component(&next)), &[])));
             };
-            // Counted before the check, so a burst cannot get past five.
-            if !self.0.code_tries.take(&user.id, self.now()) {
+            // Counted before the check, so a burst cannot get past five. A browser the account signed in from
+            // before has its own count, which only someone holding that browser's mark can use up.
+            let tries = if self.0.accounts.trusts_device(&read_cookie(request, DEVICE_COOKIE), &user)? {
+                format!("{}\ndevice", user.id)
+            } else {
+                user.id.clone()
+            };
+            if !self.0.code_tries.take(&tries, self.now()) {
                 let error = t("error.too_many_tries");
                 let page = CodePage { pending: given, next: &next, error: Some(&error) };
                 return Ok(Some(html(code_page(base, &page, &lang), 429)));
@@ -728,7 +759,7 @@ impl AccountsWeb {
                 let page = CodePage { pending: given, next: &next, error: Some(&error) };
                 return Ok(Some(html(code_page(base, &page, &lang), 401)));
             }
-            self.0.code_tries.clear(&user.id);
+            self.0.code_tries.clear(&tries);
             return self.signed_in_to(request, &user, &next).map(Some);
         }
 
@@ -764,6 +795,9 @@ impl AccountsWeb {
                 }));
             }
             if method == "POST" {
+                if request.body_over(MAX_BODY_BYTES) {
+                    return Ok(Some(too_long()));
+                }
                 let form = SearchParams::parse(&request.text());
                 let code = form.get("code").unwrap_or("");
                 let Some(invite) = self.0.accounts.invite_by_code(code, self.now()).await? else {
@@ -810,6 +844,9 @@ impl AccountsWeb {
         let lang = accepted_language(request);
         let words = translator(&lang);
         let t = |key: &str| words.t(key, &[]);
+        if request.body_over(MAX_BODY_BYTES) {
+            return Ok(too_long());
+        }
         let form = SearchParams::parse(&request.text());
         let email = form.get("email").unwrap_or("");
         let password = form.get("password").unwrap_or("");
@@ -891,7 +928,10 @@ impl AccountsWeb {
         let Some(user) = self.signed_in(request).await? else {
             return Ok(Some(coded("Sign in first", "sign_in", 401, None)));
         };
-        let Some(input) = body(request) else { return Ok(Some(coded("Send JSON", "send_json", 415, None))) };
+        let input = match json_body(request) {
+            Ok(input) => input,
+            Err(refused) => return Ok(Some(refused)),
+        };
         self.recheck(&user, &input, "password", ("Your password is not right", "password_wrong")).await
     }
 
@@ -932,7 +972,10 @@ impl AccountsWeb {
         }
         let password_wrong = ("Your password is not right", "password_wrong");
         if path == "/api/account/password" && method == "POST" {
-            let Some(input) = body(request) else { return Ok(send_json()) };
+            let input = match json_body(request) {
+                Ok(input) => input,
+                Err(refused) => return Ok(refused),
+            };
             if let Some(refused) = self
                 .recheck(&user, &input, "current", ("Your current password is not right", "password_current_wrong"))
                 .await?
@@ -955,7 +998,10 @@ impl AccountsWeb {
         // Two-factor: turning it on, confirming the first code, new recovery codes, and turning it off.
         // Each change asks for the password again, so a browser left signed in cannot quietly change it.
         if path.starts_with("/api/account/2fa") && method == "POST" {
-            let Some(input) = body(request) else { return Ok(send_json()) };
+            let input = match json_body(request) {
+                Ok(input) => input,
+                Err(refused) => return Ok(refused),
+            };
             let action = &path["/api/account/2fa".len()..];
             // Confirming asks for no password, so it has its own few tries, after which the set-up starts again.
             if action == "/confirm" {
@@ -1037,7 +1083,10 @@ impl AccountsWeb {
             if id == user.id {
                 return Ok(coded("Turn off your own two-factor sign-in under Account", "twofactor_self", 400, None));
             }
-            let Some(input) = body(request) else { return Ok(send_json()) };
+            let input = match json_body(request) {
+                Ok(input) => input,
+                Err(refused) => return Ok(refused),
+            };
             if let Some(refused) = self.recheck(&user, &input, "password", password_wrong).await? {
                 return Ok(refused);
             }
@@ -1057,7 +1106,10 @@ impl AccountsWeb {
             if user.role != Role::Owner {
                 return Ok(coded("Only the owner can hand over ownership", "owner_hand_over", 403, None));
             }
-            let Some(input) = body(request) else { return Ok(send_json()) };
+            let input = match json_body(request) {
+                Ok(input) => input,
+                Err(refused) => return Ok(refused),
+            };
             if let Some(refused) = self.recheck(&user, &input, "password", password_wrong).await? {
                 return Ok(refused);
             }
@@ -1074,7 +1126,10 @@ impl AccountsWeb {
             return Ok(reply(&obj! { "people" => self.people().await?, "invites" => Value::Array(invites) }, 200, &[]));
         }
         if path == "/api/people" && method == "POST" {
-            let Some(input) = body(request) else { return Ok(send_json()) };
+            let input = match json_body(request) {
+                Ok(input) => input,
+                Err(refused) => return Ok(refused),
+            };
             let Some(role) = role_of(input.get("role")) else {
                 return Ok(coded("Pick admin, member, or viewer", "role_needed", 400, None));
             };
@@ -1141,7 +1196,10 @@ impl AccountsWeb {
                 }
                 self.0.accounts.remove(&id).await.map(|()| None)
             } else {
-                let Some(input) = body(request) else { return Ok(send_json()) };
+                let input = match json_body(request) {
+                    Ok(input) => input,
+                    Err(refused) => return Ok(refused),
+                };
                 let Some(role) = role_of(input.get("role")) else {
                     return Ok(coded("Pick admin, member, or viewer", "role_needed", 400, None));
                 };

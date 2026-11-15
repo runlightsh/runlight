@@ -255,6 +255,10 @@ impl Player {
                 totp(self.kept.get(&c[1]).map_or("", String::as_str), now.div_euclid(30_000))
             })
             .into_owned();
+        // {{pad:N}} is the letter x, N times, so a body past a size cap is not kept in the file.
+        let with_codes = re(r"\{\{pad:(\d+)\}\}")
+            .replace_all(&with_codes, |c: &fancy_regex::Captures<str>| "x".repeat(c[1].parse().unwrap_or(0)))
+            .into_owned();
         re(r"\{\{(\w+)\}\}")
             .replace_all(&with_codes, |c: &fancy_regex::Captures<str>| {
                 self.kept.get(&c[1]).cloned().unwrap_or_default()

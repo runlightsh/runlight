@@ -173,3 +173,61 @@ async fn a_nested_service_finds_its_mount_and_a_large_body_is_refused() {
     let (status, _, body) = text(app.oneshot(request).await.unwrap()).await;
     assert_eq!((status, body.as_str()), (413, r#"{"error":"That request is too large"}"#));
 }
+
+#[tokio::test]
+async fn cookies_sent_as_header_fields_of_their_own_are_read_as_one_header() {
+    // HTTP/2 sends each cookie apart; joined with a comma, as other repeated headers are, none would be found.
+    let request = http::Request::get("http://example.com/runlight/")
+        .header("cookie", "theme=dark")
+        .header("accept", "text/html")
+        .header("cookie", "runlight_token=abc")
+        .header("accept", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let read = runlight::adapters::to_request(request).await.unwrap();
+    assert_eq!(read.headers.get("cookie").as_deref(), Some("theme=dark; runlight_token=abc"));
+    assert_eq!(read.headers.get("accept").as_deref(), Some("text/html, application/json"));
+
+    // And so the dashboard's cookie signs in, whichever field it comes in.
+    let rl = runlight().await;
+    let routes = rl.routes(options()).unwrap();
+    let app: axum::Router = axum::Router::new().merge(routes.router());
+    let opened = app.clone().oneshot(get("http://example.com/runlight?token=secret-token")).await.unwrap();
+    let cookie = opened.headers().get("set-cookie").unwrap().to_str().unwrap().split(';').next().unwrap().to_string();
+    assert!(cookie.starts_with("runlight_token="), "{cookie}");
+    for fields in [vec!["theme=dark", cookie.as_str()], vec![cookie.as_str(), "theme=dark"]] {
+        let mut request = http::Request::get("http://example.com/runlight/api/sites");
+        for field in &fields {
+            request = request.header("cookie", *field);
+        }
+        let answer = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(answer.status().as_u16(), 200, "{fields:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_request_target_never_names_the_host() {
+    // Resolved against the host as a link is, "//other.example/..." would be a request to other.example, and
+    // its origin the one a form's Origin header is checked against.
+    for (target, url) in [
+        (
+            "//other.example/runlight/oauth/authorize?x=1",
+            "http://example.com//other.example/runlight/oauth/authorize?x=1",
+        ),
+        ("///other.example/", "http://example.com///other.example/"),
+        ("/runlight/api?x=//other.example/", "http://example.com/runlight/api?x=//other.example/"),
+    ] {
+        let request = http::Request::get(target).header("host", "example.com").body(Body::empty()).unwrap();
+        let read = runlight::adapters::to_request(request).await.unwrap();
+        assert_eq!(read.url, url, "{target}");
+        assert_eq!(runlight::http::Url::parse(&read.url).unwrap().origin(), "http://example.com", "{target}");
+    }
+    // Whatever scheme a proxy names, too.
+    let request = http::Request::post("//other.example/runlight/oauth/authorize")
+        .header("host", "example.com")
+        .header("x-forwarded-proto", "https")
+        .body(Body::empty())
+        .unwrap();
+    let read = runlight::adapters::to_request(request).await.unwrap();
+    assert_eq!(read.url, "https://example.com//other.example/runlight/oauth/authorize");
+}

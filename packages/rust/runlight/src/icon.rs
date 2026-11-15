@@ -100,19 +100,38 @@ fn attrs(tag: &str) -> HashMap<String, String> {
 }
 
 /// Every match of `/<link\b[^>]*>/gi`.
+/// The most a tag holds between its name and its `>`, in UTF-16 units. A tag is at most a few thousand
+/// characters; the bound keeps a page of unclosed tags from being read over and over.
+const MAX_TAG: usize = 4000;
+
+/// Where a tag that began before `rest` ends, just past its `>`: `[^<>]{0,4000}>`.
+fn tag_end(rest: &str) -> Option<usize> {
+    let mut units = 0;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '>' => return Some(at + 1),
+            '<' => return None,
+            _ => units += c.len_utf16(),
+        }
+        if units > MAX_TAG {
+            return None;
+        }
+    }
+    None
+}
+
 fn link_tags(html: &str) -> Vec<&str> {
     let b = html.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i + 5 <= b.len() {
-        if b[i..i + 5].eq_ignore_ascii_case(b"<link") && !b.get(i + 5).is_some_and(|c| word(*c)) {
-            if let Some(end) = html[i..].find('>') {
-                out.push(&html[i..i + end + 1]);
-                i += end + 1;
-                continue;
-            }
-            // No '>' after this one, so none after any later one either.
-            break;
+        if b[i..i + 5].eq_ignore_ascii_case(b"<link")
+            && !b.get(i + 5).is_some_and(|c| word(*c))
+            && let Some(end) = tag_end(&html[i + 5..])
+        {
+            out.push(&html[i..i + 5 + end]);
+            i += 5 + end;
+            continue;
         }
         i += 1;
     }

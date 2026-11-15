@@ -8,6 +8,7 @@ use super::types::{
     text,
 };
 use super::visits::object_of;
+use super::write::MAX_LINK_CLICKS;
 use crate::BoxFuture;
 use crate::js::{self, Object, Value};
 use crate::sources::encode_uri_component;
@@ -121,7 +122,8 @@ impl Importer for Dub {
                                 set_opt(&mut o, "os", c("os").cloned());
                                 out.push(Value::Object(o));
                             }
-                            if events.len() < 1000 {
+                            // No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+                            if events.len() < 1000 || out.len() >= MAX_LINK_CLICKS as usize {
                                 return Ok::<_, ImportError>(out);
                             }
                             page += 1;

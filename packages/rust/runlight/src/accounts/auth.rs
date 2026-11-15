@@ -310,16 +310,23 @@ pub fn recovery_hash(code: &str) -> String {
 /// The time step a code matches, one step either side for clocks that drift, newer than `after`; else `None`.
 pub fn match_step(secret: &str, code: &str, now: i64, after: i64) -> Result<Option<i64>, CryptoError> {
     let current = js::floor_div(now, STEP_MS);
-    for step in [current, current - 1, current + 1] {
-        if step > after && crate::routes::constant_time_equal(&totp(secret, step)?, code) {
-            return Ok(Some(step));
+    // Every step is worked out and compared in time that does not depend on where the code differs. The
+    // current step is checked last, so it is the one kept if two should match.
+    let mut found = None;
+    for step in [current + 1, current - 1, current] {
+        if same_text(&totp(secret, step)?, code) && step > after {
+            found = Some(step);
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// `/^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/`, with JavaScript's `\s`.
 fn is_email(address: &str) -> bool {
+    // The longest an address can be. Anything longer is refused before it is read.
+    if js::len16(address) > crate::runlight::EMAIL_MAX {
+        return false;
+    }
     let bad = |c: char| js::is_space(c) || matches!(c, '@' | '<' | '>' | '"');
     let Some((local, domain)) = address.split_once('@') else { return false };
     if local.is_empty() || local.chars().any(bad) || domain.chars().any(bad) {
@@ -692,8 +699,15 @@ impl Accounts {
             return Ok(moved == 1);
         }
         let mut hashes = Self::recovery_of(row)?;
-        let wanted = Value::String(recovery_hash(given));
-        let Some(at) = hashes.iter().position(|h| *h == wanted) else { return Ok(false) };
+        // Every hash is compared, each in time that does not depend on where it differs.
+        let mine = recovery_hash(given);
+        let mut at = None;
+        for (i, hash) in hashes.iter().enumerate() {
+            if hash.as_str().is_some_and(|hash| same_text(hash, &mine)) {
+                at = Some(i);
+            }
+        }
+        let Some(at) = at else { return Ok(false) };
         hashes.remove(at);
         // Only if the codes are still the ones read, so a code crossed off at the same moment elsewhere is not used twice.
         let moved = self
@@ -1189,6 +1203,90 @@ impl Accounts {
 /// Recovery codes as the JSON array of their hashes that is stored.
 fn hashes_json(codes: &[String]) -> String {
     js::stringify(&Value::Array(codes.iter().map(|c| Value::String(recovery_hash(c))).collect()))
+}
+
+#[derive(Clone, Copy)]
+struct Locked {
+    count: u32,
+    until: i64,
+    locks: u32,
+    forget: i64,
+}
+
+/// Counts wrong second-factor codes under a key and locks it for longer each time the tries run out: five
+/// tries, then fifteen minutes, then thirty, then an hour, doubling up to a day. A right code clears the
+/// key, and so does a week with no lock and no try. A lock always ends, at most a day later, so nobody is
+/// shut out for good. Keys are hashed with a key made at start, as Throttle's are.
+pub struct Lockout {
+    entries: StdMutex<HashMap<String, Locked>>,
+    salt: Vec<u8>,
+    limit: u32,
+    window_ms: i64,
+    longest_ms: i64,
+    forget_ms: i64,
+}
+
+impl Default for Lockout {
+    /// Five tries, a first lock of fifteen minutes, none longer than a day, forgotten after a week.
+    fn default() -> Lockout {
+        Lockout::new(5, 15 * 60_000, 86_400_000, 7 * 86_400_000)
+    }
+}
+
+impl Lockout {
+    /// A lockout of `limit` tries, whose first lock lasts `window_ms` and none longer than `longest_ms`, and
+    /// which forgets a key `forget_ms` after its last lock or window ended.
+    pub fn new(limit: u32, window_ms: i64, longest_ms: i64, forget_ms: i64) -> Lockout {
+        Lockout {
+            entries: StdMutex::new(HashMap::new()),
+            salt: random_bytes(16),
+            limit,
+            window_ms,
+            longest_ms,
+            forget_ms,
+        }
+    }
+
+    fn id(&self, key: &str) -> String {
+        let mac = hmac(HmacHash::Sha256, &self.salt, key.as_bytes()).expect("a sixteen-byte key");
+        base64url(&mac)[..22].to_string()
+    }
+
+    /// Counts a try before the code is checked, so a burst cannot get past the limit. False, counting
+    /// nothing, while the key is locked. The try that uses up the last one starts the lock.
+    pub fn take(&self, key: &str, now: i64) -> bool {
+        let id = self.id(key);
+        let mut entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entry = entries.get(&id).copied().filter(|e| e.forget > now);
+        if entry.is_some_and(|e| e.count >= self.limit && e.until > now) {
+            return false;
+        }
+        let mut e = match entry.take() {
+            None => Locked { count: 0, until: now + self.window_ms, locks: 0, forget: 0 },
+            Some(e) if e.until <= now => Locked { count: 0, until: now + self.window_ms, ..e },
+            Some(e) => e,
+        };
+        e.count += 1;
+        if e.count >= self.limit {
+            // Doubled each time, and held at the longest: past that many doublings it is the longest anyway.
+            let lock = self.window_ms.checked_mul(1i64.checked_shl(e.locks).unwrap_or(i64::MAX)).unwrap_or(i64::MAX);
+            e.until = now + lock.min(self.longest_ms);
+            e.locks = e.locks.saturating_add(1);
+        }
+        e.forget = e.until + self.forget_ms;
+        entries.insert(id, e);
+        // Keys are accounts that passed the password step, so there are few; anything long forgotten goes.
+        if entries.len() > MAX_THROTTLED {
+            entries.retain(|_, v| v.forget > now);
+        }
+        true
+    }
+
+    /// Forgets a key, for a code that turned out right.
+    pub fn clear(&self, key: &str) {
+        let id = self.id(key);
+        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
+    }
 }
 
 #[derive(Clone, Copy)]

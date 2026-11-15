@@ -94,6 +94,11 @@ pub trait OAuthHost: Send + Sync {
     fn is_owner<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, bool>;
     /// Whether the request comes from someone signed in who may only read, such as a viewer.
     fn is_reader<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, bool>;
+    /// Whether the request comes from an account kept to one site, which connects no apps and is told so in its
+    /// own words.
+    fn is_site_only<'a>(&'a self, _request: &'a Request) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
     /// Where to send someone to sign in, when there is such a page (the standalone server's).
     fn sign_in(&self) -> Option<&str>;
     /// The account a request comes from, where the app has accounts.
@@ -250,9 +255,20 @@ pub fn s256(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// Redirect addresses a client may register: https, or a local app's own loopback address.
+/// Redirect addresses a client may register: https, or a local app's own loopback address, and one that parses
+/// as an address at all.
 fn allowed_redirect(value: &str) -> bool {
-    test(js_re!(r"^https://[^/]+"), value) || test(js_re!(r"^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/"), value)
+    (test(js_re!(r"^https://[^/]+"), value) || test(js_re!(r"^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/"), value))
+        && Url::can_parse(value)
+}
+
+/// The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// The answer to a body past the cap, refused here since not every host caps a request body before it reaches
+/// the app.
+fn too_long() -> Response {
+    oauth_error("invalid_request", "Send a smaller body", 413)
 }
 
 /// The URL that a 401 from the MCP endpoint points clients at, to start OAuth.
@@ -342,6 +358,9 @@ pub async fn oauth_response(
                 429,
             )));
         }
+        if request.body_over(MAX_BODY_BYTES) {
+            return Ok(Some(too_long()));
+        }
         let body = request.json().ok();
         let redirects: Vec<String> = match body.as_ref().and_then(|b| b.get("redirect_uris")) {
             Some(Value::Array(list)) => {
@@ -378,13 +397,19 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     let h = |key: &str, vars: &[(&str, &str)]| words.html(key, vars);
     let lang = words.lang.clone();
     let page = |title: &str, body: &str, status: u16| page_in(&lang, title, body, status);
+    if request.method == "POST" && request.body_over(MAX_BODY_BYTES) {
+        return Ok(too_long());
+    }
     let form = if request.method == "POST" { SearchParams::parse(&request.text()) } else { url.search_params() };
     let get = |k: &str| form.get(k).map(str::to_string);
     let client_id = get("client_id").unwrap_or_default();
     let client = client_for(runlight, &client_id).await?;
     let redirect = get("redirect_uri").unwrap_or_default();
     // Without a known client and one of its own addresses there is nowhere safe to send an answer.
-    let Some(client) = client.filter(|c| c.redirects().iter().any(|r| r.as_str() == Some(redirect.as_str()))) else {
+    // An address that does not parse, from an app registered before those were refused, is no address of its own.
+    let Some(client) = client
+        .filter(|c| c.redirects().iter().any(|r| r.as_str() == Some(redirect.as_str())) && Url::can_parse(&redirect))
+    else {
         return Ok(page(&h("oauth.unregisteredTitle", &[]), &format!("<p>{}</p>", h("oauth.startAgain", &[])), 400));
     };
     let back = |params: &[(&str, &str)]| -> Result<Response, Error> {
@@ -445,11 +470,8 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     if !host.is_owner(request).await {
         // Someone signed in who may only read would be sent to sign in again and again.
         if host.is_reader(request).await {
-            return Ok(page(
-                &h("oauth.viewerTitle", &[]),
-                &format!("<p>{}</p>", h("oauth.viewer", &[("app", &name)])),
-                403,
-            ));
+            let words = if host.is_site_only(request).await { "oauth.siteAccount" } else { "oauth.viewer" };
+            return Ok(page(&h("oauth.viewerTitle", &[]), &format!("<p>{}</p>", h(words, &[("app", &name)])), 403));
         }
         // The site stays, since on the way in it only says which one to offer first.
         let kept = SearchParams::from_pairs(form.pairs().iter().filter(|(k, _)| k != "decision").cloned());
@@ -677,6 +699,9 @@ async fn token(host: &dyn OAuthHost, request: &Request) -> Result<Response, Erro
     runlight.init().await?;
     let kind = request.headers.get("content-type").unwrap_or_default();
     let kind = js::trim(kind.split(';').next().unwrap_or(""));
+    if request.body_over(MAX_BODY_BYTES) {
+        return Ok(too_long());
+    }
     let form = if kind == "application/json" {
         json_form(request.json().ok().filter(|v| !v.is_null()))
     } else {

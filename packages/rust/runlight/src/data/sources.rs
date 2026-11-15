@@ -256,7 +256,7 @@ pub const SOURCES: &[KnownSource] = &[
         name: "Newsletter",
         kind: SourceKind::Email,
         hosts: &[],
-        aliases: &["newsletter", "email", "e-mail", "mailchimp", "kit", "convertkit", "beehiiv", "buttondown"],
+        aliases: &["newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown"],
     },
 ];
 
@@ -269,6 +269,5 @@ pub const SOURCE_PATTERNS: &[(&str, Option<&str>, SourceKind)] = &[
     (r"(^|\.)convertkit-mail[0-9]*\.com$|(^|\.)kit-mail[0-9]*\.com$", Some("Kit"), SourceKind::Email),
     (r"(^|\.)(list-manage|mailchi)\.(com|mp)$", Some("Mailchimp"), SourceKind::Email),
     (r"(^|\.)beehiiv\.com$", Some("beehiiv"), SourceKind::Email),
-    (r"(^|\.)substack\.com$", Some("Substack"), SourceKind::Email),
     (r"^(web)?mail[0-9]*\.|(^|\.)webmail\.", None, SourceKind::Email),
 ];

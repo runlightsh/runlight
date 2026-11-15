@@ -10,6 +10,7 @@ use super::types::{
     set_opt, step_answer,
 };
 use super::visits::{at_least, object_of};
+use super::write::MAX_LINK_CLICKS;
 use crate::BoxFuture;
 use crate::js::{self, Object, Value};
 use crate::re::{js_re, replace_first, test};
@@ -98,6 +99,11 @@ impl Importer for Umami {
                         let body = http.get(&format!("{base}/api{path}&page={n}&pageSize=1000"), headers).await?;
                         let data = items(field(Some(&body), "data"), "data")?;
                         out.extend(data.iter().cloned());
+                        // No more than a link keeps: a longer history, or a server that never stops, ends here.
+                        if out.len() >= MAX_LINK_CLICKS as usize {
+                            out.truncate(MAX_LINK_CLICKS as usize);
+                            return Ok(out);
+                        }
                         if at_least(out.len(), field(Some(&body), "count")) || data.is_empty() {
                             return Ok::<_, ImportError>(out);
                         }

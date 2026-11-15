@@ -533,8 +533,16 @@ fn json_headers() -> Headers {
 /// The most messages one batch may hold.
 pub const MAX_BATCH: usize = 20;
 
+/// The most a message or batch may weigh; a real one is a few hundred bytes a call.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
 /// Answers one POST to the MCP endpoint, already authorised.
 pub async fn mcp_response(request: &Request, read_api: &dyn ApiRead) -> Result<Response, BoxError> {
+    // Capped here, since not every host caps a request body before it reaches the app.
+    if request.body_over(MAX_BODY_BYTES) {
+        let error = rpc_error(None, -32600, "Send a smaller message");
+        return Ok(Response::new(js::stringify(&error), 413, json_headers()));
+    }
     let body = match request.json() {
         Ok(body @ (Value::Object(_) | Value::Array(_))) => body,
         _ => {

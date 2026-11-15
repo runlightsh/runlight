@@ -439,7 +439,7 @@ async fn places_match_the_sdk() {
     }
     for db in list(&f, "databases") {
         let bytes = base64::engine::general_purpose::STANDARD.decode(s(db, "base64")).unwrap();
-        let reader = runlight::mmdb::Mmdb::from_bytes(bytes).unwrap();
+        let reader = runlight::mmdb::Mmdb::from_bytes(bytes.clone()).unwrap();
         assert_eq!(reader.metadata.at("ip_version"), db.at("ipVersion"));
         assert_eq!(reader.metadata.at("record_size"), db.at("recordSize"));
         for case in list(db, "records") {
@@ -450,6 +450,20 @@ async fn places_match_the_sdk() {
             });
             assert_eq!(location, *case.at("location"), "{}", s(case, "ip"));
         }
+        // The same database from a file, looked up as a visit is: read off the runtime's threads, to the same answer.
+        let path = std::env::temp_dir().join(format!("runlight-test-{}.mmdb", runlight::hash::random_id(6)));
+        std::fs::write(&path, &bytes).unwrap();
+        let (in_file, in_memory) =
+            (runlight::mmdb::Mmdb::open(&path).unwrap(), runlight::mmdb::Mmdb::from_bytes(bytes).unwrap());
+        for case in list(db, "records") {
+            use runlight::geo::GeoLookup;
+            let found = in_file.lookup(s(case, "ip")).await.unwrap();
+            assert_eq!(found, in_memory.lookup(s(case, "ip")).await.unwrap(), "{}", s(case, "ip"));
+            let location =
+                found.map_or(Value::Null, |f| obj! { "country" => f.country, "region" => f.region, "city" => f.city });
+            assert_eq!(location, *case.at("location"), "{}", s(case, "ip"));
+        }
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
@@ -635,4 +649,101 @@ fn a_day_where_clocks_fall_back_across_midnight_begins_at_the_first_midnight() {
 fn a_csv_value_with_a_semicolon_or_a_tab_is_quoted_so_no_locale_splits_a_formula_out_of_it() {
     let row = ["x;=1+1", "a\tb", "=1+1", "plain"].map(String::from);
     assert_eq!(zip::csv_row(&row), "\"x;=1+1\",\"a\tb\",'=1+1,plain");
+}
+
+#[test]
+fn only_the_start_of_a_user_agent_is_read() {
+    let safari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+    // A bot's token, or an agent's, past character 512 is no longer seen.
+    let padded = format!("{safari} {}", "x".repeat(512));
+    assert!(!ua::is_bot(&format!("{padded} Googlebot/2.1")));
+    assert!(ua::is_bot(&format!("{safari} Googlebot/2.1")));
+    assert!(ua::ai_agent(&format!("{padded} GPTBot/1.2")).is_none());
+    assert!(ua::ai_agent(&format!("{safari} GPTBot/1.2")).is_some());
+    // A client hint is cut the same way.
+    let hints = ua::ClientHints { brands: Some(format!("{}\"Brave\"", " ".repeat(512))), ..ua::ClientHints::default() };
+    let chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+    assert_eq!(ua::parse_client(chrome, &hints, None).browser, "Chrome");
+    // Safari's version, with any number of parts after it or none.
+    for version in ["18", "18.1", "18.1.1", "18."] {
+        let agent = format!(
+            "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15"
+        );
+        let client = ua::parse_client(&agent, &ua::ClientHints::default(), None);
+        assert_eq!((client.browser.as_str(), client.browser_version.as_str()), ("Safari", "18"), "{version}");
+    }
+    let odd = "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18x Safari/605.1.15";
+    assert_eq!(ua::parse_client(odd, &ua::ClientHints::default(), None).browser, "Other");
+}
+
+#[test]
+fn an_address_longer_than_any_real_one_is_no_email_address() {
+    let long = format!("{}@example.com", "a".repeat(320 - "@example.com".len()));
+    assert_eq!(long.len(), 320);
+    assert!(runlight::runlight::is_email(&long));
+    assert!(!runlight::runlight::is_email(&format!("a{long}")));
+    assert!(!runlight::runlight::is_email(&format!("{}@example.com", "a".repeat(1_000_000))));
+}
+
+#[test]
+fn an_imported_column_keeps_no_address_and_no_user_agent() {
+    use runlight::importers::write::{browser, language_tag, named, place_name, screen_size, system};
+    // A browser is a known name, else a name with a capital first letter, else nothing.
+    assert_eq!(browser("chrome"), "Chrome");
+    assert_eq!(browser(" arc "), "Arc");
+    assert_eq!(browser("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"), "");
+    assert_eq!(browser("203.0.113.7"), "");
+    assert_eq!(browser("9front"), "", "a name does not start with a digit");
+    assert_eq!(browser(&"a".repeat(41)), "");
+    assert_eq!(browser(&"a".repeat(40)), format!("A{}", "a".repeat(39)));
+    // A system the same, as it is written.
+    assert_eq!(system("mac os"), "macOS");
+    assert_eq!(system("haiku"), "haiku");
+    assert_eq!(system("Windows NT 10.0; Win64; x64"), "");
+    assert_eq!(named("Net 10.0.0.1"), "");
+    assert_eq!(named("v1.2.3"), "v1.2.3", "three numbers are no address");
+    assert_eq!(named("build 1.2.3.4.5"), "build 1.2.3.4.5", "nor are five");
+    // A place is free text, unless it holds an address or reads as a user agent.
+    assert_eq!(place_name("São Paulo"), "São Paulo");
+    assert_eq!(place_name("10.0.0.1"), "");
+    assert_eq!(place_name("near 10.0.0.1, probably"), "");
+    assert_eq!(place_name("1.2.3.4.5"), "1.2.3.4.5");
+    assert_eq!(place_name("2001:db8::1"), "");
+    assert_eq!(place_name("FE80::1"), "");
+    assert_eq!(place_name("Chrome/129"), "");
+    assert_eq!(place_name("applewebkit"), "");
+    assert_eq!(place_name("12:30"), "12:30", "one colon is no address");
+    assert_eq!(screen_size(" 1440x900 "), "1440x900");
+    assert_eq!(screen_size("1440 x 900"), "");
+    assert_eq!(screen_size("123456x1"), "");
+    assert_eq!(language_tag(" pt-BR "), "pt-BR");
+    assert_eq!(language_tag("zh_Hant_TW"), "zh_Hant_TW");
+    assert_eq!(language_tag("en-US,en;q=0.9"), "");
+    assert_eq!(language_tag("e"), "");
+}
+
+#[test]
+fn a_csv_rows_time_before_2000_is_no_time() {
+    use runlight::importers::csvvisits::{CsvFormat, row_time};
+    let at = |text: &str| row_time(&js::Object::new().with("time", text), CsvFormat::Runlight);
+    assert_eq!(at("2000-01-01T00:00:00Z"), 946_684_800_000.0);
+    assert!(at("1999-12-31T23:59:59Z").is_nan());
+    // A date written as a bare number is a Unix time, in 1970.
+    assert!(at("20240501").is_nan());
+    assert_eq!(at("1714564800"), 1_714_564_800_000.0);
+    assert!(at("").is_nan());
+}
+
+#[test]
+fn an_icon_link_is_read_only_from_a_tag_of_a_few_thousand_characters() {
+    use runlight::icon::icon_links;
+    let base = "https://example.com";
+    assert_eq!(icon_links(r#"<LINK rel="icon" href="/a.png">"#, base), ["https://example.com/a.png"]);
+    let padded = |n: usize| format!(r#"<link rel="icon" {}href="/a.png">"#, " ".repeat(n));
+    // 4,000 characters between the tag's name and its end, and no more.
+    assert_eq!(icon_links(&padded(4000 - r#" rel="icon" href="/a.png""#.len()), base).len(), 1);
+    assert!(icon_links(&padded(4000), base).is_empty());
+    // A tag never holds another's start, so one left open reads up to the next and no further.
+    assert_eq!(icon_links(r#"<link rel="icon" <link rel="icon" href="/b.png">"#, base), ["https://example.com/b.png"]);
+    assert!(icon_links(&"<link ".repeat(50_000), base).is_empty());
 }

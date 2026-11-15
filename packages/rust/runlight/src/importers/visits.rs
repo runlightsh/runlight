@@ -13,7 +13,7 @@ use super::csvvisits::{CSV_BATCH, csv_format, csv_hit};
 use super::http::{Http, parse_value};
 use super::types::{Credentials, ImportError, field, filled, items, or};
 use super::umami::{bearer, umami_sign_in};
-use super::write::{browser_name, device_kind, hex_id, page_of, system_name, title};
+use super::write::{browser, device_kind, hex_id, language_tag, page_of, place_name, screen_size, system};
 use crate::accounts::crypto::{HmacHash, base64url, hmac};
 use crate::hash::random_bytes;
 use crate::js::{self, Object, Value};
@@ -558,6 +558,13 @@ fn from_umami(e: &Value, ts: f64, session: Option<&Value>) -> ImportedHit {
     }
 }
 
+/// Whether a hostname can be the host of an address, and nothing more than a host.
+fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host.contains(['/', '?', '#', '@', '\\'])
+        && crate::http::Url::parse(&format!("https://{host}/")).is_some_and(|url| !url.hostname().is_empty())
+}
+
 /// Writes one imported pageview or event as part of a Runlight visit. Visitors are hashed per day from
 /// the hit's key, as live visitors are hashed per day, and a hit within thirty minutes of the visitor's
 /// last one joins that visit. Ids come from `ns` and the key, so importing the same rows again makes the
@@ -569,12 +576,21 @@ async fn write_event(store: &SqlStore, site: &SiteRow, ns: &str, e: &ImportedHit
     let visitor = hex_id(&format!("{ns}:{}:{day}", e.key), 16);
     // A visit that runs past midnight keeps the id it started with, as a live one does.
     let yesterday = hex_id(&format!("{ns}:{}:{}", e.key, add_days(&day, -1)), 16);
-    let host = (if !e.hostname.is_empty() {
+    let own = site.hostnames.first().filter(|h| !h.is_empty());
+    let mut host = (if !e.hostname.is_empty() {
         e.hostname.clone()
     } else {
-        site.hostnames.first().filter(|h| !h.is_empty()).cloned().unwrap_or_else(|| "imported.invalid".into())
+        own.cloned().unwrap_or_else(|| "imported.invalid".into())
     })
     .to_lowercase();
+    // A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
+    // row under the site's name rather than a failed batch.
+    if !valid_host(&host) {
+        host = match own.filter(|h| valid_host(h)) {
+            Some(own) => own.to_lowercase(),
+            None => "imported.invalid".into(),
+        };
+    }
     let path = if e.path.is_empty() { "/" } else { e.path.as_str() };
     let query =
         if e.query.is_empty() { String::new() } else { format!("?{}", e.query.strip_prefix('?').unwrap_or(&e.query)) };
@@ -589,10 +605,11 @@ async fn write_event(store: &SqlStore, site: &SiteRow, ns: &str, e: &ImportedHit
             let id = hex_id(&format!("{ns}:{}:{}", e.key, js::format_number(e.ts)), 24);
             store.db().run("DELETE FROM rl_sessions WHERE id = ?", params![&id]).await?;
             let country = js::head16(&e.country.to_uppercase(), 2);
-            let region = if e.region.is_empty() {
+            let raw_region = place_name(&e.region);
+            let region = if raw_region.is_empty() {
                 String::new()
             } else {
-                let r = if e.region.contains('-') { e.region.clone() } else { format!("{country}-{}", e.region) };
+                let r = if raw_region.contains('-') { raw_region.clone() } else { format!("{country}-{raw_region}") };
                 js::head16(&r.to_uppercase(), 10)
             };
             let a = attribute(&page, &e.referrer, &site.hostnames);
@@ -615,14 +632,14 @@ async fn write_event(store: &SqlStore, site: &SiteRow, ns: &str, e: &ImportedHit
                     utm_content: page.utm.content.clone(),
                     country: if two_letters { country.clone() } else { String::new() },
                     region: if two_letters { region } else { String::new() },
-                    city: js::head16(&e.city, 100),
-                    browser: browser_name(&e.browser.to_lowercase()).map_or_else(|| title(&e.browser), str::to_string),
+                    city: js::head16(&place_name(&e.city), 100),
+                    browser: browser(&e.browser),
                     browser_version: String::new(),
-                    os: system_name(&e.os.to_lowercase()).map_or_else(|| e.os.clone(), str::to_string),
+                    os: system(&e.os),
                     os_version: String::new(),
                     device: device_kind(&e.device.to_lowercase()).unwrap_or("").to_string(),
-                    screen: js::head16(&e.screen, 20),
-                    language: js::head16(&e.language, 35),
+                    screen: screen_size(&e.screen),
+                    language: language_tag(&e.language),
                 })
                 .await?;
             // No engaged time is known, so duration falls back to first-to-last pageview.
