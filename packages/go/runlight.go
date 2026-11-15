@@ -221,7 +221,17 @@ func settingsError(message, code string, params ...string) error {
 
 // emailPattern is what passes for an email address: something@somewhere.tld,
 // with no spaces, quotes, or angle brackets.
-var emailPattern = regexp.MustCompile(`^[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}@<>"]+@[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}@<>"]+\.[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}@<>"]+$`)
+var emailPattern = emailMatcher{regexp.MustCompile(`^[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}@<>"]+@[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}@<>"]+\.[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}@<>"]+$`)}
+
+// EmailMax is the longest an address is read: no real one is longer.
+const EmailMax = 320
+
+type emailMatcher struct{ pattern *regexp.Regexp }
+
+// MatchString reports whether a value passes for an email address; anything over EmailMax is refused before the pattern reads it.
+func (m emailMatcher) MatchString(value string) bool {
+	return len16(value) <= EmailMax && m.pattern.MatchString(value)
+}
 
 type salts struct {
 	day       string
@@ -248,23 +258,25 @@ type Runlight struct {
 	// LocalInstalls says a connected install may be on this machine, at http://localhost or http://127.0.0.1.
 	LocalInstalls bool
 
-	now       func() int64
-	fetcher   Fetcher
-	logf      func(format string, args ...any)
-	geo       GeoLookup
-	trust     string // "" none, "*" the defaults, or one header's name
-	limit     *rateLimit
-	mailCode  *js.Object
-	appMailer *AppMailer
-	readyMu   sync.Mutex
-	ready     bool
-	initing   *initRun
-	checkMu   sync.Mutex
-	checking  *checkRun
-	pruneMu   sync.Mutex
-	turnsMu   sync.Mutex
-	turns     map[string]*turn
-	optimized int64
+	now     func() int64
+	fetcher Fetcher
+	logf    func(format string, args ...any)
+	geo     GeoLookup
+	trust   string // "" none, "*" the defaults, or one header's name
+	limit   *rateLimit
+	// fetchLimit is AI agent fetches allowed per address per minute, ten times the tracker's limit, since a crawler reads fast.
+	fetchLimit *rateLimit
+	mailCode   *js.Object
+	appMailer  *AppMailer
+	readyMu    sync.Mutex
+	ready      bool
+	initing    *initRun
+	checkMu    sync.Mutex
+	checking   *checkRun
+	pruneMu    sync.Mutex
+	turnsMu    sync.Mutex
+	turns      map[string]*turn
+	optimized  int64
 	// freshenedAt is when statistics were last checked for staleness, which reports do at most hourly.
 	freshenedAt int64
 	freshenMu   sync.Mutex
@@ -304,7 +316,12 @@ type Runlight struct {
 type linkDomainCache struct {
 	at      int64
 	domains map[string]bool
+	// failed says the database could not be read, so these are the domains known before, kept a few seconds.
+	failed bool
 }
+
+// linkDomainsFailedMs is how long a failed read of the link domains is remembered before the database is asked again.
+const linkDomainsFailedMs = 5_000
 
 // initRun is init under way, which every caller waits on rather than starting another.
 type initRun struct {
@@ -408,6 +425,7 @@ func New(options Options) (*Runlight, error) {
 	// 0, or anything that is not a positive number, means no limit, never a limit of nothing.
 	if perMinute > 0 {
 		r.limit = newRateLimit(perMinute, r.now)
+		r.fetchLimit = newRateLimit(perMinute*10, r.now)
 	}
 	if app := r.appMailer; app != nil {
 		switch {
@@ -640,6 +658,8 @@ var (
 	httpsInstall = regexp.MustCompile(`^https://[^/]+`)
 	localInstall = regexp.MustCompile(`^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)`)
 	hostIDLetter = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+	// leadingNonAlnum is what a site id never starts with.
+	leadingNonAlnum = regexp.MustCompile(`^[^A-Za-z0-9]+`)
 )
 
 // isDomainName is DOMAIN_NAME.test(value): a domain name of 1 to 253 characters.
@@ -772,7 +792,9 @@ func (r *Runlight) RemoteInfo(ctx context.Context, id string) *RemoteInfo {
 	if have {
 		info.LastSeen = cached.LastSeen
 	}
-	answer, err := r.installFetch(ctx, remote.URL+"/api/sites", FetchInit{Headers: web.NewHeaders("authorization", "Bearer "+remote.Token), Timeout: 8 * time.Second, MaxBytes: remoteMaxBytes})
+	// What comes back is kept for every reader for a minute, so it is asked for within its own time limit,
+	// not the asking request's: a request that went away must not leave the install looking unreachable.
+	answer, err := r.installFetch(context.WithoutCancel(ctx), remote.URL+"/api/sites", FetchInit{Headers: web.NewHeaders("authorization", "Bearer "+remote.Token), Timeout: 8 * time.Second, MaxBytes: remoteMaxBytes})
 	if err == nil {
 		if answer.Status == 401 || answer.Status == 403 {
 			info.Connection = "refused"
@@ -889,11 +911,16 @@ func (r *Runlight) addRemoteSite(ctx context.Context, input *js.Object, name any
 			break
 		}
 	}
-	thereID := js.String(js.Dig(there, "id"))
+	// Checked before anything is saved: a site there has an id and a name, as text.
+	thereID, isID := js.Dig(there, "id").(string)
+	thereName, isName := js.Dig(there, "name").(string)
+	if !isID || thereID == "" || len16(thereID) > 64 || !isName {
+		return SiteRow{}, settingsError(url+" did not answer like a Runlight install", "connect_not_runlight", "url", url)
+	}
 	// An install's answer is read as given: a site without a list of hostnames has none.
 	hostnames := []string{}
 	for _, h := range js.Arr(js.Dig(there, "hostnames")) {
-		if s, ok := h.(string); ok {
+		if s, ok := h.(string); ok && s != "" {
 			hostnames = append(hostnames, s)
 		}
 	}
@@ -928,14 +955,20 @@ func (r *Runlight) addRemoteSite(ctx context.Context, input *js.Object, name any
 	if len(hostnames) > 0 {
 		first = hostnames[0]
 	}
-	host := lower(hostIDLetter.ReplaceAllString(first, "-"))
+	host := lower(leadingNonAlnum.ReplaceAllString(hostIDLetter.ReplaceAllString(first, "-"), ""))
+	if host == "" {
+		host = "site"
+	}
 	id := head16(host, 56)
 	for n := 2; r.hasSite(id); n++ {
 		id = fmt.Sprintf("%s-%d", head16(host, 56), n)
 	}
 	siteName := head16(jsTrim(stringOf(name)), 80)
 	if siteName == "" {
-		siteName = js.String(js.Dig(there, "name"))
+		siteName = head16(jsTrim(thereName), 80)
+	}
+	if siteName == "" {
+		siteName = host
 	}
 	timezone := js.String(js.Dig(there, "timezone"))
 	if !IsTimezone(timezone) {
@@ -1274,6 +1307,7 @@ func (r *Runlight) prune(fn func(ctx context.Context) error) {
 	r.start()
 	go func() {
 		defer r.finish()
+		defer r.recovered("could not apply retention")
 		r.pruneMu.Lock()
 		defer r.pruneMu.Unlock()
 		if err := fn(context.Background()); err != nil {
@@ -1288,8 +1322,17 @@ func (r *Runlight) later(fn func(ctx context.Context)) {
 	r.start()
 	go func() {
 		defer r.finish()
+		defer r.recovered("work after an answer failed")
 		fn(context.Background())
 	}()
+}
+
+// recovered keeps a panic in work running beside the requests from ending the app Runlight is part of: it
+// is logged, as the same panic in a request is. Deferred by each such goroutine.
+func (r *Runlight) recovered(what string) {
+	if p := recover(); p != nil && r.logf != nil {
+		r.logf("Runlight: %s: panic: %v", what, p)
+	}
 }
 
 // start counts one more piece of work running after the answer.
@@ -1622,10 +1665,27 @@ func (r *Runlight) ClientIP(request *Request) string {
 			forwarded, ok = h.Lookup(r.trust)
 		}
 		if ok && strings.TrimSpace(forwarded) != "" {
-			return strings.TrimSpace(forwarded)
+			return bareAddress(strings.TrimSpace(forwarded))
 		}
 	}
 	return request.RemoteAddress
+}
+
+var (
+	bracketedAddress = regexp.MustCompile(`^\[([^\]]*)\](?::\d+)?$`)
+	v4WithPort       = regexp.MustCompile(`^\d{1,3}(?:\.\d{1,3}){3}:\d+$`)
+)
+
+// bareAddress is a forwarded address without its port: "203.0.113.7:51234" (as Azure App Service sends) and
+// "[2001:db8::1]:443" are the address alone.
+func bareAddress(value string) string {
+	if m := bracketedAddress.FindStringSubmatch(value); m != nil {
+		return m[1]
+	}
+	if v4WithPort.MatchString(value) {
+		return value[:strings.LastIndex(value, ":")]
+	}
+	return value
 }
 
 // trusts is whether a request's forwarding headers count. Left at its default, the trust believes them only on
@@ -1732,6 +1792,13 @@ func (r *Runlight) dropOldSalts(ctx context.Context, now int64) error {
 // forwardedHost is the host a proxy says the request was for, read only
 // when proxy headers are trusted, as the client's address is.
 func (r *Runlight) forwardedHost(request *Request) (string, bool) {
+	return r.ForwardedHost(request)
+}
+
+// ForwardedHost is the host a proxy says the request was for, and whether it said one: read only when proxy
+// headers are trusted, as the client's address is, so a client that reaches the app straight from the
+// internet cannot name the host itself.
+func (r *Runlight) ForwardedHost(request *Request) (string, bool) {
 	if !r.trusts(request) {
 		return "", false
 	}
@@ -1740,8 +1807,22 @@ func (r *Runlight) forwardedHost(request *Request) (string, bool) {
 
 var busyError = regexp.MustCompile(`(?i)timeout exceeded when trying to connect|connection timeout|no MySQL connection was free|SQLITE_BUSY|database is locked`)
 
-// Collect handles one tracker request. Bad input is dropped quietly.
+// Collect handles one tracker request. It never fails its caller: bad input is dropped quietly, and a hit the
+// store could not take is logged. The error it returns is always nil, and is kept for callers written before.
 func (r *Runlight) Collect(ctx context.Context, request *Request) error {
+	// Analytics must never break the app it counts for.
+	defer func() {
+		if p := recover(); p != nil {
+			r.logf("Runlight: could not record an event panic: %v", p)
+		}
+	}()
+	if err := r.take(ctx, request); err != nil {
+		r.logf("Runlight: could not record an event %v", err)
+	}
+	return nil
+}
+
+func (r *Runlight) take(ctx context.Context, request *Request) error {
 	if length := js.Number(request.Header.Get("content-length")); length > MaxBody {
 		return nil
 	}
@@ -1909,21 +1990,31 @@ func (r *Runlight) sessionFor(ctx context.Context, site SiteRow, request *Reques
 	return r.Store.SettleOpenSession(ctx, site.ID, candidates, now-SessionIdleMs, *session)
 }
 
-// linkDomainSet is the link domains, read at most every 30 seconds.
-func (r *Runlight) linkDomainSet(ctx context.Context) (map[string]bool, error) {
+// linkDomainSet is the link domains, read at most every 30 seconds. It is asked on every request of the app
+// Runlight is part of, so a database that cannot be read never fails it: the domains known before stand (none,
+// when there were none), and the database is left alone for a few seconds before it is asked again.
+func (r *Runlight) linkDomainSet(ctx context.Context) map[string]bool {
 	now := r.now()
 	r.mu.Lock()
 	cache := r.linkDomains
 	r.mu.Unlock()
-	if cache != nil && now-cache.at < 30_000 {
-		return cache.domains, nil
+	if cache != nil && ((!cache.failed && now-cache.at < 30_000) || (cache.failed && now-cache.at < linkDomainsFailedMs)) {
+		return cache.domains
 	}
-	if err := r.Init(ctx); err != nil {
-		return nil, err
-	}
-	list, err := r.Store.LinkDomains(ctx)
+	list, err := r.readLinkDomains(ctx)
 	if err != nil {
-		return nil, err
+		known := map[string]bool{}
+		if cache != nil {
+			known = cache.domains
+		}
+		// A request that went away says nothing about the database, so it is not remembered.
+		if ctx.Err() == nil {
+			r.logf("Runlight: could not read the link domains, so none are answered for a few seconds %v", err)
+			r.mu.Lock()
+			r.linkDomains = &linkDomainCache{at: now, domains: known, failed: true}
+			r.mu.Unlock()
+		}
+		return known
 	}
 	domains := map[string]bool{}
 	for _, d := range list {
@@ -1932,7 +2023,20 @@ func (r *Runlight) linkDomainSet(ctx context.Context) (map[string]bool, error) {
 	r.mu.Lock()
 	r.linkDomains = &linkDomainCache{at: now, domains: domains}
 	r.mu.Unlock()
-	return domains, nil
+	return domains
+}
+
+// readLinkDomains reads the link domains from the database, a panic in the app's own Db included as an error.
+func (r *Runlight) readLinkDomains(ctx context.Context) (list []LinkDomain, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			list, err = nil, fmt.Errorf("panic: %v", p)
+		}
+	}()
+	if err := r.Init(ctx); err != nil {
+		return nil, err
+	}
+	return r.Store.LinkDomains(ctx)
 }
 
 // ForgetLinkDomains clears the cached link domains after one is added or removed.
@@ -2016,11 +2120,7 @@ func (r *Runlight) LinkDomainResponse(ctx context.Context, request *Request) (*R
 		given = u.Host()
 	}
 	host := StripWww(strings.Split(strings.TrimSpace(strings.Split(given, ",")[0]), ":")[0])
-	domains, err := r.linkDomainSet(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !domains[host] {
+	if !r.linkDomainSet(ctx)[host] {
 		return nil, nil
 	}
 	// Lets the dashboard confirm that requests to this domain reach Runlight.
@@ -2087,7 +2187,8 @@ func (r *Runlight) Redirect(ctx context.Context, request *Request, slug, domain 
 		site, ok = r.Site("")
 	}
 	ua := request.Header.Get("user-agent")
-	if ok && AiAgentOf(ua) == nil && !IsBot(ua) && request.Method == "GET" {
+	// Past the tracker's limit for one address a click still redirects, and is not counted.
+	if ok && AiAgentOf(ua) == nil && !IsBot(ua) && request.Method == "GET" && (r.limit == nil || r.limit.allow(r.ClientIP(request))) {
 		if err := r.recordClick(ctx, request, u, site, link, host); err != nil {
 			// A failed count must never break the redirect.
 			r.logf("Runlight: could not record a link click %v", err)
@@ -2151,18 +2252,24 @@ var pageExtension = regexp.MustCompile(`\.([A-Za-z0-9]+)$`)
 // the list the agent's company publishes and then dropped: only "verified",
 // "mismatch", or "" is kept with the fetch.
 func (r *Runlight) Observe(ctx context.Context, request *Request, at *float64) bool {
-	return r.observeLogged(ctx, request, at, nil)
+	return r.observeLogged(ctx, request, at, nil, nil)
 }
 
 // ObserveReport is Observe for a fetch a log reader or plugin reports: ip is
 // the address the agent's request came from, "" when the report has none,
 // and the request's own address (the reporter's) is never checked in its place.
 func (r *Runlight) ObserveReport(ctx context.Context, request *Request, at *float64, ip string) bool {
-	return r.observeLogged(ctx, request, at, &ip)
+	return r.observeLogged(ctx, request, at, &ip, nil)
 }
 
-func (r *Runlight) observeLogged(ctx context.Context, request *Request, at *float64, agentIP *string) bool {
-	ok, err := r.observe(ctx, request, at, agentIP)
+// ObserveReportAs is ObserveReport with the agent's user agent given as text, in place of the request's
+// header: a logged one may not be fit for a header.
+func (r *Runlight) ObserveReportAs(ctx context.Context, request *Request, at *float64, ip, userAgent string) bool {
+	return r.observeLogged(ctx, request, at, &ip, &userAgent)
+}
+
+func (r *Runlight) observeLogged(ctx context.Context, request *Request, at *float64, agentIP, userAgent *string) bool {
+	ok, err := r.observe(ctx, request, at, agentIP, userAgent)
 	if err != nil {
 		// Analytics must never break the page it watches, but a failure should still be seen.
 		r.logf("Runlight: could not record an AI agent fetch %v", err)
@@ -2171,11 +2278,16 @@ func (r *Runlight) observeLogged(ctx context.Context, request *Request, at *floa
 	return ok
 }
 
-func (r *Runlight) observe(ctx context.Context, request *Request, at *float64, agentIP *string) (bool, error) {
+func (r *Runlight) observe(ctx context.Context, request *Request, at *float64, agentIP, userAgent *string) (bool, error) {
 	if request.Method != "GET" {
 		return false, nil
 	}
-	agent := AiAgentOf(request.Header.Get("user-agent"))
+	// A log reader gives the user agent as text, since a logged one may not be fit for a header.
+	ua := request.Header.Get("user-agent")
+	if userAgent != nil {
+		ua = *userAgent
+	}
+	agent := AiAgentOf(ua)
 	if agent == nil {
 		return false, nil
 	}
@@ -2195,11 +2307,16 @@ func (r *Runlight) observe(ctx context.Context, request *Request, at *float64, a
 	if !ok {
 		host = u.Hostname
 	}
+	host = strings.Split(jsTrim(strings.Split(host, ",")[0]), ":")[0]
 	if err := r.Init(ctx); err != nil {
 		return false, err
 	}
-	site, ok := r.SiteFor(strings.Split(host, ":")[0], "")
+	site, ok := r.SiteFor(host, "")
 	if !ok {
+		return false, nil
+	}
+	// A fetch seen as it happens is limited per address, as tracker hits are; a log reader's report is not.
+	if agentIP == nil && r.fetchLimit != nil && !r.fetchLimit.allow(r.ClientIP(request)) {
 		return false, nil
 	}
 	// A log reader sends when the page was served. Older than a week is dropped, so a first run over an old
@@ -2222,7 +2339,7 @@ func (r *Runlight) observe(ctx context.Context, request *Request, at *float64, a
 	// A fetch keeps the result of the address check in title: "verified", "mismatch", or "" when there was
 	// nothing to check against. The address itself is not kept.
 	title := checkCompiled(agent, ip, *r.agentRanges.Load())
-	return true, r.Store.InsertEvent(ctx, EventRow{Site: site.ID, Ts: ts, Kind: "fetch", Path: head16(u.Pathname, 1000), Hostname: StripWww(u.Hostname),
+	return true, r.Store.InsertEvent(ctx, EventRow{Site: site.ID, Ts: ts, Kind: "fetch", Path: head16(u.Pathname, 1000), Hostname: StripWww(host),
 		Title: title, Name: agent.Name, Props: js.NewObject("company", agent.Company, "kind", agent.Kind)})
 }
 
@@ -2251,7 +2368,15 @@ func (r *Runlight) Check(ctx context.Context) (CheckResult, error) {
 		run = &checkRun{done: make(chan struct{})}
 		r.checking = run
 		go func() {
-			run.result, run.err = r.runCheck(context.WithoutCancel(ctx))
+			func() {
+				// A panic is the caller's error, as it would be had the check run on the caller's goroutine.
+				defer func() {
+					if p := recover(); p != nil {
+						run.result, run.err = CheckResult{}, fmt.Errorf("panic: %v", p)
+					}
+				}()
+				run.result, run.err = r.runCheck(context.WithoutCancel(ctx))
+			}()
 			r.checkMu.Lock()
 			r.checking = nil
 			r.checkMu.Unlock()
@@ -2349,7 +2474,9 @@ func (r *Runlight) refreshAgentRanges(ctx context.Context) {
 		r.logf("Runlight: could not update the AI agents' address lists %v", err)
 		return
 	}
+	// fetched is when each list was downloaded; a copy saved before it was kept has only at, for all of them.
 	var saved map[string][]string
+	fetched := map[string]float64{}
 	savedAt := 0.0
 	if has {
 		if parsed, err := js.Parse(stored); err == nil && parsed != nil {
@@ -2358,11 +2485,24 @@ func (r *Runlight) refreshAgentRanges(ctx context.Context) {
 				if n := js.ToNumber(o.Value("at")); !math.IsNaN(n) {
 					savedAt = n
 				}
+				times, hasTimes := o.Value("fetched").(*js.Object)
 				if lists, ok := o.Value("lists").(*js.Object); ok {
 					lists.Each(func(url string, list any) {
-						if prefixes, ok := rangeListOf(list); ok {
-							saved[url] = prefixes
+						prefixes, ok := rangeListOf(list)
+						if !ok {
+							return
 						}
+						saved[url] = prefixes
+						when := 0.0
+						if hasTimes {
+							if n := js.ToNumber(undefinedIfMissing(times, url, times.Value(url))); !math.IsNaN(n) {
+								when = n
+							}
+						}
+						if when == 0 && !hasTimes {
+							when = savedAt
+						}
+						fetched[url] = when
 					})
 				}
 			}
@@ -2376,10 +2516,11 @@ func (r *Runlight) refreshAgentRanges(ctx context.Context) {
 		for _, url := range assets.AgentRangeOrder {
 			if fresh, ok := downloadRangeList(ctx, r.fetcher, url, agentRangesTimeout); ok {
 				lists[url] = fresh
+				fetched[url] = float64(r.now())
 			}
 		}
 		saved = lists
-		value := js.Stringify(js.NewObject("at", r.now(), "lists", lists))
+		value := js.Stringify(js.NewObject("at", r.now(), "lists", lists, "fetched", fetched))
 		if err := r.Store.SetSetting(ctx, "agent-ranges", &value); err != nil {
 			r.logf("Runlight: could not update the AI agents' address lists %v", err)
 			return
@@ -2389,7 +2530,18 @@ func (r *Runlight) refreshAgentRanges(ctx context.Context) {
 	for url, list := range bundledRanges {
 		inUse[url] = list
 	}
-	for url, list := range compileRanges(saved) {
+	// A downloaded list stands in for the one that came with this version only while it is the newer of the two.
+	shipped := 0.0
+	if at, ok := dateParse(assets.AgentRanges.FetchedAt); ok {
+		shipped = at
+	}
+	newer := map[string][]string{}
+	for url, list := range saved {
+		if fetched[url] >= shipped {
+			newer[url] = list
+		}
+	}
+	for url, list := range compileRanges(newer) {
 		inUse[url] = list
 	}
 	r.agentRanges.Store(&inUse)

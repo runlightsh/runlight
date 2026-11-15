@@ -549,6 +549,11 @@ func (rt *Routes) api(c *call, path string, u *whatwg.URL) (*Response, error) {
 				return Coded("This hub's address is not the one it connected from. Connect the site again from here.", "pick_hub", 403, nil), nil
 			}
 		}
+		// An account kept to one site gets a ticket only for this dashboard: the configured address, or without
+		// one the address its request came to.
+		if c.managed == nil && rt.siteKept(c) && origin != firstNonEmpty(rt.origin, u.Origin()) {
+			return Coded("Your account can only pick from this dashboard's own address", "pick_own", 403, nil), nil
+		}
 		ticket, err := rt.pickTicket(ctx, origin, site.ID, back)
 		if err != nil {
 			return nil, err
@@ -704,9 +709,9 @@ func (rt *Routes) observeAPI(c *call) (*Response, error) {
 	}
 	recorded := 0
 	for _, p := range keep {
-		req := web.NewRequest("GET", p.page.Href(), web.NewHeaders("user-agent", p.userAgent), nil)
+		req := web.NewRequest("GET", p.page.Href(), nil, nil)
 		// A fetch reported without its address cannot be checked; it is never checked against the reporter's own.
-		if r.ObserveReport(ctx, req, p.at, p.ip) {
+		if r.ObserveReportAs(ctx, req, p.at, p.ip, p.userAgent) {
 			recorded++
 		}
 	}

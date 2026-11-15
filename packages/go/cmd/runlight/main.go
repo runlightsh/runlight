@@ -385,6 +385,12 @@ func run(args []string) error {
 	if err := srv.Runlight.Init(ctx); err != nil {
 		return err
 	}
+	// Said at every start, loudly, and the server still runs: an install with a short one must keep working.
+	for _, name := range []string{"RUNLIGHT_SECRET", "RUNLIGHT_TOKEN"} {
+		if warning := server.ShortWarning(name, env(name)); warning != "" {
+			fmt.Fprintf(os.Stderr, "\n%s\n\n", warning)
+		}
+	}
 	// A site's reports fall back to UTC when its zone cannot be loaded, so say so rather than count days quietly wrong.
 	for _, site := range srv.Runlight.Sites() {
 		if site.Timezone != "" && !runlight.IsTimezone(site.Timezone) {
@@ -396,9 +402,10 @@ func run(args []string) error {
 		return errors.New("Set PORT to a number")
 	}
 	host := firstOf(env("HOST"), "0.0.0.0")
+	// A port already taken, or an address that cannot be listened on, is said in a line, like any other trouble at start.
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
-		return err
+		return fmt.Errorf("could not listen on %s: %v", net.JoinHostPort(host, strconv.Itoa(port)), err)
 	}
 	// A body is 10 MB at most, which a slow line sends within two minutes. Nothing streams: the longest
 	// answer is a report or an export from a connected install, which may take two minutes to

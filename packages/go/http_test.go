@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -187,5 +188,25 @@ func TestDashboardNamesTheCMSOnlyWhenSet(t *testing.T) {
 		if got := res.Header().Get("x-frame-options"); got != frame {
 			t.Errorf("cms %q: x-frame-options is %q, want %q", cms, got, frame)
 		}
+	}
+}
+
+// A request's target never names its host: one starting // or /\ is a path on the host the request came to.
+func TestARequestTargetNeverNamesTheHost(t *testing.T) {
+	for _, target := range []string{"//attacker.example/oauth/authorize?x=1", `/\attacker.example/oauth/authorize?x=1`, "///attacker.example/oauth/authorize?x=1"} {
+		req := &http.Request{Method: "GET", Host: "stats.example.com", RequestURI: target, URL: &url.URL{Path: "/"}, Header: http.Header{"X-Forwarded-Proto": {"https"}}}
+		request, err := runlight.FromHTTP(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u := request.Parsed()
+		if u.Origin() != "https://stats.example.com" || !strings.HasSuffix(u.Pathname, "/attacker.example/oauth/authorize") || u.Pathname == "/oauth/authorize" {
+			t.Errorf("%s: read as %s", target, request.URL)
+		}
+	}
+	// And a plain target is read as it always was.
+	req := &http.Request{Method: "GET", Host: "stats.example.com", RequestURI: "/runlight/api/stats?site=a", URL: &url.URL{Path: "/"}, Header: http.Header{}}
+	if request, _ := runlight.FromHTTP(req); request.URL != "http://stats.example.com/runlight/api/stats?site=a" {
+		t.Errorf("a plain target: %s", request.URL)
 	}
 }

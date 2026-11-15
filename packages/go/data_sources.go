@@ -72,7 +72,7 @@ var Sources = []KnownSource{
 	{"Yahoo Mail", "email", []string{"mail.yahoo.com"}, []string{"yahoomail"}},
 	{"Fastmail", "email", []string{"app.fastmail.com", "fastmail.com"}, []string{"fastmail"}},
 	{"Proton Mail", "email", []string{"mail.proton.me"}, []string{"protonmail"}},
-	{"Newsletter", "email", []string{}, []string{"newsletter", "email", "e-mail", "mailchimp", "kit", "convertkit", "beehiiv", "buttondown"}},
+	{"Newsletter", "email", []string{}, []string{"newsletter", "email", "e-mail", "mailchimp", "beehiiv", "buttondown"}},
 }
 
 // sourcePatterns are hosts known by their shape rather than their name:
@@ -87,6 +87,5 @@ var sourcePatterns = []struct {
 	{regexp.MustCompile(`(^|\.)convertkit-mail\d*\.com$|(^|\.)kit-mail\d*\.com$`), "Kit", "email"},
 	{regexp.MustCompile(`(^|\.)(list-manage|mailchi)\.(com|mp)$`), "Mailchimp", "email"},
 	{regexp.MustCompile(`(^|\.)beehiiv\.com$`), "beehiiv", "email"},
-	{regexp.MustCompile(`(^|\.)substack\.com$`), "Substack", "email"},
 	{regexp.MustCompile(`^(web)?mail\d*\.|(^|\.)webmail\.`), "", "email"},
 }

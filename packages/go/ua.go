@@ -23,9 +23,19 @@ type ClientHints struct {
 	Platform *string
 }
 
+// MaxUA is the most of a user agent, or of a client hint, that is read: a real one is far shorter, and nothing past it is parsed.
+const MaxUA = 512
+
+func capUA(value string) string {
+	if len16(value) > MaxUA {
+		return head16(value, MaxUA)
+	}
+	return value
+}
+
 // AiAgentOf is the AI agent a user agent names, or nil.
 func AiAgentOf(ua string) *AiAgent {
-	lower := lower(ua)
+	lower := lower(capUA(ua))
 	for i := range AiAgents {
 		if strings.Contains(lower, AiAgents[i].Token) {
 			agent := AiAgents[i]
@@ -39,6 +49,7 @@ var mozillaOrOpera = regexp.MustCompile(`mozilla|opera`)
 
 // IsBot reports whether a user agent is clearly not a person in a browser.
 func IsBot(ua string) bool {
+	ua = capUA(ua)
 	if len16(ua) < 20 || !mozillaOrOpera.MatchString(foldASCII(ua)) {
 		return true
 	}
@@ -60,7 +71,7 @@ var browsers = []struct {
 	{"Instagram", regexp.MustCompile(`Instagram (\d+)`)},
 	{"Firefox", regexp.MustCompile(`(?:Firefox|FxiOS)/(\d+)`)},
 	{"Chrome", regexp.MustCompile(`(?:CriOS|Chrome)/(\d+)`)},
-	{"Safari", regexp.MustCompile(`Version/(\d+)[\d.]* (?:Mobile/[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+ )?Safari/`)},
+	{"Safari", regexp.MustCompile(`Version/(\d+)(?:\.[\d.]*)? (?:Mobile/[^\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+ )?Safari/`)},
 	{"Internet Explorer", regexp.MustCompile(`(?:MSIE |Trident/[^\n\r\x{2028}\x{2029}]*rv:)(\d+)`)},
 }
 
@@ -100,6 +111,13 @@ func unquote(value *string) string {
 // ParseClient reads the browser, system, and device from a user agent, its
 // client hints, and the screen's width (nil when not sent).
 func ParseClient(ua string, hints ClientHints, screenWidth *int) Client {
+	ua = capUA(ua)
+	for _, hint := range []**string{&hints.Brands, &hints.Mobile, &hints.Platform} {
+		if *hint != nil {
+			capped := capUA(**hint)
+			*hint = &capped
+		}
+	}
 	browser, browserVersion := "Other", ""
 	for _, b := range browsers {
 		if m := b.pattern.FindStringSubmatch(ua); m != nil {

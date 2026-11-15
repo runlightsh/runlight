@@ -62,9 +62,9 @@ func init() {
 	}
 }
 
-// clip is (value ?? "").trim().slice(0, max).
+// clip is a query value as it is stored: tidied (a decoded %00 is no text), trimmed, and cut by character.
 func clip(value string, max int) string {
-	return head16(jsTrim(value), max)
+	return cleanText(jsTrim(tidy(value)), max)
 }
 
 // StripWww lowercases a host and drops a leading www.

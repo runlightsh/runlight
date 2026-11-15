@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -199,13 +200,19 @@ type player struct {
 
 var (
 	totpTemplate = regexp.MustCompile(`\{\{totp:(\w+)\}\}`)
+	padTemplate  = regexp.MustCompile(`\{\{pad:(\d+)\}\}`)
 	template     = regexp.MustCompile(`\{\{(\w+)\}\}`)
 	maxAgeZero   = regexp.MustCompile(`(?i)^[\t\n\v\f\r ]*max-age=0[\t\n\v\f\r ]*$`)
 )
 
-// fillTotp is {{totp:name}} as the six-digit code for the captured secret at the step's clock, then {{name}}.
+// fillTotp is {{pad:N}} as N letters x, for text past a limit that the file should not hold, then
+// {{totp:name}} as the six-digit code for the captured secret at the step's clock, then {{name}}.
 func (p *player) fillTotp(text string) string {
-	out := totpTemplate.ReplaceAllStringFunc(text, func(m string) string {
+	out := padTemplate.ReplaceAllStringFunc(text, func(m string) string {
+		n, _ := strconv.Atoi(padTemplate.FindStringSubmatch(m)[1])
+		return strings.Repeat("x", n)
+	})
+	out = totpTemplate.ReplaceAllStringFunc(out, func(m string) string {
 		name := totpTemplate.FindStringSubmatch(m)[1]
 		return Totp(p.kept[name], p.now/30_000)
 	})

@@ -526,6 +526,12 @@ func sideBySide(reads ...func() error) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// A panic is the request's error, as it would be had the read run on the request's goroutine.
+			defer func() {
+				if p := recover(); p != nil {
+					errs[i] = fmt.Errorf("panic: %v", p)
+				}
+			}()
 			errs[i] = read()
 		}()
 	}

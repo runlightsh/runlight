@@ -60,7 +60,13 @@ func defaultName(url string) string {
 }
 
 // Links creates, changes, deletes, and imports short links, with the rules every route shares.
-type Links struct{ r *Runlight }
+type Links struct {
+	r *Runlight
+	// Reserved are slugs no new link may take, for a host whose own pages sit where a link domain's links do:
+	// the standalone server answers /login, /api, and the rest on every name, so a link there would never
+	// open on its own domain.
+	Reserved map[string]bool
+}
 
 func (l *Links) domainFor(ctx context.Context, site, value string) (string, error) {
 	domain := StripWww(jsTrim(value))
@@ -92,10 +98,17 @@ func (l *Links) freeSlug(ctx context.Context, wanted *string, except string) (st
 		if taken != nil && taken.ID != except {
 			return "", linkError("/"+*wanted+" is already taken", "link_taken", "slug", *wanted)
 		}
+		// A link made before the slug was kept back keeps it.
+		if l.Reserved[*wanted] && taken == nil {
+			return "", linkError("/"+*wanted+" is one of this server's own pages, so a link there would never open on a link domain", "link_reserved", "slug", *wanted)
+		}
 		return *wanted, nil
 	}
 	for i := 0; i < 8; i++ {
 		slug := RandomSlug()
+		if l.Reserved[slug] {
+			continue
+		}
 		found, err := l.r.Store.LinkBySlug(ctx, slug)
 		if err != nil {
 			return "", err

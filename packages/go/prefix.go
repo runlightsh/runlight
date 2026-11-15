@@ -115,11 +115,21 @@ func (p *prefixedDb) Transaction(ctx context.Context, fn func(Db) error) error {
 		if err := p.Run(ctx, "BEGIN"); err != nil {
 			return err
 		}
+		// Rolled back whichever way fn ends: an error, a panic, a COMMIT that failed, or a request that went away.
+		committed := false
+		defer func() {
+			if !committed {
+				_ = p.Run(context.WithoutCancel(ctx), "ROLLBACK")
+			}
+		}()
 		if err := fn(p); err != nil {
-			_ = p.Run(ctx, "ROLLBACK")
 			return err
 		}
-		return p.Run(ctx, "COMMIT")
+		if err := p.Run(ctx, "COMMIT"); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 	return t.Transaction(ctx, func(db Db) error { return fn(p.wrap(db)) })
 }

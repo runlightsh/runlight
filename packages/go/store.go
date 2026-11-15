@@ -7,7 +7,6 @@ import (
 	"math"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -280,11 +279,21 @@ func (s *Store) Transaction(ctx context.Context, fn func(*Store) error) error {
 	if err := s.db.Run(ctx, "BEGIN"); err != nil {
 		return err
 	}
+	// Rolled back whichever way fn ends: an error, a panic, a COMMIT that failed, or a request that went away.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = s.db.Run(context.WithoutCancel(ctx), "ROLLBACK")
+		}
+	}()
 	if err := fn(s); err != nil {
-		_ = s.db.Run(ctx, "ROLLBACK")
 		return err
 	}
-	return s.db.Run(ctx, "COMMIT")
+	if err := s.db.Run(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // Sites
@@ -650,26 +659,9 @@ func jsRound(x float64) int64 { return int64(js.Round(x)) }
 // round2 is Math.round(x * 100) / 100.
 func round2(x float64) float64 { return js.Round(x*100) / 100 }
 
-type rollSums struct {
-	visitors, visits, pageviews, bounced, duration, engaged, views, scrollSum, scrollN, events float64
-}
-
-func (r *rollSums) bump(row Row) {
-	r.visitors += num(row["visitors"])
-	r.visits += num(row["visits"])
-	r.pageviews += num(row["pageviews"])
-	r.bounced += num(row["bounced"])
-	r.duration += num(row["duration"])
-	r.engaged += num(row["engaged"])
-	r.views += num(row["views"])
-	r.scrollSum += num(row["scroll_sum"])
-	r.scrollN += num(row["scroll_n"])
-	r.events += num(row["events"])
-}
-
 // rolledBreakdown is a breakdown of a visit dimension or of pages from
-// rollups and the visits left over, merged, then sorted and cut to the page
-// asked for.
+// rollups and the visits left over, merged, sorted, and cut to the page
+// asked for by the database.
 func (s *Store) rolledBreakdown(ctx context.Context, query Query, dimension string, limit, offset int) ([]BreakdownRow, bool, error) {
 	page := dimension == "page"
 	event := dimension == "event"
@@ -690,162 +682,153 @@ func (s *Store) rolledBreakdown(ctx context.Context, query Query, dimension stri
 		}
 		plan = &rollupPlan{rest: [][2]int64{{query.From, query.To}}}
 	}
-	sums := map[string]*rollSums{}
-	order := []string{}
-	bump := func(row Row) {
-		key := str(row["value"])
-		into, ok := sums[key]
-		if !ok {
-			into = &rollSums{}
-			sums[key] = into
-			order = append(order, key)
+	// Each source adds up its own rows by value, and the database adds the sources together, sorts them,
+	// and cuts them to the page asked for, so no more than that page is ever read into memory.
+	part := func(value string, counted map[string]string) string {
+		cols := make([]string, len(rollColumns))
+		for i, c := range rollColumns {
+			sum := counted[c]
+			if sum == "" {
+				sum = "0"
+			}
+			cols[i] = sum + " AS " + c
 		}
-		into.bump(row)
+		return value + " AS value, " + strings.Join(cols, ", ")
 	}
+	parts := []string{}
+	params := []any{}
 	if len(plan.days) > 0 {
-		rolled, err := s.db.All(ctx, `SELECT value, SUM(visitors) AS visitors, SUM(visits) AS visits, SUM(pageviews) AS pageviews, SUM(bounced) AS bounced, SUM(duration) AS duration,
-           SUM(engaged) AS engaged, SUM(views) AS views, SUM(scroll_sum) AS scroll_sum, SUM(scroll_n) AS scroll_n, SUM(events) AS events
-         FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (`+builtDays+`) GROUP BY value`,
-			query.Site, dimension, query.Site, query.From, query.To)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, row := range rolled {
-			bump(row)
-		}
+		parts = append(parts, `SELECT value, `+strings.Join(rollColumns, ", ")+` FROM rl_rollups WHERE site = ? AND dim = ? AND day IN (`+builtDays+`)`)
+		params = append(params, query.Site, dimension, query.Site, query.From, query.To)
 	}
 	w := within(plan.rest)
-	switch {
-	case (page || event) && len(plan.rest) > 0:
-		// A visit's pageviews and events belong to the day it started, as in the rollups.
-		// Bounded by time as well, so the events index finds them (see BuildRollupDay).
-		lo, hi := plan.rest[0][0], plan.rest[0][1]
-		for _, r := range plan.rest {
-			lo, hi = min(lo, r[0]), max(hi, r[1])
+	// A visit's pageviews and events belong to the day it started, as in the rollups.
+	// Bounded by time as well, so the events index finds them (see BuildRollupDay).
+	var lo, hi int64
+	for i, r := range plan.rest {
+		if i == 0 {
+			lo, hi = r[0], r[1]
 		}
-		hi += EventTailMs
-		ofRest := func(kind string) string {
-			return `FROM rl_events e JOIN rl_sessions s ON s.id = e.session WHERE e.site = ? AND e.kind = '` + kind + `' AND e.ts >= ? AND e.ts < ? AND ` + isVisit + ` AND ` + w.sql
-		}
-		at := append([]any{query.Site, lo, hi}, w.params...)
-		if page {
-			rows, err := s.db.All(ctx, `SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(DISTINCT e.session) AS visits, COUNT(*) AS pageviews, `+liveViews+` AS views `+ofRest("pageview")+` GROUP BY e.path`, at...)
-			if err != nil {
-				return nil, false, err
-			}
-			for _, row := range rows {
-				bump(row)
-			}
-			rows, err = s.db.All(ctx, `SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
-             SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest `+ofRest("engagement")+` GROUP BY e.path, e.pageview) t GROUP BY value`, at...)
-			if err != nil {
-				return nil, false, err
-			}
-			for _, row := range rows {
-				bump(row)
-			}
-		} else {
-			rows, err := s.db.All(ctx, `SELECT e.name AS value, COUNT(DISTINCT e.visitor) AS visitors, COUNT(*) AS events `+ofRest("event")+` GROUP BY e.name`, at...)
-			if err != nil {
-				return nil, false, err
-			}
-			for _, row := range rows {
-				bump(row)
-			}
-		}
-	case page || event:
-		// Every day of the range is built.
-	default:
-		col := "s." + sessionColumn(dimension)
-		rows, err := s.db.All(ctx, `SELECT `+col+` AS value, COUNT(DISTINCT s.visitor) AS visitors, COUNT(*) AS visits, SUM(s.pageviews) AS pageviews,
-           SUM(CASE WHEN `+bounce+` THEN 1 ELSE 0 END) AS bounced, SUM(`+duration+`) AS duration
-         FROM rl_sessions s WHERE s.site = ? AND `+isVisit+` AND `+w.sql+` AND `+col+` <> '' GROUP BY `+col,
-			append([]any{query.Site}, w.params...)...)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, row := range rows {
-			bump(row)
+		lo, hi = min(lo, r[0]), max(hi, r[1])
+	}
+	hi += EventTailMs
+	ofRest := func(kind string) string {
+		return `FROM ` + eventKindTable(s.dialect()) + ` CROSS JOIN rl_sessions s WHERE s.id = e.session AND e.site = ? AND e.kind = '` + kind + `' AND e.ts >= ? AND e.ts < ? AND ` + isVisit + ` AND ` + w.sql
+	}
+	at := append([]any{query.Site, lo, hi}, w.params...)
+	if len(plan.rest) > 0 {
+		switch {
+		case page:
+			parts = append(parts, `SELECT `+part("e.path", map[string]string{"visitors": "COUNT(DISTINCT e.visitor)", "pageviews": "COUNT(*)", "views": liveViews})+` `+ofRest("pageview")+` GROUP BY e.path`)
+			params = append(params, at...)
+		case event:
+			parts = append(parts, `SELECT `+part("e.name", map[string]string{"visitors": "COUNT(DISTINCT e.visitor)", "events": "COUNT(*)"})+` `+ofRest("event")+` GROUP BY e.name`)
+			params = append(params, at...)
+		default:
+			col := "s." + sessionColumn(dimension)
+			counted := map[string]string{"visitors": "COUNT(DISTINCT s.visitor)", "visits": "COUNT(*)", "pageviews": "SUM(s.pageviews)",
+				"bounced": "SUM(CASE WHEN " + bounce + " THEN 1 ELSE 0 END)", "duration": "SUM(" + duration + ")"}
+			parts = append(parts, `SELECT `+part(col, counted)+` FROM rl_sessions s WHERE s.site = ? AND `+isVisit+` AND `+w.sql+` AND `+col+` <> '' GROUP BY `+col)
+			params = append(append(params, query.Site), w.params...)
 		}
 	}
 	entryExit := dimension == "entry" || dimension == "exit"
-	keys := []string{}
-	for _, value := range order {
-		x := sums[value]
-		keep := x.visits > 0
-		if page {
-			keep = x.pageviews > 0
-		} else if event {
-			keep = x.events > 0
-		}
-		if (event || value != "") && keep {
-			keys = append(keys, value)
-		}
+	order := "n_visitors DESC, n_visits DESC"
+	switch {
+	case entryExit:
+		order = "n_visits DESC"
+	case event:
+		order = "n_visitors DESC, n_events DESC"
+	case page:
+		order = "n_visitors DESC, n_pageviews DESC"
 	}
-	sort.SliceStable(keys, func(i, j int) bool {
-		a, b := keys[i], keys[j]
-		x, y := sums[a], sums[b]
-		cmp := func(pairs ...float64) (bool, bool) {
-			for k := 0; k+1 < len(pairs); k += 2 {
-				if pairs[k] != pairs[k+1] {
-					return pairs[k] > pairs[k+1], true
-				}
+	sums := make([]string, len(rollColumns))
+	for i, c := range rollColumns {
+		sums[i] = "SUM(" + c + ") AS n_" + c
+	}
+	named := "WHERE value <> ''"
+	if event {
+		named = ""
+	}
+	rows, err := s.db.All(ctx, `SELECT value, `+strings.Join(sums, ", ")+` FROM (`+strings.Join(parts, " UNION ALL ")+`) t
+       `+named+` GROUP BY value ORDER BY `+order+`, value`+s.textOrder()+` LIMIT ? OFFSET ?`,
+		append(params, int64(limit), int64(offset))...)
+	if err != nil {
+		return nil, false, err
+	}
+	// The engaged time and scroll of the pages on this page of the report, from the visits no built day holds.
+	type more struct{ engaged, scrollSum, scrollN float64 }
+	rest := map[string]*more{}
+	if page && len(plan.rest) > 0 && len(rows) > 0 {
+		// Engaged time is added up per pageview first.
+		size := max(1, min(valuesPerQuery, maxParams-len(at)-4))
+		for i := 0; i < len(rows); i += size {
+			piece := rows[i:min(i+size, len(rows))]
+			p := append([]any{}, at...)
+			for _, row := range piece {
+				p = append(p, str(row["value"]))
 			}
-			return false, false
+			found, err := s.db.All(ctx, `SELECT value, SUM(total) AS engaged, SUM(deepest) AS scroll_sum, COUNT(deepest) AS scroll_n FROM (
+                 SELECT e.path AS value, SUM(e.engaged_ms) AS total, MAX(e.scroll) AS deepest `+ofRest("engagement")+` AND e.path IN (`+placeholders(len(piece))+`)
+                 GROUP BY e.path, e.pageview) t GROUP BY value`, p...)
+			if err != nil {
+				return nil, false, err
+			}
+			for _, row := range found {
+				key := str(row["value"])
+				into := rest[key]
+				if into == nil {
+					into = &more{}
+					rest[key] = into
+				}
+				into.engaged += num(row["engaged"])
+				into.scrollSum += num(row["scroll_sum"])
+				into.scrollN += num(row["scroll_n"])
+			}
 		}
-		var less, decided bool
-		switch {
-		case entryExit:
-			less, decided = cmp(x.visits, y.visits)
-		case event:
-			less, decided = cmp(x.visitors, y.visitors, x.events, y.events)
-		case page:
-			less, decided = cmp(x.visitors, y.visitors, x.pageviews, y.pageviews)
-		default:
-			less, decided = cmp(x.visitors, y.visitors, x.visits, y.visits)
-		}
-		if decided {
-			return less
-		}
-		return codeOrder(a, b) < 0
-	})
-	end := min(len(keys), offset+limit)
-	if offset > len(keys) {
-		offset = len(keys)
 	}
 	out := []BreakdownRow{}
-	for _, value := range keys[offset:end] {
-		x := sums[value]
+	for _, row := range rows {
+		value := str(row["value"])
+		x := func(column string) float64 { return num(row["n_"+column]) }
 		switch {
 		case event:
-			out = append(out, BreakdownRow{Value: value, Visitors: int64(x.visitors), Events: i64(int64(x.events))})
+			out = append(out, BreakdownRow{Value: value, Visitors: int64(x("visitors")), Events: i64(int64(x("events")))})
 		case page:
+			engaged, scrollSum, scrollN := x("engaged"), x("scroll_sum"), x("scroll_n")
+			if m := rest[value]; m != nil {
+				engaged, scrollSum, scrollN = engaged+m.engaged, scrollSum+m.scrollSum, scrollN+m.scrollN
+			}
 			// Over every pageview that could report its time, counting those that sent none (under a second) as none.
-			row := BreakdownRow{Value: value, Visitors: int64(x.visitors), Pageviews: i64(int64(x.pageviews)), TimeOnPage: i64(0), ScrollDepth: i64(0)}
-			if x.views > 0 {
-				row.TimeOnPage = i64(jsRound(x.engaged / x.views))
+			r := BreakdownRow{Value: value, Visitors: int64(x("visitors")), Pageviews: i64(int64(x("pageviews"))), TimeOnPage: i64(0), ScrollDepth: i64(0)}
+			if x("views") > 0 {
+				r.TimeOnPage = i64(jsRound(engaged / x("views")))
 			}
-			if x.scrollN > 0 {
-				row.ScrollDepth = i64(jsRound(x.scrollSum / x.scrollN))
+			if scrollN > 0 {
+				r.ScrollDepth = i64(jsRound(scrollSum / scrollN))
 			}
-			out = append(out, row)
+			out = append(out, r)
 		default:
-			row := BreakdownRow{Value: value, Visitors: int64(x.visitors), Visits: i64(int64(x.visits)), BounceRate: f64(0)}
-			if x.visits > 0 {
-				row.BounceRate = f64(x.bounced / x.visits)
+			visits := x("visits")
+			r := BreakdownRow{Value: value, Visitors: int64(x("visitors")), Visits: i64(int64(visits)), BounceRate: f64(0)}
+			if visits > 0 {
+				r.BounceRate = f64(x("bounced") / visits)
 			}
 			if !entryExit {
-				row.Pageviews = i64(int64(x.pageviews))
-				row.VisitDuration = i64(0)
-				if x.visits > 0 {
-					row.VisitDuration = i64(jsRound(x.duration / x.visits))
+				r.Pageviews = i64(int64(x("pageviews")))
+				r.VisitDuration = i64(0)
+				if visits > 0 {
+					r.VisitDuration = i64(jsRound(x("duration") / visits))
 				}
 			}
-			out = append(out, row)
+			out = append(out, r)
 		}
 	}
 	return out, true, nil
 }
+
+// rollColumns are the sums a rolled-up breakdown adds, in the order every part of it selects them.
+var rollColumns = []string{"visitors", "visits", "pageviews", "bounced", "duration", "engaged", "views", "scroll_sum", "scroll_n", "events"}
 
 func (s *Store) rolledStats(ctx context.Context, query Query) (*Stats, error) {
 	plan, err := s.rollupPlan(ctx, query.Site, query.Filters, query.From, query.To)
@@ -958,11 +941,17 @@ func (s *Store) SaltIfExists(ctx context.Context, day string) (string, bool, err
 
 // DropSaltsExcept deletes every salt but those of these days, so the hashes made with them can never be made again.
 func (s *Store) DropSaltsExcept(ctx context.Context, days []string) error {
-	params := make([]any, len(days))
+	// Never a day after the newest of these: a process whose clock is a moment behind must not delete the
+	// salt another has just made for the day that began.
+	params := make([]any, len(days), len(days)+1)
+	newest := ""
 	for i, d := range days {
 		params[i] = d
+		if d > newest {
+			newest = d
+		}
 	}
-	return s.db.Run(ctx, `DELETE FROM rl_salts WHERE day NOT IN (`+placeholders(len(days))+`)`, params...)
+	return s.db.Run(ctx, `DELETE FROM rl_salts WHERE day NOT IN (`+placeholders(len(days))+`) AND day < ?`, append(params, newest)...)
 }
 
 // VisitOpen is whether a visit to one of these sites that started in a stretch of time was still going at since.
@@ -1148,6 +1137,13 @@ func (s *Store) LinkByID(ctx context.Context, id string) (*LinkRow, error) {
 	}
 	l := linkRow(rows[0])
 	return &l, nil
+}
+
+// LinkExists is whether a link with this id was ever made, a deleted one included: its row stays, hidden, with
+// its id and its clicks. An import asks this, so a link it brought in once and that was deleted since is left deleted.
+func (s *Store) LinkExists(ctx context.Context, id string) (bool, error) {
+	rows, err := s.db.All(ctx, `SELECT 1 AS x FROM rl_links WHERE id = ? LIMIT 1`, id)
+	return len(rows) > 0, err
 }
 
 // InsertLink records a new link.
@@ -1696,7 +1692,8 @@ func (s *Store) goalScope(goal GoalRow) sqlPart {
 // not a number). Property names are checked before they get here.
 func (s *Store) propValue(prop string) sqlPart {
 	if s.dialect() == "postgres" {
-		return sqlPart{`(CASE WHEN (e.props::jsonb ->> ?) ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (e.props::jsonb ->> ?)::numeric ELSE 0 END)`, []any{prop, prop}}
+		readable := readableProps("postgres")
+		return sqlPart{`(CASE WHEN (` + readable + ` ->> ?) ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (` + readable + ` ->> ?)::numeric ELSE 0 END)`, []any{prop, prop}}
 	}
 	path := `$."` + prop + `"`
 	repeat := func(n int) []any {
@@ -1708,7 +1705,7 @@ func (s *Store) propValue(prop string) sqlPart {
 	}
 	if s.dialect() == "mysql" {
 		// As SQLite: a JSON number as it is, or text of digits with an optional sign and one decimal point.
-		value := "JSON_EXTRACT(e.props, ?)"
+		value := "JSON_EXTRACT(" + readableProps("mysql") + ", ?)"
 		return sqlPart{`(CASE
           WHEN JSON_TYPE(` + value + `) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN CAST(` + value + ` AS DOUBLE)
           WHEN JSON_TYPE(` + value + `) = 'STRING' AND JSON_UNQUOTE(` + value + `) REGEXP '^-?[0-9]+([.][0-9]+)?$' THEN CAST(JSON_UNQUOTE(` + value + `) AS DOUBLE)
@@ -1746,10 +1743,10 @@ func (s *Store) EventPropKeys(ctx context.Context, query Query, event string) ([
 	case "mysql":
 		// Each key as a row of its own, compared and sorted by code point like every other value.
 		sql = `SELECT j.k AS "key", COUNT(*) AS events FROM ` + v.from + `
-             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(e.props) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE ` + MySQLCollation + ` PATH '$')) j
+             CROSS JOIN JSON_TABLE(JSON_KEYS(CASE WHEN JSON_TYPE(` + readableProps("mysql") + `) = 'OBJECT' THEN e.props ELSE '{}' END), '$[*]' COLUMNS (k VARCHAR(255) COLLATE ` + MySQLCollation + ` PATH '$')) j
              WHERE ` + where + ` GROUP BY j.k ORDER BY events DESC, j.k LIMIT 30`
 	case "postgres":
-		sql = `SELECT k AS "key", COUNT(*) AS events FROM ` + v.from + ` CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(e.props::jsonb) = 'object' THEN e.props::jsonb ELSE '{}'::jsonb END) AS k
+		sql = `SELECT k AS "key", COUNT(*) AS events FROM ` + v.from + ` CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(` + readableProps("postgres") + `) = 'object' THEN ` + readableProps("postgres") + ` ELSE '{}'::jsonb END) AS k
              WHERE ` + where + ` GROUP BY k ORDER BY events DESC, k` + s.textOrder() + ` LIMIT 30`
 	default:
 		sql = `SELECT j.key AS "key", COUNT(*) AS events FROM ` + v.from + `, json_each(e.props) j
@@ -1774,10 +1771,10 @@ func (s *Store) EventPropValues(ctx context.Context, query Query, event, key str
 	path := `$."` + key + `"`
 	switch s.dialect() {
 	case "postgres":
-		value = "(e.props::jsonb ->> ?)"
+		value = "(" + readableProps("postgres") + " ->> ?)"
 		path = key
 	case "mysql":
-		value = "(JSON_UNQUOTE(JSON_EXTRACT(e.props, ?)) COLLATE " + MySQLCollation + ")"
+		value = "(JSON_UNQUOTE(JSON_EXTRACT(" + readableProps("mysql") + ", ?)) COLLATE " + MySQLCollation + ")"
 	}
 	params := append([]any{path}, v.params...)
 	params = append(params, event, path, int64(limit))

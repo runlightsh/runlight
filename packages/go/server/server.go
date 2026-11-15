@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -75,6 +76,23 @@ type Server struct {
 // serverPaths are the server's own pages, which answer as the server on every name it is reached at, a link domain too.
 var serverPaths = map[string]bool{"/login": true, "/logout": true, "/setup": true, "/invite": true, "/healthz": true, "/auth.css": true, "/auth.js": true, "/api": true, "/mcp": true, "/s.js": true, "/pick.js": true, "/pick-return": true, "/pick-return.js": true, "/e": true, "/embed": true}
 
+// ShortestSecret is how long a secret or token set by hand should be at least: a shorter one is warned about
+// at start, and wrong guesses at a shorter token are counted.
+const ShortestSecret = 32
+
+// ShortWarning is what to say at start about a secret or token someone set by hand that is short enough to
+// guess, or "". The server still starts, since refusing would stop an install that ran before this was checked.
+func ShortWarning(name, value string) string {
+	if value == "" || js.Length16(value) >= ShortestSecret {
+		return ""
+	}
+	does := "Anyone who guesses it has the whole API, as the owner"
+	if name == "RUNLIGHT_SECRET" {
+		does = "It signs every session and encrypts the saved mail and assistant keys"
+	}
+	return fmt.Sprintf("Runlight: WARNING: %s is only %d characters long. %s. Set it to %d or more random characters, such as the output of: openssl rand -hex 32", name, js.Length16(value), does, ShortestSecret)
+}
+
 // maxOwnHosts is the most names remembered as the server's own. The first
 // ones stay and later ones are not learned, so a server reached at more names
 // than this needs a URL to keep the rest from becoming link domains.
@@ -138,6 +156,17 @@ func New(options Options) (*Server, error) {
 		Forgot: "https://runlight.sh/docs/server/#forgotten-passwords",
 	})
 	s.Accounts = s.web.Accounts
+	// A token short enough to guess gets ten wrong tries per address in fifteen minutes, after which that
+	// address's tries are all refused until the time is up. A long one cannot be guessed, so nothing is counted
+	// for it and nobody's wrong tries can keep a script that shares their address out.
+	guessable := options.Token != "" && js.Length16(options.Token) < ShortestSecret
+	guesses := runlight.NewThrottle(10, 0)
+	// A link at one of the server's own paths would open at /go/<slug> and never on a link domain, where the
+	// server's page answers first, so no new link takes one.
+	rl.Links.Reserved = map[string]bool{}
+	for path := range serverPaths {
+		rl.Links.Reserved[path[1:]] = true
+	}
 	base := ""
 	// The cron route is never needed: the server runs the check itself.
 	cronSecret := randomHex(32)
@@ -145,8 +174,24 @@ func New(options Options) (*Server, error) {
 		BasePath: &base, CronSecret: &cronSecret, SignOut: "/logout", SignIn: "/login", GeoCredit: options.GeoCredit, AccountsWeb: s.web,
 		Authorize: func(ctx context.Context, request *runlight.Request) runlight.Access {
 			auth := request.Header.Get("authorization")
-			if options.Token != "" && strings.HasPrefix(strings.ToLower(auth), "bearer ") && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(auth[7:])), []byte(options.Token)) == 1 {
-				return runlight.AccessFull
+			given := ""
+			if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+				given = strings.TrimSpace(auth[7:])
+			}
+			// A token made in Settings (rl_...) is the routes' to check, never a guess at this one.
+			if options.Token != "" && given != "" && (!strings.HasPrefix(given, "rl_") || strings.HasPrefix(options.Token, "rl_")) {
+				from := rl.ClientIP(request)
+				if from == "" {
+					from = "unknown"
+				}
+				if !(guessable && guesses.Blocked(from, now())) {
+					if subtle.ConstantTimeCompare([]byte(given), []byte(options.Token)) == 1 {
+						return runlight.AccessFull
+					}
+					if guessable {
+						guesses.Fail(from, now())
+					}
+				}
 			}
 			access := s.web.Access(ctx, request)
 			if access == runlight.AccessFull {
@@ -166,10 +211,10 @@ func New(options Options) (*Server, error) {
 
 // hostOf is the name a request came in on, read as link domains read it.
 func (s *Server) hostOf(request *runlight.Request) string {
-	if !s.options.IgnoreProxy {
-		if host, ok := request.Header.Lookup("x-forwarded-host"); ok {
-			return runlight.HostName(host)
-		}
+	// A proxy's X-Forwarded-Host only where the library believes a proxy's headers at all, so a client that
+	// reaches the server straight from the internet cannot name the host itself.
+	if host, ok := s.Runlight.ForwardedHost(request); ok {
+		return runlight.HostName(host)
 	}
 	if host, ok := request.Header.Lookup("host"); ok {
 		return runlight.HostName(host)

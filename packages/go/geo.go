@@ -46,7 +46,7 @@ func cleanLocation(l Location) Location {
 	}
 	// A code ("CA", "US-CA") is kept as ISO 3166-2; a name from a database
 	// that has no codes ("California") is kept readable, as "US-California".
-	raw := jsTrim(l.Region)
+	raw := jsTrim(tidy(l.Region))
 	var region string
 	if regionCode.MatchString(raw) {
 		region = upper(raw)
@@ -61,7 +61,7 @@ func cleanLocation(l Location) Location {
 	}
 	city := ""
 	if country != "" {
-		city = head16(l.City, 100)
+		city = head16(tidy(l.City), 100)
 	}
 	return Location{country, region, city}
 }

@@ -423,19 +423,19 @@ func TOTP(secret string, step int64) (string, error) {
 // false when none does.
 func MatchStep(secret, code string, now, after int64) (int64, bool, error) {
 	current := js.FloorDiv(now, StepMS)
-	for _, step := range []int64{current, current - 1, current + 1} {
-		if step <= after {
-			continue
-		}
+	// Every step is worked out and compared in time that does not depend on where the code differs. The
+	// current step is checked last, so it is the one kept if two should match.
+	found, matched := int64(0), false
+	for _, step := range []int64{current + 1, current - 1, current} {
 		got, err := TOTP(secret, step)
 		if err != nil {
 			return 0, false, err
 		}
-		if got == code {
-			return step, true, nil
+		if SameText(got, code) && step > after {
+			found, matched = step, true
 		}
 	}
-	return 0, false, nil
+	return found, matched, nil
 }
 
 // OtpauthURI is the address an authenticator app reads from the QR code.

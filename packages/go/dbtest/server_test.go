@@ -233,9 +233,14 @@ func TestServerLogsInternalErrorsToStandardErrorWithoutALogger(t *testing.T) {
 	if err := s.server.Runlight.Store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// A short link's address reads the link domains, which a closed database cannot give.
-	if r := s.do("GET", "/sale", "", ""); r.Status != 500 {
-		t.Fatalf("answered %d", r.Status)
+	// A short link's address reads the link domains, which a closed database cannot give: that is logged, and
+	// the address is answered as one on no link domain, since the same read runs on every request of an app.
+	if r := s.do("GET", "/sale", "", ""); r.Status != 404 {
+		t.Fatalf("a short link's address answered %d", r.Status)
+	}
+	// A report cannot be read at all, which is an error of its own.
+	if r := s.do("GET", "/api/sites", "", "", "authorization", "Bearer script-token"); r.Status != 500 {
+		t.Fatalf("a report answered %d", r.Status)
 	}
 	write.Close()
 	logged, _ := io.ReadAll(read)

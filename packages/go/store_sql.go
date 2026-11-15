@@ -300,6 +300,24 @@ func bucketParams(buckets []Bucket) []any {
 	return out
 }
 
+// pgUnreadableProps is text Postgres will not read as jsonb: an escaped NUL, or half of a surrogate pair, each
+// after an even number of backslashes. Both are valid JSON, and a tracker's props can hold them. It is sent to
+// Postgres as it is written here, and never read by Go's own regexp, which has no lookbehind.
+const pgUnreadableProps = `(?<!\\)(\\\\)*(\\u0000|\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2}))|(?<!\\)(?<!\\u[dD][89abAB][0-9a-fA-F]{2})(\\\\)*\\u[dD][c-fC-F][0-9a-fA-F]{2}`
+
+// readableProps is an event's props as the database can read them as JSON, or NULL for a row it cannot:
+// Postgres refuses an escaped NUL or half a surrogate pair, and MySQL the half pair. Such a row counts as one
+// with no props, rather than failing every report that reads its event. SQLite reads them as they are.
+func readableProps(dialect string) string {
+	switch dialect {
+	case "postgres":
+		return `(CASE WHEN e.props !~ '` + pgUnreadableProps + `' THEN e.props END)::jsonb`
+	case "mysql":
+		return `(CASE WHEN JSON_VALID(e.props) THEN e.props END)`
+	}
+	return "e.props"
+}
+
 func column(dimension string) string {
 	if c, ok := lookupDimension(sessionDimensions, dimension); ok {
 		return "s." + c

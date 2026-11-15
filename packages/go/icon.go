@@ -41,7 +41,7 @@ var (
 )
 
 var (
-	linkTag  = regexp.MustCompile(`(?i)<link\b[^>]*>`)
+	linkOpen = regexp.MustCompile(`(?i)<link\b`)
 	relSplit = regexp.MustCompile(`[\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+`)
 )
 
@@ -49,6 +49,48 @@ var (
 const jsSpace = `\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}`
 
 var linkAttr = regexp.MustCompile(`([^` + jsSpace + `"'>/=]+)(?:[` + jsSpace + `]*=[` + jsSpace + `]*(?:"([^"]*)"|'([^']*)'|([^` + jsSpace + `>]+)))?`)
+
+// linkTagMax is the most a link tag holds between its name and its end.
+const linkTagMax = 4000
+
+// linkTags are a page's link tags, as /<link\b[^<>]{0,4000}>/gi finds them: no < or > inside, and at most
+// 4,000 characters (UTF-16 units), so a page of unclosed tags is not read over and over. Go's regexp counts
+// to 1,000 at most, so the tag's end is looked for by hand.
+func linkTags(html string) []string {
+	var out []string
+	for at := 0; at < len(html); {
+		m := linkOpen.FindStringIndex(html[at:])
+		if m == nil {
+			break
+		}
+		start, rest := at+m[0], at+m[1]
+		end, units := -1, 0
+		for i, c := range html[rest:] {
+			if c == '>' {
+				end = rest + i + 1
+				break
+			}
+			if c == '<' {
+				break
+			}
+			if c >= 0x10000 {
+				units += 2
+			} else {
+				units++
+			}
+			if units > linkTagMax {
+				break
+			}
+		}
+		if end < 0 {
+			at = start + 1
+			continue
+		}
+		out = append(out, html[start:end])
+		at = end
+	}
+	return out
+}
 
 // attrs are a tag's attributes, read one after another so a name inside
 // another (data-rel) or inside a value (title="rel=icon") is never taken for
@@ -81,7 +123,7 @@ func IconLinks(html, base string) []string {
 		score int
 	}
 	list := []found{}
-	for _, tag := range linkTag.FindAllString(html, -1) {
+	for _, tag := range linkTags(html) {
 		attributes := attrs(tag)
 		rel := relSplit.Split(lower(attributes["rel"]), -1)
 		href := attributes["href"]
@@ -154,7 +196,9 @@ func FetchIcon(ctx context.Context, fetcher Fetcher, origin string, now int64) *
 		ch := make(chan struct{})
 		iconWait[origin] = ch
 		iconMu.Unlock()
-		icon := lookUpIcon(ctx, fetcher, origin)
+		// The answer is kept for everyone, so it is looked up within its own time limits, not the asking
+		// request's: a request that went away must not leave the site without its icon for an hour.
+		icon := lookUpIcon(context.WithoutCancel(ctx), fetcher, origin)
 		iconMu.Lock()
 		if _, ok := iconCache[origin]; !ok {
 			iconOrder = append(iconOrder, origin)

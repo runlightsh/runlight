@@ -54,7 +54,16 @@ type Geo struct {
 	reader   *mmdb.Reader
 	loaded   string
 	fetching chan struct{}
+	// After a try that left this month's file missing: how long the next waits, and when it may start.
+	wait    int64
+	retryAt int64
 }
+
+// How long after a first failed try the next one waits, and the longest any waits.
+const (
+	geoFirstWait   = 5 * 60_000
+	geoLongestWait = 6 * 3_600_000
+)
 
 // NewGeo keeps DB-IP's "city" or "country" database in dir. log gets a line
 // when new data is ready or a download fails; nil prints nothing. download
@@ -110,7 +119,9 @@ func (g *Geo) open(file string) error {
 }
 
 // Refresh opens the newest file on disk, then fetches this month's if it is
-// missing. Safe to call often; a download under way is shared.
+// missing. Safe to call often; a download under way is shared, and after one
+// that left the month's file missing the next waits, from five minutes,
+// doubling, up to six hours.
 func (g *Geo) Refresh(ctx context.Context, now int64) error {
 	current := month(now)
 	g.mu.Lock()
@@ -143,6 +154,12 @@ func (g *Geo) Refresh(ctx context.Context, now int64) error {
 	}
 	g.mu.Lock()
 	wait := g.fetching
+	// While the month's file is not published yet, or a download keeps failing, each try waits twice as long
+	// as the last, so neither DB-IP nor the disk is asked for the whole file every few minutes.
+	if wait == nil && now < g.retryAt {
+		g.mu.Unlock()
+		return nil
+	}
 	if wait == nil {
 		wait = make(chan struct{})
 		g.fetching = wait
@@ -150,6 +167,16 @@ func (g *Geo) Refresh(ctx context.Context, now int64) error {
 		g.fetch(ctx, current, now)
 		g.mu.Lock()
 		g.fetching = nil
+		if exists(g.file(current)) {
+			g.wait = 0
+		} else {
+			if g.wait == 0 {
+				g.wait = geoFirstWait
+			} else {
+				g.wait = min(g.wait*2, geoLongestWait)
+			}
+			g.retryAt = now + g.wait
+		}
 		close(wait)
 	}
 	g.mu.Unlock()

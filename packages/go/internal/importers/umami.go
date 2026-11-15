@@ -2,6 +2,7 @@ package importers
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"regexp"
 	"strconv"
@@ -80,6 +81,10 @@ func UmamiAll(ctx context.Context, client *Client, base, path string, headers *w
 			return nil, err
 		}
 		out = append(out, data...)
+		// No more than a link keeps: a longer history, or a server that never stops, ends here.
+		if len(out) >= MaxLinkClicks {
+			return out[:MaxLinkClicks], nil
+		}
 		if float64(len(out)) >= js.ToNumber(field(body, "count")) || len(data) == 0 {
 			return out, nil
 		}
@@ -208,14 +213,18 @@ func umamiHistory(ctx context.Context, client *Client, base, id, rng string, hea
 		err    error
 	}
 	answers := make(chan answer, 2)
-	go func() {
-		items, err := UmamiAll(ctx, client, base, "/websites/"+id+"/events?"+rng, headers)
-		answers <- answer{true, items, err}
-	}()
-	go func() {
-		items, err := UmamiAll(ctx, client, base, "/websites/"+id+"/sessions?"+rng, headers)
-		answers <- answer{false, items, err}
-	}()
+	// A panic in either is the step's error, as it would be had the list been read on the step's goroutine.
+	ask := func(events bool, path string) {
+		defer func() {
+			if p := recover(); p != nil {
+				answers <- answer{events, nil, fmt.Errorf("panic: %v", p)}
+			}
+		}()
+		items, err := UmamiAll(ctx, client, base, path, headers)
+		answers <- answer{events, items, err}
+	}
+	go ask(true, "/websites/"+id+"/events?"+rng)
+	go ask(false, "/websites/"+id+"/sessions?"+rng)
 	for range 2 {
 		a := <-answers
 		if a.err != nil && err == nil {

@@ -32,6 +32,16 @@ const (
 	maxBody = 10 * 1024 * 1024
 )
 
+// unsupported reports whether a method is one no route or link answers (TRACE, TRACK, CONNECT), so the
+// request is the app's.
+func unsupported(method string) bool {
+	switch strings.ToUpper(method) {
+	case "TRACE", "TRACK", "CONNECT":
+		return true
+	}
+	return false
+}
+
 // ErrBodyTooLarge is a request body past its limit, answered with 413
 // rather than passed on cut short.
 var ErrBodyTooLarge = errors.New("runlight: request body too large")
@@ -79,8 +89,10 @@ func headOf(req *http.Request) *Request {
 	if target == "" || !strings.HasPrefix(target, "/") {
 		target = req.URL.RequestURI()
 	}
+	// The target is put after the host as text, never resolved against it: a target that starts // or /\
+	// would otherwise be read as naming a host of its own, and the request would seem to come to it.
 	href := "http://localhost/"
-	if u, err := whatwg.Parse(target, proto+"://"+host); err == nil {
+	if u, err := whatwg.Parse(proto + "://" + host + target); err == nil {
 		href = u.Href()
 	}
 	headers := &web.Headers{}
@@ -151,6 +163,10 @@ func tooLarge(w http.ResponseWriter, err error) {
 // such as "/runlight" and "/runlight/". The request's context ending stops
 // the work, such as a report or a pass-through to a connected install.
 func (rt *Routes) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if unsupported(req.Method) {
+		w.WriteHeader(405)
+		return
+	}
 	HTTPHandler(rt.Handle).ServeHTTP(w, req)
 }
 
@@ -165,7 +181,7 @@ func (rt *Routes) Owns(path string) bool {
 // sends every request through one handler.
 func (rt *Routes) Middleware(next http.Handler) http.Handler {
 	return rt.r.LinkDomains(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if !rt.Owns(req.URL.Path) {
+		if !rt.Owns(req.URL.Path) || unsupported(req.Method) {
 			next.ServeHTTP(w, req)
 			return
 		}
@@ -181,6 +197,10 @@ func (rt *Routes) Middleware(next http.Handler) http.Handler {
 // domain.
 func (r *Runlight) LinkDomains(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if unsupported(req.Method) {
+			next.ServeHTTP(w, req)
+			return
+		}
 		answer, err := r.LinkDomainResponse(req.Context(), headOf(req))
 		if err != nil {
 			WriteHTTP(w, internalError(r, err))
@@ -213,6 +233,14 @@ func (r *Runlight) LinksHTTPOr(notFound http.Handler) http.Handler {
 	links := r.LinkHandler()
 	return r.LinkDomains(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		// A short link reads no body, so the request is left as it came for notFound.
+		if unsupported(req.Method) && notFound == nil {
+			w.WriteHeader(405)
+			return
+		}
+		if unsupported(req.Method) {
+			notFound.ServeHTTP(w, req)
+			return
+		}
 		answer := links(req.Context(), headOf(req))
 		if answer.Status == 404 && notFound != nil {
 			notFound.ServeHTTP(w, req)

@@ -6,6 +6,7 @@ import (
 	"math"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -272,5 +273,43 @@ func TestEveryImporterIsRegistered(t *testing.T) {
 	}
 	if len(Importers) != len(Sources) {
 		t.Errorf("%d importers, %d sources", len(Importers), len(Sources))
+	}
+}
+
+// A link's events and sessions are read on goroutines of their own, where a panic would end the app: it is the step's error.
+func TestAPanicReadingALinksHistoryIsTheStepsError(t *testing.T) {
+	was := web.Resolver
+	defer func() { web.Resolver = was }()
+	web.Resolver = func(context.Context, string) ([]string, error) { return []string{"93.184.216.34"}, nil }
+	client := &Client{Fetcher: web.FetchFunc(func(_ context.Context, url string, _ web.FetchInit) (*web.Response, error) {
+		if strings.Contains(url, "/api/links") {
+			return web.NewResponse(200, []byte(`{"data":[{"id":"l1","slug":"hello","url":"https://example.org/","name":"Hello"}],"count":1}`)), nil
+		}
+		panic("a fetcher that fell over")
+	})}
+	known := func(context.Context, string, string, string) (bool, error) { return false, nil }
+	_, err := Umami.Step(context.Background(), client, StepInput{Credentials: Credentials{"url": "https://umami.example", "apiKey": "k"}, Known: known, Now: 1_700_000_000_000})
+	if err == nil || !strings.Contains(err.Error(), "panic: a fetcher that fell over") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A list that never ends, or a history longer than a link keeps, is read no further than MaxLinkClicks.
+func TestAnUmamiListEndsAtWhatALinkKeeps(t *testing.T) {
+	was := web.Resolver
+	defer func() { web.Resolver = was }()
+	web.Resolver = func(context.Context, string) ([]string, error) { return []string{"93.184.216.34"}, nil }
+	page := `{"count":100000000,"data":[` + strings.TrimSuffix(strings.Repeat(`{"id":"e"},`, 1000), ",") + `]}`
+	asked := 0
+	client := &Client{Fetcher: web.FetchFunc(func(context.Context, string, web.FetchInit) (*web.Response, error) {
+		asked++
+		return web.NewResponse(200, []byte(page)), nil
+	})}
+	items, err := UmamiAll(context.Background(), client, "https://umami.example", "/websites/w/events?x=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != MaxLinkClicks || asked != MaxLinkClicks/1000 {
+		t.Fatalf("%d items from %d pages, want %d from %d", len(items), asked, MaxLinkClicks, MaxLinkClicks/1000)
 	}
 }

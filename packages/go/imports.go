@@ -86,14 +86,81 @@ func importTitle(v string) string {
 	return upper(slice16(v, 0, 1)) + slice16(v, 1, len16(v))
 }
 
+// Runlight never stores an IP address or a full user agent, and a file or another tool can hold either in
+// any column. Go's regexp has no lookahead, so an address's end is a character that is neither a digit nor a
+// dot, or the end of the text, which finds the same texts.
+var (
+	// importAddress is an IPv4 address, or what reads as an IPv6 one, anywhere in a text.
+	importAddress = regexp.MustCompile(`(?i)(^|[^\d.])\d{1,3}(\.\d{1,3}){3}([^\d.]|$)|[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}`)
+	// importAgent is what a user agent has and a place name does not: a product with its version (Chrome/129), or its usual first words.
+	importAgent = regexp.MustCompile(`(?i)[a-z]/\d|mozilla|applewebkit`)
+	// importName is a browser or system as a name: a word or a few, not starting with a digit, without the punctuation of a user agent.
+	importName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9 ._+-]{0,39}$`)
+	importScreen   = regexp.MustCompile(`^\d{1,5}x\d{1,5}$`)
+	importLanguage = regexp.MustCompile(`^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8}){0,3}$`)
+)
+
+// importNamed is a name that is not one Runlight knows, kept only when it reads as a name, and nothing else.
+func importNamed(name string) string {
+	text := jsTrim(name)
+	if importName.MatchString(text) && !importAddress.MatchString(text) {
+		return text
+	}
+	return ""
+}
+
+// browserName is a browser name in Runlight's spelling: a known one, or a name with a capital first letter, or none for anything else.
 func browserName(v string) string {
 	if b, ok := importBrowsers[lower(v)]; ok {
 		return b
 	}
-	return importTitle(v)
+	return importTitle(importNamed(v))
+}
+
+// systemName is a system name in Runlight's spelling, or a name as given, or none for anything that is not a name.
+func systemName(v string) string {
+	if s, ok := importSystems[lower(v)]; ok {
+		return s
+	}
+	return importNamed(v)
+}
+
+// placeName is free text about a place as given, or none when it holds an address or reads as a user agent.
+func placeName(v string) string {
+	if importAddress.MatchString(v) || importAgent.MatchString(v) {
+		return ""
+	}
+	return v
+}
+
+// screenSize is a screen as 1440x900, or none.
+func screenSize(v string) string {
+	if text := jsTrim(v); importScreen.MatchString(text) {
+		return text
+	}
+	return ""
+}
+
+// languageTag is a language tag such as en or pt-BR, or none.
+func languageTag(v string) string {
+	if text := jsTrim(v); importLanguage.MatchString(text) {
+		return text
+	}
+	return ""
 }
 
 func deviceName(v string) string { return importDevices[lower(v)] }
+
+var hostExtras = regexp.MustCompile(`[/?#@\\]`)
+
+// validHost is whether a hostname can be the host of an address, and nothing more than a host.
+func validHost(host string) bool {
+	if host == "" || hostExtras.MatchString(host) {
+		return false
+	}
+	u, err := whatwg.Parse("https://" + host + "/")
+	return err == nil && u.Hostname != ""
+}
 
 var (
 	twoLetters   = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -113,14 +180,19 @@ func regionOf(region, country string) string {
 }
 
 func pageAt(host, path, query, fallback string) Page {
-	target := "https://" + host + path
 	if query != "" {
-		target += "?" + leadingQ.ReplaceAllString(query, "")
+		query = "?" + leadingQ.ReplaceAllString(query, "")
 	}
-	if u, err := whatwg.Parse(target); err == nil {
-		return ParsePage(u)
+	// A hostname that is none, as another tool's rows may hold, never stops the import: the row keeps its
+	// path under the name rows with no hostname get.
+	for _, name := range []string{host, "imported.invalid"} {
+		for _, rest := range []string{path + query, fallback} {
+			if u, err := whatwg.Parse("https://" + name + rest); err == nil {
+				return ParsePage(u)
+			}
+		}
 	}
-	return ParsePage(whatwg.MustParse("https://" + host + fallback))
+	return ParsePage(whatwg.MustParse("https://imported.invalid/"))
 }
 
 func isoDay(ts float64) string {
@@ -166,7 +238,9 @@ type writeResult struct {
 func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign importers.ForeignLink, item importers.ForeignItem,
 	linkDomain func(context.Context, string) (string, error)) (writeResult, error) {
 	id := importedLinkID(source, foreign.SourceID)
-	if existing, err := r.Store.LinkByID(ctx, id); err != nil || existing != nil {
+	// Here already, or imported once and deleted since. A deleted link keeps its row and its clicks, so it is
+	// left as it is: writing it again would clear those clicks and the visits they opened, then fail on its id.
+	if existing, err := r.Store.LinkExists(ctx, id); err != nil || existing {
 		return writeResult{status: "skipped"}, err
 	}
 	taken, err := r.Store.LinkBySlug(ctx, foreign.Slug)
@@ -218,6 +292,9 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 		}
 		made := map[string]bool{}
 		for _, c := range item.Clicks {
+			if clicks >= importers.MaxLinkClicks {
+				break
+			}
 			ts := c.TS()
 			if math.IsNaN(ts) || math.IsInf(ts, 0) {
 				continue
@@ -244,7 +321,7 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 				}
 				page := pageAt(host, path, clickOr(c, "query"), "/"+foreign.Slug)
 				country := head16(upper(clickOr(c, "country")), 2)
-				region := regionOf(clickOr(c, "region"), country)
+				region := regionOf(placeName(clickOr(c, "region")), country)
 				if country == "" {
 					region = ""
 				}
@@ -253,20 +330,14 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 				}
 				referrer, _ := clickText(c, "referrer")
 				a := Attribute(page, referrer, nil)
-				os, hasOS := clickText(c, "os")
-				if s, ok := importSystems[lower(clickOr(c, "os"))]; ok {
-					os = s
-				} else if !hasOS {
-					os = ""
-				}
 				screen, _ := clickText(c, "screen")
 				language, _ := clickText(c, "language")
 				if err := store.InsertSession(ctx, SessionRow{
 					ID: session, Site: site, Visitor: visitor, StartedAt: int64(ts), Hostname: page.Hostname,
 					ReferrerHost: a.ReferrerHost, ReferrerPath: a.ReferrerPath, Source: a.Source, Channel: a.Channel,
 					UtmSource: page.Utm.Source, UtmMedium: page.Utm.Medium, UtmCampaign: page.Utm.Campaign, UtmTerm: page.Utm.Term, UtmContent: page.Utm.Content,
-					Country: country, Region: region, City: head16(clickOr(c, "city"), 100),
-					Browser: browserName(clickOr(c, "browser")), OS: os, Device: deviceName(clickOr(c, "device")), Screen: screen, Language: language,
+					Country: country, Region: region, City: head16(placeName(clickOr(c, "city")), 100),
+					Browser: browserName(clickOr(c, "browser")), OS: systemName(clickOr(c, "os")), Device: deviceName(clickOr(c, "device")), Screen: screenSize(screen), Language: languageTag(language),
 				}); err != nil {
 					return err
 				}
@@ -290,7 +361,7 @@ func (r *Runlight) writeLink(ctx context.Context, site, source string, foreign i
 				continue
 			}
 			// A day's count is capped, so one made-up figure from a source cannot write millions of rows.
-			n := math.Min(math.Floor(d.Clicks), maxDaily)
+			n := math.Min(math.Min(math.Floor(d.Clicks), maxDaily), float64(importers.MaxLinkClicks-clicks))
 			for i := 0.0; i < n; i++ {
 				if err := store.InsertEvent(ctx, EventRow{Site: site, Ts: int64(start + math.Floor(((i+0.5)/n)*86_400_000)), Kind: "click",
 					Path: "/" + foreign.Slug, Hostname: domain, Name: foreign.Slug, Props: js.NewObject("imported", "daily"), Link: id}); err != nil {
@@ -350,9 +421,10 @@ func ImportStep(ctx context.Context, r *Runlight, site, source string, credentia
 		return nil, err
 	}
 	known := func(ctx context.Context, sourceID, slug, url string) (bool, error) {
-		link, err := r.Store.LinkByID(ctx, importedLinkID(source, sourceID))
-		if err != nil || link != nil {
-			return link != nil, err
+		// A link imported before and deleted since counts too, so its history is not fetched to be thrown away.
+		exists, err := r.Store.LinkExists(ctx, importedLinkID(source, sourceID))
+		if err != nil || exists {
+			return exists, err
 		}
 		if slug == "" || url == "" {
 			return false, nil
@@ -868,6 +940,14 @@ func writeImportedEvent(ctx context.Context, store *Store, site SiteRow, ns stri
 		host = "imported.invalid"
 	}
 	host = lower(host)
+	// A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
+	// row under the site's name rather than a failed batch.
+	if !validHost(host) {
+		host = "imported.invalid"
+		if len(site.Hostnames) > 0 && validHost(site.Hostnames[0]) {
+			host = lower(site.Hostnames[0])
+		}
+	}
 	path := e.path
 	if path == "" {
 		path = "/"
@@ -887,21 +967,17 @@ func writeImportedEvent(ctx context.Context, store *Store, site SiteRow, ns stri
 			return false, err
 		}
 		country := head16(upper(e.country), 2)
-		region := regionOf(e.region, country)
+		region := regionOf(placeName(e.region), country)
 		if !twoLetters.MatchString(country) {
 			country, region = "", ""
 		}
 		a := Attribute(page, e.referrer, site.Hostnames)
-		os := e.os
-		if s, ok := importSystems[lower(e.os)]; ok {
-			os = s
-		}
 		if err := store.InsertSession(ctx, SessionRow{
 			ID: id, Site: site.ID, Visitor: visitor, StartedAt: ts, Hostname: page.Hostname,
 			ReferrerHost: a.ReferrerHost, ReferrerPath: a.ReferrerPath, Source: a.Source, Channel: a.Channel,
 			UtmSource: page.Utm.Source, UtmMedium: page.Utm.Medium, UtmCampaign: page.Utm.Campaign, UtmTerm: page.Utm.Term, UtmContent: page.Utm.Content,
-			Country: country, Region: region, City: head16(e.city, 100), Browser: browserName(e.browser), OS: os, Device: deviceName(e.device),
-			Screen: head16(e.screen, 20), Language: head16(e.language, 35),
+			Country: country, Region: region, City: head16(placeName(e.city), 100), Browser: browserName(e.browser), OS: systemName(e.os), Device: deviceName(e.device),
+			Screen: screenSize(e.screen), Language: languageTag(e.language),
 		}); err != nil {
 			return false, err
 		}
@@ -957,6 +1033,17 @@ var (
 // a zone, "2024-05-01 12:34:56" (both read as UTC when no zone is given, as
 // Umami writes them), or a Unix time in seconds or milliseconds.
 func rowTime(row map[string]string, format string) float64 {
+	if ts := readTime(row, format); ts >= csvEarliest {
+		return ts
+	}
+	return math.NaN()
+}
+
+// csvEarliest is the earliest time a row may have: the start of 2000. A bare number is read as a Unix time, so
+// a date written 20240501 would otherwise land in 1970, and the site's history would begin there.
+const csvEarliest = 946_684_800_000
+
+func readTime(row map[string]string, format string) float64 {
 	text := row["time"]
 	if format == "umami" {
 		text = row["created_at"]

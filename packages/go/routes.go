@@ -220,7 +220,12 @@ func (r *Runlight) Routes(options RoutesOptions) (*Routes, error) {
 		isOwner: func(ctx context.Context, request *Request) bool {
 			return rt.canRead(&call{ctx: ctx, req: request}) == canFull
 		},
+		// An account kept to one site connects no apps either, so it is told so rather than sent to sign in again.
+		isSiteOnly: func(ctx context.Context, request *Request) bool { return rt.siteKept(&call{ctx: ctx, req: request}) },
 		isReader: func(ctx context.Context, request *Request) bool {
+			if rt.siteKept(&call{ctx: ctx, req: request}) {
+				return true
+			}
 			if options.Authorize != nil {
 				return options.Authorize(ctx, request) == AccessRead
 			}
@@ -259,6 +264,19 @@ func (rt *Routes) sessionScope(c *call) (*User, error) {
 	return nil, nil
 }
 
+// siteKept is whether a request comes from an account kept to one site.
+func (rt *Routes) siteKept(c *call) bool {
+	scoped, err := rt.sessionScope(c)
+	return err == nil && scoped != nil && scoped.Site != ""
+}
+
+// restricted is whether a request reaches one site's settings and nothing of the install's: a hub's manage
+// token, or an account kept to one site. Neither is taken at its word about where this app lives, since the
+// Host of a request is the caller's to choose.
+func (rt *Routes) restricted(c *call) bool {
+	return c.managed != nil || rt.siteKept(c)
+}
+
 func (rt *Routes) canRead(c *call) canResult {
 	if c.managed != nil {
 		return canFull
@@ -273,7 +291,7 @@ func (rt *Routes) canRead(c *call) canResult {
 		if err != nil {
 			return canNo
 		}
-		if scoped != nil && scoped.Site != "" && strings.Contains(c.req.URL, "/oauth/") {
+		if scoped != nil && scoped.Site != "" && strings.HasPrefix(strings.TrimPrefix(c.req.Parsed().Pathname, rt.base), "/oauth/") {
 			return canNo
 		}
 		var answer Access
@@ -483,10 +501,12 @@ func readJSON(request *Request) (*js.Object, *Response) {
 	return nil, Coded("Send a JSON object", "send_object", 400, nil)
 }
 
+// maxDomain is the longest domain name there can be.
+const maxDomain = 253
+
 var (
 	domainScheme = regexp.MustCompile(`^https?://`)
 	domainPath   = regexp.MustCompile(`/.*$`)
-	domainDots   = regexp.MustCompile(`\.+$`)
 	checkPath    = regexp.MustCompile(`^/api/link-domains/([^/]+)/check$`)
 	domainOne    = regexp.MustCompile(`^/api/link-domains/([^/]+)$`)
 	importPath   = regexp.MustCompile(`^/api/links/import/([a-z]+)$`)
@@ -539,9 +559,13 @@ func (rt *Routes) siteDomains(ctx context.Context, site string) ([]string, error
 func (rt *Routes) checkLinkDomain(c *call, u *whatwg.URL, site, value string) (string, *Response, error) {
 	ctx, request := c.ctx, c.req
 	domain := lower(jsTrim(value))
+	// Anything longer than a domain name can be is refused before a pattern reads it.
+	if len16(domain) > maxDomain {
+		return "", Coded("That is not a domain name", "domain_invalid", 400, nil), nil
+	}
 	domain = domainScheme.ReplaceAllString(domain, "")
 	domain = domainPath.ReplaceAllString(domain, "")
-	domain = domainDots.ReplaceAllString(domain, "")
+	domain = strings.TrimRight(domain, ".")
 	domain = strings.TrimPrefix(domain, "www.")
 	if !isDomainName(domain) {
 		return "", Coded("That is not a domain name", "domain_invalid", 400, nil), nil
@@ -553,7 +577,7 @@ func (rt *Routes) checkLinkDomain(c *call, u *whatwg.URL, site, value string) (s
 	// lives. The request's own Host is the caller's to choose, so the configured address and the names
 	// people signed in from count too. A hub cannot know every name this app answers on, so it adds none
 	// until the app knows its own address.
-	if c.managed != nil && rt.origin == "" {
+	if rt.restricted(c) && rt.origin == "" {
 		return "", originNeeded(), nil
 	}
 	own := []string{}
@@ -1314,7 +1338,7 @@ func (rt *Routes) mailRoutes(c *call, path string, u *whatwg.URL) (*Response, er
 			// the request came to. An address in the body is never used, so whoever adds a report cannot point
 			// its links somewhere else. A report made from a hub needs the configured address, where its
 			// unsubscribe link answers, since the Host its request names is the hub's to choose.
-			if c.managed != nil && rt.origin == "" {
+			if rt.restricted(c) && rt.origin == "" {
 				return originNeeded(), nil
 			}
 			home := firstNonEmpty(rt.origin, u.Origin()) + rt.base

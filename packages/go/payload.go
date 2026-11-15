@@ -35,12 +35,22 @@ const maxEngagedMs = 30 * 60 * 1000
 
 const maxProps = 30
 
+// payloadStr is a string as it came, cut to max UTF-16 units: for a URL, which the parser then encodes.
 func payloadStr(value any, max int) string {
 	s, ok := value.(string)
 	if !ok {
 		return ""
 	}
 	return head16(s, max)
+}
+
+// payloadStored is a string the tracker sent, as it is stored.
+func payloadStored(value any, max int) string {
+	s, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return cleanText(s, max)
 }
 
 func payloadInt(value any, min, max float64) *int {
@@ -63,14 +73,14 @@ func payloadProps(value any) *js.Object {
 		if count >= maxProps {
 			break
 		}
-		k := head16(jsTrim(key), 60)
+		k := cleanText(jsTrim(tidy(key)), 60)
 		if k == "" {
 			continue
 		}
 		var value string
 		switch raw := o.Value(key).(type) {
 		case string:
-			value = head16(raw, 500)
+			value = cleanText(raw, 500)
 		case float64:
 			if math.IsNaN(raw) || math.IsInf(raw, 0) {
 				continue
@@ -134,7 +144,7 @@ func ParsePayload(text string) *Payload {
 	if u.Protocol != "http:" && u.Protocol != "https:" {
 		return nil
 	}
-	name := jsTrim(payloadStr(body.Value("n"), 120))
+	name := jsTrim(payloadStored(body.Value("n"), 120))
 	if kind == "event" && name == "" {
 		return nil
 	}
@@ -147,13 +157,13 @@ func ParsePayload(text string) *Payload {
 	}
 	p := &Payload{
 		Kind:         kind,
-		Site:         payloadStr(body.Value("s"), 64),
+		Site:         payloadStored(body.Value("s"), 64),
 		URL:          u,
 		Referrer:     payloadStr(body.Value("r"), 2048),
-		Title:        payloadStr(body.Value("t"), 500),
+		Title:        payloadStored(body.Value("t"), 500),
 		ScreenWidth:  payloadInt(body.Value("w"), 0, 20000),
 		ScreenHeight: payloadInt(body.Value("h"), 0, 20000),
-		Language:     payloadStr(body.Value("l"), 35),
+		Language:     payloadStored(body.Value("l"), 35),
 		Name:         name,
 		PageviewID:   pageviewID,
 		Scroll:       payloadInt(body.Value("d"), 0, 100),

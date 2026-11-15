@@ -444,7 +444,14 @@ func (a *AccountStore) CheckSecondFactor(ctx context.Context, id, code string, n
 		read = str(row["totp_recovery"])
 	}
 	hashes := recoveryList(row["totp_recovery"])
-	at := indexOf(hashes, accounts.RecoveryHash(given))
+	// Every hash is compared, each in time that does not depend on where it differs.
+	mine := accounts.RecoveryHash(given)
+	at := -1
+	for i, hash := range hashes {
+		if accounts.SameText(hash, mine) {
+			at = i
+		}
+	}
 	if at < 0 {
 		return false, nil
 	}
@@ -1148,6 +1155,100 @@ func (t *Throttle) Clear(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.delete(t.id(key))
+}
+
+// Lockout counts wrong second-factor codes under a key and locks it for longer each time the tries run out:
+// five tries, then fifteen minutes, then thirty, then an hour, doubling up to a day. A right code clears the
+// key, and so does a week with no lock and no try. A lock always ends, at most a day later, so nobody is shut
+// out for good. Keys are hashed with a key made at start, as Throttle's are.
+type Lockout struct {
+	mu        sync.Mutex
+	limit     int
+	windowMs  int64
+	longestMs int64
+	forgetMs  int64
+	salt      []byte
+	entries   map[string]*lockedOut
+}
+
+type lockedOut struct {
+	count  int
+	until  int64
+	locks  int
+	forget int64
+}
+
+// NewLockout locks a key after limit tries (5 when zero) in windowMs (15 minutes), for at most longestMs
+// (a day), and forgets it forgetMs (a week) after its last lock or window ended.
+func NewLockout(limit int, windowMs, longestMs, forgetMs int64) *Lockout {
+	if limit == 0 {
+		limit = 5
+	}
+	if windowMs == 0 {
+		windowMs = 15 * 60_000
+	}
+	if longestMs == 0 {
+		longestMs = 86_400_000
+	}
+	if forgetMs == 0 {
+		forgetMs = 7 * 86_400_000
+	}
+	return &Lockout{limit: limit, windowMs: windowMs, longestMs: longestMs, forgetMs: forgetMs, salt: accounts.RandomBytes(16), entries: map[string]*lockedOut{}}
+}
+
+func (l *Lockout) id(key string) string {
+	m := hmac.New(sha256.New, l.salt)
+	m.Write([]byte(key))
+	return accounts.Base64url(m.Sum(nil))[:22]
+}
+
+// Take counts a try before the code is checked, so a burst cannot get past the limit. False, counting
+// nothing, while the key is locked. The try that uses up the last one starts the lock.
+func (l *Lockout) Take(key string, now int64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	id := l.id(key)
+	entry := l.entries[id]
+	if entry != nil && entry.forget <= now {
+		entry = nil
+	}
+	if entry != nil && entry.count >= l.limit && entry.until > now {
+		return false
+	}
+	if entry == nil {
+		entry = &lockedOut{until: now + l.windowMs}
+	} else if entry.until <= now {
+		entry.count = 0
+		entry.until = now + l.windowMs
+	}
+	entry.count++
+	if entry.count >= l.limit {
+		// Doubled each time, and never past the longest: the shift is kept small enough not to overflow.
+		lock := l.longestMs
+		if entry.locks < 30 {
+			lock = min(l.windowMs<<entry.locks, l.longestMs)
+		}
+		entry.until = now + lock
+		entry.locks++
+	}
+	entry.forget = entry.until + l.forgetMs
+	l.entries[id] = entry
+	// Keys are accounts that passed the password step, so there are few; anything long forgotten goes.
+	if len(l.entries) > maxThrottled {
+		for k, v := range l.entries {
+			if v.forget <= now {
+				delete(l.entries, k)
+			}
+		}
+	}
+	return true
+}
+
+// Clear forgets a key, for a code that turned out right.
+func (l *Lockout) Clear(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, l.id(key))
 }
 
 func nilIfEmpty(value string) any {

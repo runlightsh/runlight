@@ -22,6 +22,17 @@ func slice16(s string, start, end int) string { return js.Slice16(js.WellFormed(
 
 func jsTrim(s string) string { return js.Trim(s) }
 
+// tidy is text as every database can keep it: without U+0000, which Postgres refuses, and with half a
+// surrogate pair (which is no character) as U+FFFD. Parsed JSON and decoded bytes already hold U+FFFD for one.
+func tidy(s string) string {
+	return strings.ReplaceAll(js.WellFormed(s), "\x00", "")
+}
+
+// cleanText is tidied text cut to max characters (code points), so a character such as an emoji is never cut in half.
+func cleanText(s string, max int) string {
+	return fitColumn(tidy(s), max)
+}
+
 func lower(s string) string { return js.ToLower(s) }
 
 func upper(s string) string { return js.ToUpper(s) }
@@ -76,7 +87,3 @@ func compare16(a, b string) int {
 	}
 	return len(x) - len(y)
 }
-
-// codeOrder orders text by code point, as SQLite and Postgres's "C"
-// collation do, which for UTF-8 is byte order.
-func codeOrder(a, b string) int { return strings.Compare(a, b) }

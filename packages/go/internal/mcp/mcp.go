@@ -465,12 +465,19 @@ func answer(ctx context.Context, message any, readAPI APIRead) *js.Object {
 	return js.NewObject("jsonrpc", "2.0", "id", id, "result", result)
 }
 
+// maxBodyBytes is the most a message or batch may weigh; a real one is a few hundred bytes a call.
+const maxBodyBytes = 1024 * 1024
+
 // MaxBatch is the most messages one batch may hold.
 const MaxBatch = 20
 
 // MCPResponse answers one POST to the MCP endpoint, already authorised.
 func MCPResponse(ctx context.Context, request *web.Request, readAPI APIRead) *web.Response {
 	headers := []string{"content-type", "application/json; charset=utf-8", "cache-control", "no-store"}
+	// Capped here, since not every host caps a request body before it reaches the app.
+	if js.Number(request.Header.Get("content-length")) > maxBodyBytes || len(request.Body) > maxBodyBytes {
+		return web.NewResponse(413, []byte(js.Stringify(rpcError(nil, -32600, "Send a smaller message"))), headers...)
+	}
 	body, err := request.JSON()
 	if err != nil || !isObject(body) {
 		return web.NewResponse(400, []byte(js.Stringify(rpcError(nil, -32700, "Send a JSON-RPC message"))), headers...)

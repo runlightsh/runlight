@@ -92,13 +92,15 @@ func siteHost(redirect string) string {
 }
 
 type oauthHost struct {
-	r         *Runlight
-	base      string
-	isOwner   func(ctx context.Context, request *Request) bool
-	isReader  func(ctx context.Context, request *Request) bool
-	signIn    string
-	accountOf func(ctx context.Context, request *Request) string
-	tokenMade func(ctx context.Context, token TokenRow, by string) bool
+	r        *Runlight
+	base     string
+	isOwner  func(ctx context.Context, request *Request) bool
+	isReader func(ctx context.Context, request *Request) bool
+	// isSiteOnly is whether the request comes from an account kept to one site, which connects no apps and is told so in its own words.
+	isSiteOnly func(ctx context.Context, request *Request) bool
+	signIn     string
+	accountOf  func(ctx context.Context, request *Request) string
+	tokenMade  func(ctx context.Context, token TokenRow, by string) bool
 	// csrf is the token the consent form sends back in its csrf field, for the app's own check of where it comes from.
 	csrf func() string
 
@@ -221,7 +223,15 @@ var (
 
 // allowedRedirect: redirect addresses a client may register are https, or a local app's own loopback address.
 func allowedRedirect(value string) bool {
-	return httpsRedirect.MatchString(value) || loopbackRedirect.MatchString(value)
+	return (httpsRedirect.MatchString(value) || loopbackRedirect.MatchString(value)) && whatwg.CanParse(value)
+}
+
+// maxOAuthBody is the most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.
+const maxOAuthBody = 64 * 1024
+
+// oauthTooLarge is the refusal for a body past the cap, since not every host caps a request body before it reaches the app.
+func oauthTooLarge() *Response {
+	return oauthError("invalid_request", "Send a smaller body", 413)
 }
 
 // ResourceMetadataURL is the URL that a 401 from the MCP endpoint points clients at, to start OAuth.
@@ -262,6 +272,9 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 		if !o.limit.allow(r.ClientIP(request)) {
 			return oauthError("invalid_client_metadata", "Too many registrations from this address. Wait a minute and try again.", 429), nil
 		}
+		if bodyOver(request, maxOAuthBody) {
+			return oauthTooLarge(), nil
+		}
 		body, _ := request.JSON()
 		redirects := []string{}
 		for _, v := range js.Arr(js.Dig(body, "redirect_uris")) {
@@ -284,6 +297,9 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 	if path == "/oauth/token" && request.Method == "POST" {
 		if err := r.Init(ctx); err != nil {
 			return nil, err
+		}
+		if bodyOver(request, maxOAuthBody) {
+			return oauthTooLarge(), nil
 		}
 		var form *whatwg.SearchParams
 		if strings.TrimSpace(strings.Split(request.Header.Get("content-type"), ";")[0]) == "application/json" {
@@ -408,6 +424,9 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	oauthPage := func(title, body string, status int) *Response { return oauthPageIn(tr.Lang, title, body, status) }
 	form := u.SearchParams()
 	if request.Method == "POST" {
+		if bodyOver(request, maxOAuthBody) {
+			return oauthTooLarge(), nil
+		}
 		form = whatwg.ParseQuery(request.Text())
 	}
 	clientID := form.Value("client_id")
@@ -417,7 +436,8 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	}
 	redirect := form.Value("redirect_uri")
 	// Without a known client and one of its own addresses there is nowhere safe to send an answer.
-	if client == nil || !contains(client.redirects, redirect) {
+	// An address that does not parse, from an app registered before those were refused, is no address of its own.
+	if client == nil || !contains(client.redirects, redirect) || !whatwg.CanParse(redirect) {
 		return oauthPage(h("oauth.unregisteredTitle"), "<p>"+h("oauth.startAgain")+"</p>", 400), nil
 	}
 	back := func(pairs ...string) *Response {
@@ -477,7 +497,11 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	if !o.isOwner(ctx, request) {
 		// Someone signed in who may only read would be sent to sign in again and again.
 		if o.isReader != nil && o.isReader(ctx, request) {
-			return oauthPage(h("oauth.viewerTitle"), "<p>"+h("oauth.viewer", "app", escapeHTML(client.name))+"</p>", 403), nil
+			message := "oauth.viewer"
+			if o.isSiteOnly != nil && o.isSiteOnly(ctx, request) {
+				message = "oauth.siteAccount"
+			}
+			return oauthPage(h("oauth.viewerTitle"), "<p>"+h(message, "app", escapeHTML(client.name))+"</p>", 403), nil
 		}
 		// The site stays, since on the way in it only says which one to offer first.
 		kept := whatwg.NewSearchParams()

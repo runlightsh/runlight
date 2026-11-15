@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"runlight.sh/go/internal/js"
@@ -97,7 +98,7 @@ type SQLDB struct {
 
 	// MySQL: the session's statement timeout, lifted while tables are built.
 	statementTimeout int
-	mariadb          *bool
+	mariadb          atomic.Pointer[bool]
 
 	// MySQL: the pooled connections already set up for Runlight, by their driver connection.
 	prepMu   sync.Mutex
@@ -371,12 +372,23 @@ func (d *SQLDB) Transaction(ctx context.Context, fn func(Db) error) error {
 		if _, err := q.ExecContext(ctx, "BEGIN"); err != nil {
 			return err
 		}
+		// The store keeps this one connection, so a transaction left open on it would take in every later
+		// write and commit none of them. It is rolled back whichever way fn ends: an error, a panic, a
+		// COMMIT that failed, or a request that went away, whose context no longer runs anything.
+		committed := false
+		defer func() {
+			if !committed {
+				_, _ = q.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
+			}
+		}()
 		if err := fn(inner); err != nil {
-			_, _ = q.ExecContext(ctx, "ROLLBACK")
 			return err
 		}
-		_, err = q.ExecContext(ctx, "COMMIT")
-		return err
+		if _, err := q.ExecContext(ctx, "COMMIT"); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 	conn, err := d.ownConn(ctx)
 	if err != nil {
@@ -395,14 +407,26 @@ func (d *SQLDB) Transaction(ctx context.Context, fn func(Db) error) error {
 		return err
 	}
 	inner := &SQLDB{db: d.db, dialect: d.dialect, q: tx}
-	if err := fn(inner); err != nil {
+	// Rolled back whichever way fn ends, a panic too: the connection is closed after this, and closing
+	// one whose transaction is still open waits for the transaction to end.
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
 		if rollback := tx.Rollback(); rollback != nil {
 			// A connection still in its transaction must never go back to the pool.
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
+	}()
+	if err := fn(inner); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // Exclusive runs fn holding a database-wide lock: Postgres's advisory lock,
@@ -538,15 +562,18 @@ func (d *SQLDB) mysqlConn(ctx context.Context) (*sql.Conn, error) {
 // limitStatements sets MySQL's statement timeout for a session, which MySQL
 // and MariaDB name differently.
 func (d *SQLDB) limitStatements(ctx context.Context, conn *sql.Conn, ms int) error {
-	if d.mariadb == nil {
+	// Connections are set up at once, so which server it is is kept where they can all read it.
+	mariadb := d.mariadb.Load()
+	if mariadb == nil {
 		var version string
 		if err := conn.QueryRowContext(ctx, "SELECT VERSION() AS v").Scan(&version); err != nil {
 			return err
 		}
 		m := strings.Contains(strings.ToLower(version), "mariadb")
-		d.mariadb = &m
+		mariadb = &m
+		d.mariadb.Store(mariadb)
 	}
-	if *d.mariadb {
+	if *mariadb {
 		_, err := conn.ExecContext(ctx, "SET SESSION max_statement_time = "+js.FormatNumber(float64(ms)/1000))
 		return err
 	}

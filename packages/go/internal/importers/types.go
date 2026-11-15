@@ -120,6 +120,11 @@ type ImportStep struct {
 
 // Credentials are what the person typed for the service: a key, a token, an
 // address, or a username and password.
+// MaxLinkClicks is the most clicks one imported link brings with it, each click or each one of a daily count.
+// The rest of a longer history is left behind, so no source, however much it sends, can fill memory or hold
+// the database.
+const MaxLinkClicks = 100_000
+
 type Credentials = map[string]string
 
 // Known reports whether a link from this source is already in Runlight, so

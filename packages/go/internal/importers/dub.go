@@ -145,7 +145,8 @@ func dubEvents(ctx context.Context, client *Client, headers *web.Headers, id any
 				"os", field(click, "os"),
 			))
 		}
-		if len(events) < 1000 {
+		// No more than a link keeps: the oldest clicks come first, and a longer history ends here.
+		if len(events) < 1000 || len(clicks) >= MaxLinkClicks {
 			return clicks, nil
 		}
 	}

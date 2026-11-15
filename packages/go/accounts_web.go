@@ -55,7 +55,7 @@ type AccountsWeb struct {
 	perAddress   *Throttle
 	perAccount   *Throttle
 	perIP        *Throttle
-	codeTries    *Throttle
+	codeTries    *Lockout
 	confirmTries *Throttle
 	rechecks     *Throttle
 	mu           sync.Mutex
@@ -83,12 +83,14 @@ func NewAccountsWeb(options AccountsWebOptions) *AccountsWeb {
 	// fifty, so a caller who invents a new address for every try still cannot guess on and on. And per address
 	// across every account, thirty, so one caller trying made-up emails cannot keep the server hashing; a
 	// request with no known address skips that one, since it would hold up everyone at once. Six-digit
-	// codes: five wrong tries an account every fifteen minutes, and five to confirm the first one.
-	// Password re-checks in Account: ten.
+	// codes: five wrong tries an account, then a lock of fifteen minutes that doubles each time the tries run
+	// out again, up to a day, so guessing on and on gets about five tries a day. A browser that signed in to
+	// the account before counts on its own, so its owner is never held up by others' guesses. Five tries to
+	// confirm the first code. Password re-checks in Account: ten.
 	return &AccountsWeb{
 		Accounts: NewAccountStore(options.Runlight.Store, options.Secret), o: options, r: options.Runlight,
 		cookiePath: firstNonEmpty(options.Base, "/"), home: options.Base + "/",
-		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), perIP: NewThrottle(30, 0), codeTries: NewThrottle(5, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
+		perAddress: NewThrottle(10, 0), perAccount: NewThrottle(50, 0), perIP: NewThrottle(30, 0), codeTries: NewLockout(5, 0, 0, 0), confirmTries: NewThrottle(5, 0), rechecks: NewThrottle(10, 0),
 		linkSent: map[string]int64{},
 	}
 }
@@ -263,16 +265,32 @@ func inviteView(i Invite) *js.Object {
 }
 
 // jsonBody is a JSON body by its media type, which a cross-site form cannot send; nil for anything else.
-func jsonBody(request *Request) *js.Object {
+// One past the cap is refused, as the second answer, since not every host caps a request body before it reaches the app.
+func jsonBody(request *Request) (*js.Object, *Response) {
 	if !isJSON(request) {
-		return nil
+		return nil, nil
+	}
+	if bodyOver(request, maxAccountBody) {
+		return nil, bodyTooLarge()
 	}
 	parsed, err := request.JSON()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	o, _ := parsed.(*js.Object)
-	return o
+	return o, nil
+}
+
+// maxAccountBody is the most a sign-in form or an account change may weigh: a few fields, far smaller than this.
+const maxAccountBody = 64 * 1024
+
+// bodyOver reports whether a request's body is past max bytes, by its declared length or by what was read.
+func bodyOver(request *Request, max int) bool {
+	return js.Number(request.Header.Get("content-length")) > float64(max) || len(request.Body) > max
+}
+
+func bodyTooLarge() *Response {
+	return Coded("Send a smaller body", "body_too_large", 413, nil)
 }
 
 // setupOk is the first account's gate: whether the setup form carries what it must.
@@ -392,7 +410,13 @@ func (w *AccountsWeb) sendLink(ctx context.Context, user User, next string) erro
 	})
 }
 
-func formOf(request *Request) *whatwg.SearchParams { return whatwg.ParseQuery(request.Text()) }
+// formOf is a posted form, or the refusal for one past the cap.
+func formOf(request *Request) (*whatwg.SearchParams, *Response) {
+	if bodyOver(request, maxAccountBody) {
+		return nil, bodyTooLarge()
+	}
+	return whatwg.ParseQuery(request.Text()), nil
+}
 
 func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) (*Response, error) {
 	u := request.Parsed()
@@ -440,7 +464,10 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			return w.setupLocked(lang), nil
 		}
 		if method == "POST" {
-			form := formOf(request)
+			form, large := formOf(request)
+			if large != nil {
+				return large, nil
+			}
 			code := form.Value("code")
 			if !w.setupOk(code) {
 				if w.asksForToken() {
@@ -514,7 +541,10 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 	}
 
 	if path == "/login/code" && method == "POST" {
-		form := formOf(request)
+		form, large := formOf(request)
+		if large != nil {
+			return large, nil
+		}
 		next := w.safeNext(form.Value("next"))
 		user, err := w.Accounts.FromPending(ctx, form.Value("pending"), w.now())
 		if err != nil {
@@ -523,8 +553,13 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 		if user == nil {
 			return redirect(base + "/login?next=" + encodeURIComponent(next)), nil
 		}
-		// Counted before the check, so a burst cannot get past five.
-		if !w.codeTries.Take(user.ID, w.now()) {
+		// Counted before the check, so a burst cannot get past five. A browser the account signed in from
+		// before has its own count, which only someone holding that browser's mark can use up.
+		tries := user.ID
+		if w.Accounts.TrustsDevice(readCookie(request, deviceCookie), *user) {
+			tries = user.ID + "\ndevice"
+		}
+		if !w.codeTries.Take(tries, w.now()) {
 			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: tr.T("error.too_many_tries", nil)}, lang), 429), nil
 		}
 		ok, err := w.Accounts.CheckSecondFactor(ctx, user.ID, form.Value("code"), w.now())
@@ -534,7 +569,7 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 		if !ok {
 			return html(accounts.CodePage(base, accounts.CodeOptions{Pending: form.Value("pending"), Next: next, Error: tr.T("auth.codeWrong", nil)}, lang), 401), nil
 		}
-		w.codeTries.Clear(user.ID)
+		w.codeTries.Clear(tries)
 		return w.signedInTo(request, *user, next)
 	}
 
@@ -556,7 +591,10 @@ func (w *AccountsWeb) pages(ctx context.Context, request *Request, path string) 
 			return html(accounts.InvitePage(base, accounts.InviteOptions{Code: code, Email: invite.Email, Role: invite.Role, Site: invite.Site, Host: u.Host()}, lang), 200), nil
 		}
 		if method == "POST" {
-			form := formOf(request)
+			form, large := formOf(request)
+			if large != nil {
+				return large, nil
+			}
 			code := form.Value("code")
 			invite, err := w.Accounts.InviteByCode(ctx, code, w.now())
 			if err != nil {
@@ -597,7 +635,10 @@ func (w *AccountsWeb) login(ctx context.Context, request *Request) (*Response, e
 	base := w.o.Base
 	lang := acceptedLanguage(request)
 	tr := messages.New(lang)
-	form := formOf(request)
+	form, large := formOf(request)
+	if large != nil {
+		return large, nil
+	}
 	email, password := form.Value("email"), form.Value("password")
 	next := w.safeNext(form.Value("next"))
 	account := lower(jsTrim(email))
@@ -740,7 +781,10 @@ func (w *AccountsWeb) ConfirmPassword(ctx context.Context, request *Request) (*R
 	if !isJSON(request) {
 		return accountCoded("Send JSON", "send_json", 415, nil), nil
 	}
-	input := jsonBody(request)
+	input, large := jsonBody(request)
+	if large != nil {
+		return large, nil
+	}
 	if input == nil {
 		return accountCoded("Send JSON", "send_json", 415, nil), nil
 	}
@@ -771,7 +815,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		return reply(js.NewObject("ok", true), 200, "set-cookie", w.sessionCookie(request, "", 0)), nil
 	}
 	if path == "/api/account/password" && request.Method == "POST" {
-		input := jsonBody(request)
+		input, large := jsonBody(request)
+		if large != nil {
+			return large, nil
+		}
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
@@ -798,7 +845,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 	// Two-factor: turning it on, confirming the first code, new recovery codes, and turning it off. Each
 	// change asks for the password again, so a browser left signed in cannot quietly change it.
 	if strings.HasPrefix(path, "/api/account/2fa") && request.Method == "POST" {
-		input := jsonBody(request)
+		input, large := jsonBody(request)
+		if large != nil {
+			return large, nil
+		}
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
@@ -876,7 +926,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		if m[1] == user.ID {
 			return accountCoded("Turn off your own two-factor sign-in under Account", "twofactor_self", 400, nil), nil
 		}
-		input := jsonBody(request)
+		input, large := jsonBody(request)
+		if large != nil {
+			return large, nil
+		}
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
@@ -903,7 +956,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		if user.Role != "owner" {
 			return accountCoded("Only the owner can hand over ownership", "owner_hand_over", 403, nil), nil
 		}
-		input := jsonBody(request)
+		input, large := jsonBody(request)
+		if large != nil {
+			return large, nil
+		}
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
@@ -930,7 +986,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 		return w.people(ctx, true)
 	}
 	if path == "/api/people" && request.Method == "POST" {
-		input := jsonBody(request)
+		input, large := jsonBody(request)
+		if large != nil {
+			return large, nil
+		}
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
@@ -1038,7 +1097,10 @@ func (w *AccountsWeb) api(ctx context.Context, request *Request, path string) (*
 			}
 			return reply(js.NewObject("ok", true), 200), nil
 		}
-		input := jsonBody(request)
+		input, large := jsonBody(request)
+		if large != nil {
+			return large, nil
+		}
 		if input == nil {
 			return accountCoded("Send JSON", "send_json", 415, nil), nil
 		}
