@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import secrets
 import sys
-import tempfile
 from collections.abc import Callable
 from typing import Any
 
@@ -63,23 +61,11 @@ def store_kinds() -> list[str]:
     return out + [f"{k}+prefix" for k in prefixed]
 
 
-def _empty_mysql(db: Any) -> None:
-    """Drops every table in the test database, so a test starts from nothing."""
-    rows = db.all("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE()")
-    if rows:
-        db.run("SET FOREIGN_KEY_CHECKS = 0")
-        for row in rows:
-            name = row.get("name") or row.get("NAME") or row.get("TABLE_NAME")
-            db.run(f"DROP TABLE IF EXISTS {dbs.quote_name(str(name), '`')}")
-        db.run("SET FOREIGN_KEY_CHECKS = 1")
-
-
 class Databases:
-    """Fresh, empty databases, dropped (or emptied) by cleanup()."""
+    """Fresh, empty databases, dropped by cleanup()."""
 
     def __init__(self) -> None:
         self._cleanups: list[Callable[[], None]] = []
-        self._lock_file: Any = None
 
     def db(self, kind: str) -> Any:
         """A fresh Db of this kind. A "+prefix" kind's tables start with TEST_PREFIX."""
@@ -102,15 +88,8 @@ class Databases:
 
             self._cleanups.append(drop)
             return db
-        url = mysql_urls()[kind]
-        self._hold_mysql()
-        db = dbs.mysql(url)
-        _empty_mysql(db)
-
-        def empty() -> None:
-            db.close()
-
-        self._cleanups.append(empty)
+        db = dbs.mysql(self._mysql_database(mysql_urls()[kind]))
+        self._cleanups.append(db.close)
         return db
 
     def url(self, kind: str) -> str:
@@ -130,20 +109,23 @@ class Databases:
             self._cleanups.append(drop)
             sep = "&" if "?" in url else "?"
             return f"{url}{sep}options=-c%20search_path%3D{name}"
-        url = mysql_urls()[kind]
-        self._hold_mysql()
-        admin = dbs.mysql(url)
-        _empty_mysql(admin)
-        admin.close()
-        return url
+        return self._mysql_database(mysql_urls()[kind])
 
-    def _hold_mysql(self) -> None:
-        """MySQL tests share one database, so one test at a time holds it, across every process running tests."""
-        if self._lock_file is not None:
-            return
-        path = os.path.join(tempfile.gettempdir(), "runlight-python-mysql.lock")
-        self._lock_file = open(path, "w")  # noqa: SIM115
-        fcntl.flock(self._lock_file, fcntl.LOCK_EX)
+    def _mysql_database(self, url: str) -> str:
+        """A database of its own on the server a MySQL URL names, made now and dropped by cleanup(), and the URL
+        for it. MySQL has no schemas inside a database, so each test gets a database, as each Postgres test gets a
+        schema. Work an earlier test left going on a thread, such as a sweep of sign-in counts by that test's clock,
+        then reaches only that test's database, never this one's."""
+        name = "rl_test_" + secrets.token_hex(5)
+        admin = dbs.mysql(url)
+        admin.run(f"CREATE DATABASE `{name}`")
+
+        def drop() -> None:
+            admin.run(f"DROP DATABASE IF EXISTS `{name}`")
+            admin.close()
+
+        self._cleanups.append(drop)
+        return re.sub(r"^([^?]*/)[^/?]*", lambda m: m.group(1) + name, url, count=1)
 
     def cleanup(self) -> None:
         while self._cleanups:
@@ -152,7 +134,3 @@ class Databases:
                 fn()
             except Exception as error:  # pragma: no cover
                 print(f"cleanup: {error}", file=sys.stderr)
-        if self._lock_file is not None:
-            fcntl.flock(self._lock_file, fcntl.LOCK_UN)
-            self._lock_file.close()
-            self._lock_file = None
