@@ -6,7 +6,7 @@ go 1.25.0
 
 require (
 	github.com/labstack/echo/v5 v5.4.5
-	runlight.sh/go v0.4.3
+	runlight.sh/go v0.5.0
 )
 
 require golang.org/x/text v0.41.0 // indirect

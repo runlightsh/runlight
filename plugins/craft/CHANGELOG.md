@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.5.0 - 2026-11-15
 
 ### Security
 - Changes in the dashboard need the signed-in person's CSRF token and a request that says it comes from the site.
