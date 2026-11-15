@@ -65667,6 +65667,672 @@
           }
         }
       ]
+    },
+    {
+      "name": "imports: clicks that came as daily counts show under all time",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791374400000,
+      "token": "conformance",
+      "upstream": [
+        {
+          "url": "https://api.dub.co/links",
+          "body": [
+            {
+              "id": "dub1",
+              "domain": "dub.sh",
+              "key": "daily",
+              "url": "https://example.org/daily",
+              "title": "Daily",
+              "createdAt": "2026-08-01T10:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "url": "https://api.dub.co/events",
+          "status": 403,
+          "body": {
+            "error": {
+              "message": "Upgrade to read events"
+            }
+          }
+        },
+        {
+          "url": "https://api.dub.co/analytics",
+          "body": [
+            {
+              "start": "2026-08-03T00:00:00.000Z",
+              "clicks": 3
+            },
+            {
+              "start": "2026-08-04T00:00:00.000Z",
+              "clicks": 0
+            },
+            {
+              "start": "2026-08-05T00:00:00.000Z",
+              "clicks": 2
+            }
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/api/links/import/dub",
+          "headers": {
+            "authorization": "Bearer conformance",
+            "content-type": "application/json"
+          },
+          "body": {
+            "credentials": {
+              "apiKey": "dub-key"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "cursor": null,
+              "done": 1,
+              "total": null,
+              "links": 1,
+              "clicks": 5,
+              "skipped": 0,
+              "failed": []
+            },
+            "fetched": [
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/links?pageSize=10&showArchived=true",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/events?event=clicks&linkId=dub1&interval=all&sortOrder=asc&limit=1000&page=1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              },
+              {
+                "method": "GET",
+                "url": "https://api.dub.co/analytics?event=clicks&groupBy=timeseries&interval=all&linkId=dub1",
+                "headers": {
+                  "accept": "application/json",
+                  "authorization": "Bearer dub-key"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links?period=all",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "capture": {
+            "link": "links.0.id"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "prefix": "https://example.com/go",
+              "domains": [],
+              "links": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "daily",
+                  "name": "Daily",
+                  "url": "https://example.org/daily",
+                  "createdAt": 1785578400000,
+                  "updatedAt": 1785578400000,
+                  "clicks": 5,
+                  "visitors": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links/{{link}}?period=all",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "link": {
+                "id": "<id>",
+                "site": "default",
+                "domain": "",
+                "slug": "daily",
+                "name": "Daily",
+                "url": "https://example.org/daily",
+                "createdAt": 1785578400000,
+                "updatedAt": 1785578400000
+              },
+              "range": {
+                "from": "2026-08-03",
+                "to": "2026-10-07",
+                "interval": "day",
+                "timezone": "UTC"
+              },
+              "clicks": 5,
+              "series": [
+                {
+                  "start": 1785715200000,
+                  "clicks": 3,
+                  "visitors": 0
+                },
+                {
+                  "start": 1785801600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1785888000000,
+                  "clicks": 2,
+                  "visitors": 0
+                },
+                {
+                  "start": 1785974400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786060800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786147200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786233600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786320000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786406400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786492800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786579200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786665600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786752000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786838400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1786924800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787011200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787097600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787184000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787270400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787356800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787443200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787529600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787616000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787702400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787788800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787875200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1787961600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788048000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788134400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788220800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788307200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788393600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788480000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788566400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788652800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788739200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788825600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788912000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1788998400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789084800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789171200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789257600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789344000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789430400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789516800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789603200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789689600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789776000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789862400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1789948800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790035200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790121600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790208000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790294400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790380800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790467200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790553600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790640000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790726400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790812800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790899200000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1790985600000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1791072000000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1791158400000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1791244800000,
+                  "clicks": 0,
+                  "visitors": 0
+                },
+                {
+                  "start": 1791331200000,
+                  "clicks": 0,
+                  "visitors": 0
+                }
+              ],
+              "sources": [],
+              "referrers": [],
+              "countries": [],
+              "devices": [],
+              "browsers": []
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links?period=today",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "prefix": "https://example.com/go",
+              "domains": [],
+              "links": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "daily",
+                  "name": "Daily",
+                  "url": "https://example.org/daily",
+                  "createdAt": 1785578400000,
+                  "updatedAt": 1785578400000,
+                  "clicks": 0,
+                  "visitors": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=all&compare=off",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-07",
+                "to": "2026-10-07",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 0,
+                "visits": 0,
+                "pageviews": 0,
+                "viewsPerVisit": 0,
+                "bounceRate": 0,
+                "visitDuration": 0
+              }
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.1"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/",
+            "i": "a1"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/links?period=all",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "prefix": "https://example.com/go",
+              "domains": [],
+              "links": [
+                {
+                  "id": "<id>",
+                  "site": "default",
+                  "domain": "",
+                  "slug": "daily",
+                  "name": "Daily",
+                  "url": "https://example.org/daily",
+                  "createdAt": 1785578400000,
+                  "updatedAt": 1785578400000,
+                  "clicks": 5,
+                  "visitors": 0
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/stats?period=all&compare=off",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "site": "default",
+              "range": {
+                "from": "2026-10-07",
+                "to": "2026-10-07",
+                "interval": "hour",
+                "timezone": "UTC"
+              },
+              "stats": {
+                "visitors": 1,
+                "visits": 1,
+                "pageviews": 1,
+                "viewsPerVisit": 1,
+                "bounceRate": 1,
+                "visitDuration": 0
+              }
+            }
+          }
+        }
+      ]
     }
   ]
 }

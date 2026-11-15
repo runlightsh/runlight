@@ -760,6 +760,9 @@ export class ClickHouseStore extends SqlStore {
   override firstSeen(...a: Parameters<SqlStore["firstSeen"]>) {
     return this.visits.firstSeen(...a);
   }
+  override firstClick(...a: Parameters<SqlStore["firstClick"]>) {
+    return this.visits.firstClick(...a);
+  }
   override firstOwnVisit(...a: Parameters<SqlStore["firstOwnVisit"]>) {
     return this.visits.firstOwnVisit(...a);
   }

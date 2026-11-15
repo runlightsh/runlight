@@ -6,7 +6,7 @@ import { postgres } from "../src/stores/postgres.js";
 import { mysql } from "../src/stores/mysql.js";
 import { sqlite } from "../src/stores/sqlite.js";
 import { libsql } from "../src/stores/libsql.js";
-import { d1 } from "../src/stores/d1.js";
+import { d1, type D1Database } from "../src/stores/d1.js";
 import { ClickHouseStore, clickhouse } from "../src/stores/clickhouse.js";
 import { createClient } from "@libsql/client";
 import Database from "better-sqlite3";
@@ -87,27 +87,64 @@ export function freshMysqlDatabase(): { url: string; ready: Promise<void> } {
   return { url: url.href, ready };
 }
 
-/** Cloudflare's D1 binding, played by an in-memory SQLite, so the D1 store runs the same tests. */
-function fakeD1() {
+/**
+ * Cloudflare's D1 binding, played by an in-memory SQLite, so the D1 store runs the same tests. A batch is one
+ * transaction, as D1's is. `sent` counts what D1 counts against a Worker: each statement sent alone, and each
+ * batch, as one query; with the most statements a batch held and the most values a statement bound.
+ */
+export function fakeD1() {
   const handle = new Database(":memory:");
+  const sent = { queries: 0, batches: 0, mostStatements: 0, mostParams: 0 };
+  /** For a test: a batch holding a statement that matches fails, once, as a whole. */
+  const failing: RegExp[] = [];
   const prepare = (sql: string) => {
     let params: unknown[] = [];
+    const exec = () => {
+      sent.mostParams = Math.max(sent.mostParams, params.length);
+      const prepared = handle.prepare(sql);
+      return prepared.reader ? prepared.all(...params) : (prepared.run(...params), []);
+    };
     const statement = {
+      sql,
+      exec,
       bind(...values: unknown[]) {
         params = values.map((v) => (typeof v === "number" && Number.isSafeInteger(v) ? BigInt(v) : v));
         return statement;
       },
       async all<T>() {
-        const prepared = handle.prepare(sql);
-        return { results: (prepared.reader ? prepared.all(...params) : (prepared.run(...params), [])) as T[] };
+        sent.queries++;
+        return { results: exec() as T[] };
       },
       async run() {
-        return handle.prepare(sql).run(...params);
+        sent.queries++;
+        exec();
+        return {};
       },
     };
     return statement;
   };
-  return { prepare };
+  const batch = async (statements: Array<ReturnType<typeof prepare>>) => {
+    sent.queries++;
+    sent.batches++;
+    sent.mostStatements = Math.max(sent.mostStatements, statements.length);
+    handle.exec("BEGIN");
+    try {
+      const at = failing.findIndex((pattern) => statements.some((s) => pattern.test(s.sql)));
+      if (at >= 0) {
+        failing.splice(at, 1);
+        // The statements before it ran, and are undone with it.
+        for (const s of statements) s.exec();
+        throw new Error("D1_ERROR: a statement in the batch failed");
+      }
+      const results = statements.map((s) => ({ results: s.exec() }));
+      handle.exec("COMMIT");
+      return results;
+    } catch (error) {
+      handle.exec("ROLLBACK");
+      throw error;
+    }
+  };
+  return { prepare, batch, sent, failing } as unknown as D1Database & { sent: typeof sent; failing: RegExp[] };
 }
 
 const cleanups: Array<() => Promise<void>> = [];

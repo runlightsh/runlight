@@ -2163,6 +2163,31 @@ const REVIEW: Scenario[] = [
       ...["region", "city", "browser", "os", "screen", "language"].map((d) => get(`/api/breakdown?from=2026-03-02&to=2026-03-02&dimension=${d}`)),
     ],
   },
+  {
+    name: "imports: clicks that came as daily counts show under all time",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 7, 12, 0),
+    token: "conformance",
+    upstream: [
+      { url: "https://api.dub.co/links", body: [{ id: "dub1", domain: "dub.sh", key: "daily", url: "https://example.org/daily", title: "Daily", createdAt: "2026-08-01T10:00:00.000Z" }] },
+      // A plan that gives no click events, only each day's count.
+      { url: "https://api.dub.co/events", status: 403, body: { error: { message: "Upgrade to read events" } } },
+      { url: "https://api.dub.co/analytics", body: [{ start: "2026-08-03T00:00:00.000Z", clicks: 3 }, { start: "2026-08-04T00:00:00.000Z", clicks: 0 }, { start: "2026-08-05T00:00:00.000Z", clicks: 2 }] },
+    ],
+    steps: [
+      post("/api/links/import/dub", { credentials: { apiKey: "dub-key" } }),
+      // Such clicks belong to no visit, so the site has no first visit, and all time still reaches them.
+      { ...get("/api/links?period=all"), capture: { link: "links.0.id" } },
+      get("/api/links/{{link}}?period=all"),
+      get("/api/links?period=today"),
+      // Every other report's all time still starts at the first visit: with none, today.
+      get("/api/stats?period=all&compare=off"),
+      // With a visit newer than the clicks, all time for links starts at the clicks, and for the rest at the visit.
+      hit({ k: "pageview", u: "https://example.com/", i: "a1" }, "203.0.113.1"),
+      get("/api/links?period=all"),
+      get("/api/stats?period=all&compare=off"),
+    ],
+  },
 ];
 
 export const SCENARIOS: Scenario[] = [...BASICS, ...TRACKING, ...REPORTS, ...GOALS, ...LINKS, ...SHARING, ...TOKENS, ...MCP, ...OAUTH, ...ACCOUNTS, ...FIRST, ...MAIL, ...SITES, ...IMPORTS, ...OBSERVE, ...ASSISTANT, ...PICKING, ...ESCAPES, ...CMS, ...REVIEW];

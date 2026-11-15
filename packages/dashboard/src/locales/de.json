@@ -898,7 +898,7 @@
   "error.unknown_account": "Dieses Konto gibt es nicht mehr.",
   "error.password_short": "Nimm ein Passwort mit mindestens {min} Zeichen.",
   "error.invite_gone": "Diese Einladung ist abgelaufen oder wurde schon benutzt. Bitte um eine neue.",
-  "error.too_many_tries": "Zu viele Versuche. Warte fünfzehn Minuten und versuch es noch einmal.",
+  "error.too_many_tries": "Zu viele Versuche. Versuch es später noch einmal.",
   "error.password_current_wrong": "Dein aktuelles Passwort stimmt nicht.",
   "error.password_wrong": "Dein Passwort stimmt nicht.",
   "error.code_wrong": "Dieser Code stimmt nicht. Prüf die Uhrzeit auf deinem Handy und versuch den nächsten.",

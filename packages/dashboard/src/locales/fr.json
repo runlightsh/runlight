@@ -898,7 +898,7 @@
   "error.unknown_account": "Ce compte n’existe plus.",
   "error.password_short": "Utilisez un mot de passe d’au moins {min} caractères.",
   "error.invite_gone": "Cette invitation a expiré ou a déjà servi. Demandez-en une nouvelle.",
-  "error.too_many_tries": "Trop de tentatives. Patientez quinze minutes et réessayez.",
+  "error.too_many_tries": "Trop de tentatives. Réessayez plus tard.",
   "error.password_current_wrong": "Votre mot de passe actuel n’est pas correct.",
   "error.password_wrong": "Votre mot de passe n’est pas correct.",
   "error.code_wrong": "Ce code n’est pas correct. Vérifiez l’heure de votre téléphone et essayez le suivant.",

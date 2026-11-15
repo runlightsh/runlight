@@ -898,7 +898,7 @@
   "error.unknown_account": "Esa cuenta ya no existe.",
   "error.password_short": "Usa una contraseña de al menos {min} caracteres.",
   "error.invite_gone": "Esta invitación caducó o ya se usó. Pide una nueva.",
-  "error.too_many_tries": "Demasiados intentos. Espera quince minutos y vuelve a intentarlo.",
+  "error.too_many_tries": "Demasiados intentos. Vuelve a intentarlo más tarde.",
   "error.password_current_wrong": "Tu contraseña actual no es correcta.",
   "error.password_wrong": "Tu contraseña no es correcta.",
   "error.code_wrong": "Ese código no es correcto. Revisa la hora de tu teléfono y prueba con el siguiente.",

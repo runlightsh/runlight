@@ -198,6 +198,12 @@ async function writeStep(
     // A failed earlier try at these days (on D1, which has no transactions) can
     // have left part of them behind. Clear it, so every step can safely run again.
     await store.clearImportedVisits(siteId, from, to);
+    // A database that counts its requests (D1) is told whom the rows will ask about, to look them up at once.
+    if (store.db.metered && hits.length) {
+      const asked: string[] = [];
+      for (const { ns, hit } of hits) asked.push(...(await visitorIds(site, ns, hit)));
+      await store.expectVisitors(siteId, asked, hits[0]!.hit.ts - SESSION_IDLE_MS);
+    }
     for (const { ns, hit } of hits) {
       const made = await writeEvent(store, site, ns, hit);
       if (made) counts.visits++;
@@ -261,6 +267,14 @@ function fromUmami(e: UmamiEvent & { ts: number }, session: UmamiSession | undef
   };
 }
 
+/** A hit's visitor on its own day, and the one it would have had the day before. */
+async function visitorIds(site: { timezone: string }, ns: string, e: ImportedHit): Promise<[string, string]> {
+  // The site's own day, as live visitors are counted, so days add up the same way in rollups.
+  const day = localDate(e.ts, site.timezone);
+  // A visit that runs past midnight keeps the id it started with, as a live one does.
+  return [await hexId(`${ns}:${e.key}:${day}`, 16), await hexId(`${ns}:${e.key}:${addDays(day, -1)}`, 16)];
+}
+
 /** Whether a hostname can be the host of an address, and nothing more than a host. */
 function validHost(host: string): boolean {
   try {
@@ -278,11 +292,7 @@ function validHost(host: string): boolean {
  * same ids. Returns whether it started a new visit.
  */
 async function writeEvent(store: SqlStore, site: { id: string; hostnames: string[]; timezone: string }, ns: string, e: ImportedHit): Promise<boolean> {
-  // The site's own day, as live visitors are counted, so days add up the same way in rollups.
-  const day = localDate(e.ts, site.timezone);
-  const visitor = await hexId(`${ns}:${e.key}:${day}`, 16);
-  // A visit that runs past midnight keeps the id it started with, as a live one does.
-  const yesterday = await hexId(`${ns}:${e.key}:${addDays(day, -1)}`, 16);
+  const [visitor, yesterday] = await visitorIds(site, ns, e);
   let host = (e.hostname || site.hostnames[0] || "imported.invalid").toLowerCase();
   // A hostname no address can hold (a space in it, say) is the site's own instead, so one bad cell is one
   // row under the site's name rather than a failed batch.

@@ -588,7 +588,8 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     return site ?? coded("Unknown site", "unknown_site", 404);
   }
 
-  async function readQuery(url: URL, site: SiteRow) {
+  /** `clicks` is for the short link reports, whose "all" reaches back to the oldest click as well as the oldest visit. */
+  async function readQuery(url: URL, site: SiteRow, clicks = false) {
     const filters: Filter[] = [];
     if (url.searchParams.getAll("filter").length > MAX_FILTERS) return coded(`Use at most ${MAX_FILTERS} filters at once.`, "filters_max", 400, { max: String(MAX_FILTERS) });
     for (const raw of url.searchParams.getAll("filter")) {
@@ -599,7 +600,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     const now = runlight.now();
     let firstDate: string | undefined;
     if (url.searchParams.get("period") === "all") {
-      const first = await runlight.store.firstSeen(site.id);
+      const seen = await runlight.store.firstSeen(site.id);
+      // Clicks imported as daily counts belong to no visit, and may be older than any.
+      const clicked = clicks ? await runlight.store.firstClick(site.id) : null;
+      const first = seen === null ? clicked : clicked === null ? seen : Math.min(seen, clicked);
       if (first !== null) firstDate = localDate(first, site.timezone);
     }
     const range = resolveRange(
@@ -715,7 +719,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
 
       if (path === "/api/links") {
         if (request.method === "GET") {
-          const read = await readQuery(url, site);
+          const read = await readQuery(url, site, true);
           if (read instanceof Response) return read;
           const links = await runlight.store.links(site.id, read.range.from, read.range.to);
           // Links on a removed domain are served from the app's own path until it is added back.
@@ -777,7 +781,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (request.method === "GET") {
           const link = await runlight.store.linkById(id);
           if (!link || link.site !== site.id) return coded("Unknown link", "unknown_link", 404);
-          const read = await readQuery(url, site);
+          const read = await readQuery(url, site, true);
           if (read instanceof Response) return read;
           const { range } = read;
           const by = async (dimension: string) =>

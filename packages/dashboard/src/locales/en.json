@@ -898,7 +898,7 @@
   "error.unknown_account": "That account no longer exists.",
   "error.password_short": "Use a password of at least {min} characters.",
   "error.invite_gone": "This invite has expired or was already used. Ask for a new one.",
-  "error.too_many_tries": "Too many tries. Wait fifteen minutes and try again.",
+  "error.too_many_tries": "Too many tries. Try again later.",
   "error.password_current_wrong": "Your current password is not right.",
   "error.password_wrong": "Your password is not right.",
   "error.code_wrong": "That code is not right. Check the time on your phone and try the next one.",

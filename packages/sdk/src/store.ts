@@ -38,6 +38,12 @@ export interface Db {
   transaction?<T>(fn: (db: Db) => Promise<T>): Promise<T>;
   close?(): Promise<void>;
   /**
+   * Runs several statements as one request, in order, and gives each one's rows. Only a database that counts
+   * its requests has it (Cloudflare D1, where a batch is one query of a Worker's allowance, and all of it is
+   * undone if one statement fails), so an import's step sends its rows a batch at a time.
+   */
+  batch?(statements: Array<{ sql: string; params?: unknown[] }>): Promise<unknown[][]>;
+  /**
    * True for a database reached one statement at a time over the network with a cap on statements per
    * request (Cloudflare D1), so long jobs send fewer, larger pieces.
    */
@@ -400,6 +406,7 @@ export function prefixed(inner: Db, prefix: string): Db {
     ...(inner.exclusive ? { exclusive: <T>(fn: (db: Db) => Promise<T>) => inner.exclusive!((db) => fn(wrap(db))) } : {}),
     ...(inner.transaction ? { transaction: <T>(fn: (db: Db) => Promise<T>) => inner.transaction!((db) => fn(wrap(db))) } : {}),
     ...(inner.close ? { close: () => inner.close!() } : {}),
+    ...(inner.batch ? { batch: (statements: Array<{ sql: string; params?: unknown[] }>) => inner.batch!(statements.map((s) => ({ sql: sql(s.sql), params: s.params }))) } : {}),
     ...(inner.metered ? { metered: true } : {}),
   };
   prefixes.set(outer, prefix);
@@ -407,6 +414,63 @@ export function prefixed(inner: Db, prefix: string): Db {
 }
 
 const PIECE_MS = 86_400_000;
+
+/**
+ * The most statements an import's step sends Cloudflare D1 in one batch. D1 names no limit; its own example
+ * of what one invocation may send is a batch of 2,000, and a batch must finish within 30 seconds.
+ */
+export const BATCH_STATEMENTS = 2_000;
+
+/** An INSERT of one row and nothing more, which the next row of the same INSERT can join. */
+const ONE_ROW = /^\s*INSERT INTO \w+ \([^()]*\)\s+VALUES \(([^()]*)\)\s*$/;
+
+/** A Db that keeps its writes to send together, with what an import's step needs to send them. */
+interface GatheringDb extends Db {
+  flush(): Promise<void>;
+  /** Reads answered in one request, after the writes kept so far. */
+  readAll(statements: Array<{ sql: string; params?: unknown[] }>): Promise<unknown[][]>;
+}
+
+/**
+ * For a database with `batch` (Cloudflare D1): writes are kept and sent a batch at a time, BATCH_STATEMENTS
+ * at most, and a read sends what is kept first, so it sees every write before it. Rows of the same INSERT
+ * that follow one another go as one statement, within the 100 values a statement binds. What fits one
+ * batch is written all together or not at all; a longer run of writes goes as several batches, each all
+ * or nothing by itself.
+ */
+function gathering(inner: Db): GatheringDb {
+  const kept: Array<{ sql: string; params: unknown[]; row: string | null }> = [];
+  const flush = async () => {
+    while (kept.length) await inner.batch!(kept.splice(0, BATCH_STATEMENTS).map(({ sql, params }) => ({ sql, params })));
+  };
+  const db: GatheringDb = {
+    dialect: inner.dialect,
+    ...(inner.metered ? { metered: true } : {}),
+    async all<T>(sql: string, params?: unknown[]): Promise<T[]> {
+      await flush();
+      return inner.all<T>(sql, params);
+    },
+    async run(sql: string, params: unknown[] = []): Promise<void> {
+      const row = ONE_ROW.exec(sql)?.[1] ?? null;
+      const last = kept[kept.length - 1];
+      // The same INSERT as the one before it, with room left: its row joins that statement.
+      if (row !== null && last && last.row === row && last.sql.startsWith(sql.trimEnd()) && last.params.length + params.length <= MAX_PARAMS) {
+        last.sql += `, (${row})`;
+        last.params.push(...params);
+        return;
+      }
+      kept.push({ sql: row === null ? sql : sql.trimEnd(), params: [...params], row });
+      if (kept.length >= BATCH_STATEMENTS) await flush();
+    },
+    transaction: (fn) => fn(db),
+    flush,
+    async readAll(statements) {
+      await flush();
+      return statements.length ? inner.batch!(statements) : [];
+    },
+  };
+  return db;
+}
 
 /** Text cut to at most `max` characters, as a VARCHAR(max) holds it, never through the middle of one. */
 export function clip(text: string, max: number): string {
@@ -1017,10 +1081,25 @@ export class SqlStore {
     }
   }
 
-  /** Runs one step of an import, whose rows go in together: here in one transaction. */
+  /**
+   * Runs one step of an import, whose rows go in together: here in one transaction. On a database that takes
+   * batches (Cloudflare D1, which has no transactions and counts each statement sent alone against a Worker's
+   * allowance), the step's writes are gathered and sent a batch at a time (see GatheredStep).
+   */
   async importStep<T>(fn: (store: SqlStore) => Promise<T>): Promise<T> {
-    return this.transaction(fn);
+    if (!this.db.batch) return this.transaction(fn);
+    const db = gathering(this.db);
+    prefixes.set(db, this.prefix);
+    const result = await fn(new GatheredStep(db));
+    await db.flush();
+    return result;
   }
+
+  /**
+   * Tells an import's step which visitors its rows will ask `openSession` about, none active before `since`.
+   * Only a step that gathers its writes uses it, to look them all up in one request; elsewhere each row asks.
+   */
+  async expectVisitors(_site: string, _visitors: string[], _since: number): Promise<void> {}
 
   // Sites
 
@@ -2397,6 +2476,15 @@ export class SqlStore {
     return row?.t === null || row?.t === undefined ? null : num(row.t);
   }
 
+  /**
+   * When a site's oldest short link click was, or null with none. Clicks imported as daily counts belong to
+   * no visit, so firstSeen does not reach them.
+   */
+  async firstClick(site: string): Promise<number | null> {
+    const [row] = await this.db.all(`SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'`, [site]);
+    return row?.t === null || row?.t === undefined ? null : num(row.t);
+  }
+
   /** Just the visitor count from stats(), in one query, for conversion rates. */
   async visitors(query: Query): Promise<number> {
     // Built days add up their visitors, as the stats do.
@@ -2771,5 +2859,83 @@ export class SqlStore {
         device: String(r.device ?? ""),
       })),
     };
+  }
+}
+
+/**
+ * One step of an import on a database that takes batches (Cloudflare D1). Its writes are gathered (see
+ * `gathering`), and a row's question, which visit it joins, is answered from memory: the visits its visitors
+ * had before the step, read once in `expectVisitors`, and what the step has done to them since. So a step
+ * costs a few requests however many rows it has, where a row at a time it would cost several each.
+ */
+class GatheredStep extends SqlStore {
+  private site = "";
+  private since = Infinity;
+  private readonly expected = new Set<string>();
+  /** The expected visitors' visits that may still be going, by id, as the step's own writes leave them. */
+  private readonly visits = new Map<string, { id: string; visitor: string; lastAt: number }>();
+
+  override async expectVisitors(site: string, visitors: string[], since: number): Promise<void> {
+    this.forget();
+    const asked = [...new Set(visitors)];
+    const statements = [];
+    for (let i = 0; i < asked.length; i += MAX_PARAMS - 2) {
+      const piece = asked.slice(i, i + MAX_PARAMS - 2);
+      statements.push({ sql: `SELECT id, visitor, last_at FROM rl_sessions WHERE site = ? AND visitor IN (${piece.map(() => "?").join(", ")}) AND last_at >= ?`, params: [site, ...piece, since] });
+    }
+    for (const rows of await (this.db as GatheringDb).readAll(statements)) {
+      for (const row of rows as Array<Record<string, unknown>>) this.visits.set(String(row.id), { id: String(row.id), visitor: String(row.visitor), lastAt: num(row.last_at) });
+    }
+    this.site = site;
+    this.since = since;
+    for (const visitor of asked) this.expected.add(visitor);
+  }
+
+  /** After a write this does not follow visit by visit, every row asks the database again. */
+  private forget(): void {
+    this.expected.clear();
+    this.visits.clear();
+    this.since = Infinity;
+  }
+
+  override async openSession(site: string, visitors: string[], since: number): Promise<{ id: string; visitor: string } | null> {
+    if (visitors.length === 0) return null;
+    if (site !== this.site || since < this.since || !visitors.every((v) => this.expected.has(v))) return super.openSession(site, visitors, since);
+    // As the database would choose: the one active last, and of two at the same moment the lower id.
+    const open = [...this.visits.values()]
+      .filter((v) => visitors.includes(v.visitor) && v.lastAt >= since)
+      .sort((a, b) => b.lastAt - a.lastAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+    return open ? { id: open.id, visitor: open.visitor } : null;
+  }
+
+  override async insertSession(row: SessionRow): Promise<void> {
+    await super.insertSession(row);
+    if (row.site === this.site && this.expected.has(row.visitor)) this.visits.set(row.id, { id: row.id, visitor: row.visitor, lastAt: row.startedAt });
+  }
+
+  override async touchSession(id: string, ts: number, kind: "pageview" | "event" | "click", path: string, reopen = true): Promise<void> {
+    await super.touchSession(id, ts, kind, path, reopen);
+    const visit = this.visits.get(id);
+    if (visit && (kind !== "event" || reopen)) visit.lastAt = ts;
+  }
+
+  override async deleteSession(id: string): Promise<void> {
+    await super.deleteSession(id);
+    this.visits.delete(id);
+  }
+
+  override async deleteLinkHistory(link: string): Promise<void> {
+    await super.deleteLinkHistory(link);
+    this.forget();
+  }
+
+  override async clearImportedVisits(site: string, from: number, to: number): Promise<void> {
+    await super.clearImportedVisits(site, from, to);
+    this.forget();
+  }
+
+  override async recountCarriedVisits(site: string, from: number, to: number): Promise<void> {
+    await super.recountCarriedVisits(site, from, to);
+    this.forget();
   }
 }

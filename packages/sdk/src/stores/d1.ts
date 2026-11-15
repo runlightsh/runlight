@@ -3,6 +3,8 @@ import { SqlStore, type Db } from "../store.js";
 /** The parts of Cloudflare's D1 binding Runlight uses, so there is no dependency on its types. */
 export interface D1Database {
   prepare(sql: string): D1PreparedStatement;
+  /** Several statements as one request, and one transaction: all of them, or none. */
+  batch?(statements: D1PreparedStatement[]): Promise<Array<{ results?: unknown[] }>>;
 }
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
@@ -25,9 +27,11 @@ export interface D1Options {
  *
  *   export default { fetch: (request, env) => runlight({ store: d1({ database: env.DB }) }).routes().handler(request) };
  *
- * D1 has no interactive transactions, so a link import writes each link
- * step by step instead of all at once; a failure part way through leaves
- * the links written so far, and running the import again skips them.
+ * D1 has no interactive transactions, and a Worker may send it only so many queries a request (50 on the
+ * free plan, 1,000 on a paid one), with a batch of statements counting as one. So an import gathers a step's
+ * writes and sends them in batches of up to 2,000 statements, each batch all or nothing. A link whose history
+ * fits one batch is written whole or not at all; a longer one goes in several batches with the link itself
+ * last, so a failure part way leaves clicks without a link, which the next try clears before it starts again.
  */
 export function d1(options: D1Options): SqlStore {
   const stmt = (sql: string, params: unknown[]) => {
@@ -48,5 +52,8 @@ export function d1(options: D1Options): SqlStore {
       return fn(db);
     },
   };
+  if (options.database.batch) {
+    db.batch = async (statements) => (await options.database.batch!(statements.map((s) => stmt(s.sql, s.params ?? [])))).map((result) => result.results ?? []);
+  }
   return new SqlStore(db, options.prefix);
 }

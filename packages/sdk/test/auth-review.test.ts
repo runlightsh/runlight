@@ -143,6 +143,26 @@ test("an account kept to one site is told it cannot connect an app, not sent to 
   assert.equal(posted.status, 403);
 });
 
+test("all time for short links reaches back to clicks that came as daily counts, which belong to no visit", async () => {
+  const rl = runlight({ store: sqlite({ path: ":memory:" }), site: { hostnames: ["example.com"] } });
+  const { handler } = rl.routes({ token: "t" });
+  const get = async (path: string) => (await handler(req(`/runlight${path}`, { headers: { authorization: "Bearer t" } }))).json() as Promise<any>;
+  const link = await rl.links.create("default", { url: "https://example.org/", slug: "old" });
+  // As an import writes a day's count: a click with no visitor and no visit, long before any visit.
+  const ts = Date.UTC(2025, 0, 5, 12);
+  await rl.store.insertEvent({ site: "default", ts, kind: "click", visitor: "", session: "", pageview: "", path: "/old", hostname: "", title: "", name: "old", props: { imported: "daily" }, engagedMs: 0, scroll: null, link: link.id });
+  assert.equal(await rl.store.firstSeen("default"), null);
+  assert.equal(await rl.store.firstClick("default"), ts);
+  const all = await get("/api/links?period=all");
+  assert.deepEqual(all.links.map((l: any) => [l.slug, l.clicks]), [["old", 1]]);
+  const one = await get(`/api/links/${link.id}?period=all`);
+  assert.equal(one.clicks, 1);
+  assert.equal(one.range.from, "2025-01-05");
+  // The site's other reports still start at its first visit.
+  assert.notEqual((await get("/api/stats?period=all&compare=off")).range.from, "2025-01-05");
+  await rl.store.close();
+});
+
 test("wrong second-factor codes lock for longer each time, up to a day, and a lock always ends", async () => {
   const lock = new Lockout();
   const minute = 60_000;
