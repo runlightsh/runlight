@@ -45,8 +45,10 @@ function main() {
   const failed = [];
   for (const name of GENERATORS) {
     const args = name.endsWith(".mts") ? ["--import", "tsx", `scripts/${name}`, "--check"] : [`scripts/${name}`, "--check"];
-    // The generators that read the clock's zone ask for UTC, as the ports' tests run.
-    const run = spawnSync(process.execPath, args, { cwd: root, env: { ...process.env, TZ: "UTC" }, encoding: "utf8" });
+    // The generators that read the clock's zone ask for UTC, as the ports' tests run. The server's tsconfig maps
+    // @runlight/sdk to its source, so a generator importing the server runs before the SDK is built, as in CI.
+    const env = { ...process.env, TZ: "UTC", TSX_TSCONFIG_PATH: "packages/server/tsconfig.json" };
+    const run = spawnSync(process.execPath, args, { cwd: root, env, encoding: "utf8" });
     // A generator's own chatter is dropped; what the check says is its last lines.
     const said = `${run.stdout ?? ""}${run.stderr ?? ""}`.split("\n").filter((line) => line.startsWith(name.replace(/\.m?[jt]s$/, "")) || line.startsWith("  ") || line.startsWith("::warning") || line.startsWith("Run the generator"));
     if (run.status !== 0) {
