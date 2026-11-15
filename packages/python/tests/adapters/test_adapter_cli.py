@@ -163,10 +163,6 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
     import time
     from wsgiref.simple_server import make_server
 
-    class Handler(cli._QuietHandler):
-        timeout = 0.3
-        request_seconds = 0.8
-
     def echo(environ: Any, start_response: Any) -> list[bytes]:
         body = environ["wsgi.input"].read(int(environ.get("CONTENT_LENGTH") or 0))
         start_response("200 OK", [("content-type", "text/plain")])
@@ -174,8 +170,10 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
 
     class Server(cli._ThreadingServer):
         head_seconds = 0.3
+        grace_seconds = 0.3
+        body_seconds = 0.8
 
-    httpd = make_server("127.0.0.1", 0, echo, server_class=Server, handler_class=Handler)
+    httpd = make_server("127.0.0.1", 0, echo, server_class=Server, handler_class=cli._QuietHandler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     port = httpd.server_address[1]
     try:
@@ -184,12 +182,12 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
             started = time.monotonic()
             assert idle.recv(1024) == b""
             assert time.monotonic() - started < 3
-        # Sending a body a byte at a time, each well inside the idle timeout.
+        # Sending a body a byte at a time, each well inside any idle timeout.
         with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
             slow.sendall(b"POST / HTTP/1.0\r\nContent-Length: 100\r\n\r\n")
             started = time.monotonic()
-            # Until the server answers: a body this short is waited for with its head, before it gets a thread, so
-            # the server hangs up when the head's time is up (or, on a thread, when the app's read fails).
+            # Until the server answers: the body is waited for before the request gets a thread, and when it does
+            # not keep pace the server says so and hangs up.
             try:
                 while not select.select([slow], [], [], 0.1)[0] and time.monotonic() - started < 5:
                     slow.sendall(b"x")
@@ -197,7 +195,7 @@ def test_a_connection_that_stalls_is_closed_and_frees_its_thread() -> None:
             except (ConnectionResetError, BrokenPipeError):
                 # A byte sent after the server's last read makes its hang-up a reset: hung up all the same.
                 answer = b""
-            assert answer == b"" or answer.startswith(b"HTTP/1.0 500")
+            assert answer == b"" or answer.startswith(b"HTTP/1.1 408 Request Timeout")
             assert time.monotonic() - started < 3
         # A request that arrives in time is answered.
         with socket.create_connection(("127.0.0.1", port), timeout=5) as quick:
@@ -245,7 +243,8 @@ def test_idle_connections_do_not_keep_the_server_from_answering() -> None:
         for connection in held:
             connection.settimeout(5)
             try:
-                assert connection.recv(1024) == b""
+                # One that began a head is told its request took too long; one that sent nothing is just closed.
+                assert connection.recv(1024) in (b"", b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
             except ConnectionResetError:
                 # Closed with half a head unread, which hangs up with a reset: hung up all the same.
                 pass

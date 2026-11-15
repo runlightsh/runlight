@@ -13,6 +13,11 @@ drivers it uses, so each of its requests runs in a worker thread and never holds
 are Runlight's own, a fixed few (`threads`, default 8), so a long report never takes one the app's own code
 would run on. A request that is the app's needs none: whether it is Runlight's is decided on the event loop, and
 only reading the link domains again, every half minute, takes a thread.
+
+A body for one of Runlight's own paths is read here, no further than the path may take (413 past it) and for no
+longer than a minute in all (serve.BODY_SECONDS), whatever the server's own limits: after it the answer is 408 with
+Connection: close, and the server closes the connection. A request for the app goes on with its body unread, so a
+slow body sent to the app's own routes is the app's and the server's to limit.
 """
 
 from __future__ import annotations
@@ -24,7 +29,8 @@ from concurrent.futures import Executor, ThreadPoolExecutor
 from typing import Any, TypeVar
 
 from .http import Request, Response
-from .serve import UNSUPPORTED, Front, body_limit, header_pairs, request_url, too_large
+from . import serve
+from .serve import UNSUPPORTED, Front, body_limit, header_pairs, request_url, too_large, too_slow
 
 Scope = MutableMapping[str, Any]
 Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
@@ -197,9 +203,14 @@ class RunlightMiddleware:
         body = b""
         if method not in ("GET", "HEAD"):
             try:
-                read = await _read_body(receive, body_limit(path))
+                # The whole body has a minute to come, however steadily it comes: a client that sends a little at
+                # a time is answered 408, and the server closes its connection.
+                read = await asyncio.wait_for(_read_body(receive, body_limit(path)), serve.BODY_SECONDS)
             except _TooLarge:
                 await send_response(send, too_large(), head)
+                return
+            except asyncio.TimeoutError:
+                await send_response(send, too_slow(), head)
                 return
             if read is None:
                 return

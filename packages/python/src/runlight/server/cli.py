@@ -247,28 +247,54 @@ def _password(settings: Settings, email: str | None, out: IO[str]) -> int:
     return 0
 
 
+class _Waiting:
+    """A connection whose request is still arriving: what has come, and what its head says is still to come."""
+
+    __slots__ = ("client", "since", "seen", "need", "body_at", "body_since")
+
+    def __init__(self, client: Any, since: float) -> None:
+        self.client = client
+        self.since = since
+        self.seen = bytearray()
+        # How many bytes the whole request is, once its head says, and where its body starts and when it did.
+        self.need: int | None = None
+        self.body_at = 0
+        self.body_since = 0.0
+
+
 class _ThreadingServer(WSGIServer):
     """Answers each request on one of a fixed number of threads, so a flood of connections waits its turn rather
-    than starting a thread, and holding memory, for every one. A connection takes a thread only once the head of its
-    request has arrived, and with it the whole of a small body (a tracker hit, a sign-in form), so ones held open
-    and idle, or sending a short body a byte at a time, cannot use up the threads and keep everyone else waiting. A
-    longer body is read on its thread, which it keeps only while it arrives at a fair pace (see _Deadline)."""
+    than starting a thread, and holding memory, for every one. A connection takes a thread only once its whole
+    request has arrived, body and all: one thread reads every connection that is still sending, so ones held open
+    and idle, a head sent a byte at a time, and a body that stalls or drips in never use up the threads and keep
+    everyone else waiting. A request that does not arrive in time is answered 408 and its connection closed, as
+    Node's own server answers one: the head has `head_seconds`, and then the body has `body_seconds` in all and
+    must keep a fair pace, `pace` bytes for each second after the first `grace_seconds`. What is held for the
+    requests still arriving is `buffered_most` bytes at most; past that a body is answered 503. A body with no
+    Content-Length (chunked) is answered 411, since nothing says how much of it to wait for."""
 
     threads = 64
-    # How long a connection has to send the head of its request before it is closed, without having had a thread.
+    # How long a connection has to send the head of its request before it is answered 408 and closed.
     head_seconds = 10.0
-    # The most connections kept waiting for a head; past that the one waiting longest is closed.
+    # How long the body then has to arrive, however steadily it comes.
+    body_seconds = 60.0
+    # After this long, a body is waited for only while it has sent this many bytes for each second since.
+    grace_seconds = 5.0
+    pace = 8 * 1024
+    # The most connections kept waiting; past that the one waiting longest is closed.
     waiting_most = 1024
     # The head is looked at as far as this many bytes; past that the request is the handler's to refuse.
     head_peek = 16 * 1024
-    # A body this long at most is waited for here, with its head, before the request gets a thread.
-    body_peek = 16 * 1024
+    # The most held in memory for requests still arriving, all together.
+    buffered_most = 64 * 1024 * 1024
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pool = ThreadPoolExecutor(self.threads, thread_name_prefix="runlight-http")
         self._arrived: collections.deque[tuple[Any, Any]] = collections.deque()
         self._arrived_lock = threading.Lock()
+        # What was read of each request before it got its thread, for its handler to read first.
+        self._read_ahead: dict[Any, bytes] = {}
         self._wake_read, self._wake_write = socket.socketpair()
         self._wake_read.setblocking(False)
         self._closing = False
@@ -284,51 +310,80 @@ class _ThreadingServer(WSGIServer):
             pass
 
     def _watch(self) -> None:
-        """Holds each new connection until the head of its request is there to read, then hands it to a thread. One
-        thread watches every waiting connection."""
+        """Reads each new connection until its whole request is there, then hands it to a thread. One thread reads
+        every connection that is still sending."""
         selector = selectors.DefaultSelector()
         selector.register(self._wake_read, selectors.EVENT_READ, None)
-        waiting: dict[Any, tuple[Any, float]] = {}
-        # Ones that have begun to send a head but not finished it. Looked at again every so often rather than when
-        # readable, since the bytes already there keep them readable.
-        begun: set[Any] = set()
+        waiting: dict[Any, _Waiting] = {}
+        held = 0
 
         def drop(connection: Any) -> None:
-            waiting.pop(connection, None)
-            begun.discard(connection)
+            nonlocal held
+            state = waiting.pop(connection, None)
+            if state is not None:
+                held -= len(state.seen)
             try:
                 selector.unregister(connection)
             except (KeyError, ValueError, OSError):
                 pass
 
-        def close(connection: Any) -> None:
+        def close(connection: Any, answer: bytes = b"") -> None:
             drop(connection)
+            if answer:
+                try:
+                    connection.send(answer)
+                except OSError:
+                    # Gone already, or not taking anything: closed all the same.
+                    pass
             self.shutdown_request(connection)
 
-        def look(connection: Any) -> None:
-            """Hands the connection to a thread when its head is whole, closes it if it hung up, else keeps it."""
+        def hand(connection: Any) -> None:
+            state = waiting[connection]
+            drop(connection)
             try:
-                head = connection.recv(self.head_peek + self.body_peek, socket.MSG_PEEK)
+                connection.setblocking(True)
+            except OSError:
+                self.shutdown_request(connection)
+                return
+            self._read_ahead[connection] = bytes(state.seen)
+            self._pool.submit(self._answer, connection, state.client)
+
+        def look(connection: Any) -> None:
+            """Reads what has come. Hands the connection to a thread when its request is whole, answers it when it
+            cannot be waited for, closes it if it hung up, else keeps it."""
+            nonlocal held
+            state = waiting[connection]
+            try:
+                data = connection.recv(65536)
+            except (BlockingIOError, InterruptedError):
+                return
             except OSError:
                 close(connection)
                 return
-            if not head:
-                # Hung up without a word: nothing to answer.
+            if not data:
+                # Hung up before the request was whole: nothing to answer.
                 close(connection)
-            elif _arrived(head, self.head_peek, self.body_peek):
-                client = waiting[connection][0]
-                drop(connection)
-                self._pool.submit(self._answer, connection, client)
-            elif connection not in begun:
-                begun.add(connection)
-                try:
-                    selector.unregister(connection)
-                except (KeyError, ValueError, OSError):
-                    pass
+                return
+            state.seen += data
+            held += len(data)
+            if state.need is None:
+                read = _head(bytes(state.seen[: self.head_peek + 4]), self.head_peek)
+                if read is None:
+                    return
+                if read == _NO_LENGTH:
+                    close(connection, _LENGTH_REQUIRED)
+                    return
+                state.body_at, length = read
+                state.need = state.body_at + length
+                state.body_since = time.monotonic()
+            if len(state.seen) >= state.need:
+                hand(connection)
+            elif held > self.buffered_most:
+                close(connection, _BUSY)
 
         try:
             while not self._closing:
-                for key, _ in selector.select(0.05 if begun else 1.0):
+                for key, _ in selector.select(0.25 if waiting else 1.0):
                     if key.fileobj is self._wake_read:
                         try:
                             while self._wake_read.recv(4096):
@@ -337,13 +392,17 @@ class _ThreadingServer(WSGIServer):
                             pass
                     elif key.fileobj in waiting:
                         look(key.fileobj)
-                for connection in list(begun):
-                    if connection in waiting:
-                        look(connection)
                 now = time.monotonic()
-                for connection, (_, since) in list(waiting.items()):
-                    if now - since > self.head_seconds:
-                        close(connection)
+                for connection, state in list(waiting.items()):
+                    if state.need is None:
+                        if now - state.since > self.head_seconds:
+                            # Said only to one that began a request; one that sent nothing is just closed.
+                            close(connection, _TIMED_OUT if state.seen else b"")
+                        continue
+                    waited = now - state.body_since
+                    body = len(state.seen) - state.body_at
+                    if waited > self.body_seconds or (waited > self.grace_seconds and body < self.pace * (waited - self.grace_seconds)):
+                        close(connection, _TIMED_OUT)
                 with self._arrived_lock:
                     arrived = list(self._arrived)
                     self._arrived.clear()
@@ -352,8 +411,9 @@ class _ThreadingServer(WSGIServer):
                     while len(waiting) >= self.waiting_most:
                         close(next(iter(waiting)))
                     try:
+                        connection.setblocking(False)
                         selector.register(connection, selectors.EVENT_READ, None)
-                        waiting[connection] = (client, time.monotonic())
+                        waiting[connection] = _Waiting(client, time.monotonic())
                     except (OSError, ValueError):
                         self.shutdown_request(connection)
         finally:
@@ -367,6 +427,7 @@ class _ThreadingServer(WSGIServer):
         except Exception:
             self.handle_error(request, client_address)
         finally:
+            self._read_ahead.pop(request, None)
             self.shutdown_request(request)
 
     def server_close(self) -> None:
@@ -387,29 +448,43 @@ class _ThreadingServer(WSGIServer):
 
 _HEAD_END = re.compile(rb"\r?\n\r?\n")
 _CONTENT_LENGTH = re.compile(rb"^content-length:[ \t]*([0-9]{1,18})[ \t]*\r?$", re.I | re.M)
+_TRANSFER_ENCODING = re.compile(rb"^transfer-encoding:", re.I | re.M)
+_NO_LENGTH = (-1, -1)
+
+# What the one thread that reads requests answers itself, each closing the connection. The first is Node's own
+# answer to a request that took too long to arrive, which the TypeScript server gives.
+_TIMED_OUT = b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"
+_LENGTH_REQUIRED = b"HTTP/1.1 411 Length Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+_BUSY = b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n"
 
 
-def _arrived(seen: bytes, head_peek: int, body_peek: int) -> bool:
-    """Whether what has come in on a connection is enough to give it a thread: the head of its request, and the
-    whole body too when the head says it is `body_peek` bytes at most. A head past `head_peek` goes on as it is,
-    for the handler to refuse."""
+def _head(seen: bytes, head_peek: int) -> tuple[int, int] | None:
+    """What a request's head says, once it is whole: where its body starts and how many bytes of it to wait for.
+    None while the head is still coming, and _NO_LENGTH for a body whose length it does not give. Nothing is
+    waited for after a head past `head_peek`, which is the handler's to refuse, nor for a body longer than its
+    path may take, which is refused by its length alone."""
+    from ..serve import body_limit
+
     end = _HEAD_END.search(seen, 0, head_peek)
     if end is None:
-        return len(seen) >= head_peek
-    length = _CONTENT_LENGTH.search(seen, 0, end.start() + 2)
-    if length is None or int(length.group(1)) > body_peek:
-        return True
-    return len(seen) - end.end() >= int(length.group(1))
+        return (len(seen), 0) if len(seen) >= head_peek else None
+    head = seen[: end.start() + 2]
+    length = _CONTENT_LENGTH.search(head)
+    if length is None:
+        return _NO_LENGTH if _TRANSFER_ENCODING.search(head) else (end.end(), 0)
+    target = head.split(b"\n", 1)[0].split(b" ")
+    path = target[1].split(b"?", 1)[0].decode("latin-1") if len(target) > 1 else ""
+    size = int(length.group(1))
+    return (end.end(), size if size <= body_limit(path) else 0)
 
 
 class _Deadline(io.RawIOBase):
-    """The connection's reads, each given only the time left before the deadline, so a request that trickles in
-    a byte at a time is cut off as surely as one that stops. A request must also keep a fair pace: after `grace`
-    seconds, what has arrived must be at least `pace` bytes for every second since, or the read gives up. So a body
-    sent a few bytes at a time loses its thread within seconds, however long it says it is, rather than keeping it
-    for the whole deadline."""
+    """A request's reads on its thread: first what was read before it got the thread, which is the whole request
+    as its head describes it, and then the connection, for anything the head did not account for. Each such read
+    is given only the time left before the deadline, and must keep a fair pace (`pace` bytes for every second
+    after `grace`), so nothing sent a byte at a time keeps the thread."""
 
-    def __init__(self, connection: socket.socket, idle: float, deadline: float, grace: float = 5.0, pace: int = 8 * 1024) -> None:
+    def __init__(self, connection: socket.socket, idle: float, deadline: float, grace: float = 5.0, pace: int = 8 * 1024, ahead: bytes = b"") -> None:
         self._connection = connection
         self._idle = idle
         self._deadline = deadline
@@ -417,11 +492,17 @@ class _Deadline(io.RawIOBase):
         self._pace = pace
         self._began = time.monotonic()
         self._read = 0
+        self._ahead = memoryview(ahead)
 
     def readable(self) -> bool:
         return True
 
     def readinto(self, buffer: Any) -> int:
+        if self._ahead:
+            count = min(len(buffer), len(self._ahead))
+            buffer[:count] = self._ahead[:count]
+            self._ahead = self._ahead[count:]
+            return count
         now = time.monotonic()
         left = self._deadline - now
         # When what has arrived so far stops being enough, if nothing more comes.
@@ -437,16 +518,17 @@ class _Deadline(io.RawIOBase):
 class _QuietHandler(WSGIRequestHandler):
     # A connection that sends nothing for this long is closed, so idle ones do not hold a thread for good.
     timeout = 30
-    # And the whole request, body and all, has this long to arrive.
+    # What a request's thread reads from the connection itself (more than its head said was coming) has this long.
     request_seconds = 60.0
-    # After this long, a request keeps its thread only while it has sent this many bytes for each second since.
+    # After this long, such a read goes on only while this many bytes have come for each second since.
     grace_seconds = 5.0
     pace = 8 * 1024
 
     def setup(self) -> None:
         super().setup()
+        ahead = getattr(self.server, "_read_ahead", {}).pop(self.connection, b"")
         self.rfile = io.BufferedReader(
-            _Deadline(self.connection, float(self.timeout), time.monotonic() + self.request_seconds, self.grace_seconds, self.pace)
+            _Deadline(self.connection, float(self.timeout), time.monotonic() + self.request_seconds, self.grace_seconds, self.pace, ahead)
         )
 
     def get_environ(self) -> dict[str, Any]:

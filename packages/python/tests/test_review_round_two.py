@@ -732,3 +732,39 @@ def test_a_taken_port_is_said_in_one_line(tmp_path: Any, monkeypatch: pytest.Mon
         assert len(lines) == 1 and lines[0].startswith(f"Runlight: could not listen on 127.0.0.1:{taken.getsockname()[1]}: ")
     finally:
         taken.close()
+
+
+def test_all_time_on_the_short_link_reports_reaches_back_to_the_oldest_click() -> None:
+    clock = Clock()
+    rl = Runlight(store=Stores.sqlite(":memory:"), site={"hostnames": ["example.com"], "timezone": "Pacific/Auckland"}, now=clock, rateLimit=False)
+    routes = rl.routes({"token": "t"})
+
+    def get(path: str) -> Any:
+        answer = routes.handle(Request(f"https://example.com/runlight{path}", "GET", {"authorization": "Bearer t"}))
+        assert answer.status == 200, answer.text()
+        return _js.loads(answer.text())
+
+    made = rl.links.create("default", {"url": "https://example.org/sale", "slug": "sale"})
+    assert rl.store.first_click("default") is None
+    # Neither a visit nor a click yet: today, in the site's own timezone (already the 7th in Auckland).
+    assert get(f"/api/links/{made['id']}?period=all")["range"]["from"] == "2026-10-07"
+
+    # Clicks imported as daily counts belong to no visit, and are older than any.
+    old = {"daily": [{"day": "2026-08-01", "clicks": 3}, {"day": "2026-08-03", "clicks": 2}]}
+    assert write.write_link(rl, "default", "dub", {"sourceId": "1", "slug": "old", "url": "https://example.org/old"}, old)["clicks"] == 5
+    link = write.imported_link_id("dub", "1")
+    first = rl.store.first_click("default")
+    assert first is not None and 1_785_542_400_000 <= first < 1_785_542_400_000 + DAY
+    rl.collect(hit())
+    assert rl.store.first_seen("default") == NOW
+
+    one = get(f"/api/links/{link}?period=all")
+    assert one["range"]["from"] == "2026-08-01" and one["clicks"] == 5
+    listed = {row["slug"]: row["clicks"] for row in get("/api/links?period=all")["links"]}
+    assert listed == {"old": 5, "sale": 0}
+    # Every other report's "all" still starts at the first visit, and other periods are as they were.
+    assert get("/api/stats?period=all")["range"]["from"] == "2026-10-07"
+    assert get(f"/api/links/{link}?period=7d")["clicks"] == 0
+    # A visit older than any click wins, as before.
+    rl.store.db.run("UPDATE rl_sessions SET started_at = ? WHERE site = 'default'", [NOW - 400 * DAY])
+    assert get(f"/api/links/{link}?period=all")["range"]["from"] == "2025-09-02"

@@ -410,7 +410,7 @@ def test_ten_wrong_passwords_from_one_address_wait(h):
         assert handle(web, req("/login", "POST", headers, body)).status == 401
     held = handle(web, req("/login", "POST", headers, body))
     assert held.status == 429
-    assert "Too many tries. Wait fifteen minutes and try again." in held.text()
+    assert "Too many tries. Try again later." in held.text()
     right = SearchParams({"email": "jon@example.com", "password": "a long password"}).to_string()
     assert handle(web, req("/login", "POST", headers, right)).status == 429, "even the right password waits"
     elsewhere = {**headers, "x-forwarded-for": "203.0.113.10"}

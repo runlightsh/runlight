@@ -79,66 +79,6 @@ def test_the_standalone_server_drops_headers_named_with_underscores_so_none_adds
     assert rl.client_ip(wsgi_request({**seen, "REMOTE_ADDR": "127.0.0.1"})) == "203.0.113.9"
 
 
-def test_a_request_gets_a_thread_once_its_head_and_a_short_body_are_whole() -> None:
-    arrived = cli._arrived
-    head = b"POST /e HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\n"
-    assert not arrived(head[:20], 16384, 16384), "half a head"
-    assert not arrived(head, 16384, 16384), "a head whose short body has not come"
-    assert not arrived(head + b"1234", 16384, 16384)
-    assert arrived(head + b"12345", 16384, 16384)
-    assert arrived(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n", 16384, 16384), "no body to wait for"
-    assert arrived(b"GET / HTTP/1.0\n\n", 16384, 16384)
-    assert arrived(b"POST / HTTP/1.1\r\ncontent-length: 20000\r\n\r\n", 16384, 16384), "a long body is read on its thread"
-    assert arrived(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", 16384, 16384)
-    assert arrived(b"x" * 16384, 16384, 16384), "a head past the most looked at is the handler's to refuse"
-    # A length inside the body is not the head's.
-    assert arrived(b"POST / HTTP/1.1\r\nHost: a\r\n\r\nContent-Length: 5\r\n", 16384, 16384)
-
-
-def test_a_body_sent_a_few_bytes_at_a_time_loses_its_thread_within_seconds_however_long_it_says_it_is() -> None:
-    import select
-
-    read: list[bytes] = []
-
-    class Handler(cli._QuietHandler):
-        # Far past the test: only the pace can end the request.
-        timeout = 20
-        request_seconds = 30.0
-        grace_seconds = 0.3
-        pace = 4096
-
-    def echo(environ: Any, start_response: Any) -> list[bytes]:
-        body = environ["wsgi.input"].read(int(environ.get("CONTENT_LENGTH") or 0))
-        read.append(body)
-        start_response("200 OK", [("content-type", "text/plain")])
-        return [b"read"]
-
-    httpd = _serve(echo, Handler)
-    port = httpd.server_address[1]
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
-            slow.sendall(b"POST / HTTP/1.0\r\nContent-Length: 1000000\r\n\r\n")
-            started = time.monotonic()
-            try:
-                while not select.select([slow], [], [], 0.05)[0] and time.monotonic() - started < 5:
-                    slow.sendall(b"x")
-                answer = slow.makefile("rb").read()
-            except (ConnectionResetError, BrokenPipeError):
-                # A byte sent after the server hung up: hung up all the same.
-                answer = b""
-            assert answer == b"" or answer.startswith(b"HTTP/1.0 500")
-            assert time.monotonic() - started < 3, "cut off by its pace, long before the deadline"
-        assert read == []
-        # One that keeps the pace is read whole.
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as quick:
-            quick.sendall(b"POST / HTTP/1.0\r\nContent-Length: 40000\r\n\r\n" + b"y" * 40000)
-            assert quick.makefile("rb").read().endswith(b"read")
-        assert read == [b"y" * 40000]
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
 # The adapters.
 
 

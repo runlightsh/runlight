@@ -1485,6 +1485,12 @@ class SqlStore:
         rows = self.db.all("SELECT MIN(started_at) AS t FROM rl_sessions WHERE site = ?", [site])
         return _time(rows[0] if rows else None)
 
+    def first_click(self, site: str) -> int | float | None:
+        """When the site's oldest short link click was, or None with none. Clicks imported as daily counts belong to
+        no visit, so the short link reports look here as well as at the first visit."""
+        rows = self.db.all("SELECT MIN(ts) AS t FROM rl_events WHERE site = ? AND kind = 'click'", [site])
+        return _time(rows[0] if rows else None)
+
     def visitors(self, query: dict[str, Any]) -> int | float:
         """Just the visitor count from stats(), in one query, for conversion rates."""
         # Built days add up their visitors, as the stats do.

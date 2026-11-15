@@ -223,7 +223,7 @@ def create_server(options: Mapping[str, Any] | None = None, **kwargs: Any) -> Ru
 
 def wsgi_app(server: RunlightServer) -> Callable[..., Any]:
     """The server as a WSGI app, for gunicorn or any WSGI server."""
-    from ..serve import too_large
+    from ..serve import BodyTooSlow, too_large, too_slow
     from ..wsgi import BodyTooLarge, _After, send, to_request
 
     def application(environ: Mapping[str, Any], start_response: Callable[..., Any]) -> Any:
@@ -232,6 +232,8 @@ def wsgi_app(server: RunlightServer) -> Callable[..., Any]:
             request = to_request(environ)
         except BodyTooLarge:
             return send(too_large(), start_response, head)
+        except BodyTooSlow:
+            return send(too_slow(), start_response, head)
         return _After(send(server.handle(request), start_response, head), server.runlight.idle)
 
     return application

@@ -18,6 +18,12 @@ The middleware answers the dashboard and API under /runlight, short links at /go
 domain added in Settings (which must be in ALLOWED_HOSTS), before Django's URLs, and records page requests from known
 AI agents. A slug with no link goes on to Django's URLs, so the project's own 404 page answers it. The URL is Django's (request.scheme, so SECURE_PROXY_SSL_HEADER applies), and the address is REMOTE_ADDR:
 Runlight reads proxy headers itself, as its trustProxy option says.
+
+A body for one of Runlight's own paths is read for no longer than a minute in all (serve.BODY_SECONDS), and
+answered 408 after it. Under WSGI that is checked as each piece of the body comes from the server, so a server
+whose reads never time out can still be held by a client that stops sending: see runlight.wsgi. Under ASGI,
+Django has read the whole body before any middleware runs, so there the server's own limits are the only ones
+(uvicorn and daphne have none for a slow body: put a proxy that buffers request bodies in front).
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ except ImportError as error:  # pragma: no cover
     raise ImportError("runlight.django needs Django: pip install django") from error
 
 from ..http import Request, Response
-from ..serve import HOP_BY_HOP, Front, body_limit, request_url, too_large
+from ..serve import HOP_BY_HOP, BodyTooSlow, Front, body_limit, read_within, request_url, too_large, too_slow
 
 _lock = threading.Lock()
 _front: Front | None = None
@@ -95,7 +101,7 @@ def to_request(request: Any, with_body: bool = True) -> Request:
             length = 0
         if length > limit:
             raise _TooLarge()
-        body = request.read(limit + 1)
+        body = read_within(request.read, limit + 1)
         if len(body) > limit:
             raise _TooLarge()
     return Request(request_url(request.scheme, request.get_host(), raw), request.method, headers, body, meta.get("REMOTE_ADDR", ""))
@@ -153,6 +159,8 @@ class RunlightMiddleware:
             full = to_request(request)
         except _TooLarge:
             return to_response(too_large())
+        except BodyTooSlow:
+            return to_response(too_slow())
         return self._finish(serving, serving.answer(full), head)
 
     @staticmethod

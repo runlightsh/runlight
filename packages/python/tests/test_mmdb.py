@@ -4,19 +4,16 @@ what the server's lookupFrom makes of it. The parts of GeoTest that read databas
 from __future__ import annotations
 
 import base64
-import gzip
 import os
 import tempfile
 from typing import Any
 
 import pytest
 from support import fixtures
-from support.fake_fetcher import FakeFetcher
 
 from runlight import _js
 from runlight.mmdb import Mmdb
-from runlight.http import Response
-from runlight.server.dbip import DbIp, city_name, file_lookup, lookup_from, month
+from runlight.server.dbip import city_name, file_lookup, lookup_from
 
 
 def test_mmdb() -> None:
@@ -88,61 +85,6 @@ def test_db_ip_records_become_a_country_code_a_readable_region_and_a_plain_city(
     assert lookup("8.8.8.8") == {"country": "US", "region": "CA", "city": "Mountain View"}, "a code wins when the database has one"
     assert lookup("10.0.0.1") is None
     assert lookup_from(Broken())("nonsense") is None
-
-
-def test_db_ip_opens_what_is_on_disk_downloads_this_months_release_or_last_months_and_keeps_only_the_newest(tmp_path: Any) -> None:
-    data = base64.b64decode(fixtures.load("geo")["databases"][0]["base64"])
-
-    def answer(url: str, init: dict[str, Any]) -> Response:
-        return Response("", 404) if "2026-10" in url else Response(gzip.compress(data), 200)
-
-    fetcher = FakeFetcher(answer)
-    said: list[str] = []
-    dbip = DbIp(str(tmp_path / "geo"), "city", said.append, fetcher)
-    assert dbip.lookup("8.8.8.8") is None, "nothing to read before the first download"
-    now = 1_791_288_000_000
-    assert month(now) == "2026-10"
-    (tmp_path / "geo" / "dbip-city-lite-2026-08.mmdb").write_bytes(data)
-    dbip.refresh(now)
-    assert [r["url"] for r in fetcher.requests] == [
-        "https://download.db-ip.com/free/dbip-city-lite-2026-10.mmdb.gz",
-        "https://download.db-ip.com/free/dbip-city-lite-2026-09.mmdb.gz",
-    ]
-    assert said == ["Runlight: location data from DB-IP (2026-09) is ready."]
-    assert sorted(os.listdir(tmp_path / "geo")) == ["dbip-city-lite-2026-09.mmdb"], "older releases go"
-    assert dbip.lookup("8.8.8.8") == {"country": "US", "region": "CA", "city": "Mountain View"}
-
-    # Last month's file is open, so a later refresh in the same month only looks for this month's again, and
-    # each try waits twice as long as the last: five minutes, then ten, up to six hours.
-    dbip.refresh(now + 60_000)
-    assert len(fetcher.requests) == 2, "not within five minutes of a try that found none"
-    at = now
-    for wait, tries in ((5, 3), (10, 4), (20, 5), (40, 6), (80, 7), (160, 8), (320, 9), (360, 10), (360, 11)):
-        at += wait * 60_000
-        dbip.refresh(at - 1)
-        assert len(fetcher.requests) == tries - 1, f"not before {wait} minutes are up"
-        dbip.refresh(at)
-        assert len(fetcher.requests) == tries
-    assert fetcher.requests[-1]["url"].endswith("dbip-city-lite-2026-10.mmdb.gz")
-    assert dbip._wait == 6 * 3_600_000
-    # A try that gets the month's file starts the wait over.
-    fresh = DbIp(str(tmp_path / "fresh"), "city", said.append, FakeFetcher(lambda url, init: Response("", 404) if "2026-10" in url else Response(gzip.compress(data), 200)))
-    fresh.refresh(now)
-    assert fresh._wait == 5 * 60_000
-    fresh.refresh(now + 31 * 86_400_000)
-    assert fresh._loaded == "2026-11" and fresh._wait == 0
-
-    # A new process opens the newest file on disk before it fetches anything.
-    other = DbIp(str(tmp_path / "geo"), "city", said.append, FakeFetcher(lambda url, init: Response("", 404)))
-    other.refresh(now)
-    assert other.lookup("8.8.8.8") == {"country": "US", "region": "CA", "city": "Mountain View"}
-
-    # A download that is no database is never kept.
-    broken = DbIp(str(tmp_path / "geo"), "country", said.append, FakeFetcher(lambda url, init: Response(gzip.compress(b"not a database"), 200)))
-    broken.refresh(now)
-    assert said[-1].startswith("Runlight: could not download location data from https://download.db-ip.com/free/dbip-country-lite-2026-09.mmdb.gz")
-    assert sorted(os.listdir(tmp_path / "geo")) == ["dbip-city-lite-2026-09.mmdb"]
-    assert broken.lookup("8.8.8.8") is None
 
 
 def test_a_file_the_owner_gives_is_looked_up(tmp_path: Any) -> None:

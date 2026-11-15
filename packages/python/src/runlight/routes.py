@@ -781,7 +781,9 @@ class Routes:
     def _query_site(self, url: Url) -> Any:
         return self.rl.site(url.search_params.get("site")) or coded("Unknown site", "unknown_site", 404)
 
-    def _read_query(self, url: Url, site: Mapping[str, Any]) -> Any:
+    def _read_query(self, url: Url, site: Mapping[str, Any], clicks: bool = False) -> Any:
+        """`clicks` is for the short link reports, whose "all" reaches back to the oldest click as well as the
+        oldest visit."""
         from .query import MAX_FILTERS, parse_filter
         from .time import compare_range, local_date, resolve_range
 
@@ -797,7 +799,10 @@ class Routes:
         now = self.rl.now()
         first_date = None
         if params.get("period") == "all":
-            first = self.rl.store.first_seen(site["id"])
+            seen = self.rl.store.first_seen(site["id"])
+            # Clicks imported as daily counts belong to no visit, and may be older than any.
+            clicked = self.rl.store.first_click(site["id"]) if clicks else None
+            first = clicked if seen is None else seen if clicked is None else min(seen, clicked)
             if first is not None:
                 first_date = local_date(first, site["timezone"])
         range_ = resolve_range(
@@ -912,7 +917,7 @@ class Routes:
 
             if path == "/api/links":
                 if method == "GET":
-                    read = self._read_query(url, site)
+                    read = self._read_query(url, site, True)
                     if isinstance(read, Response):
                         return read
                     links = store.links(site["id"], read["range"]["from"], read["range"]["to"])
@@ -982,7 +987,7 @@ class Routes:
                     link = store.link_by_id(id_)
                     if not link or link["site"] != site["id"]:
                         return coded("Unknown link", "unknown_link", 404)
-                    read = self._read_query(url, site)
+                    read = self._read_query(url, site, True)
                     if isinstance(read, Response):
                         return read
                     range_ = read["range"]

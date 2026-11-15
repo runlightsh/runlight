@@ -48,6 +48,17 @@ A `token` passed to `rl.routes()` works the same way. `None` counts as not given
 
 The [Python guide](https://runlight.sh/docs/python/) has the code for Django, FastAPI, and plain WSGI or ASGI apps, the Postgres, MySQL, and MariaDB stores, the scheduled check, and the standalone server.
 
+## Slow request bodies
+
+A client that sends a request body slowly, or says how long it is and then stops, is given up on wherever Runlight reads the body: after a minute in all the answer is 408 and the connection is closed.
+
+- The standalone server (`runlight`) reads every request on one thread before it gets a worker, so a slow body never takes one. The head has 10 seconds; the body then has 60 seconds in all and must keep up 8 KB a second after its first 5 seconds. A body with no `Content-Length` is answered 411.
+- Under ASGI (FastAPI, Starlette, and any ASGI app through `runlight.asgi`) the minute holds whatever the server does, for Runlight's own paths.
+- Under WSGI (Flask, Django, and any WSGI app through `runlight.wsgi`) the minute is checked each time the server hands over a piece of the body. A server whose reads never time out can still be held by a client that stops sending: gunicorn's sync worker ends such a request itself after its `--timeout`, but its gthread and gevent workers, and uWSGI without `socket-timeout` or `harakiri`, do not.
+- Django under ASGI reads the whole body before any middleware runs, and your app's own routes read their bodies themselves, so there the limits are the server's.
+
+For the last two, put a proxy that buffers request bodies in front (nginx does by default), or set the server's own timeout.
+
 ## License
 
 Runlight is MIT licensed.

@@ -11,6 +11,14 @@ a slug with no link included, so the app's own 404 page answers it, and a page f
 recorded on the way (observe=False turns that off). Without an app, anything else is a 404.
 The work a request starts after answering (a retention change's deletions) runs once the answer is sent.
 
+A request's body is read here only for Runlight's own paths, no further than the path may take (413 past it) and
+for no longer than a minute in all (serve.BODY_SECONDS; 408 after it), so a body that drips in is given up on. The
+clock is looked at each time a piece of the body comes, which is as often as the server's input hands pieces over:
+a server whose reads wait with no timeout of their own (gunicorn's gthread and gevent workers, uWSGI without
+socket-timeout or harakiri) can still be held by a client that stops sending, and so can the app's own views,
+which Runlight never sees. Set that server's timeout, or put a proxy that buffers request bodies in front (nginx
+does unless told otherwise); gunicorn's sync worker ends such a request itself after its --timeout.
+
 WSGI names a header by putting underscores for its dashes, so a server that passes on a header named
 X_Forwarded_For gives it in the same place as X-Forwarded-For, and a client could then add to the address a proxy in
 front wrote. gunicorn, Django's own server, and Runlight's standalone server drop such headers; with another server
@@ -25,7 +33,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from .http import Request, Response
-from .serve import HOP_BY_HOP, UNSUPPORTED, Front, body_limit, header_pairs, request_url, too_large
+from .serve import HOP_BY_HOP, UNSUPPORTED, BodyTooSlow, Front, body_limit, header_pairs, read_within, request_url, too_large, too_slow
 
 WsgiApp = Callable[[Mapping[str, Any], Callable[..., Any]], Iterable[bytes]]
 
@@ -95,7 +103,16 @@ def _text(value: Any) -> str:
         return text
 
 
+def _reader(stream: Any) -> Callable[[int], bytes]:
+    """How a body is read a piece at a time: what has come so far where the stream can give it (read1), so the
+    clock is looked at as the body arrives, else read(n), which waits for all n."""
+    read1 = getattr(stream, "read1", None)
+    return read1 if callable(read1) else stream.read
+
+
 def _read_body(environ: Mapping[str, Any], limit: int) -> bytes:
+    """The body, read no further than `limit` (BodyTooLarge past it) and for no longer than serve.BODY_SECONDS in
+    all (BodyTooSlow)."""
     stream = environ.get("wsgi.input")
     if stream is None:
         return b""
@@ -107,9 +124,9 @@ def _read_body(environ: Mapping[str, Any], limit: int) -> bytes:
             size = 0
         if size > limit:
             raise BodyTooLarge()
-        return stream.read(size) if size > 0 else b""
+        return read_within(_reader(stream), size) if size > 0 else b""
     if environ.get("wsgi.input_terminated") or "chunked" in str(environ.get("HTTP_TRANSFER_ENCODING", "")).lower():
-        data = stream.read(limit + 1)
+        data = read_within(_reader(stream), limit + 1)
         if len(data) > limit:
             raise BodyTooLarge()
         return data
@@ -191,6 +208,8 @@ class RunlightMiddleware:
             request = to_request(environ)
         except BodyTooLarge:
             return send(too_large(), start_response, head)
+        except BodyTooSlow:
+            return send(too_slow(), start_response, head)
         response = self.front.answer(request)
         return _After(send(response, start_response, head), self.runlight.idle)
 

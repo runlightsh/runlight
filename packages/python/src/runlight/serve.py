@@ -39,6 +39,44 @@ def too_large() -> Response:
     )
 
 
+# How long a request's body has to arrive, in all, where Runlight reads it: however steadily it comes.
+BODY_SECONDS = 60.0
+
+
+class BodyTooSlow(Exception):
+    """A body that did not arrive in time, answered with 408."""
+
+
+def too_slow() -> Response:
+    """A body that took too long to arrive, answered 408 with nothing more, as Node's own server answers one, and
+    the connection closed: what is left of the body is still on its way."""
+    return Response("", 408, {"connection": "close"})
+
+
+def read_within(read: Any, size: int, seconds: float | None = None) -> bytes:
+    """Up to `size` bytes of a body from `read(n)`, a piece at a time, stopping at its end. Raises BodyTooSlow once
+    `seconds` (BODY_SECONDS when left out) have passed, or when a read itself times out, so a body sent a little
+    at a time is given up on however steadily it comes. The clock is looked at between pieces: a read that blocks
+    with no timeout of its own is the server's to end (see the adapters' notes)."""
+    import time
+
+    until = time.monotonic() + (BODY_SECONDS if seconds is None else seconds)
+    pieces: list[bytes] = []
+    left = size
+    while left > 0:
+        try:
+            piece = read(min(left, 65536))
+        except TimeoutError:
+            raise BodyTooSlow() from None
+        if not piece:
+            break
+        pieces.append(piece)
+        left -= len(piece)
+        if left > 0 and time.monotonic() > until:
+            raise BodyTooSlow()
+    return b"".join(pieces)
+
+
 def internal_error() -> Response:
     return Response(
         _js.dumps({"error": "Internal error", "code": "internal"}),

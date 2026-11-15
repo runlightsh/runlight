@@ -39,6 +39,8 @@ class Mmdb:
         at = self._read(tail_start, self._size - tail_start).rfind(_METADATA_MARKER)
         if at < 0:
             raise ValueError("Not a MaxMind DB file: no metadata")
+        # Where the metadata's marker is: everything the search tree and the records hold comes before it.
+        self.marker_at = tail_start + at
         start = tail_start + at + len(_METADATA_MARKER)
         metadata, _ = self._decode(start, start)
         if not isinstance(metadata, dict) or not all(k in metadata for k in ("node_count", "record_size", "ip_version")):
