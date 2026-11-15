@@ -12,6 +12,7 @@
 //   node scripts/go-idna.mjs [--check]
 import { readFileSync, writeFileSync } from "node:fs";
 import { domainToUnicode } from "node:url";
+import { skipped } from "./node-data.mjs";
 
 const hex = (cp) => cp.toString(16);
 const text = (cp) => String.fromCodePoint(cp);
@@ -127,7 +128,7 @@ const file = new URL("../packages/go/internal/whatwg/idna.json", import.meta.url
 if (process.argv.includes("--check")) {
   const old = readFileSync(file, "utf8");
   if (JSON.parse(old).unicode !== process.versions.unicode) {
-    console.log(`idna.json was written from Unicode ${JSON.parse(old).unicode}, this Node has ${process.versions.unicode}`);
+    skipped("go-idna", "Unicode", JSON.parse(old).unicode, process.versions.unicode);
   } else if (old !== out) {
     console.error("packages/go/internal/whatwg/idna.json is stale: run node scripts/go-idna.mjs");
     process.exit(1);

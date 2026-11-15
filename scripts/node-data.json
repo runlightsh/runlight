@@ -1,0 +1,54 @@
+{
+  "conformance-url": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "java-collation": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "java-intl": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-agents": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-ai": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-core": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-core2": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-outbound": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-routes": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "php-fixtures-store": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "python-fixtures-crypto": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "python-fixtures-reports": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  },
+  "rust-fixtures-reports": {
+    "icu": "78.2",
+    "unicode": "17.0"
+  }
+}

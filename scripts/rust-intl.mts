@@ -5,6 +5,7 @@
 // is a currency written as its code where the language writes an unknown code. Run with Node 24 (ICU 78)
 // after a Node upgrade; with --check it only says whether the file is current.
 import { readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 import { ENGLISH, LOCALES } from "../packages/sdk/src/generated/dashboard.ts";
 
 const file = new URL("../packages/rust/runlight/assets/intl.json", import.meta.url);
@@ -71,7 +72,7 @@ try {
   written = JSON.parse(current ?? "").icu;
 } catch {}
 if (process.argv.includes("--check") && typeof written === "string" && written !== process.versions.icu) {
-  console.log(`rust-intl: intl.json was written from ICU ${written}, this Node has ${process.versions.icu}`);
+  skipped("rust-intl", "ICU", written, process.versions.icu);
 } else if (process.argv.includes("--check")) {
   if (current !== text) {
     console.error("rust-intl: packages/rust/runlight/assets/intl.json is stale. Run node --import tsx scripts/rust-intl.mts");

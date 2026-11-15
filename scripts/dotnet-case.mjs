@@ -5,8 +5,13 @@
 // "SS", which .NET's simple mappings leave alone). The one context-sensitive
 // rule, a final capital sigma, is applied in Js.cs.
 //
-//   node scripts/dotnet-case.mjs
-import { writeFileSync } from "node:fs";
+//   node scripts/dotnet-case.mjs [--check]
+//
+// With --check it writes nothing and fails if the file is stale. The second
+// line names the Node that wrote it, so it is left out of the comparison,
+// and the tables are compared only on the Unicode release that wrote them.
+import { readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 
 function table(map) {
   const rows = [];
@@ -50,5 +55,23 @@ const out = [
   "}",
   "",
 ];
-writeFileSync(new URL("../packages/dotnet/src/Runlight/CaseTables.cs", import.meta.url), out.join("\n"));
-console.log(`${lower.length} lower and ${upper.length} upper mappings written`);
+const file = new URL("../packages/dotnet/src/Runlight/CaseTables.cs", import.meta.url);
+if (process.argv.includes("--check")) {
+  let current = "";
+  try {
+    current = readFileSync(file, "utf8");
+  } catch {}
+  const written = /^\/\/ From Node \S+ \(ICU \S+, Unicode ([^)]+)\)\.$/m.exec(current)?.[1];
+  const tables = (text) => text.split("\n").filter((_, i) => i !== 1).join("\n");
+  if (written && written !== process.versions.unicode) {
+    skipped("dotnet-case", "Unicode", written, process.versions.unicode);
+  } else if (tables(current) !== tables(out.join("\n"))) {
+    console.error("dotnet-case: packages/dotnet/src/Runlight/CaseTables.cs is stale. Run node scripts/dotnet-case.mjs");
+    process.exit(1);
+  } else {
+    console.log("dotnet-case: up to date");
+  }
+} else {
+  writeFileSync(file, out.join("\n"));
+  console.log(`${lower.length} lower and ${upper.length} upper mappings written`);
+}

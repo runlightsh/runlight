@@ -11,6 +11,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { record, recorded, skipped } from "./node-data.mjs";
 
 const LANGS = ["en", "de", "es", "fr", "pt"];
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -112,6 +113,13 @@ const files: Array<[URL, string]> = [
 ];
 
 const check = process.argv.includes("--check");
+// Another ICU (CI's Node, say) writes other data, so only the ICU that wrote the files compares them, as
+// scripts/python-intl.mts does. These files do not say which wrote them; scripts/node-data.json does.
+const writtenFrom = recorded("java-intl")?.icu;
+if (check && typeof writtenFrom === "string" && writtenFrom !== process.versions.icu) {
+  skipped("java-intl", "ICU", writtenFrom, process.versions.icu);
+  process.exit(0);
+}
 const stale: string[] = [];
 for (const [file, text] of files) {
   let current: string | null = null;
@@ -129,4 +137,5 @@ if (stale.length) {
   console.error(`java-intl: ${stale.join(", ")} stale. Run node --import tsx scripts/java-intl.mts (on Node ${process.versions.node}, ICU ${process.versions.icu})`);
   process.exit(1);
 }
+if (!check) record("java-intl");
 console.log(check ? "java-intl: up to date" : "java-intl: written");

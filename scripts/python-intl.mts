@@ -8,6 +8,7 @@
  * Run from the repo root: node --import tsx scripts/python-intl.mts [--check]
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 
 const LANGS = ["en", "de", "es", "fr", "pt"];
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -120,7 +121,7 @@ if (process.argv.includes("--check")) {
     icu = JSON.parse(read(files[0]![0]) ?? "").icu;
   } catch {}
   if (typeof icu === "string" && icu !== process.versions.icu) {
-    console.log(`python-intl: the data was written from ICU ${icu}, this Node has ${process.versions.icu}`);
+    skipped("python-intl", "ICU", icu, process.versions.icu);
     process.exit(0);
   }
   const stale = files.filter(([file, text]) => read(file) !== text).map(([file]) => file.pathname);

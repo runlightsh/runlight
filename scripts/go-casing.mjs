@@ -4,6 +4,7 @@
 // Unicode version Go was built with. Run with Node 24:
 //   node scripts/go-casing.mjs [--check]
 import { readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 
 const lower = {};
 const upper = {};
@@ -21,7 +22,7 @@ const file = new URL("../packages/go/internal/js/casing.json", import.meta.url);
 if (process.argv.includes("--check")) {
   const old = readFileSync(file, "utf8");
   if (JSON.parse(old).unicode !== process.versions.unicode) {
-    console.log(`casing.json was written from Unicode ${JSON.parse(old).unicode}, this Node has ${process.versions.unicode}`);
+    skipped("go-casing", "Unicode", JSON.parse(old).unicode, process.versions.unicode);
   } else if (old !== text) {
     console.error("packages/go/internal/js/casing.json is stale: run node scripts/go-casing.mjs");
     process.exit(1);

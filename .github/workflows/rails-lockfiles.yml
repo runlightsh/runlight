@@ -1,0 +1,118 @@
+# The three Rails test apps' lockfiles (packages/ruby/test/rails/gemfiles/
+# rails_*.gemfile.lock) are what ruby.yml installs, and Dependabot cannot
+# keep them current: it reads a folder's Gemfile or gems.rb and nothing by
+# another name. So once a week this resolves each of them again
+# (bundle lock --update) and, when one moved, opens a pull request from the
+# branch rails-lockfiles, or updates the one already open.
+#
+# Two jobs, as in dependabot-rebuild.yml. "lock" evaluates the Gemfiles and
+# resolves with a read-only token, installs no gem, and hands over a patch;
+# "pull-request" applies it only if it touches those three lockfiles and
+# nothing else, and holds the token that can push the branch and open the
+# pull request.
+#
+# Stays off until the repository variable RAILS_LOCKFILES_ENABLED is "true".
+# Before that, in Settings, Actions, General, Workflow permissions, tick
+# "Allow GitHub Actions to create and approve pull requests", or the last
+# step fails. A pull request the workflow's own token opens does not start
+# CI by itself: close it and open it again to run the checks, then merge it
+# like any other.
+name: Rails lockfiles
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rails-lockfiles
+  cancel-in-progress: false
+
+jobs:
+  lock:
+    if: vars.RAILS_LOCKFILES_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      base: ${{ steps.diff.outputs.base }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The newest Ruby ruby.yml tests the Rails apps on. No gems are installed: resolving needs none.
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: false
+      - name: bundle lock --update, for each Rails series
+        working-directory: packages/ruby
+        run: |
+          for gemfile in test/rails/gemfiles/*.gemfile; do
+            echo "== $gemfile"
+            BUNDLE_GEMFILE="$gemfile" bundle lock --update
+          done
+      - name: Patch of what moved
+        id: diff
+        run: |
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git diff --binary > lockfiles.patch
+          if [ -s lockfiles.patch ]; then
+            git diff --stat
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The lockfiles are up to date."
+          fi
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lockfiles
+          path: lockfiles.patch
+          retention-days: 1
+
+  pull-request:
+    needs: lock
+    if: needs.lock.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.lock.outputs.base }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lockfiles
+          path: ${{ runner.temp }}
+      - name: Apply, if it touches the lockfiles only, and open the pull request
+        env:
+          PATCH: ${{ runner.temp }}/lockfiles.patch
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: rails-lockfiles
+        run: |
+          allowed='^packages/ruby/test/rails/gemfiles/rails_[0-9]+_[0-9]+\.gemfile\.lock$'
+          bad="$(git apply --numstat "$PATCH" | cut -f3 | grep -Ev "$allowed" || true)"
+          if [ -n "$bad" ]; then
+            echo "The update touched files that are not the Rails lockfiles:"
+            echo "$bad"
+            exit 1
+          fi
+          git apply --index "$PATCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update the Rails test apps' lockfiles"
+          # The branch is this run's commit on top of main, whatever an earlier run left there.
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "The pull request from $BRANCH is already open, and now holds this update."
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "Update the Rails test apps' lockfiles" \
+              --body "The weekly \`bundle lock --update\` of packages/ruby/test/rails/gemfiles, by .github/workflows/rails-lockfiles.yml. Dependabot cannot read these files, so this stands in for it. Close and reopen this pull request to start CI on it."
+          fi

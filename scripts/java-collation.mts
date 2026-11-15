@@ -11,6 +11,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { record, recorded, skipped } from "./node-data.mjs";
 
 const MARKS = [0x301, 0x300, 0x306, 0x302, 0x30c, 0x30a, 0x308, 0x30b, 0x303, 0x307, 0x327, 0x328, 0x304, 0x309, 0x30f, 0x311, 0x31b, 0x323, 0x324, 0x325, 0x326, 0x32d, 0x32e, 0x330, 0x331].map((c) => String.fromCodePoint(c));
 
@@ -81,7 +82,12 @@ for (const a of models) for (const b of models) if (a !== b) add(a, b);
 
 const file = fileURLToPath(new URL("../packages/java/runlight/src/test/resources/sh/runlight/collation.json", import.meta.url));
 const out = `[\n${pairs.map((p) => JSON.stringify(p)).join(",\n")}\n]\n`;
-if (process.argv.includes("--check")) {
+// Another ICU orders some strings otherwise, so only the ICU that wrote the file compares it, as
+// scripts/java-intl.mts does. The file does not say which wrote it; scripts/node-data.json does.
+const writtenFrom = recorded("java-collation")?.icu;
+if (process.argv.includes("--check") && typeof writtenFrom === "string" && writtenFrom !== process.versions.icu) {
+  skipped("java-collation", "ICU", writtenFrom, process.versions.icu);
+} else if (process.argv.includes("--check")) {
   let current = "";
   try {
     current = readFileSync(file, "utf8");
@@ -96,5 +102,6 @@ if (process.argv.includes("--check")) {
 } else {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, out);
+  record("java-collation");
   console.log(`wrote ${pairs.length} pairs to ${file}`);
 }

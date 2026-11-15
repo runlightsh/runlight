@@ -1,7 +1,11 @@
 # Every push and pull request: the dash check (files and commit messages),
 # typecheck, the tests against SQLite, Postgres, and MySQL or MariaDB, and a
 # build, on the two Node majors better-sqlite3 13 supports. The PHP package's
-# tests run in a job of their own, on PHP 8.2 and 8.4.
+# tests run in a job of their own, on PHP 8.2 and 8.4, and the WordPress and
+# Drupal plugins are parsed on the oldest PHP each says it runs on. On the
+# Node 24 leg, `npm run check` also runs every fixture generator with --check
+# (scripts/check-fixtures.mjs), so a fixture the ports replay cannot fall
+# behind the TypeScript that writes it.
 name: CI
 
 on:
@@ -166,6 +170,53 @@ jobs:
       - run: composer validate --strict
       - run: composer install --no-interaction --no-progress
       - run: vendor/bin/phpunit
+
+  # The plugins' own PHP runs above on PHP 8.4 alone, so each is also parsed
+  # (php -l) on the oldest PHP it says it runs on: WordPress on 8.1 (Requires
+  # PHP in its header and readme), Drupal on 8.2 (its composer.json). Syntax
+  # from a later PHP is a parse error there, on every page of the site. The
+  # Craft plugin is loaded on its floor in the job below.
+  plugins-floor:
+    name: plugins-floor (${{ matrix.dir }}, PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: plugins/wordpress
+            php: "8.1"
+          - dir: plugins/drupal
+            php: "8.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+      - name: php -l over every PHP file
+        env:
+          DIR: ${{ matrix.dir }}
+          PHP: ${{ matrix.php }}
+        run: |
+          case "$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')" in
+            "$PHP") ;;
+            *) echo "this is PHP $(php -r 'echo PHP_VERSION;'), not $PHP"; exit 1 ;;
+          esac
+          count=0
+          failed=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! out="$(php -l "$file" 2>&1)"; then
+              echo "$out"
+              failed=1
+            fi
+          done < <(find "$DIR" -type f \( -name '*.php' -o -name '*.module' -o -name '*.install' -o -name '*.inc' -o -name '*.theme' \) -not -path '*/vendor/*' -print0)
+          if [ "$count" -eq 0 ]; then echo "no PHP files under $DIR"; exit 1; fi
+          echo "$count files parsed on PHP $PHP"
+          exit "$failed"
 
   # The Craft plugin has no database to run against here, so each of its
   # classes is loaded against a real Craft install, on the oldest PHP and the

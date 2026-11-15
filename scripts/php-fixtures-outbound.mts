@@ -3,7 +3,7 @@
 // packages/php/tests/fixtures/outbound.json, so the PHP port's tests can require the very same requests.
 // Run with: TZ=UTC node --import tsx scripts/php-fixtures-outbound.mts
 import { createCipheriv, createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import { createServer } from "node:net";
 import { mock } from "node:test";
 import { iconLinks } from "../packages/sdk/src/icon.ts";
@@ -415,5 +415,6 @@ for (const s of scenarios) {
 }
 
 const out = new URL("../packages/php/tests/fixtures/outbound.json", import.meta.url);
-writeFileSync(out, `${JSON.stringify({ note: "Written by scripts/php-fixtures-outbound.mts from the TypeScript SDK. Do not edit.", now: NOW, mail: mailCases, replies: replies.map((reply) => ({ reply, message: serviceMessage(reply) })), signatures, mimes, smtp, sealed, ips, icons, importers }, null, 1)}\n`);
+// The sealed secrets carry an IV drawn at random, so they differ on every run.
+emit(out, `${JSON.stringify({ note: "Written by scripts/php-fixtures-outbound.mts from the TypeScript SDK. Do not edit.", now: NOW, mail: mailCases, replies: replies.map((reply) => ({ reply, message: serviceMessage(reply) })), signatures, mimes, smtp, sealed, ips, icons, importers }, null, 1)}\n`, { random: ["sealed"] });
 console.log(`Wrote ${out.pathname}`);

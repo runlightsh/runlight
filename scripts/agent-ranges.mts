@@ -1,16 +1,22 @@
 // Downloads the address lists AI companies publish for their agents and writes them to
 // packages/sdk/src/data/agent-ranges.ts, the copy every install starts from. Run before a release,
-// then npm run build (the language ports copy the lists from there) and npm run conformance.
+// then npm run build (the language ports copy the lists from there) and npm run conformance. A list with an
+// entry wider than scripts/prefix-bound.mjs allows stops the run before anything is written.
 //   node --import tsx scripts/agent-ranges.mts
 import { writeFileSync } from "node:fs";
 import { AI_AGENTS } from "../packages/sdk/src/data/agents.ts";
 import { downloadRangeList } from "../packages/sdk/src/agentcheck.ts";
+import { refusedPrefixes } from "./prefix-bound.mjs";
 
 const urls = [...new Set(AI_AGENTS.map((a) => a.ranges).filter((u): u is string => Boolean(u)))].sort();
 const lists: Record<string, string[]> = {};
 for (const url of urls) {
   const prefixes = await downloadRangeList(url);
   if (!prefixes) throw new Error(`Could not read ${url}`);
+  if (prefixes.length === 0) throw new Error(`${url} lists no prefixes; the copy in the repository is left as it is`);
+  // Nothing is written when any list holds an entry too wide to be an agent's (scripts/prefix-bound.mjs).
+  const refused = refusedPrefixes(prefixes);
+  if (refused.length > 0) throw new Error(`${url} is not taken:\n  ${refused.join("\n  ")}`);
   lists[url] = prefixes;
   console.log(`${url}: ${prefixes.length}`);
 }

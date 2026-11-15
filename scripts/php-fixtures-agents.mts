@@ -1,7 +1,7 @@
 // Runs the Node server's access log parser over many lines and writes what parseLine and agentFetch
 // return to packages/php/tests/fixtures/agents.json, so the PHP port's tests can require the same reading.
 // Run with: TZ=UTC node --import tsx scripts/php-fixtures-agents.mts
-import { writeFileSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import { mock } from "node:test";
 import { agentFetch, parseLine } from "../packages/server/src/agents.ts";
 
@@ -91,5 +91,5 @@ const cases = lines.flatMap((text) =>
   }),
 );
 
-writeFileSync(new URL("../packages/php/tests/fixtures/agents.json", import.meta.url), `${JSON.stringify({ now: NOW, cases }, null, 2)}\n`);
+emit(new URL("../packages/php/tests/fixtures/agents.json", import.meta.url), `${JSON.stringify({ now: NOW, cases }, null, 2)}\n`);
 console.log(`Wrote ${cases.length} cases.`);

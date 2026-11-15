@@ -5,6 +5,7 @@
  * "Release <version>" and tags v<version>. It never pushes or publishes; it
  * prints those commands. It fetches the branch first and refuses unless HEAD
  * is exactly origin's, and the tag is on neither this clone nor origin.
+ * (A dry run reads origin's branch without moving origin/<branch> here.)
  *
  *   node scripts/release.mjs <version> [options]
  *   npm run release -- <version> [options]
@@ -152,6 +153,8 @@ const ROOT_CHANGELOG = "CHANGELOG.md";
  * behind a wait for CI to pass on the release commit.
  */
 export const PUBLISH = [
+  // Each package's prepublishOnly (scripts/prepublish.mjs) refuses unless HEAD is the release's tag with a clean
+  // tree, and builds again from it, so what npm takes is the tagged commit's build.
   { dir: "packages/sdk", byHand: () => ["npm publish --workspace packages/sdk --access public"] },
   // The server requires the SDK at exactly this release, so the SDK goes first.
   { dir: "packages/server", byHand: () => ["npm publish --workspace packages/server --access public"], workflows: (v) => [
@@ -363,24 +366,27 @@ function strays(current) {
  * Why the release cannot go on top of origin, or null when it can: the
  * branch is fetched and HEAD must be exactly origin's, so the release commit
  * is the only new commit the push carries, and the tag must not be on origin
- * already.
+ * already. A dry run writes nothing, so it reads origin's branch into
+ * FETCH_HEAD alone (an empty --refmap keeps git from moving origin/<branch>
+ * as it would for a fetch by name); a release moves origin/<branch> itself.
  */
-function remoteProblem(branch, tag) {
+function remoteProblem(branch, tag, dryRun) {
   try {
     git("remote", "get-url", "origin");
   } catch {
     return "there is no remote named origin to release to";
   }
   try {
-    git("fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+    if (dryRun) git("fetch", "--quiet", "--no-tags", "--refmap=", "origin", `refs/heads/${branch}`);
+    else git("fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
   } catch (error) {
     return `could not fetch ${branch} from origin: ${String(error.stderr ?? error.message).trim()}`;
   }
   const head = git("rev-parse", "HEAD");
-  const upstream = git("rev-parse", `refs/remotes/origin/${branch}`);
+  const upstream = git("rev-parse", dryRun ? "FETCH_HEAD" : `refs/remotes/origin/${branch}`);
   if (head !== upstream) {
-    const behind = git("rev-list", "--count", `HEAD..refs/remotes/origin/${branch}`);
-    const ahead = git("rev-list", "--count", `refs/remotes/origin/${branch}..HEAD`);
+    const behind = git("rev-list", "--count", `HEAD..${upstream}`);
+    const ahead = git("rev-list", "--count", `${upstream}..HEAD`);
     return `${branch} is ${ahead} commit(s) ahead of and ${behind} behind origin/${branch}; release from exactly what origin has (pull, or push and let CI pass, first)`;
   }
   let remoteTag;
@@ -418,6 +424,31 @@ function run(label, cmd, args, opts = {}) {
   if (result.status !== 0) {
     fail(`${label} failed. Nothing is committed; the working tree holds the bump so far (\`git restore .\` drops it).`);
   }
+}
+
+/**
+ * Makes the release commit from what is staged, then its tag, with `exec`
+ * (a command and its arguments; it throws when the command fails). Returns
+ * null when both are made, or what to tell the person: a failed commit
+ * leaves the bump staged, and a failed tag leaves the commit untagged, which
+ * a second run of the release would refuse (the version is already the
+ * current one), so each says how to finish by hand and how to go back.
+ */
+export function commitAndTag({ next, tag, branch }, exec) {
+  const commit = `git commit -m "Release ${next}"`;
+  const tagIt = `git tag -a ${tag} -m "Release ${next}"`;
+  const why = (error) => String(error?.stderr || error?.message || error).trim();
+  try {
+    exec("git", ["commit", "-m", `Release ${next}`]);
+  } catch (error) {
+    return `the commit failed (${why(error)}). Nothing is committed or tagged, and the bump is staged.\n  To finish by hand, fix what stopped it, then: ${commit} && ${tagIt}\n  To go back: git restore --staged . && git restore .`;
+  }
+  try {
+    exec("git", ["tag", "-a", tag, "-m", `Release ${next}`]);
+  } catch (error) {
+    return `"Release ${next}" is committed, but the tag was not made (${why(error)}). Do not run the release again: it would refuse ${next} as already the current version.\n  To finish by hand: ${tagIt}\n  To go back: git reset --hard origin/${branch}`;
+  }
+  return null;
 }
 
 /** Run as a script (not imported by its tests): cut the release. */
@@ -468,11 +499,13 @@ function main() {
     if (!result.written) console.log(`Note: ${file} has no ${heading} section, so the release adds a placeholder changelog entry; edit it before tagging, or write the notes under ${heading} next time.\n`);
   }
 
-  const remote = remoteProblem(options.branch, tag);
+  const remote = remoteProblem(options.branch, tag, options.dryRun);
   if (remote) fail(remote);
 
   const php = hasPhpZip();
   const zipDir = options.dryRun ? path.join(os.tmpdir(), "runlight-wordpress-XXXXXX") : mkdtempSync(path.join(os.tmpdir(), "runlight-wordpress-"));
+  // However the release ends (a failed step leaves through process.exit), the zip's folder goes with it.
+  if (!options.dryRun) process.on("exit", () => rmSync(zipDir, { recursive: true, force: true }));
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const databases = ["RUNLIGHT_TEST_PG", "RUNLIGHT_TEST_MYSQL"].filter((name) => process.env[name]);
   const steps = [
@@ -522,8 +555,8 @@ function main() {
     }
     if (untracked.length > 0) console.log(`\nLeft out of the commit (untracked):\n${untracked.join("\n")}`);
     git("add", "-u");
-    execFileSync("git", ["commit", "-m", `Release ${next}`], { cwd: ROOT, stdio: "inherit" });
-    git("tag", "-a", tag, "-m", `Release ${next}`);
+    const problem = commitAndTag({ next, tag, branch }, (cmd, args) => execFileSync(cmd, args, { cwd: ROOT, stdio: ["inherit", "inherit", "pipe"], encoding: "utf8" }));
+    if (problem) fail(problem);
     console.log(`\nCommitted "Release ${next}" and tagged ${tag}. Nothing is pushed or published.`);
   }
 
@@ -539,7 +572,6 @@ function main() {
   for (const { byHand } of PUBLISH) for (const command of byHand?.(next) ?? []) console.log(`  ${command}`);
   console.log("  # Once both packages exist on npm, a later release can publish them from a workflow with npm's trusted publishing instead of by hand.");
   console.log(`  # Then move the docs' install lines in runlightsh/runlight-website: npm run versions -- ${next}`);
-  if (!options.dryRun) rmSync(zipDir, { recursive: true, force: true });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

@@ -8,7 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
-import { drupalVersion, minorOf, planEdits, PUBLISH, tableProblems, UNPUBLISHED, untrackedGenerated, UNVERSIONED, VERSIONED } from "./release.mjs";
+import { commitAndTag, drupalVersion, minorOf, planEdits, PUBLISH, tableProblems, UNPUBLISHED, untrackedGenerated, UNVERSIONED, VERSIONED } from "./release.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const readRepo = (file) => readFileSync(path.join(ROOT, file), "utf8");
@@ -95,6 +95,33 @@ test("new files under a regenerated folder are caught, and other untracked files
   const folders = ["packages/php/assets", "packages/go/internal/assets"];
   const untracked = ["packages/php/assets/new.js", "packages/go/internal/assets/x/y.json", "packages/php/assets-old/z", "notes.txt"];
   assert.deepEqual(untrackedGenerated(untracked, folders), ["packages/php/assets/new.js", "packages/go/internal/assets/x/y.json"]);
+});
+
+test("the commit and the tag are made in that order, and a failure of either says how to finish and how to go back", () => {
+  const release = { next: "1.2.3", tag: "v1.2.3", branch: "main" };
+  const calls = [];
+  assert.equal(commitAndTag(release, (cmd, args) => calls.push([cmd, ...args])), null);
+  assert.deepEqual(calls, [["git", "commit", "-m", "Release 1.2.3"], ["git", "tag", "-a", "v1.2.3", "-m", "Release 1.2.3"]]);
+
+  const failing = (step, stderr) => (cmd, args) => {
+    if (args[0] === step) throw Object.assign(new Error("Command failed"), { stderr });
+  };
+  const noCommit = commitAndTag(release, failing("commit", "hook said no\n"));
+  assert.match(noCommit, /the commit failed \(hook said no\)/);
+  assert.match(noCommit, /Nothing is committed or tagged/);
+  assert.match(noCommit, /git commit -m "Release 1\.2\.3" && git tag -a v1\.2\.3 -m "Release 1\.2\.3"/);
+  assert.match(noCommit, /git restore --staged \. && git restore \./);
+
+  const tagged = [];
+  const noTag = commitAndTag(release, (cmd, args) => {
+    tagged.push(args[0]);
+    if (args[0] === "tag") throw Object.assign(new Error("Command failed"), { stderr: "gpg failed to sign the data" });
+  });
+  assert.deepEqual(tagged, ["commit", "tag"]);
+  assert.match(noTag, /"Release 1\.2\.3" is committed, but the tag was not made \(gpg failed to sign the data\)/);
+  assert.match(noTag, /Do not run the release again/);
+  assert.match(noTag, /To finish by hand: git tag -a v1\.2\.3 -m "Release 1\.2\.3"/);
+  assert.match(noTag, /To go back: git reset --hard origin\/main/);
 });
 
 test("a file out of step is refused", () => {
@@ -254,6 +281,27 @@ test("a release refuses a branch that is not exactly origin's, or a tag already 
     git("remote", "rename", "upstream", "origin");
   }
   assert.equal(release("0.1.0", "--dry-run").status, 0);
+});
+
+test("a dry run reads origin's branch without moving origin/main here", () => {
+  const was = git("rev-parse", "refs/remotes/origin/main").trim();
+  // Origin moves on without this clone hearing of it: a commit pushed under another name, then main set to it there.
+  const tree = git("rev-parse", "HEAD^{tree}").trim();
+  const ahead = git("commit-tree", tree, "-p", "HEAD", "-m", "elsewhere").trim();
+  git("push", "-q", "origin", `${ahead}:refs/heads/elsewhere`);
+  const atOrigin = (...args) => execFileSync("git", ["--git-dir", origin, ...args], { encoding: "utf8" });
+  atOrigin("update-ref", "refs/heads/main", ahead);
+  try {
+    const { status, err } = release("0.1.0", "--dry-run");
+    assert.equal(status, 1);
+    assert.match(err, /main is 0 commit\(s\) ahead of and 1 behind origin\/main/);
+    assert.equal(git("rev-parse", "refs/remotes/origin/main").trim(), was, "origin/main moved");
+  } finally {
+    atOrigin("update-ref", "refs/heads/main", was);
+    git("push", "-q", "origin", "--delete", "elsewhere");
+  }
+  assert.equal(release("0.1.0", "--dry-run").status, 0);
+  assert.equal(git("rev-parse", "refs/remotes/origin/main").trim(), was);
 });
 
 test("a release refuses a new folder with no row in the tables", () => {

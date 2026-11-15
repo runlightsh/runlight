@@ -5,7 +5,8 @@
 // without its core.
 //
 // Run with: node --import tsx scripts/python-fixtures-reports.mts
-import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildReport, lastPeriod } from "../packages/sdk/src/reports.js";
@@ -40,5 +41,5 @@ rmSync(folder, { recursive: true, force: true });
 
 const out = path.join(root, "packages/python/tests/fixtures/reports-store.json");
 mkdirSync(path.dirname(out), { recursive: true });
-writeFileSync(out, `${JSON.stringify({ description: "buildReport over packages/php/tests/fixtures/store.db, from scripts/python-fixtures-reports.mts", cases })}\n`);
+emit(out, `${JSON.stringify({ description: "buildReport over packages/php/tests/fixtures/store.db, from scripts/python-fixtures-reports.mts", cases })}\n`);
 console.log(`${cases.length} reports written to ${path.relative(root, out)}`);

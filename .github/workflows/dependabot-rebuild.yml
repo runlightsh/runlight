@@ -85,8 +85,9 @@ jobs:
             echo "$bad"
             exit 1
           fi
-          git apply "$PATCH"
+          # Into the index too, so a file the rebuild adds is committed with the ones it changes.
+          git apply --index "$PATCH"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Rebuild the generated files"
+          git commit -m "Rebuild the generated files"
           git push

@@ -1,7 +1,8 @@
 // Writes packages/php/tests/fixtures/*.json: what the TypeScript SDK's pure modules (ua, sources, query,
 // payload, time, geo, zip, brand, and version) answer for a wide set of inputs, so the PHP port can replay
 // them and must give the same answers. Run with: node --import tsx scripts/php-fixtures-core.mts
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import { createHash } from "node:crypto";
 import { Reader } from "mmdb-lib";
 import { aiAgent, isBot, parseClient, type ClientHints } from "../packages/sdk/src/ua.js";
@@ -29,7 +30,7 @@ function wellFormed(value: unknown): unknown {
 
 function write(name: string, description: string, data: Record<string, unknown>): void {
   const text = JSON.stringify(wellFormed({ description, ...data })) + "\n";
-  writeFileSync(new URL(`${name}.json`, dir), text);
+  emit(new URL(`${name}.json`, dir), text);
   console.log(`${name}.json: ${(text.length / 1024).toFixed(0)} KB`);
 }
 

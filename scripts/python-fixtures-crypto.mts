@@ -3,7 +3,8 @@
 // The inputs come from SHA-256 of a counter, so a rerun writes the same file.
 // Run with: node --import tsx scripts/python-fixtures-crypto.mts
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
 let counter = 0;
@@ -49,7 +50,7 @@ for (const ivLength of [1, 8, 11]) {
 for (const length of [0, 1, 17, 1000]) cases.push(await seal(bytes(16), bytes(12), bytes(length), bytes(length % 23)));
 
 mkdirSync("packages/python/tests/fixtures", { recursive: true });
-writeFileSync(
+emit(
   "packages/python/tests/fixtures/aesgcm.json",
   `${JSON.stringify({ note: "Written by scripts/python-fixtures-crypto.mts from Node's Web Crypto. Do not edit.", cases, refused }, null, 1)}\n`,
 );

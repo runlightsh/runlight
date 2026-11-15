@@ -11,7 +11,8 @@
 // With `migrate <url>`, creates the tables in a Postgres or MySQL database, for PHP to compare with its own.
 //
 // Run with: node --import tsx scripts/php-fixtures-store.mts
-import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { WRITING, emit, seedRandom } from "./fixture-out.mjs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runlight } from "../packages/sdk/src/index.js";
@@ -107,7 +108,7 @@ if (process.argv[2] === "read") {
     [{ id: "s", name: "S", hostnames: ["www.example.com", "shop.example.com"], timezone: "UTC" }, { id: "t", name: "T", hostnames: [], timezone: "UTC" }, { id: "u", name: "U", hostnames: ["u.example"], timezone: "UTC" }],
     [goal("c".repeat(24), { name: "Buy", kind: "click", match: ".buy", clickBy: "selector" }), goal("d".repeat(24), { name: "Out", kind: "click", match: "https://x.example/*", clickBy: "link", site: "t" }), goal("e".repeat(24), { name: "E", kind: "event", site: "u" })] as never,
   );
-  writeFileSync(
+  emit(
     new URL("../packages/php/tests/fixtures/goals.json", import.meta.url),
     `${JSON.stringify({ description: "goalFrom, funnelFrom, pagePattern, and clickRules as the TypeScript SDK answers them. Written by scripts/php-fixtures-store.mts.", existing, existingFunnels, goals, funnels, patterns, rules })}\n`,
   );
@@ -124,6 +125,8 @@ const REFERRERS = ["https://www.google.com/", "https://news.ycombinator.com/", "
 const COUNTRIES = ["GB", "US", "DE", "CA", "FR"];
 const CAMPAIGNS = ["alpha", "Zeta", "beta", "Gamma", "émile", "Émile", "_x", "a-b", "ab", "Über"];
 
+// The ids and salts the SDK draws are the same on every run, so --check can compare store.json.
+seedRandom("php-fixtures-store");
 const dir = path.join(tmpdir(), `runlight-store-${process.pid}`);
 mkdirSync(dir, { recursive: true });
 const file = path.join(dir, "store.db");
@@ -364,8 +367,9 @@ const results = await answers(store, calls);
 await store.db.run("PRAGMA journal_mode = DELETE");
 await store.close();
 const fixtures = new URL("../packages/php/tests/fixtures/", import.meta.url);
-copyFileSync(file, new URL("store.db", fixtures));
-writeFileSync(
+// The database file is not compared: SQLite does not write the same bytes twice. Its reads, in store.json, are.
+if (WRITING) copyFileSync(file, new URL("store.db", fixtures));
+emit(
   new URL("store.json", fixtures),
   `${JSON.stringify({ description: "SqlStore reads over store.db, as the TypeScript SDK answers them. Written by scripts/php-fixtures-store.mts.", now: start, calls: calls.map((call, i) => ({ ...call, result: results[i] })) })}\n`,
 );

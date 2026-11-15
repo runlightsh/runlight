@@ -3,6 +3,7 @@
 // month names as dates are written, and region names. With --check it only says whether the file is current,
 // when this Node's ICU is the one that wrote it.
 import { readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 import { languages } from "../packages/sdk/src/messages.ts";
 
 const out = new URL("../packages/elixir/priv/intl.json", import.meta.url);
@@ -77,7 +78,7 @@ if (process.argv.includes("--check")) {
     icu = JSON.parse(current).icu;
   } catch {}
   if (typeof icu === "string" && icu !== process.versions.icu) {
-    console.log(`elixir-intl: intl.json was written from ICU ${icu}, this Node has ${process.versions.icu}`);
+    skipped("elixir-intl", "ICU", icu, process.versions.icu);
     process.exit(0);
   }
   if (current !== text) {

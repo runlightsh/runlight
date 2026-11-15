@@ -5,6 +5,7 @@
 // --check it only says whether the file is current. It also checks that the way the port lays out
 // an amount (Intl.cs) matches Node for every currency.
 import { readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 
 const LANGS = ["en", "de", "es", "fr", "pt"];
 const file = new URL("../packages/dotnet/src/Runlight/Assets/intl.json", import.meta.url);
@@ -72,7 +73,7 @@ try {
 // scripts/go-intl.mjs does.
 const written = /from Node's ICU ([^ ]+)\. Do not edit\./.exec(current ?? "")?.[1];
 if (process.argv.includes("--check") && written && written !== process.versions.icu) {
-  console.log(`dotnet-intl: intl.json was written from ICU ${written}, this Node has ${process.versions.icu}`);
+  skipped("dotnet-intl", "ICU", written, process.versions.icu);
 } else if (process.argv.includes("--check")) {
   if (current !== text) {
     console.error("dotnet-intl: intl.json is stale. Run node scripts/dotnet-intl.mjs");

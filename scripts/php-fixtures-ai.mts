@@ -3,7 +3,8 @@
 // SDK answers for a set of inputs, so packages/php/tests can require the very
 // same answers byte for byte. Run with node --import tsx.
 import { createCipheriv, createHash, pbkdf2Sync, scryptSync } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import * as crypto from "../packages/sdk/src/accounts/crypto.ts";
 import { base32, otpauthUri, totp } from "../packages/sdk/src/accounts/auth.ts";
 import * as pages from "../packages/sdk/src/accounts/pages.ts";
@@ -15,8 +16,9 @@ import { publicFetchThroughGlobal } from "../packages/sdk/src/safefetch.ts";
 
 const dir = new URL("../packages/php/tests/fixtures/", import.meta.url);
 mkdirSync(dir, { recursive: true });
-const save = (name: string, data: unknown) => {
-  if (!process.argv.includes("--assistant-only") || name === "assistant.json") writeFileSync(new URL(name, dir), `${JSON.stringify(data)}\n`);
+// `random` names the keys whose values a run draws at random (see scripts/fixture-out.mjs).
+const save = (name: string, data: unknown, random: string[] = []) => {
+  if (!process.argv.includes("--assistant-only") || name === "assistant.json") emit(new URL(name, dir), `${JSON.stringify(data)}\n`, { random });
 };
 
 // A small seeded generator, so the fixtures only change when the TypeScript does.
@@ -175,7 +177,8 @@ for (const code of ["k7dq-2mfa", "K7DQ 2MFA", "k7dq2mfa", "  k7-dq-2m-fa  ", "ü
 const same: unknown[] = [];
 for (const [a, b] of [["", ""], ["a", "a"], ["a", "b"], ["abc", "ab"], ["é", "e"], ["ab", "abc"]]) same.push({ a, b, same: crypto.sameText(a!, b!) });
 
-save("crypto.json", { scrypt, hashes, checks, sealedByTs, sealedWithIv, unseal, base64, encode, totp: totps, uris, signatures, recovery, same });
+// hashPassword draws a salt and seal an IV, so those two differ on every run.
+save("crypto.json", { scrypt, hashes, checks, sealedByTs, sealedWithIv, unseal, base64, encode, totp: totps, uris, signatures, recovery, same }, ["hashes", "sealedByTs"]);
 
 // ---- Pages ----
 

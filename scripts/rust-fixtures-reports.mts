@@ -2,7 +2,8 @@
 // stores for each case's hits in packages/php/tests/fixtures/reports.json, so the Rust port's report tests can
 // put the same rows in a store before the core that collects them is ported. It also checks that the SDK still
 // renders each case's reports as the fixture holds them. Run with: node --import tsx scripts/rust-fixtures-reports.mts
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { emit, seedRandom } from "./fixture-out.mjs";
 import { runlight } from "../packages/sdk/src/index.js";
 import { sqlite } from "../packages/sdk/src/stores/sqlite.js";
 import { buildReport } from "../packages/sdk/src/reports.js";
@@ -10,6 +11,8 @@ import { buildReport } from "../packages/sdk/src/reports.js";
 const AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 const fixture = JSON.parse(readFileSync(new URL("../packages/php/tests/fixtures/reports.json", import.meta.url), "utf8"));
 const dir = new URL("../packages/rust/runlight-sqlx/tests/fixtures/", import.meta.url);
+// The ids the SDK draws are the same on every run, so --check can compare the rows.
+seedRandom("rust-fixtures-reports");
 mkdirSync(dir, { recursive: true });
 
 const cases = [];
@@ -42,5 +45,5 @@ const text = `${JSON.stringify(
   { description: "The rows the TypeScript SDK stores for the hits in packages/php/tests/fixtures/reports.json (scripts/rust-fixtures-reports.mts)", cases },
   (_, v) => (typeof v === "bigint" ? Number(v) : v),
 )}\n`;
-writeFileSync(new URL("reports-rows.json", dir), text);
+emit(new URL("reports-rows.json", dir), text);
 console.log(`reports-rows.json: ${(text.length / 1024).toFixed(0)} KB`);

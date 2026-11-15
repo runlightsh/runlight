@@ -6,8 +6,10 @@
 # Three jobs. "ci" waits for CI to pass on the tagged commit (ci-passed.yml).
 # "build" builds the sdist and wheel from that commit with no credential and
 # uploads them as the artifact "python-dist"; the build backend and anything
-# it pulls in run there, never beside the OIDC token. "publish" holds the
-# token, compiles and builds nothing, and uploads exactly those files.
+# it pulls in run there, never beside the OIDC token. The backend is the one
+# pinned, with hashes, in .github/pypi-build/requirements.txt, not whatever
+# is newest when the tag is pushed. "publish" holds the token, compiles and
+# builds nothing, and uploads exactly those files.
 #
 # Stays off until the repository variable PYPI_ENABLED is "true". Before
 # that, on pypi.org: add a pending trusted publisher for the project
@@ -63,7 +65,8 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
           if [ "v$version" != "$TAG" ]; then echo "packages/python is $version, the tag is $TAG"; exit 1; fi
           rm -rf dist
-          uv build
+          # hatchling and what it needs, at the pinned releases and no others.
+          uv build --build-constraints ../../.github/pypi-build/requirements.txt --require-hashes
           ls -l dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

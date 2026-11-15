@@ -1,7 +1,7 @@
 // Writes conformance/url.json: how JavaScript's URL, URLSearchParams, and
 // number formatting answer a set of inputs, so another implementation can
 // parse paths, queries, and hosts the same way and print numbers alike.
-import { writeFileSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 
 const urls = [
   "https://example.com",
@@ -70,7 +70,7 @@ const written = [
 const numbers = [0, -0, 1, -1, 0.5, 1 / 3, 2 / 3, 1e-6, 1e-7, 1.5e-9, 123456789.123, 1e20, 1e21, 1.2e25, -4.5e-8, 0.1 + 0.2, 100, 99.99, 12.5, Number.MAX_SAFE_INTEGER];
 
 const file = new URL("../conformance/url.json", import.meta.url);
-writeFileSync(
+emit(
   file,
   `${JSON.stringify(
     {

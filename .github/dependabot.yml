@@ -42,13 +42,17 @@ updates:
     groups:
       composer:
         patterns: ["*"]
+  # /.github/pypi-build pins the build backend pypi.yml builds the release with.
   - package-ecosystem: pip
-    directories: ["/packages/python"]
+    directories: ["/packages/python", "/.github/pypi-build"]
     schedule:
       interval: weekly
     groups:
       pip:
         patterns: ["*"]
+  # Dependabot reads a folder's Gemfile or gems.rb and nothing by another name, so the Rails test apps'
+  # lockfiles (packages/ruby/test/rails/gemfiles/rails_*.gemfile.lock) are kept current by
+  # .github/workflows/rails-lockfiles.yml instead.
   - package-ecosystem: bundler
     directories: ["/packages/ruby"]
     schedule:

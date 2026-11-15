@@ -4,7 +4,8 @@
 // OAuth's documents and refusals), plus the pure helpers routes.ts and oauth.ts
 // export. packages/php/tests/Routes replays them. Run with node --import tsx.
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import { runlight } from "../packages/sdk/src/index.ts";
 import { sqlite } from "../packages/sdk/src/stores/sqlite.ts";
 import { coded, hostName, managePath } from "../packages/sdk/src/routes.ts";
@@ -202,7 +203,7 @@ const manage = [
 ];
 const verifiers = ["", "a", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "ünïcode verifier ✓", "x".repeat(128)];
 
-writeFileSync(
+emit(
   new URL("routes.json", dir),
   `${JSON.stringify({
     now: NOW,

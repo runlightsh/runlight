@@ -5,6 +5,7 @@
 // Run with Node 24:
 //   node scripts/go-intl.mjs [--check]
 import { readFileSync, writeFileSync } from "node:fs";
+import { skipped } from "./node-data.mjs";
 
 const languages = ["en", "de", "es", "fr", "pt"];
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -46,7 +47,7 @@ const text = `${JSON.stringify({ icu: process.versions.icu, unicode: process.ver
 const file = new URL("../packages/go/internal/intl/intl.json", import.meta.url);
 if (process.argv.includes("--check")) {
   const old = JSON.parse(readFileSync(file, "utf8"));
-  if (old.icu !== process.versions.icu) console.log(`intl.json was written from ICU ${old.icu}, this Node has ${process.versions.icu}`);
+  if (old.icu !== process.versions.icu) skipped("go-intl", "ICU", old.icu, process.versions.icu);
   else if (readFileSync(file, "utf8") !== text) {
     console.error("packages/go/internal/intl/intl.json is stale: run node scripts/go-intl.mjs");
     process.exit(1);

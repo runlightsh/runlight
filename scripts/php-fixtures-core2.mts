@@ -1,7 +1,8 @@
 // Writes packages/php/tests/fixtures/reports.json: email reports the TypeScript SDK renders for fixed visits in
 // every language, the periods they cover, and the Intl formatting they use, so the PHP port can replay the same
 // visits and must render the same emails. Run with: node --import tsx scripts/php-fixtures-core2.mts
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { emit } from "./fixture-out.mjs";
 import { runlight } from "../packages/sdk/src/index.js";
 import { sqlite } from "../packages/sdk/src/stores/sqlite.js";
 import { buildReport, lastPeriod } from "../packages/sdk/src/reports.js";
@@ -124,5 +125,5 @@ const reports = [];
 for (const c of cases) reports.push({ name: c.name, timezone: c.timezone, withGoals: c.withGoals, at: c.at, hits: c.hits, goals: c.withGoals ? goals : [], reports: await render(c.timezone, c.hits, c.withGoals, c.at) });
 
 const text = `${JSON.stringify({ description: "Email reports and their Intl formatting, from the TypeScript SDK (scripts/php-fixtures-core2.mts)", intl, periods, cases: reports })}\n`;
-writeFileSync(new URL("reports.json", dir), text);
+emit(new URL("reports.json", dir), text);
 console.log(`reports.json: ${(text.length / 1024).toFixed(0)} KB`);
