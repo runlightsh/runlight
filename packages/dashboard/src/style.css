@@ -4273,6 +4273,7 @@ button.sign-out {
 
 .funnel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin: 0;
   padding: 0;
@@ -4281,17 +4282,17 @@ button.sign-out {
 
 .funnel-label {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   font-size: 14px;
+  line-height: 20px;
 }
 
+/* Long paths wrap rather than clip: the end of a path is often what tells two steps apart. */
 .funnel-label .name-text {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .funnel-step {

@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- Dashboard: a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.
+
 ## 0.5.0 - 2026-11-15
 
 This release follows a review of every package. Read the first entry under Changed before upgrading a fetch-style mount that sits behind your own proxy.
