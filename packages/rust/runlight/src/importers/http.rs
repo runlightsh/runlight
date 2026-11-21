@@ -197,7 +197,7 @@ pub fn date_parse(text: &str) -> f64 {
         return ts.as_millisecond() as f64;
     }
     if let Ok(dt) = t.parse::<jiff::civil::DateTime>()
-        && let Ok(z) = dt.to_zoned(jiff::tz::TimeZone::system())
+        && let Ok(z) = dt.to_zoned_datetime(jiff::tz::TimeZone::system())
     {
         return z.timestamp().as_millisecond() as f64;
     }

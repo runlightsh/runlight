@@ -1401,12 +1401,12 @@ pub(crate) fn date_parse(text: &str) -> f64 {
     if let Ok(dt) = t.parse::<jiff::civil::DateTime>() {
         // A date and time without a zone is local time in JavaScript; a date alone is UTC.
         let zone = if t.len() <= 10 { jiff::tz::TimeZone::UTC } else { jiff::tz::TimeZone::system() };
-        if let Ok(z) = dt.to_zoned(zone) {
+        if let Ok(z) = dt.to_zoned_datetime(zone) {
             return z.timestamp().as_millisecond() as f64;
         }
     }
     if let Ok(d) = t.parse::<jiff::civil::Date>()
-        && let Ok(z) = d.to_zoned(jiff::tz::TimeZone::UTC)
+        && let Ok(z) = d.to_zoned_datetime(jiff::tz::TimeZone::UTC)
     {
         return z.timestamp().as_millisecond() as f64;
     }
