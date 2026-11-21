@@ -81,7 +81,7 @@ jobs:
       # Node's ICU is the one that wrote it, as python.yml's python-intl check is.
       - name: The Intl data is current
         run: node --import tsx scripts/ruby-intl.mts --check
-      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+      - uses: ruby/setup-ruby@4e97ecde5048e1e0816923020652678063ffbf65 # v1.339.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
