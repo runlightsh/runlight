@@ -36,7 +36,7 @@ function revenueText(rows: Row[]): string {
 }
 
 /** The Conversions box: each goal's conversions, conversion rate, and revenue. */
-export function ConversionsPanel({ view, funnelView, readOnly, onAdd }: { view: View; funnelView: View; readOnly?: boolean; onAdd: (section: "goals" | "funnels") => void }) {
+export function ConversionsPanel({ view, funnelView, readOnly, alone, onAdd }: { view: View; funnelView: View; readOnly?: boolean; /** No links box beside it, so it takes the whole row. */ alone?: boolean; onAdd: (section: "goals" | "funnels") => void }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
@@ -78,7 +78,7 @@ export function ConversionsPanel({ view, funnelView, readOnly, onAdd }: { view: 
   if (readOnly && rows && rows.length === 0 && funnels.length === 0) return null;
   if (showing === "funnels" && funnels.length) {
     return (
-      <section class={readOnly ? "panel full" : "panel"}>
+      <section class={alone ? "panel full" : "panel"}>
         <header class="panel-head">
           <h2>{t("panel.conversions")}</h2>
           <div class="head-tools">
@@ -111,8 +111,7 @@ export function ConversionsPanel({ view, funnelView, readOnly, onAdd }: { view: 
   const revenue = rows ? revenueText(rows) : "";
   const sorted = [...(rows ?? [])].sort((a, b) => b.conversions - a.conversions || a.name.localeCompare(b.name));
   return (
-    // Alone on a shared dashboard (no links box), so it takes the whole row.
-    <section class={readOnly ? "panel full" : "panel"}>
+    <section class={alone ? "panel full" : "panel"}>
       <header class="panel-head">
         <h2>
           {t("panel.conversions")} {revenue ? <span class="aside">{t("goals.revenueAside", { amount: revenue })}</span> : null}

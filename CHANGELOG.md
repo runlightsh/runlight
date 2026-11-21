@@ -7,6 +7,8 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Fixed
 
 - Dashboard: a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.
+- Dashboard: for a viewer, the Conversions box sits beside the Links box again instead of taking the whole row. It still takes the whole row on a share link, where there is no Links box.
+- Dashboard: picking a language in a dashboard left open across an upgrade no longer says "Could not load" the language. The page loads again in the language picked.
 
 ## 0.5.0 - 2026-11-15
 

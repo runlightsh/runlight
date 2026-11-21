@@ -693,7 +693,7 @@ function App() {
         {/* The last row, Links wide and Conversions narrow, so the zigzag of the rows above carries on. A viewer
             reads the links without changing them, and a share never shows them. */}
         {site && !shared && !elsewhere ? <LinksPanel view={panelView} site={site.id} readOnly={readOnly} /> : null}
-        {site ? <ConversionsPanel view={view} funnelView={panelView} readOnly={readOnly || elsewhere} onAdd={(section) => openSettings(section)} /> : null}
+        {site ? <ConversionsPanel view={view} funnelView={panelView} readOnly={readOnly || elsewhere} alone={shared || elsewhere} onAdd={(section) => openSettings(section)} /> : null}
       </div>
 
       <footer class="foot">

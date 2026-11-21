@@ -78,6 +78,16 @@ export async function setLocale(code: string, remember = false): Promise<void> {
     const url = urls[code];
     if (!url) throw new Error(`No messages for ${code}`);
     const response = await fetch(url);
+    // A dashboard left open across an upgrade asks for the old version's file, which is gone. Picked by hand,
+    // the language is kept and the page loaded again, so the new page asks for the new file. Only a pick does
+    // this, never the language a page starts in, so a page cannot keep reloading itself.
+    if (response.status === 404 && remember) {
+      try {
+        localStorage.setItem(STORAGE, code);
+      } catch {}
+      location.reload();
+      return new Promise<void>(() => {});
+    }
     if (!response.ok) throw new Error(`Could not load ${code}`);
     messages = { ...en, ...((await response.json()) as Partial<Messages>) };
   }
