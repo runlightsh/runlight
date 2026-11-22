@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Changed
+- Updated the Runlight library to 0.5.2, a maintenance release with a new install option for the standalone server. Nothing changes in how the Craft plugin works.
+
 ## 0.5.1 - 2026-11-21
 
 ### Fixed

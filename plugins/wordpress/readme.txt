@@ -139,6 +139,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Maintenance release with a new install option for the standalone Runlight server. Nothing changes in how the WordPress plugin works.
+
 = 0.5.1 =
 * In the dashboard, a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.
 * For a viewer, the Conversions box sits beside the Links box again instead of taking the whole row.
