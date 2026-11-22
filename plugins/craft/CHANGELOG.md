@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.5.1 - 2026-11-21
 
 ### Fixed
 - In the dashboard, a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.

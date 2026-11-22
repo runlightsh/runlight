@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.5.0
+Stable tag: 0.5.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -139,7 +139,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.5.1 =
 * In the dashboard, a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.
 * For a viewer, the Conversions box sits beside the Links box again instead of taking the whole row.
 * Picking a language in a dashboard left open across an upgrade no longer says "Could not load" the language.
