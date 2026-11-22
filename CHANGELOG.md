@@ -4,6 +4,11 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Changed
+
+- Rust: the crate now depends on jiff 1.0, up from 0.2.
+- .NET: the standalone server is built with Npgsql 11, up from 10.
+
 ### Fixed
 
 - Dashboard: a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.

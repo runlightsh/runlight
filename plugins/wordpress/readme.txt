@@ -139,6 +139,11 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* In the dashboard, a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.
+* For a viewer, the Conversions box sits beside the Links box again instead of taking the whole row.
+* Picking a language in a dashboard left open across an upgrade no longer says "Could not load" the language.
+
 = 0.5.0 =
 * When a Runlight elsewhere does not answer, AI agent reports pause for a minute, where each request used to wait on it.
 * An AI agent is recorded only for a page that was served, not for a missing page, a redirect, or an error.

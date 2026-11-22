@@ -1,5 +1,12 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Fixed
+- In the dashboard, a funnel step with a long page path wraps onto a second line instead of running past the edge of the Conversions card.
+- For a viewer, the Conversions box sits beside the Links box again instead of taking the whole row.
+- Picking a language in a dashboard left open across an upgrade no longer says "Could not load" the language.
+
 ## 0.5.0 - 2026-11-15
 
 ### Security
