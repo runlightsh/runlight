@@ -241,6 +241,8 @@
   "install.none": "No visits yet. Add the script below, then open a page on your site.",
   "install.cms": "Runlight in {cms} adds the script to every page, so there is nothing to add.",
   "install.script": "Add this to every page, just before {tag}.",
+  "install.from": "Load it from",
+  "install.fromHint": "A link domain on your site's own domain keeps the script and its visits on that domain, where ad blockers leave it alone more often.",
   "install.copy": "Copy",
   "install.copied": "Copied",
   "install.events": "Clicks on anything can be counted with no JavaScript.",

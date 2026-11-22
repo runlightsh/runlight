@@ -241,6 +241,8 @@
   "install.none": "Noch keine Besuche. Füge das Skript unten ein und öffne dann eine Seite deiner Website.",
   "install.cms": "Runlight in {cms} fügt das Skript jeder Seite hinzu, du musst also nichts hinzufügen.",
   "install.script": "Füge das auf jeder Seite ein, direkt vor {tag}.",
+  "install.from": "Laden von",
+  "install.fromHint": "Eine Link-Domain unter der Domain deiner Seite hält das Skript und seine Besuche auf dieser Domain, wo Werbeblocker es öfter in Ruhe lassen.",
   "install.copy": "Kopieren",
   "install.copied": "Kopiert",
   "install.events": "Klicks auf beliebige Elemente lassen sich ohne JavaScript zählen.",

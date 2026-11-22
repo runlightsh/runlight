@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Added
+
+- Dashboard: Settings, Install can give the script tag on one of the site's link domains, such as `t.example.com`, instead of the dashboard's own address, so the script and its visits stay on the site's own domain. Pick it under "Load it from", shown once the site has a link domain.
+
 ## 0.5.1 - 2026-11-21
 
 ### Changed

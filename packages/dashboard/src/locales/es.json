@@ -241,6 +241,8 @@
   "install.none": "Aún no hay visitas. Añade el script de abajo y abre una página de tu sitio.",
   "install.cms": "Runlight en {cms} añade el script a cada página, así que no hay nada que añadir.",
   "install.script": "Añade esto a cada página, justo antes de {tag}.",
+  "install.from": "Cargarlo desde",
+  "install.fromHint": "Un dominio de enlaces en el propio dominio de tu sitio mantiene el script y sus visitas en ese dominio, donde los bloqueadores de anuncios lo dejan pasar más a menudo.",
   "install.copy": "Copiar",
   "install.copied": "Copiado",
   "install.events": "Los clics en cualquier elemento se cuentan sin JavaScript.",

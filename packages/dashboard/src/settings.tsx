@@ -635,7 +635,23 @@ function OwnVisits({ site }: { site: Site }) {
 }
 
 export function Install({ site, sites }: { site: Site; sites: Site[] }) {
-  const origin = location.origin;
+  // The site's link domains reach Runlight too, so the script can load from one on the site's own domain.
+  const [domains, setDomains] = useState<string[]>([]);
+  const [from, setFrom] = useState("");
+  useEffect(() => {
+    setFrom("");
+    setDomains([]);
+    if (cms || site.remote) return;
+    let live = true;
+    api
+      .linkDomains(site.id)
+      .then((r) => live && setDomains(r.domains))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [site.id]);
+  const origin = from && domains.includes(from) ? `https://${from}` : location.origin;
   // The standalone server always names the site, since its script serves many.
   const several = sites.length > 1 || install.managed;
   // The standalone server's script names its site, so it carries only that site's click rules.
@@ -667,6 +683,16 @@ export function Install({ site, sites }: { site: Site; sites: Site[] }) {
         {cms ? null : (
           <>
             <p class="settings-text">{rich("install.script", { tag: <code>{"</head>"}</code> })}</p>
+            {domains.length ? (
+              <Field label={t("install.from")} hint={t("install.fromHint")}>
+                <select class="value" value={from} onChange={(e) => setFrom((e.target as HTMLSelectElement).value)}>
+                  <option value="">{location.host}</option>
+                  {domains.map((d) => (
+                    <option value={d}>{d}</option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
             <Code>{script}</Code>
           </>
         )}
