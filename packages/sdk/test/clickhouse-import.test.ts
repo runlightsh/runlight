@@ -145,7 +145,11 @@ if (process.env.RUNLIGHT_TEST_CLICKHOUSE) {
     await own.rl.init();
     const store = own.rl.store as ClickHouseStore;
     const at = Date.parse("2026-03-25T00:00:00Z");
-    await (store as unknown as { setMeta(key: string, value: string): Promise<void> }).setMeta("move", JSON.stringify({ at, through: at - 86_400_000, done: false }));
+    const inside = store as unknown as { copying?: Promise<void>; setMeta(key: string, value: string): Promise<void> };
+    // The copy init() starts finds nothing to copy and stops, but on a slow runner it can still be going, find
+    // the copy set up below, and mark it done before the second import: it has to have stopped first.
+    await inside.copying;
+    await inside.setMeta("move", JSON.stringify({ at, through: at - 86_400_000, done: false }));
     umami();
     await assert.rejects(importVisits(own.rl), /still being copied/);
     dub();
