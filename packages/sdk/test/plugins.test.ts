@@ -1607,8 +1607,8 @@ test("deleting the WordPress plugin removes what it kept, on every site of a net
   `);
   if (answer === null) return;
   const { blog, left, queries, meta } = JSON.parse(answer);
-  // Who closed the thank you is kept with the users, which every site shares, so it goes once, for all of them.
-  assert.deepEqual(meta, [["user", 0, "runlight_thanked", true]]);
+  // When each person saw and closed the thank you is kept with the users, which every site shares, so it goes once, for all of them.
+  assert.deepEqual(meta, [["user", 0, "runlight_thanks", true]]);
   assert.equal(blog, 1, "back on the site it started on");
   // The transients go by a query, which the stand-in only records; every other row and file of Runlight's is gone.
   const kept = { options: ["_transient_runlight_icon", "blogname"], runlight: false, photo: true };
@@ -1616,6 +1616,30 @@ test("deleting the WordPress plugin removes what it kept, on every site of a net
   assert.equal(queries.length, 2);
   assert.match(queries[0], /^1: DELETE FROM wp_options WHERE option_name LIKE '\\_transient\\_runlight\\_%' OR option_name LIKE '\\_transient\\_timeout\\_runlight\\_%'$/);
   assert.match(queries[1], /^2: DELETE FROM/);
+});
+
+test("the WordPress plugin's thank you shows until closed, comes back once 14 days after it first showed, then never", (t) => {
+  const day = 86_400;
+  const seen = 1_800_000_000;
+  const cases: [string, Record<string, number>, number, boolean][] = [
+    ["never seen", {}, seen, true],
+    ["seen, not closed", { seen }, seen + 30 * day, true],
+    ["closed on day 1, day 13", { seen, closed: seen + day }, seen + 13 * day, false],
+    ["closed on day 1, day 14", { seen, closed: seen + day }, seen + 14 * day, true],
+    ["closed on day 1, a year on", { seen, closed: seen + day }, seen + 365 * day, true],
+    ["closed again on day 14", { seen, closed: seen + 14 * day }, seen + 365 * day, false],
+    ["closed first on day 20", { seen, closed: seen + 20 * day }, seen + 365 * day, false],
+  ];
+  const answer = wordpressPhp(t, `
+    require ${JSON.stringify(WORDPRESS + "includes/Admin.php")};
+    $cases = json_decode(${JSON.stringify(JSON.stringify(cases))}, true);
+    echo json_encode(array_map(fn ($c) => Runlight\\WordPress\\Admin::thanks_due($c[1], $c[2]), $cases));
+  `);
+  if (answer === null) return;
+  assert.deepEqual(
+    Object.fromEntries(cases.map(([name], i) => [name, JSON.parse(answer)[i]])),
+    Object.fromEntries(cases.map(([name, , , due]) => [name, due])),
+  );
 });
 
 test("the WordPress plugin sends Runlight's email through WordPress only when a real mailer is set up", (t) => {

@@ -243,24 +243,55 @@ final class Admin {
 		<?php
 	}
 
-	/** Per user: set once they close the thank you, which then never shows to them again. */
-	public const THANKED = 'runlight_thanked';
+	/** Per user: when they first saw the thank you, and when they last closed it. */
+	public const THANKS = 'runlight_thanks';
 
-	/** Whether the person signed in has closed the thank you. */
-	public static function thanked(): bool {
-		return (bool) get_user_meta( get_current_user_id(), self::THANKED, true );
+	/** How long after someone first sees the thank you it comes back, once, if they closed it before then. */
+	public const THANKS_AGAIN = 14 * DAY_IN_SECONDS;
+
+	/**
+	 * Whether the thank you shows: until it is closed, and if it was closed
+	 * within 14 days of first showing, once more from then. Closed after that,
+	 * it never comes back.
+	 *
+	 * @param array{seen?:int,closed?:int} $state When it was first seen and last closed.
+	 * @param int                          $now   The time now.
+	 */
+	public static function thanks_due( array $state, int $now ): bool {
+		$closed = (int) ( $state['closed'] ?? 0 );
+		if ( 0 === $closed ) {
+			return true;
+		}
+		$again = (int) ( $state['seen'] ?? $closed ) + self::THANKS_AGAIN;
+		return $closed < $again && $now >= $again;
+	}
+
+	/**
+	 * When the person signed in first saw the thank you and last closed it.
+	 *
+	 * @return array{seen?:int,closed?:int}
+	 */
+	private static function thanks_state(): array {
+		$state = get_user_meta( get_current_user_id(), self::THANKS, true );
+		return is_array( $state ) ? $state : array();
 	}
 
 	/**
 	 * The thank you, asking for a review and a star: at the foot of the
-	 * settings page, and above the dashboard with a button that closes it for
-	 * good. Never on other screens, and never again once closed.
+	 * settings page, and above the dashboard with a button that closes it.
+	 * Never on other screens. The first time it shows to someone starts their
+	 * 14 days (see thanks_due()).
 	 *
 	 * @param bool $closable Whether it has the button that closes it.
 	 */
 	public static function thanks( bool $closable ): void {
-		if ( self::thanked() ) {
+		$state = self::thanks_state();
+		if ( ! self::thanks_due( $state, time() ) ) {
 			return;
+		}
+		if ( empty( $state['seen'] ) ) {
+			$state['seen'] = time();
+			update_user_meta( get_current_user_id(), self::THANKS, $state );
 		}
 		?>
 		<div id="runlight-thanks" class="<?php echo $closable ? 'notice notice-info inline' : 'card'; ?>"<?php echo $closable ? ' style="position:relative;padding-right:38px"' : ''; ?>>
@@ -275,20 +306,23 @@ final class Admin {
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 					<input type="hidden" name="action" value="runlight_thanked">
 					<?php wp_nonce_field( 'runlight_thanked', 'runlight_thanked_nonce' ); ?>
-					<button type="submit" class="notice-dismiss"><span class="screen-reader-text"><?php esc_html_e( 'Dismiss for good', 'runlight' ); ?></span></button>
+					<button type="submit" class="notice-dismiss"><span class="screen-reader-text"><?php esc_html_e( 'Dismiss this notice.', 'runlight' ); ?></span></button>
 				</form>
 			<?php endif; ?>
 		</div>
 		<?php
 	}
 
-	/** Closes the thank you for the person signed in, for good, then goes back to the page it was on. */
+	/** Closes the thank you for the person signed in, then goes back to the page it was on. */
 	public static function close_thanks(): void {
 		check_admin_referer( 'runlight_thanked', 'runlight_thanked_nonce' );
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_die( '', 403 );
 		}
-		update_user_meta( get_current_user_id(), self::THANKED, 1 );
+		$state           = self::thanks_state();
+		$state['seen']   = (int) ( $state['seen'] ?? time() );
+		$state['closed'] = time();
+		update_user_meta( get_current_user_id(), self::THANKS, $state );
 		wp_safe_redirect( wp_get_referer() ? wp_get_referer() : admin_url( 'admin.php?page=' . Dashboard::PAGE ) );
 		exit;
 	}

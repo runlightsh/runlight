@@ -251,8 +251,11 @@ final class SettingsForm extends ConfigFormBase {
       '#default_value' => $config->get('downloads'),
     ];
     $form = parent::buildForm($form, $form_state);
-    // Closed for good from the dashboard, it shows here no more either.
-    if (!$unset && !ThanksForm::closed($this->userData, $this->currentUser())) {
+    // While it is due (ThanksForm::due()), closed from the dashboard or not.
+    // It comes and goes with the time and the account, so the page is never
+    // cached, with it or without it.
+    $form['#cache']['max-age'] = 0;
+    if (!$unset && ThanksForm::shows($this->userData, $this->currentUser())) {
       $form['thanks'] = [
         '#type' => 'fieldset',
         '#title' => $this->t('Thanks for using Runlight'),

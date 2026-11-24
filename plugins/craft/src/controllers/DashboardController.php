@@ -63,18 +63,21 @@ final class DashboardController extends Controller
             'frameScript' => Frame::run(),
             'full' => $full,
             'settingsUrl' => 'settings/plugins/runlight',
-            'thanked' => Plugin::thanked(),
+            'thanks' => Plugin::thanksShow(),
         ]);
     }
 
-    /** Closes the thank you for the person signed in, for good, kept with their other Control Panel preferences. */
+    /** Closes the thank you for the person signed in, kept with their other Control Panel preferences. */
     public function actionThanks(): ?Response
     {
         $this->requirePostRequest();
         $this->requirePermission('accessPlugin-runlight');
         $user = Craft::$app->getUser()->getIdentity();
         if ($user !== null) {
-            Craft::$app->getUsers()->saveUserPreferences($user, [Plugin::THANKED => true]);
+            $state = Plugin::thanksState();
+            $state['seen'] = (int) ($state['seen'] ?? time());
+            $state['closed'] = time();
+            Craft::$app->getUsers()->saveUserPreferences($user, [Plugin::THANKS => $state]);
         }
         return $this->asSuccess();
     }

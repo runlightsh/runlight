@@ -1,6 +1,5 @@
 {# The thank you, asking for a review and a star: at the foot of the settings page, and above the dashboard
-   with a button that closes it for good. Once closed (DashboardController::actionThanks), it shows to that
-   person nowhere again. #}
+   with a button that closes it (DashboardController::actionThanks). When it shows is Plugin::thanksDue(). #}
 <div id="runlight-thanks" class="readable{% if closable %} pane{% endif %}" style="position: relative; margin: 24px 0;{% if closable %} padding-right: 48px;{% endif %}">
   <h2>{{ 'Thanks for using Runlight'|t('runlight') }}</h2>
   <p>{{ 'Runlight is free and open source. If it is useful to you, a review on the Plugin Store or a star on GitHub helps other people find it.'|t('runlight') }}</p>
@@ -14,7 +13,7 @@
       {{ csrfInput() }}
       {{ actionInput('runlight/dashboard/thanks') }}
       {{ redirectInput('runlight') }}
-      <button type="submit" class="btn borderless" aria-label="{{ 'Dismiss for good'|t('runlight') }}" title="{{ 'Dismiss for good'|t('runlight') }}" style="position: absolute; top: 8px; right: 8px; font-size: 20px;">×</button>
+      <button type="submit" class="btn borderless" aria-label="{{ 'Dismiss'|t('runlight') }}" title="{{ 'Dismiss'|t('runlight') }}" style="position: absolute; top: 8px; right: 8px; font-size: 20px;">×</button>
     </form>
     {% js %}
       (function () {

@@ -19,7 +19,7 @@
   {% elseif error %}
     <p class="error">{{ error }} <a href="{{ cpUrl(settingsUrl) }}">{{ 'Check the settings'|t('runlight') }}</a></p>
   {% else %}
-    {% if not thanked %}
+    {% if thanks %}
       {% include 'runlight/_thanks.twig' with { closable: true } only %}
     {% endif %}
     {# Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. #}

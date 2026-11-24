@@ -158,7 +158,7 @@ final class DashboardController extends ControllerBase {
   /**
    * The frame the dashboard opens in, from the Runlight at the address.
    *
-   * Above it, until closed for good, the thank you.
+   * Above it, while it is due (ThanksForm::due()), the thank you.
    *
    * @param string $url
    *   The page to frame.
@@ -172,7 +172,7 @@ final class DashboardController extends ControllerBase {
    *   The render array.
    */
   private function frame(string $url, string $address, bool $full = FALSE): array {
-    $thanks = ThanksForm::closed($this->userData, $this->currentUser()) ? [] : ['thanks' => $this->formBuilder()->getForm(ThanksForm::class)];
+    $thanks = ThanksForm::shows($this->userData, $this->currentUser()) ? ['thanks' => $this->formBuilder()->getForm(ThanksForm::class)] : [];
     $frame = [
       '#type' => 'html_tag',
       '#tag' => 'iframe',

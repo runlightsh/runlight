@@ -12,12 +12,13 @@ use Drupal\user\UserDataInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * The thank you above the dashboard, with a button that closes it for good.
+ * The thank you above the dashboard, with a button that closes it.
  *
- * Whether someone closed it is kept with their account, in user data, which
- * Drupal removes when the module is uninstalled. Once closed, it shows to
- * them nowhere again, the settings page included. drupal.org has no reviews,
- * so it asks only for a star.
+ * When someone first saw it and last closed it is kept with their account,
+ * in user data, which Drupal removes when the module is uninstalled. Closed
+ * within 14 days of first showing, it comes back once from then; closed after
+ * that, it shows to them nowhere again, the settings page included.
+ * drupal.org has no reviews, so it asks only for a star.
  */
 final class ThanksForm extends FormBase {
 
@@ -36,10 +37,53 @@ final class ThanksForm extends FormBase {
   }
 
   /**
-   * Whether the account has closed the thank you.
+   * How long after first showing it comes back, once, if closed before then.
    */
-  public static function closed(UserDataInterface $data, AccountInterface $account): bool {
-    return (bool) $data->get('runlight', (int) $account->id(), 'thanked');
+  public const AGAIN = 14 * 86400;
+
+  /**
+   * Whether the thank you shows, by when it was first seen and last closed.
+   *
+   * @param array{seen?: int, closed?: int} $state
+   *   When it was first seen and last closed.
+   * @param int $now
+   *   The time now.
+   */
+  public static function due(array $state, int $now): bool {
+    $closed = (int) ($state['closed'] ?? 0);
+    if ($closed === 0) {
+      return TRUE;
+    }
+    $again = (int) ($state['seen'] ?? $closed) + self::AGAIN;
+    return $closed < $again && $now >= $again;
+  }
+
+  /**
+   * When the account first saw the thank you and last closed it.
+   *
+   * @return array{seen?: int, closed?: int}
+   *   The times.
+   */
+  public static function state(UserDataInterface $data, AccountInterface $account): array {
+    $state = $data->get('runlight', (int) $account->id(), 'thanks');
+    return is_array($state) ? $state : [];
+  }
+
+  /**
+   * Whether the thank you shows to the account now.
+   *
+   * The first time it does starts their 14 days.
+   */
+  public static function shows(UserDataInterface $data, AccountInterface $account): bool {
+    $state = self::state($data, $account);
+    if (!self::due($state, time())) {
+      return FALSE;
+    }
+    if (empty($state['seen'])) {
+      $state['seen'] = time();
+      $data->set('runlight', (int) $account->id(), 'thanks', $state);
+    }
+    return TRUE;
   }
 
   /**
@@ -87,8 +131,8 @@ final class ThanksForm extends FormBase {
       '#type' => 'submit',
       '#value' => '×',
       '#attributes' => [
-        'aria-label' => $this->t('Dismiss for good'),
-        'title' => $this->t('Dismiss for good'),
+        'aria-label' => $this->t('Dismiss'),
+        'title' => $this->t('Dismiss'),
         'style' => 'position:absolute;top:.25rem;right:.25rem;margin:0;padding:0 .6rem;min-height:0;font-size:1.5rem;line-height:1.6;background:none;border:0;box-shadow:none;color:inherit;cursor:pointer',
       ],
     ];
@@ -99,7 +143,10 @@ final class ThanksForm extends FormBase {
    * {@inheritdoc}
    */
   public function submitForm(array &$form, FormStateInterface $form_state): void {
-    $this->userData->set('runlight', (int) $this->currentUser()->id(), 'thanked', 1);
+    $state = self::state($this->userData, $this->currentUser());
+    $state['seen'] = (int) ($state['seen'] ?? time());
+    $state['closed'] = time();
+    $this->userData->set('runlight', (int) $this->currentUser()->id(), 'thanks', $state);
   }
 
 }

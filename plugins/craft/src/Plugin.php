@@ -127,7 +127,7 @@ final class Plugin extends BasePlugin
 
     /**
      * Uninstalling removes what Runlight kept here: its tables in Craft's database, its folder, and what it
-     * kept in Craft's cache, with whether each person closed the thank you. Craft removes the settings
+     * kept in Craft's cache, with when each person saw and closed the thank you. Craft removes the settings
      * itself. Keys Connect put in .env stay there, since the file is the site's.
      */
     protected function afterUninstall(): void
@@ -135,21 +135,24 @@ final class Plugin extends BasePlugin
         Storage::remove();
         Local::forget();
         Craft::$app->getCache()->delete(self::DOWN);
-        self::forgetThanked();
+        self::forgetThanks();
     }
 
     /** Takes the thank you's preference out of every account's preferences, leaving the rest as they were. */
-    private static function forgetThanked(): void
+    private static function forgetThanks(): void
     {
         // Every row, one per account: a LIKE on the column fails where Postgres keeps it as JSON.
         $rows = (new Query())->select(['userId', 'preferences'])->from(Table::USERPREFERENCES)->all();
+        // Written as Users::saveUserPreferences() writes them, which encodes for the column's own type: a JSON
+        // column given an encoded string would hold a string.
+        $type = Craft::$app->getDb()->getSchema()->getTableSchema(Table::USERPREFERENCES)->columns['preferences']->dbType;
         foreach ($rows as $row) {
-            $preferences = Json::decodeIfJson((string) $row['preferences']);
-            if (!is_array($preferences) || !array_key_exists(self::THANKED, $preferences)) {
+            $preferences = is_array($row['preferences']) ? $row['preferences'] : Json::decodeIfJson((string) $row['preferences']);
+            if (!is_array($preferences) || !array_key_exists(self::THANKS, $preferences)) {
                 continue;
             }
-            unset($preferences[self::THANKED]);
-            Db::update(Table::USERPREFERENCES, ['preferences' => Json::encode($preferences)], ['userId' => $row['userId']]);
+            unset($preferences[self::THANKS]);
+            Db::update(Table::USERPREFERENCES, ['preferences' => Db::prepareValueForDb($preferences, $type)], ['userId' => $row['userId']]);
         }
     }
 
@@ -175,17 +178,56 @@ final class Plugin extends BasePlugin
             'local' => Local::address(),
             'counting' => $settings->getMode() === 'local' && $missing === '',
             'overdue' => $settings->getMode() === 'local' && $missing === '' && Local::overdue(),
-            'thanked' => self::thanked(),
+            'thanks' => self::thanksShow(),
         ]);
     }
 
-    /** The user preference set once someone closes the thank you, which then never shows to them again. */
-    public const THANKED = 'runlightThanked';
+    /** The user preference with when someone first saw the thank you and last closed it. */
+    public const THANKS = 'runlightThanks';
 
-    /** Whether the person signed in has closed the thank you. */
-    public static function thanked(): bool
+    /** How long after first showing the thank you comes back, once, if it was closed before then. */
+    public const THANKS_AGAIN = 14 * 86400;
+
+    /**
+     * Whether the thank you shows: until it is closed, and if it was closed within 14 days of first showing,
+     * once more from then. Closed after that, it never comes back.
+     *
+     * @param array{seen?: int, closed?: int} $state When it was first seen and last closed.
+     */
+    public static function thanksDue(array $state, int $now): bool
     {
-        return (bool) Craft::$app->getUser()->getIdentity()?->getPreference(self::THANKED);
+        $closed = (int) ($state['closed'] ?? 0);
+        if ($closed === 0) {
+            return true;
+        }
+        $again = (int) ($state['seen'] ?? $closed) + self::THANKS_AGAIN;
+        return $closed < $again && $now >= $again;
+    }
+
+    /**
+     * When the person signed in first saw the thank you and last closed it.
+     *
+     * @return array{seen?: int, closed?: int}
+     */
+    public static function thanksState(): array
+    {
+        $state = Craft::$app->getUser()->getIdentity()?->getPreference(self::THANKS);
+        return is_array($state) ? $state : [];
+    }
+
+    /** Whether the thank you shows to the person signed in now. The first time it does starts their 14 days. */
+    public static function thanksShow(): bool
+    {
+        $user = Craft::$app->getUser()->getIdentity();
+        $state = self::thanksState();
+        if ($user === null || !self::thanksDue($state, time())) {
+            return false;
+        }
+        if (empty($state['seen'])) {
+            $state['seen'] = time();
+            Craft::$app->getUsers()->saveUserPreferences($user, [self::THANKS => $state]);
+        }
+        return true;
     }
 
     /**

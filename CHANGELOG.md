@@ -6,7 +6,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ### Added
 
-- WordPress, Drupal, and Craft plugins: once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review (on WordPress.org or the Craft Plugin Store) and to a star on GitHub. Its X closes it for good for that person, on both pages, and uninstalling removes that choice with everything else. It never shows as a notice elsewhere in the admin.
+- WordPress, Drupal, and Craft plugins: once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review (on WordPress.org or the Craft Plugin Store) and to a star on GitHub. Its X closes it for that person on both pages. Closed within 14 days of first showing, it comes back once from then, and closed after that it never shows again. Uninstalling removes those times with everything else. It never shows as a notice elsewhere in the admin.
 
 ## 0.5.2 - 2026-11-22
 
