@@ -160,4 +160,8 @@
   on: settings.downloads,
 }) }}
 
+{% if setUp and not thanked %}
+  {% include 'runlight/_thanks.twig' with { closable: false } only %}
+{% endif %}
+
 <p>{{ 'Need help? <a href="{url}">Read the Runlight docs.</a>'|t('runlight', { url: 'https://runlight.sh/docs/craft/' })|raw }}</p>

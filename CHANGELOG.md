@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Added
+
+- WordPress, Drupal, and Craft plugins: once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review (on WordPress.org or the Craft Plugin Store) and to a star on GitHub. Its X closes it for good for that person, on both pages, and uninstalling removes that choice with everything else. It never shows as a notice elsewhere in the admin.
+
 ## 0.5.2 - 2026-11-22
 
 ### Added

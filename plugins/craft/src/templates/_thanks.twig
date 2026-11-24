@@ -1,0 +1,34 @@
+{# The thank you, asking for a review and a star: at the foot of the settings page, and above the dashboard
+   with a button that closes it for good. Once closed (DashboardController::actionThanks), it shows to that
+   person nowhere again. #}
+<div id="runlight-thanks" class="readable{% if closable %} pane{% endif %}" style="position: relative; margin: 24px 0;{% if closable %} padding-right: 48px;{% endif %}">
+  <h2>{{ 'Thanks for using Runlight'|t('runlight') }}</h2>
+  <p>{{ 'Runlight is free and open source. If it is useful to you, a review on the Plugin Store or a star on GitHub helps other people find it.'|t('runlight') }}</p>
+  <div class="buttons" style="margin-bottom: 0;">
+    <a class="btn" href="https://plugins.craftcms.com/runlight/reviews" target="_blank" rel="noopener">{{ 'Write a review'|t('runlight') }}</a>
+    <a class="btn" href="https://github.com/runlightsh/runlight" target="_blank" rel="noopener">{{ 'Star it on GitHub'|t('runlight') }}</a>
+  </div>
+  {% if closable %}
+    {# A form, so it closes without JavaScript too; the script below sends it without leaving the page. #}
+    <form method="post" accept-charset="UTF-8" style="margin: 0;">
+      {{ csrfInput() }}
+      {{ actionInput('runlight/dashboard/thanks') }}
+      {{ redirectInput('runlight') }}
+      <button type="submit" class="btn borderless" aria-label="{{ 'Dismiss for good'|t('runlight') }}" title="{{ 'Dismiss for good'|t('runlight') }}" style="position: absolute; top: 8px; right: 8px; font-size: 20px;">×</button>
+    </form>
+    {% js %}
+      (function () {
+        var thanks = document.getElementById("runlight-thanks");
+        var form = thanks && thanks.querySelector("form");
+        if (!form) return;
+        // Closing sends the form without leaving the page, then lets the frame fit the space it leaves.
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          Craft.sendActionRequest("POST", "runlight/dashboard/thanks").catch(function () {});
+          thanks.remove();
+          window.dispatchEvent(new Event("resize"));
+        });
+      })();
+    {% endjs %}
+  {% endif %}
+</div>

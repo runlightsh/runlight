@@ -7,8 +7,12 @@ namespace Runlight\Craft;
 use Craft;
 use craft\base\Model;
 use craft\base\Plugin as BasePlugin;
+use craft\db\Query;
+use craft\db\Table;
 use craft\events\RegisterUrlRulesEvent;
 use craft\events\RegisterUserPermissionsEvent;
+use craft\helpers\Db;
+use craft\helpers\Json;
 use craft\helpers\UrlHelper;
 use craft\services\ProjectConfig;
 use craft\services\UserPermissions;
@@ -123,14 +127,30 @@ final class Plugin extends BasePlugin
 
     /**
      * Uninstalling removes what Runlight kept here: its tables in Craft's database, its folder, and what it
-     * kept in Craft's cache. Craft removes the settings itself. Keys Connect put in .env stay there, since
-     * the file is the site's.
+     * kept in Craft's cache, with whether each person closed the thank you. Craft removes the settings
+     * itself. Keys Connect put in .env stay there, since the file is the site's.
      */
     protected function afterUninstall(): void
     {
         Storage::remove();
         Local::forget();
         Craft::$app->getCache()->delete(self::DOWN);
+        self::forgetThanked();
+    }
+
+    /** Takes the thank you's preference out of every account's preferences, leaving the rest as they were. */
+    private static function forgetThanked(): void
+    {
+        // Every row, one per account: a LIKE on the column fails where Postgres keeps it as JSON.
+        $rows = (new Query())->select(['userId', 'preferences'])->from(Table::USERPREFERENCES)->all();
+        foreach ($rows as $row) {
+            $preferences = Json::decodeIfJson((string) $row['preferences']);
+            if (!is_array($preferences) || !array_key_exists(self::THANKED, $preferences)) {
+                continue;
+            }
+            unset($preferences[self::THANKED]);
+            Db::update(Table::USERPREFERENCES, ['preferences' => Json::encode($preferences)], ['userId' => $row['userId']]);
+        }
     }
 
     protected function createSettingsModel(): ?Model
@@ -155,7 +175,17 @@ final class Plugin extends BasePlugin
             'local' => Local::address(),
             'counting' => $settings->getMode() === 'local' && $missing === '',
             'overdue' => $settings->getMode() === 'local' && $missing === '' && Local::overdue(),
+            'thanked' => self::thanked(),
         ]);
+    }
+
+    /** The user preference set once someone closes the thank you, which then never shows to them again. */
+    public const THANKED = 'runlightThanked';
+
+    /** Whether the person signed in has closed the thank you. */
+    public static function thanked(): bool
+    {
+        return (bool) Craft::$app->getUser()->getIdentity()?->getPreference(self::THANKED);
     }
 
     /**

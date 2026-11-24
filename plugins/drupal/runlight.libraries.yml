@@ -17,3 +17,6 @@ settings:
     - core/drupal
     - core/drupalSettings
     - core/once
+thanks:
+  js:
+    js/thanks.js: {}

@@ -19,6 +19,9 @@
   {% elseif error %}
     <p class="error">{{ error }} <a href="{{ cpUrl(settingsUrl) }}">{{ 'Check the settings'|t('runlight') }}</a></p>
   {% else %}
+    {% if not thanked %}
+      {% include 'runlight/_thanks.twig' with { closable: true } only %}
+    {% endif %}
     {# Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. #}
     <iframe id="runlight-embed" src="{{ frame }}" data-runlight-origin="{{ origin }}" data-runlight-bars="#global-header, #header" data-runlight-gap="48" title="{{ 'Runlight dashboard'|t('runlight') }}" referrerpolicy="no-referrer"{% if not local %} sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"{% endif %} style="display:block;width:100%;height:calc(100vh - 220px);min-height:600px;border:0;border-radius:8px;background:transparent"></iframe>
     {% js %}{{ frameScript|raw }}{% endjs %}

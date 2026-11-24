@@ -11,7 +11,9 @@ use Drupal\Core\Site\Settings;
 use Drupal\Core\Url;
 use Drupal\runlight\Connect;
 use Drupal\runlight\Local;
+use Drupal\runlight\Form\ThanksForm;
 use Drupal\runlight\Setup;
+use Drupal\user\UserDataInterface;
 use GuzzleHttp\ClientInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -30,6 +32,7 @@ final class DashboardController extends ControllerBase {
     private readonly Setup $setup,
     private readonly ClientInterface $httpClient,
     private readonly RequestStack $requestStack,
+    private readonly UserDataInterface $userData,
   ) {}
 
   /**
@@ -41,6 +44,7 @@ final class DashboardController extends ControllerBase {
       $container->get('runlight.setup'),
       $container->get('http_client'),
       $container->get('request_stack'),
+      $container->get('user.data'),
     );
   }
 
@@ -154,6 +158,8 @@ final class DashboardController extends ControllerBase {
   /**
    * The frame the dashboard opens in, from the Runlight at the address.
    *
+   * Above it, until closed for good, the thank you.
+   *
    * @param string $url
    *   The page to frame.
    * @param string $address
@@ -166,6 +172,7 @@ final class DashboardController extends ControllerBase {
    *   The render array.
    */
   private function frame(string $url, string $address, bool $full = FALSE): array {
+    $thanks = ThanksForm::closed($this->userData, $this->currentUser()) ? [] : ['thanks' => $this->formBuilder()->getForm(ThanksForm::class)];
     $frame = [
       '#type' => 'html_tag',
       '#tag' => 'iframe',
@@ -188,7 +195,7 @@ final class DashboardController extends ControllerBase {
     if (!$full) {
       $frame['#attributes']['sandbox'] = 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads';
     }
-    return $frame;
+    return $thanks + ['iframe' => $frame];
   }
 
   /**

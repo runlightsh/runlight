@@ -155,6 +155,7 @@ final class Dashboard {
 					<a href="<?php echo esc_url( $setup ); ?>"><?php esc_html_e( 'Check the settings', 'runlight' ); ?></a>
 				</p></div>
 			<?php else : ?>
+				<?php Admin::thanks( true ); ?>
 				<?php // Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. ?>
 				<iframe id="runlight-embed" src="<?php echo esc_url( $ticket['url'] ); ?>" data-runlight-origin="<?php echo esc_attr( self::origin_of( $address ) ); ?>" data-runlight-bars="#wpadminbar" data-runlight-gap="24" title="<?php esc_attr_e( 'Runlight dashboard', 'runlight' ); ?>" referrerpolicy="no-referrer"<?php echo $local ? '' : ' sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"'; ?> style="display:block;width:100%;height:calc(100vh - 140px);min-height:600px;margin-top:12px;border:0;border-radius:8px;background:transparent"></iframe>
 			<?php endif; ?>

@@ -88,6 +88,12 @@ function delete_option( $name ): bool {
 	return true;
 }
 
+// Records metadata removed for every object, as uninstall.php removes the users' own.
+function delete_metadata( $type, $id, $key, $value = '', $all = false ): bool {
+	$GLOBALS['wp_test']['deleted_meta'][] = array( $type, $id, $key, $all );
+	return true;
+}
+
 function get_site_option( $name, $default = false ) {
 	return get_option( $name, $default );
 }

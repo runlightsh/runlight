@@ -1603,10 +1603,12 @@ test("deleting the WordPress plugin removes what it kept, on every site of a net
     foreach ($GLOBALS["wp_test"]["blogs"] as $id => $uploads) {
       $left[$id] = ["options" => array_keys($GLOBALS["wp_test"]["parked"][$id]), "runlight" => is_dir("$uploads/runlight"), "photo" => is_file("$uploads/photo.jpg")];
     }
-    echo json_encode(["blog" => get_current_blog_id(), "left" => $left, "queries" => $GLOBALS["wpdb"]->queries]);
+    echo json_encode(["blog" => get_current_blog_id(), "left" => $left, "queries" => $GLOBALS["wpdb"]->queries, "meta" => $GLOBALS["wp_test"]["deleted_meta"] ?? []]);
   `);
   if (answer === null) return;
-  const { blog, left, queries } = JSON.parse(answer);
+  const { blog, left, queries, meta } = JSON.parse(answer);
+  // Who closed the thank you is kept with the users, which every site shares, so it goes once, for all of them.
+  assert.deepEqual(meta, [["user", 0, "runlight_thanked", true]]);
   assert.equal(blog, 1, "back on the site it started on");
   // The transients go by a query, which the stand-in only records; every other row and file of Runlight's is gone.
   const kept = { options: ["_transient_runlight_icon", "blogname"], runlight: false, photo: true };

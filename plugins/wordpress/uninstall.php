@@ -46,3 +46,5 @@ if ( is_multisite() ) {
 } else {
 	runlight_uninstall_site();
 }
+// Whether each person closed the thank you, kept with the users, whom every site of a network shares.
+delete_metadata( 'user', 0, 'runlight_thanked', '', true );

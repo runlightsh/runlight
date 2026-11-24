@@ -24,6 +24,7 @@ final class Admin {
 		add_filter( 'plugin_action_links_' . plugin_basename( RUNLIGHT_PLUGIN_FILE ), array( self::class, 'action_links' ) );
 		add_action( 'admin_init', array( self::class, 'after_activation' ) );
 		add_action( 'admin_notices', array( self::class, 'setup_notice' ) );
+		add_action( 'admin_post_runlight_thanked', array( self::class, 'close_thanks' ) );
 	}
 
 	/** Set when the plugin is activated, so the next admin page can open the setup screen. */
@@ -242,6 +243,56 @@ final class Admin {
 		<?php
 	}
 
+	/** Per user: set once they close the thank you, which then never shows to them again. */
+	public const THANKED = 'runlight_thanked';
+
+	/** Whether the person signed in has closed the thank you. */
+	public static function thanked(): bool {
+		return (bool) get_user_meta( get_current_user_id(), self::THANKED, true );
+	}
+
+	/**
+	 * The thank you, asking for a review and a star: at the foot of the
+	 * settings page, and above the dashboard with a button that closes it for
+	 * good. Never on other screens, and never again once closed.
+	 *
+	 * @param bool $closable Whether it has the button that closes it.
+	 */
+	public static function thanks( bool $closable ): void {
+		if ( self::thanked() ) {
+			return;
+		}
+		?>
+		<div id="runlight-thanks" class="<?php echo $closable ? 'notice notice-info inline' : 'card'; ?>"<?php echo $closable ? ' style="position:relative;padding-right:38px"' : ''; ?>>
+			<h2><?php esc_html_e( 'Thanks for using Runlight', 'runlight' ); ?></h2>
+			<p><?php esc_html_e( 'Runlight is free and open source. If it is useful to you, a review on WordPress.org or a star on GitHub helps other people find it.', 'runlight' ); ?></p>
+			<p>
+				<a class="button" href="https://wordpress.org/support/plugin/runlight/reviews/#new-post" target="_blank" rel="noopener"><?php esc_html_e( 'Write a review', 'runlight' ); ?></a>
+				<a class="button" href="https://github.com/runlightsh/runlight" target="_blank" rel="noopener"><?php esc_html_e( 'Star it on GitHub', 'runlight' ); ?></a>
+			</p>
+			<?php if ( $closable ) : ?>
+				<?php // A form, so it closes without JavaScript too; assets/dashboard.js sends it without leaving the page. ?>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="runlight_thanked">
+					<?php wp_nonce_field( 'runlight_thanked', 'runlight_thanked_nonce' ); ?>
+					<button type="submit" class="notice-dismiss"><span class="screen-reader-text"><?php esc_html_e( 'Dismiss for good', 'runlight' ); ?></span></button>
+				</form>
+			<?php endif; ?>
+		</div>
+		<?php
+	}
+
+	/** Closes the thank you for the person signed in, for good, then goes back to the page it was on. */
+	public static function close_thanks(): void {
+		check_admin_referer( 'runlight_thanked', 'runlight_thanked_nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( '', 403 );
+		}
+		update_user_meta( get_current_user_id(), self::THANKED, 1 );
+		wp_safe_redirect( wp_get_referer() ? wp_get_referer() : admin_url( 'admin.php?page=' . Dashboard::PAGE ) );
+		exit;
+	}
+
 	public static function page(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
@@ -361,6 +412,9 @@ final class Admin {
 				</table>
 				<?php submit_button(); ?>
 			</form>
+			<?php if ( ! $unset ) : ?>
+				<?php self::thanks( false ); ?>
+			<?php endif; ?>
 			<p><?php printf( /* translators: %s: link to the docs */ esc_html__( 'Need help? %s', 'runlight' ), '<a href="https://runlight.sh/docs/wordpress/" target="_blank" rel="noopener">' . esc_html__( 'Read the Runlight docs.', 'runlight' ) . '</a>' ); ?></p>
 		</div>
 		<?php

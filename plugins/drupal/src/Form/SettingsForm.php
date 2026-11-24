@@ -11,6 +11,7 @@ use Drupal\Core\Url;
 use Drupal\runlight\Connect;
 use Drupal\runlight\Local;
 use Drupal\runlight\Setup;
+use Drupal\user\UserDataInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -39,6 +40,11 @@ final class SettingsForm extends ConfigFormBase {
   protected Connect $connect;
 
   /**
+   * Accounts' own data, where closing the thank you is kept.
+   */
+  protected UserDataInterface $userData;
+
+  /**
    * {@inheritdoc}
    */
   public static function create(ContainerInterface $container): static {
@@ -46,6 +52,7 @@ final class SettingsForm extends ConfigFormBase {
     $form->local = $container->get('runlight.local');
     $form->setup = $container->get('runlight.setup');
     $form->connect = $container->get('runlight.connect');
+    $form->userData = $container->get('user.data');
     return $form;
   }
 
@@ -244,6 +251,14 @@ final class SettingsForm extends ConfigFormBase {
       '#default_value' => $config->get('downloads'),
     ];
     $form = parent::buildForm($form, $form_state);
+    // Closed for good from the dashboard, it shows here no more either.
+    if (!$unset && !ThanksForm::closed($this->userData, $this->currentUser())) {
+      $form['thanks'] = [
+        '#type' => 'fieldset',
+        '#title' => $this->t('Thanks for using Runlight'),
+        '#weight' => 999,
+      ] + ThanksForm::words();
+    }
     $form['help'] = [
       '#markup' => '<p>' . $this->t('Need help? <a href=":url" target="_blank" rel="noopener">Read the Runlight docs.</a>', [':url' => 'https://runlight.sh/docs/drupal/']) . '</p>',
       '#weight' => 1000,
