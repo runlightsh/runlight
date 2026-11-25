@@ -1116,8 +1116,9 @@ impl Routes {
                 refused.headers.set(
                     "www-authenticate",
                     &format!(
-                        "Bearer realm=\"runlight\", resource_metadata=\"{}\"",
-                        glue::resource_metadata_url(&url.origin(), &self.0.base)
+                        "Bearer realm=\"runlight\", resource_metadata=\"{}\", scope=\"{}\"",
+                        glue::resource_metadata_url(&url.origin(), &self.0.base),
+                        crate::oauth::MCP_SCOPE
                     ),
                 );
                 return Ok(refused);

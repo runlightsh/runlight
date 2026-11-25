@@ -4,6 +4,7 @@ import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -119,6 +120,13 @@ public final class OAuth {
   }
 
   private static final List<String> SCOPES = List.of("read", "manage", "cms");
+
+  /**
+   * The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is
+   * offered only read: manage and cms are for a hub and the CMS plugins, which ask for them by
+   * name.
+   */
+  static final String MCP_SCOPE = "read";
 
   /**
    * The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new
@@ -389,7 +397,7 @@ public final class OAuth {
               "authorization_servers",
               List.of(issuer),
               "scopes_supported",
-              SCOPES,
+              List.of(MCP_SCOPE),
               "bearer_methods_supported",
               List.of("header")));
     }
@@ -526,9 +534,16 @@ public final class OAuth {
       return refuse.apply(
           ordered("error", "invalid_request", "error_description", "PKCE with S256 is required"));
     }
-    List<String> scopes = List.of(SPACES.split(orEmpty(form.get("scope")), -1));
-    boolean cms = scopes.contains("cms");
-    boolean manage = !cms && scopes.contains("manage");
+    // A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than
+    // one is a generic client asking for everything it was offered, and gets read, the least of
+    // them.
+    List<String> scopes =
+        Arrays.stream(SPACES.split(orEmpty(form.get("scope")), -1))
+            .filter(SCOPES::contains)
+            .distinct()
+            .toList();
+    boolean cms = scopes.equals(List.of("cms"));
+    boolean manage = scopes.equals(List.of("manage"));
     // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a
     // new one for it.
     String host = siteHost(redirect);

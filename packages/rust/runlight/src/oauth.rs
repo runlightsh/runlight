@@ -35,6 +35,9 @@ use crate::store::TokenRow;
 use crate::{BoxFuture, arr, obj};
 
 const SCOPES: [&str; 3] = ["read", "manage", "cms"];
+/// The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is offered
+/// only read: manage and cms are for a hub and the CMS plugins, which ask for them by name.
+pub const MCP_SCOPE: &str = "read";
 
 /// The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
 /// replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied
@@ -324,7 +327,7 @@ pub async fn oauth_response(
             &obj! {
                 "resource" => format!("{issuer}/mcp"),
                 "authorization_servers" => arr![issuer.clone()],
-                "scopes_supported" => Value::Array(SCOPES.iter().map(|&s| Value::from(s)).collect()),
+                "scopes_supported" => arr![MCP_SCOPE],
                 "bearer_methods_supported" => arr!["header"],
             },
             200,
@@ -453,9 +456,16 @@ async fn authorize(host: &dyn OAuthHost, request: &Request, url: &Url) -> Result
     if form.get("code_challenge_method") != Some("S256") || !test(js_re!(r"^[A-Za-z0-9_-]{43,128}$"), &challenge) {
         return refuse("invalid_request", Some("PKCE with S256 is required"));
     }
-    let scopes = split_space(form.get("scope").unwrap_or(""));
-    let cms = scopes.contains(&"cms");
-    let manage = !cms && scopes.contains(&"manage");
+    // A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+    // is a generic client asking for everything it was offered, and gets read, the least of them.
+    let mut scopes: Vec<&str> = Vec::new();
+    for scope in split_space(form.get("scope").unwrap_or("")) {
+        if SCOPES.contains(&scope) && !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    let cms = scopes == ["cms"];
+    let manage = scopes == ["manage"];
     // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
     let host_name = site_host(&redirect)?;
     // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.

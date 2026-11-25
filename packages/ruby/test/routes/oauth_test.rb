@@ -191,7 +191,7 @@ class RoutesOAuthTest < RoutesTestCase
                                                  Json.encode({ "client_name" => "Hub", "redirect_uris" => ["https://hub.example.net/cb"] }))))["client_id"]
     verifier = b64url(SecureRandom.bytes(32))
     params = form({ "response_type" => "code", "client_id" => client_id, "redirect_uri" => "https://hub.example.net/cb", "code_challenge" => Runlight::OAuth.s256(verifier),
-                    "code_challenge_method" => "S256", "scope" => "read manage", "site" => "b" })
+                    "code_challenge_method" => "S256", "scope" => "manage", "site" => "b" })
     page = routes.handle(at("https://x.com/runlight/oauth/authorize?#{params}", "GET", owner)).text
     assert_includes page, '<option value="b" selected>Site B</option>', "the site asked for is offered first"
     refute_includes page, "Every site"

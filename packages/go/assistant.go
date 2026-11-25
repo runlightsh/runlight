@@ -376,7 +376,7 @@ func (rt *Routes) mcp(c *call, u *whatwg.URL) (*Response, error) {
 	if access.refused() {
 		refused := deniedReader(access)
 		// Points an OAuth client at the metadata that starts the sign-in.
-		refused.Header.Set("www-authenticate", `Bearer realm="runlight", resource_metadata="`+ResourceMetadataURL(u.Origin(), rt.base)+`"`)
+		refused.Header.Set("www-authenticate", `Bearer realm="runlight", resource_metadata="`+ResourceMetadataURL(u.Origin(), rt.base)+`", scope="`+mcpScope+`"`)
 		return refused, nil
 	}
 	// Each tool reads the HTTP API with the caller's own headers, so it sees what they may.

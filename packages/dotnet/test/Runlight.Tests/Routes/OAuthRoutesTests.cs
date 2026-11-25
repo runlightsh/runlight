@@ -197,7 +197,7 @@ public sealed class OAuthRoutesTests : RoutesTestCase
         var owner = H(("authorization", "Bearer secret"));
         string clientId = Obj(await routes.HandleAsync(At("https://x.com/runlight/oauth/register", "POST", H(("content-type", "application/json")), Json.Stringify(new JsObject { ["client_name"] = "Hub", ["redirect_uris"] = L("https://hub.example.net/cb") })))).Str("client_id")!;
         string verifier = B64url(RandomNumberGenerator.GetBytes(32));
-        string parameters = Form(("response_type", "code"), ("client_id", clientId), ("redirect_uri", "https://hub.example.net/cb"), ("code_challenge", OAuth.S256(verifier)), ("code_challenge_method", "S256"), ("scope", "read manage"), ("site", "b"));
+        string parameters = Form(("response_type", "code"), ("client_id", clientId), ("redirect_uri", "https://hub.example.net/cb"), ("code_challenge", OAuth.S256(verifier)), ("code_challenge_method", "S256"), ("scope", "manage"), ("site", "b"));
         string page = (await routes.HandleAsync(At("https://x.com/runlight/oauth/authorize?" + parameters, "GET", owner))).Text();
         Assert.Contains("<option value=\"b\" selected>Site B</option>", page, StringComparison.Ordinal); // the site asked for is offered first
         Assert.DoesNotContain("Every site", page, StringComparison.Ordinal);

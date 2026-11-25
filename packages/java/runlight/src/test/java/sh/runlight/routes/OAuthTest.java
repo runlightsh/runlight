@@ -525,7 +525,7 @@ class OAuthTest {
             "code_challenge_method",
             "S256",
             "scope",
-            "read manage",
+            "manage",
             "site",
             "b");
     String page =

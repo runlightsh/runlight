@@ -8,6 +8,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 - WordPress, Drupal, and Craft plugins: once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review (on WordPress.org or the Craft Plugin Store) and to a star on GitHub. Its X closes it for that person on both pages. Closed within 14 days of first showing, it comes back once from then, and closed after that it never shows again. Uninstalling removes those times with everything else. It never shows as a notice elsewhere in the admin.
 
+### Fixed
+
+- Connecting Claude (or another MCP client) through OAuth showed the CMS plugins' consent page, offering to make a new site for `claude.ai`. The MCP endpoint now offers only the `read` scope, in its protected resource metadata and its 401 answer, and a request that asks for more than one scope at once is asked to read. A hub still asks for `manage` and the plugins for `cms`, each on its own.
+
 ## 0.5.2 - 2026-11-22
 
 ### Added

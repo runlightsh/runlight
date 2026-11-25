@@ -2703,7 +2703,7 @@ module Runlight
         if access == false || access == "unconfigured"
           refused = denied(access)
           # Points an OAuth client at the metadata that starts the sign-in.
-          refused.headers.set("www-authenticate", "Bearer realm=\"runlight\", resource_metadata=\"#{OAuth.resource_metadata_url(url.origin, base)}\"")
+          refused.headers.set("www-authenticate", "Bearer realm=\"runlight\", resource_metadata=\"#{OAuth.resource_metadata_url(url.origin, base)}\", scope=\"#{OAuth::MCP_SCOPE}\"")
           return refused
         end
         # Each tool reads the HTTP API with the caller's own headers, so it sees what they may.

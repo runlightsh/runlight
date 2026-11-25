@@ -249,7 +249,7 @@ public sealed class OAuthTests : IAsyncLifetime
         var ctx = await ContextAsync();
         string clientId = Body(await H(ctx, At("https://x.com/runlight/oauth/register", "POST", JsonType, Register("Hub", "https://hub.example.net/cb")))).Str("client_id")!;
         string verifier = B64url(RandomNumberGenerator.GetBytes(32));
-        string parameters = Form(("response_type", "code"), ("client_id", clientId), ("redirect_uri", "https://hub.example.net/cb"), ("code_challenge", OAuth.S256(verifier)), ("code_challenge_method", "S256"), ("scope", "read manage"), ("site", "b"));
+        string parameters = Form(("response_type", "code"), ("client_id", clientId), ("redirect_uri", "https://hub.example.net/cb"), ("code_challenge", OAuth.S256(verifier)), ("code_challenge_method", "S256"), ("scope", "manage"), ("site", "b"));
         string page = (await H(ctx, At("https://x.com/runlight/oauth/authorize?" + parameters, "GET", Owner))).Text();
         Assert.Contains("<option value=\"b\" selected>Site B</option>", page);
         Assert.DoesNotContain("Every site", page);

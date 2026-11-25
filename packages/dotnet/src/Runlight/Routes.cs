@@ -3724,7 +3724,7 @@ public sealed class Routes
             {
                 var refused = Denied(access);
                 // Points an OAuth client at the metadata that starts the sign-in.
-                refused.Headers.Set("www-authenticate", "Bearer realm=\"runlight\", resource_metadata=\"" + OAuth.ResourceMetadataUrl(url.Origin, @base) + "\"");
+                refused.Headers.Set("www-authenticate", "Bearer realm=\"runlight\", resource_metadata=\"" + OAuth.ResourceMetadataUrl(url.Origin, @base) + "\", scope=\"" + OAuth.McpScope + "\"");
                 return refused;
             }
             // Each tool reads the HTTP API with the caller's own headers, so it sees what they may.

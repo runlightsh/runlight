@@ -125,7 +125,7 @@ final class OAuthTest {
             "",
             null);
     assertEquals(
-        "{\"resource\":\"https://x.com/runlight/mcp\",\"authorization_servers\":[\"https://x.com/runlight\"],\"scopes_supported\":[\"read\",\"manage\",\"cms\"],\"bearer_methods_supported\":[\"header\"]}",
+        "{\"resource\":\"https://x.com/runlight/mcp\",\"authorization_servers\":[\"https://x.com/runlight\"],\"scopes_supported\":[\"read\"],\"bearer_methods_supported\":[\"header\"]}",
         resource.text());
     assertEquals("*", resource.headers().get("access-control-allow-origin"));
     assertEquals("nosniff", resource.headers().get("x-content-type-options"));

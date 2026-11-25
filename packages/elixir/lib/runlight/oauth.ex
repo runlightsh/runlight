@@ -35,6 +35,12 @@ defmodule Runlight.OAuth do
   ]
 
   @scopes ["read", "manage", "cms"]
+  # The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is offered
+  # only read: manage and cms are for a hub and the CMS plugins, which ask for them by name.
+  @mcp_scope "read"
+
+  @doc "The scope the MCP endpoint offers, named in its 401 answer."
+  def mcp_scope, do: @mcp_scope
 
   defp base64url(text), do: Base.url_encode64(text, padding: false)
 
@@ -168,7 +174,7 @@ defmodule Runlight.OAuth do
           JS.obj(
             resource: "#{issuer}/mcp",
             authorization_servers: [issuer],
-            scopes_supported: @scopes,
+            scopes_supported: [@mcp_scope],
             bearer_methods_supported: ["header"]
           )
         )
@@ -285,9 +291,11 @@ defmodule Runlight.OAuth do
       end
 
       challenge = get.("code_challenge") || ""
-      scopes = String.split(get.("scope") || "", ~r/\s+/u)
-      cms = "cms" in scopes
-      manage = not cms and "manage" in scopes
+      # A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+      # is a generic client asking for everything it was offered, and gets read, the least of them.
+      scopes = String.split(get.("scope") || "", ~r/\s+/u) |> Enum.filter(&(&1 in @scopes)) |> Enum.uniq()
+      cms = scopes == ["cms"]
+      manage = scopes == ["manage"]
       # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
       host = site_host(redirect)
 

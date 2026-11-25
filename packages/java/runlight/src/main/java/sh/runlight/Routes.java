@@ -4590,6 +4590,8 @@ public final class Routes {
                 "www-authenticate",
                 "Bearer realm=\"runlight\", resource_metadata=\""
                     + OAuth.resourceMetadataUrl(url.origin(), base)
+                    + "\", scope=\""
+                    + OAuth.MCP_SCOPE
                     + "\"");
         return refused;
       }

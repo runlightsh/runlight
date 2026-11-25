@@ -22081,7 +22081,7 @@
             "headers": {
               "content-type": "application/json",
               "cache-control": "no-store",
-              "www-authenticate": "Bearer realm=\"runlight\", resource_metadata=\"https://example.com/runlight/.well-known/oauth-protected-resource\"",
+              "www-authenticate": "Bearer realm=\"runlight\", resource_metadata=\"https://example.com/runlight/.well-known/oauth-protected-resource\", scope=\"read\"",
               "x-content-type-options": "nosniff"
             },
             "body": {
@@ -25268,7 +25268,7 @@
             "headers": {
               "content-type": "application/json",
               "cache-control": "no-store",
-              "www-authenticate": "Bearer realm=\"runlight\", resource_metadata=\"https://example.com/runlight/.well-known/oauth-protected-resource\"",
+              "www-authenticate": "Bearer realm=\"runlight\", resource_metadata=\"https://example.com/runlight/.well-known/oauth-protected-resource\", scope=\"read\"",
               "x-content-type-options": "nosniff"
             },
             "body": {
@@ -25731,7 +25731,7 @@
             "headers": {
               "content-type": "application/json",
               "cache-control": "no-store",
-              "www-authenticate": "Bearer realm=\"runlight\", resource_metadata=\"https://example.com/runlight/.well-known/oauth-protected-resource\"",
+              "www-authenticate": "Bearer realm=\"runlight\", resource_metadata=\"https://example.com/runlight/.well-known/oauth-protected-resource\", scope=\"read\"",
               "x-content-type-options": "nosniff"
             },
             "body": {
@@ -28040,9 +28040,7 @@
                 "https://example.com/runlight"
               ],
               "scopes_supported": [
-                "read",
-                "manage",
-                "cms"
+                "read"
               ],
               "bearer_methods_supported": [
                 "header"
@@ -28070,9 +28068,7 @@
                 "https://example.com/runlight"
               ],
               "scopes_supported": [
-                "read",
-                "manage",
-                "cms"
+                "read"
               ],
               "bearer_methods_supported": [
                 "header"
@@ -29443,7 +29439,7 @@
             "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
             "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
             "code_challenge_method": "S256",
-            "scope": "read manage",
+            "scope": "manage",
             "decision": "allow",
             "site": "shop"
           },
@@ -29587,6 +29583,112 @@
                   "lastUsedAt": 1791288360000
                 }
               ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/oauth/authorize?response_type=code&client_id={{client}}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y&code_challenge_method=S256&scope=read%20manage%20cms",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "look": [
+            "<strong>Claude</strong> wants to read",
+            "change its settings",
+            "wants to count",
+            "A new site for"
+          ],
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "text/html",
+              "cache-control": "no-store",
+              "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
+              "referrer-policy": "same-origin"
+            },
+            "found": [
+              true,
+              false,
+              false,
+              false
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/authorize",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "form": {
+            "response_type": "code",
+            "client_id": "{{client}}",
+            "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+            "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
+            "code_challenge_method": "S256",
+            "scope": "manage cms",
+            "decision": "allow",
+            "site": "shop"
+          },
+          "capture": {
+            "code6": "header:location~code=([a-f0-9]+)"
+          },
+          "expect": {
+            "status": 303,
+            "headers": {
+              "cache-control": "no-store",
+              "location": "https://claude.ai/api/mcp/auth_callback?code=<value>"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/oauth/token",
+          "form": {
+            "grant_type": "authorization_code",
+            "code": "{{code6}}",
+            "client_id": "{{client}}",
+            "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+            "code_verifier": "conformance-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"
+          },
+          "capture": {
+            "mixed": "access_token"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type, mcp-protocol-version"
+            },
+            "body": {
+              "access_token": "<access_token>",
+              "token_type": "Bearer",
+              "scope": "read",
+              "site": "shop"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/token",
+          "headers": {
+            "authorization": "Bearer {{mixed}}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "scope": "read",
+              "site": "shop"
             }
           }
         },
@@ -30039,9 +30141,10 @@
             "authorization": "Bearer conformance"
           },
           "look": [
-            "wants to count <strong>blog.example.com</strong>",
+            "wants to count",
             "agents key",
-            "change its settings"
+            "change its settings",
+            "wants to read"
           ],
           "expect": {
             "status": 200,
@@ -30053,9 +30156,10 @@
               "referrer-policy": "same-origin"
             },
             "found": [
-              true,
-              true,
-              false
+              false,
+              false,
+              false,
+              true
             ]
           }
         },
@@ -30071,7 +30175,7 @@
             "redirect_uri": "https://www.blog.example.com/wp-admin/options-general.php?page=runlight",
             "code_challenge": "o_UBuWlNRvSWwsVYJqrs5EQo89Jn7Cm_gk-BDYsu17Y",
             "code_challenge_method": "S256",
-            "scope": "cms manage",
+            "scope": "cms",
             "state": "c1",
             "decision": "allow",
             "site": "new"

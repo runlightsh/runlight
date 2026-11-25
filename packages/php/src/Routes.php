@@ -3141,7 +3141,7 @@ final class Routes
             if ($access === false || $access === 'unconfigured') {
                 $refused = self::denied($access);
                 // Points an OAuth client at the metadata that starts the sign-in.
-                $refused->headers->set('www-authenticate', 'Bearer realm="runlight", resource_metadata="' . OAuth::resourceMetadataUrl($url->origin(), $base) . '"');
+                $refused->headers->set('www-authenticate', 'Bearer realm="runlight", resource_metadata="' . OAuth::resourceMetadataUrl($url->origin(), $base) . '", scope="' . OAuth::MCP_SCOPE . '"');
                 return $refused;
             }
             // Each tool reads the HTTP API with the caller's own headers, so it sees what they may.

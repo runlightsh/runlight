@@ -52,6 +52,8 @@ final class OAuth
     public const OLD_REGISTRATIONS = 'oauth-registrations';
 
     private const SCOPES = ['read', 'manage', 'cms'];
+    /** The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is offered only read: manage and cms are for a hub and the CMS plugins, which ask for them by name. */
+    public const MCP_SCOPE = 'read';
 
     private const CORS = [
         'access-control-allow-origin' => '*',
@@ -207,7 +209,7 @@ final class OAuth
         }
 
         if (str_starts_with($known, '/.well-known/oauth-protected-resource')) {
-            return self::json(['resource' => "$issuer/mcp", 'authorization_servers' => [$issuer], 'scopes_supported' => self::SCOPES, 'bearer_methods_supported' => ['header']]);
+            return self::json(['resource' => "$issuer/mcp", 'authorization_servers' => [$issuer], 'scopes_supported' => [self::MCP_SCOPE], 'bearer_methods_supported' => ['header']]);
         }
         if (str_starts_with($known, '/.well-known/oauth-authorization-server') || str_starts_with($known, '/.well-known/openid-configuration')) {
             return self::json([
@@ -281,9 +283,11 @@ final class OAuth
             if ($form->get('code_challenge_method') !== 'S256' || !preg_match('/^[A-Za-z0-9_-]{43,128}\z/', $challenge)) {
                 return $refuse(['error' => 'invalid_request', 'error_description' => 'PKCE with S256 is required']);
             }
-            $scopes = preg_split('/[' . Js::SPACE . ']+/u', $form->get('scope') ?? '') ?: [];
-            $cms = in_array('cms', $scopes, true);
-            $manage = !$cms && in_array('manage', $scopes, true);
+            // A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+            // is a generic client asking for everything it was offered, and gets read, the least of them.
+            $scopes = array_values(array_unique(array_intersect(preg_split('/[' . Js::SPACE . ']+/u', $form->get('scope') ?? '') ?: [], self::SCOPES)));
+            $cms = $scopes === ['cms'];
+            $manage = $scopes === ['manage'];
             // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
             $host = self::siteHost($redirect);
             // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.

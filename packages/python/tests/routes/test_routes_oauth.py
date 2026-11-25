@@ -219,7 +219,7 @@ def test_a_manage_grant_names_one_site_and_records_the_hubs_origin() -> None:
             "redirect_uri": "https://hub.example.net/cb",
             "code_challenge": s256(verifier),
             "code_challenge_method": "S256",
-            "scope": "read manage",
+            "scope": "manage",
             "site": "b",
         }
     )

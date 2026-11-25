@@ -99,6 +99,14 @@ public static class OAuth
 {
     public const long CodeMs = 5 * 60_000;
 
+    /// <summary>
+    /// The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is offered only
+    /// read: manage and cms are for a hub and the CMS plugins, which ask for them by name.
+    /// </summary>
+    public const string McpScope = "read";
+
+    private static readonly string[] Scopes = ["read", "manage", "cms"];
+
     /// <summary>An app stored before client ids were signed, which never finished connecting within a day, is removed.</summary>
     public const long UnusedClientMs = 86_400_000;
 
@@ -271,7 +279,7 @@ public static class OAuth
             {
                 ["resource"] = issuer + "/mcp",
                 ["authorization_servers"] = Strings(issuer),
-                ["scopes_supported"] = Strings("read", "manage", "cms"),
+                ["scopes_supported"] = Strings(McpScope),
                 ["bearer_methods_supported"] = Strings("header"),
             });
         }
@@ -381,9 +389,11 @@ public static class OAuth
         {
             return Refuse("invalid_request", "PKCE with S256 is required");
         }
-        string[] scopes = Spaces.Split(form.Get("scope") ?? "");
-        bool cms = scopes.Contains("cms");
-        bool manage = !cms && scopes.Contains("manage");
+        // A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+        // is a generic client asking for everything it was offered, and gets read, the least of them.
+        string[] scopes = Spaces.Split(form.Get("scope") ?? "").Where(Scopes.Contains).Distinct().ToArray();
+        bool cms = scopes is ["cms"];
+        bool manage = scopes is ["manage"];
         string name = Js.String(client.Get("name"));
         // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
         string host = SiteHost(redirect);

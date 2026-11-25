@@ -39,6 +39,10 @@ const (
 // oauthScopes are the scopes a token from OAuth may have.
 var oauthScopes = []string{"read", "manage", "cms"}
 
+// mcpScope is the scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is
+// offered only read: manage and cms are for a hub and the CMS plugins, which ask for them by name.
+const mcpScope = "read"
+
 // agentsKey is the key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
 // replaces it. It is kept sealed with the server's secret, as the mail service's keys are, so a copied database alone
 // cannot report for the site; one kept before as plain text is sealed the next time it is read.
@@ -249,7 +253,7 @@ func (o *oauthHost) respond(c *call, path string, u *whatwg.URL) (*Response, err
 		return web.NewResponse(204, nil, oauthCORS...), nil
 	}
 	if strings.HasPrefix(path, "/.well-known/oauth-protected-resource") {
-		return oauthJSON(js.NewObject("resource", issuer+"/mcp", "authorization_servers", []string{issuer}, "scopes_supported", oauthScopes, "bearer_methods_supported", []string{"header"}), 200), nil
+		return oauthJSON(js.NewObject("resource", issuer+"/mcp", "authorization_servers", []string{issuer}, "scopes_supported", []string{mcpScope}, "bearer_methods_supported", []string{"header"}), 200), nil
 	}
 	if strings.HasPrefix(path, "/.well-known/oauth-authorization-server") || strings.HasPrefix(path, "/.well-known/openid-configuration") {
 		return oauthJSON(js.NewObject(
@@ -471,9 +475,16 @@ func (o *oauthHost) authorize(c *call, u *whatwg.URL) (*Response, error) {
 	if form.Value("code_challenge_method") != "S256" || !challengePattern.MatchString(challenge) {
 		return refuse("error", "invalid_request", "error_description", "PKCE with S256 is required"), nil
 	}
-	scopes := scopeSplit.Split(form.Value("scope"), -1)
-	cms := contains(scopes, "cms")
-	manage := !cms && contains(scopes, "manage")
+	// A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+	// is a generic client asking for everything it was offered, and gets read, the least of them.
+	var scopes []string
+	for _, s := range scopeSplit.Split(form.Value("scope"), -1) {
+		if contains(oauthScopes, s) && !contains(scopes, s) {
+			scopes = append(scopes, s)
+		}
+	}
+	cms := len(scopes) == 1 && scopes[0] == "cms"
+	manage := len(scopes) == 1 && scopes[0] == "manage"
 	// A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
 	host := siteHost(redirect)
 	// As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.

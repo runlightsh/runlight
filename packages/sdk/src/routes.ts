@@ -11,7 +11,7 @@ import { EMAIL, LINK_DOMAIN_CHECK, RETENTION_MONTHS, envValue as env, type Reque
 import { mcpResponse } from "./mcp.js";
 import { readablePath, recordedPath } from "./sources.js";
 import { decodePart } from "./path.js";
-import { agentsKey, oauthResponse, openAgentsKey, resourceMetadataUrl } from "./oauth.js";
+import { agentsKey, MCP_SCOPE, oauthResponse, openAgentsKey, resourceMetadataUrl } from "./oauth.js";
 import { csv, zip } from "./zip.js";
 import { GoalError, clickRules, goalFrom } from "./goals.js";
 import { FunnelError, funnelFrom } from "./funnels.js";
@@ -2241,7 +2241,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (access === false || access === "unconfigured") {
           const refused = denied(access);
           // Points an OAuth client at the metadata that starts the sign-in.
-          refused.headers.set("www-authenticate", `Bearer realm="runlight", resource_metadata="${resourceMetadataUrl(url.origin, base)}"`);
+          refused.headers.set("www-authenticate", `Bearer realm="runlight", resource_metadata="${resourceMetadataUrl(url.origin, base)}", scope="${MCP_SCOPE}"`);
           return refused;
         }
         // Each tool reads the HTTP API with the caller's own headers, so it sees what they may.

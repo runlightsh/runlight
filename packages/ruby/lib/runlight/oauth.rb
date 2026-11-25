@@ -34,6 +34,9 @@ module Runlight
     # The longest client id, which carries the app's name and redirect addresses.
     MAX_CLIENT_ID = 2048
     SCOPES = %w[read manage cms].freeze
+    # The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is offered
+    # only read: manage and cms are for a hub and the CMS plugins, which ask for them by name.
+    MCP_SCOPE = "read"
     # The most an OAuth request's body may be: a registration, a consent form, or a code swap is far smaller.
     MAX_BODY_BYTES = 64 * 1024
 
@@ -110,7 +113,7 @@ module Runlight
       end
 
       if known.start_with?("/.well-known/oauth-protected-resource")
-        return json({ "resource" => "#{issuer}/mcp", "authorization_servers" => [issuer], "scopes_supported" => SCOPES, "bearer_methods_supported" => ["header"] })
+        return json({ "resource" => "#{issuer}/mcp", "authorization_servers" => [issuer], "scopes_supported" => [MCP_SCOPE], "bearer_methods_supported" => ["header"] })
       end
       if known.start_with?("/.well-known/oauth-authorization-server") || known.start_with?("/.well-known/openid-configuration")
         return json({
@@ -187,9 +190,11 @@ module Runlight
           return refuse.call({ "error" => "invalid_request", "error_description" => "PKCE with S256 is required" })
         end
 
-        scopes = (form.get("scope") || "").split(/[#{Js::SPACE}]+/o)
-        cms = scopes.include?("cms")
-        manage = !cms && scopes.include?("manage")
+        # A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+        # is a generic client asking for everything it was offered, and gets read, the least of them.
+        scopes = (form.get("scope") || "").split(/[#{Js::SPACE}]+/o).select { |s| SCOPES.include?(s) }.uniq
+        cms = scopes == ["cms"]
+        manage = scopes == ["manage"]
         name = client["name"].to_s
         # A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
         host = site_host(redirect)

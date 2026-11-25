@@ -943,12 +943,22 @@ const OAUTH: Scenario[] = [
         look: ["change its settings", '<option value="shop" selected>', "Every site"],
       },
       { method: "POST", path: "/oauth/authorize", headers: auth, form: { response_type: "code", client_id: "{{client}}", redirect_uri: CALLBACK, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: "manage", decision: "allow" } },
-      { method: "POST", path: "/oauth/authorize", headers: auth, form: { response_type: "code", client_id: "{{client}}", redirect_uri: CALLBACK, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: "read manage", decision: "allow", site: "shop" }, capture: { code5: "header:location~code=([a-f0-9]+)" } },
+      { method: "POST", path: "/oauth/authorize", headers: auth, form: { response_type: "code", client_id: "{{client}}", redirect_uri: CALLBACK, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: "manage", decision: "allow", site: "shop" }, capture: { code5: "header:location~code=([a-f0-9]+)" } },
       { method: "POST", path: "/oauth/token", form: { grant_type: "authorization_code", code: "{{code5}}", client_id: "{{client}}", redirect_uri: CALLBACK, code_verifier: VERIFIER }, capture: { manage: "access_token" } },
       getAs("/api/token", as("{{manage}}")),
       post("/api/pick", { origin: "https://claude.ai" }, asJson("{{manage}}")),
       post("/api/pick", { origin: "https://elsewhere.example" }, asJson("{{manage}}")),
       get("/api/tokens"),
+      // An MCP client asks for every scope it was offered, or several at once, and is asked to read, never to manage or count.
+      {
+        method: "GET",
+        path: `/oauth/authorize?response_type=code&client_id={{client}}&redirect_uri=${encodeURIComponent(CALLBACK)}&code_challenge=${CHALLENGE}&code_challenge_method=S256&scope=read%20manage%20cms`,
+        headers: auth,
+        look: ["<strong>Claude</strong> wants to read", "change its settings", "wants to count", "A new site for"],
+      },
+      { method: "POST", path: "/oauth/authorize", headers: auth, form: { response_type: "code", client_id: "{{client}}", redirect_uri: CALLBACK, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: "manage cms", decision: "allow", site: "shop" }, capture: { code6: "header:location~code=([a-f0-9]+)" } },
+      { method: "POST", path: "/oauth/token", form: { grant_type: "authorization_code", code: "{{code6}}", client_id: "{{client}}", redirect_uri: CALLBACK, code_verifier: VERIFIER }, capture: { mixed: "access_token" } },
+      getAs("/api/token", as("{{mixed}}")),
       { method: "GET", path: "/oauth/nothing" },
     ],
   },
@@ -987,9 +997,10 @@ OAUTH.push({
     // The agents key in the answer is the site's own: it reports the site's pages, and a key made up is refused.
     post("/api/observe", { url: "https://blog.example.com/post", userAgent: GPTBOT }, asJson("{{agentsKey}}")),
     post("/api/observe", { url: "https://blog.example.com/post", userAgent: GPTBOT }, asJson("rlo_0123456789abcdefghij0123")),
-    // Asked for with manage too, cms wins, and a new site for a domain a site already counts is that site.
-    { method: "GET", path: cmsAsk("wp", WP_BACK).replace("scope=cms", "scope=cms%20manage"), headers: auth, look: ["wants to count <strong>blog.example.com</strong>", "agents key", "change its settings"] },
-    { ...cmsAllow("wp", WP_BACK, "new", "cms manage"), capture: { againCode: "header:location~code=([a-f0-9]+)" } },
+    // Asked for with manage too, it is not a plugin but an app asking for everything, which may only read.
+    { method: "GET", path: cmsAsk("wp", WP_BACK).replace("scope=cms", "scope=cms%20manage"), headers: auth, look: ["wants to count", "agents key", "change its settings", "wants to read"] },
+    // A new site for a domain a site already counts is that site.
+    { ...cmsAllow("wp", WP_BACK, "new"), capture: { againCode: "header:location~code=([a-f0-9]+)" } },
     cmsSwap("againCode", "wp", WP_BACK),
     // A domain no site counts yet gets a new site for it.
     register("Drupal at new.example.org", NEW_BACK, "drupal"),

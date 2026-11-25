@@ -4055,7 +4055,7 @@ defmodule Runlight.Routes do
           Response.put_header(
             refused,
             "www-authenticate",
-            ~s(Bearer realm="runlight", resource_metadata="#{Runlight.OAuth.resource_metadata_url(Url.origin(url), routes.base)}")
+            ~s(Bearer realm="runlight", resource_metadata="#{Runlight.OAuth.resource_metadata_url(Url.origin(url), routes.base)}", scope="#{Runlight.OAuth.mcp_scope()}")
           )
 
         _ ->

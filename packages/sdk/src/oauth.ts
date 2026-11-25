@@ -46,6 +46,11 @@ interface Code {
 
 type Scope = "read" | "manage" | "cms";
 const SCOPES: Scope[] = ["read", "manage", "cms"];
+/**
+ * The scope the MCP endpoint offers. An MCP client asks for every scope it is offered, so it is offered
+ * only read: manage and cms are for a hub and the CMS plugins, which ask for them by name.
+ */
+export const MCP_SCOPE = "read";
 
 /**
  * The key a CMS plugin reports AI agents reading a site's pages with: made on first ask, or a new one that
@@ -196,7 +201,7 @@ async function respond(ctx: OAuthContext, request: Request, path: string, url: U
   if (request.method === "OPTIONS" && (known.startsWith("/.well-known/oauth-") || known.startsWith("/.well-known/openid-configuration") || path.startsWith("/oauth/"))) return new Response(null, { status: 204, headers: CORS });
 
   if (known.startsWith("/.well-known/oauth-protected-resource")) {
-    return json({ resource: `${issuer}/mcp`, authorization_servers: [issuer], scopes_supported: SCOPES, bearer_methods_supported: ["header"] });
+    return json({ resource: `${issuer}/mcp`, authorization_servers: [issuer], scopes_supported: [MCP_SCOPE], bearer_methods_supported: ["header"] });
   }
   if (known.startsWith("/.well-known/oauth-authorization-server") || known.startsWith("/.well-known/openid-configuration")) {
     return json({
@@ -251,9 +256,11 @@ async function respond(ctx: OAuthContext, request: Request, path: string, url: U
     if (form.get("response_type") !== "code") return refuse({ error: "unsupported_response_type" });
     const challenge = form.get("code_challenge") ?? "";
     if (form.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43,128}$/.test(challenge)) return refuse({ error: "invalid_request", error_description: "PKCE with S256 is required" });
-    const scopes = (form.get("scope") ?? "").split(/\s+/);
-    const cms = scopes.includes("cms");
-    const manage = !cms && scopes.includes("manage");
+    // A hub asks for manage and a CMS plugin for cms, each on its own. An app asking for more than one
+    // is a generic client asking for everything it was offered, and gets read, the least of them.
+    const scopes = [...new Set((form.get("scope") ?? "").split(/\s+/).filter((s): s is Scope => (SCOPES as string[]).includes(s)))];
+    const cms = scopes.length === 1 && scopes[0] === "cms";
+    const manage = scopes.length === 1 && scopes[0] === "manage";
     // A CMS plugin is for the site it runs on: one of the sites counting its admin's domain, or a new one for it.
     const host = siteHost(redirect);
     // As the tracker counts: a site that lists the domain, or the only site here when it lists none, which counts any.

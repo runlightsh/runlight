@@ -2694,11 +2694,11 @@ class Routes:
                 return coded("Method not allowed", "method_not_allowed", 405, None, {"allow": "POST"})
             access = self._reader(request)
             if access is False or access == "unconfigured":
-                from .oauth import resource_metadata_url
+                from .oauth import MCP_SCOPE, resource_metadata_url
 
                 refused = self._denied(access)
                 # Points an OAuth client at the metadata that starts the sign-in.
-                refused.headers.set("www-authenticate", f'Bearer realm="runlight", resource_metadata="{resource_metadata_url(url.origin, base)}"')
+                refused.headers.set("www-authenticate", f'Bearer realm="runlight", resource_metadata="{resource_metadata_url(url.origin, base)}", scope="{MCP_SCOPE}"')
                 return refused
             # Each tool reads the HTTP API with the caller's own headers, so it sees what they may.
             return mcp_response(request, self._read_api(request, url))

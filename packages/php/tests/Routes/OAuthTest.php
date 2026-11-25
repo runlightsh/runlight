@@ -209,7 +209,7 @@ final class OAuthTest extends TestCase
         $owner = ['authorization' => 'Bearer secret'];
         $clientId = Make::body($routes->handle(self::at('https://x.com/runlight/oauth/register', 'POST', ['content-type' => 'application/json'], Json::encode(['client_name' => 'Hub', 'redirect_uris' => ['https://hub.example.net/cb']]))))['client_id'];
         $verifier = self::b64url(random_bytes(32));
-        $params = self::form(['response_type' => 'code', 'client_id' => $clientId, 'redirect_uri' => 'https://hub.example.net/cb', 'code_challenge' => OAuth::s256($verifier), 'code_challenge_method' => 'S256', 'scope' => 'read manage', 'site' => 'b']);
+        $params = self::form(['response_type' => 'code', 'client_id' => $clientId, 'redirect_uri' => 'https://hub.example.net/cb', 'code_challenge' => OAuth::s256($verifier), 'code_challenge_method' => 'S256', 'scope' => 'manage', 'site' => 'b']);
         $page = $routes->handle(self::at("https://x.com/runlight/oauth/authorize?$params", 'GET', $owner))->text();
         $this->assertStringContainsString('<option value="b" selected>Site B</option>', $page, 'the site asked for is offered first');
         $this->assertStringNotContainsString('Every site', $page);
