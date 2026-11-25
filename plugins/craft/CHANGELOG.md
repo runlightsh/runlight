@@ -1,5 +1,13 @@
 # Release Notes for Runlight
 
+## Unreleased
+
+### Added
+- Once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review in the Craft Plugin Store and to a star on GitHub. Its X closes it for you on both pages. Closed within 14 days of first showing, it comes back once from then, and closed after that it never shows again. Uninstalling removes those times with everything else.
+
+### Fixed
+- Connecting Claude (or another MCP client) to Runlight through OAuth now asks only to read your stats. It used to show the page for connecting a CMS plugin, offering to make a new site for the app.
+
 ## 0.5.2 - 2026-11-22
 
 ### Changed
