@@ -1,6 +1,6 @@
 # Release Notes for Runlight
 
-## Unreleased
+## 0.5.3 - 2026-11-25
 
 ### Added
 - Once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review in the Craft Plugin Store and to a star on GitHub. Its X closes it for you on both pages. Closed within 14 days of first showing, it comes back once from then, and closed after that it never shows again. Uninstalling removes those times with everything else.
