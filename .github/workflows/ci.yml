@@ -240,12 +240,6 @@ jobs:
       - run: |
           composer config repositories.runlight "$(jq -nc --arg v "$(jq -r .version ../../packages/sdk/package.json)" '{type: "path", url: "../../packages/php", options: {symlink: false, versions: {"runlight/runlight": $v}}}')"
         working-directory: plugins/craft
-      # Every Craft 5 release pins a dependency with a security advisory at
-      # times (Twig, 2026-11-24), which Composer then refuses to install. This
-      # job only loads the plugin's classes against Craft and ships nothing,
-      # so it installs Craft anyway.
-      - run: composer config audit.block-insecure false
-        working-directory: plugins/craft
       - run: composer update --no-interaction --no-progress --prefer-dist --no-plugins
         working-directory: plugins/craft
       - run: php scripts/craft-load.php
