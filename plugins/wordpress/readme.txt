@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.5.3
+Stable tag: 0.5.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -138,6 +138,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 6. The settings page sets what Runlight counts.
 
 == Changelog ==
+
+= 0.5.4 =
+* Released with Runlight 0.5.4.
 
 = 0.5.3 =
 * Once Runlight is set up, a short thank you above the dashboard, and at the foot of the settings page, links to a review on WordPress.org and to a star on GitHub. Its X closes it for you on both pages. Closed within 14 days of first showing, it comes back once from then, and closed after that it never shows again. It never shows as a notice elsewhere in the admin.
