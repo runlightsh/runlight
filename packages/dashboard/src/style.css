@@ -4073,25 +4073,9 @@ button.live:hover {
 }
 
 .powered-mark {
-  width: 18px;
-  height: 18px;
+  width: 19px;
+  height: 19px;
   flex: none;
-}
-
-.powered-mark rect {
-  fill: var(--ink);
-}
-
-.powered-mark path {
-  fill: none;
-  stroke: var(--page);
-  stroke-width: 2.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.powered-mark circle {
-  fill: #22c55e;
 }
 
 /* Settings, MCP & API: a new token, shown once, with how to connect it. */

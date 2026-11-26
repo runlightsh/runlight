@@ -1269,7 +1269,7 @@ class Routes:
                         "to": to,
                         "subject": t("email.test.subject"),
                         "text": t("email.test.body", {"service": name}),
-                        "html": f'<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
+                        "html": f'<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#1c1c1f;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
                     }
                 )
                 # Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.

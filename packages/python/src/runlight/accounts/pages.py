@@ -19,7 +19,7 @@ def _esc(value: str) -> str:
     return _SPECIAL.sub(lambda m: _ESCAPES[m.group(0)], value)
 
 
-MARK = '<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2.5" y="2.5" width="27" height="27" rx="7"/><path d="M11 23V9h6.2a4.3 4.3 0 0 1 0 8.6H11m6 0 5 5.4"/><circle cx="23.6" cy="8.4" r="2.6"/></svg>'
+MARK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" class="mark" aria-hidden="true"><defs><clipPath id="rlm-b"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath><linearGradient id="rlm-t" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#2e2e33"/><stop offset="1" stop-color="#111113"/></linearGradient><radialGradient id="rlm-s" cx="709.6" cy="322.4" r="439.4" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#22c55e" stop-opacity=".38"/><stop offset="1" stop-color="#22c55e" stop-opacity="0"/></radialGradient><linearGradient id="rlm-rim" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity=".28"/><stop offset=".5" stop-color="#fff" stop-opacity=".02"/></linearGradient><linearGradient id="rlm-r" x1="0" y1="5.6" x2="0" y2="26" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#d4d4d8"/></linearGradient><radialGradient id="rlm-l" cx="23.6" cy="8.4" r="2.6" fx="22.69" fy="7.36" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#86efac"/><stop offset=".55" stop-color="#22c55e"/><stop offset="1" stop-color="#16a34a"/></radialGradient><filter id="rlm-d" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy=".23" stdDeviation=".27" flood-color="#000" flood-opacity=".45"/></filter><filter id="rlm-g" x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="1.15"/></filter><mask id="rlm-n" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><circle cx="23.6" cy="8.4" r="3.432" fill="#000" transform="translate(96 104) scale(26)"/></mask></defs><g clip-path="url(#rlm-b)"><rect x="100" y="100" width="824" height="824" fill="url(#rlm-t)"/><rect x="100" y="100" width="824" height="824" fill="url(#rlm-s)"/><rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="url(#rlm-rim)" stroke-width="3"/></g><g mask="url(#rlm-n)"><g transform="translate(96 104) scale(26)" filter="url(#rlm-d)"><path d="M11 23V9h6.2a4.3 4.3 0 0 1 0 8.6H11M17 17.6l5 5.4" fill="none" stroke="url(#rlm-r)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></g></g><g transform="translate(96 104) scale(26)"><circle cx="23.6" cy="8.4" r="2.6" fill="#4ade80" fill-opacity=".9" filter="url(#rlm-g)"/><circle cx="23.6" cy="8.4" r="2.6" fill="url(#rlm-l)"/></g></svg>'
 
 # Light until someone picks otherwise, as in the dashboard, which shares the choice through localStorage.
 DARK = "color-scheme: dark; --page: #09090b; --card: #141417; --ink: #fafafa; --muted: #a1a1aa; --line: #27272a; --field: #0c0c0e; --bad: #f87171;"
@@ -36,10 +36,7 @@ AUTH_CSS = (
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--page); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
 main { width: min(400px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
 .brand { display: flex; align-items: center; gap: 9px; margin: 0 0 22px; color: var(--ink); font-weight: 700; font-size: 16px; }
-.mark { width: 26px; height: 26px; }
-.mark rect { fill: var(--ink); }
-.mark path { fill: none; stroke: var(--card); stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; }
-.mark circle { fill: #22c55e; }
+.mark { width: 27px; height: 27px; }
 h1 { margin: 0 0 6px; font-size: 21px; }
 p { margin: 0 0 18px; color: var(--muted); }
 label { display: block; margin: 0 0 14px; font-size: 13px; font-weight: 600; }

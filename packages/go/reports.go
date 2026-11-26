@@ -256,7 +256,7 @@ func BuildReport(ctx context.Context, r *Runlight, site SiteRow, frequency strin
 		where = u.Host() + strings.TrimSuffix(u.Pathname, "/")
 	}
 	at := tr.T("email.at", Vars{"where": where})
-	mark := `<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#111827;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div>`
+	mark := `<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#1c1c1f;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div>`
 
 	frequencyWord := tr.T("email.weekly", nil)
 	if monthly {
