@@ -690,7 +690,7 @@
   "account.strength3": "Good",
   "account.strength4": "Strong",
   "auth.signIn": "Sign in",
-  "auth.signInIntro": "Sign in to see your sites.",
+  "auth.signInIntro": "Sign in to see your stats.",
   "auth.email": "Email",
   "auth.password": "Password",
   "auth.passwordAgain": "Password again",
