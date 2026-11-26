@@ -2,7 +2,7 @@
 Contributors: joncphillips
 Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
-Tested up to: 7.1
+Tested up to: 7.2
 Requires PHP: 8.1
 Stable tag: 0.5.4
 License: GPLv2 or later
