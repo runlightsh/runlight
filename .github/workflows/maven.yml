@@ -133,7 +133,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 200
     environment: maven
     permissions: {}
     env:
@@ -203,7 +203,7 @@ jobs:
             "$api/upload?name=runlight-${TAG#v}&publishingType=AUTOMATIC")"
           case "$id" in ''|*[!0-9a-f-]*) echo "the Portal did not answer a deployment id: $id"; exit 1 ;; esac
           echo "deployment $id"
-          for _ in $(seq 1 150); do
+          for _ in $(seq 1 540); do
             sleep 20
             status="$(curl -fsS --retry 5 --retry-all-errors -X POST -H "Authorization: Bearer $token" "$api/status?id=$id")"
             state="$(printf '%s' "$status" | jq -r .deploymentState)"
@@ -213,7 +213,7 @@ jobs:
               FAILED) printf '%s\n' "$status" | jq .; exit 1 ;;
             esac
           done
-          echo "deployment $id was not published within 50 minutes; see it in the Portal"
+          echo "deployment $id was not published within 3 hours; see it in the Portal"
           exit 1
       - name: Remove the signing key
         if: always()
