@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.2
 Requires PHP: 8.1
-Stable tag: 0.5.4
+Stable tag: 0.5.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -138,6 +138,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 6. The settings page sets what Runlight counts.
 
 == Changelog ==
+
+= 0.5.5 =
+* Released with Runlight 0.5.5.
 
 = 0.5.4 =
 * Released with Runlight 0.5.4.
