@@ -49,6 +49,13 @@ pub static BUILD_INFO: LazyLock<Build> = LazyLock::new(|| {
     }
 });
 
+/// The email logo's bytes: the mark as a 96 pixel PNG, which assets/build.json holds as base64, decoded the
+/// first time it is asked for. Each install serves it at `<base>/logo.png` for its emails.
+pub static LOGO_PNG: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let v = js::parse(BUILD).expect("assets/build.json is JSON");
+    crate::geo::atob(&js::str_or_empty(v.get("logoPng"))).expect("assets/build.json's logoPng is base64")
+});
+
 /// Every language's messages as the JSON text the dashboard reads, English first, in the build's order.
 pub static LOCALE_TEXTS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
     let v = js::parse(LOCALES_JSON).expect("assets/locales.json is JSON");

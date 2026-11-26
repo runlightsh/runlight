@@ -171,6 +171,7 @@ pub(crate) async fn send_test_mail(
     rl: &Runlight,
     to: &str,
     lang: &str,
+    home: &str,
     sample_sent: &std::sync::Mutex<std::collections::HashMap<String, i64>>,
 ) -> R {
     let Some((settings, source)) = rl.mail_settings().await? else {
@@ -195,7 +196,11 @@ pub(crate) async fn send_test_mail(
         to: to.to_string(),
         subject: t("email.test.subject", &[]),
         text: body.clone(),
-        html: format!("<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table><p style=\"font-family:sans-serif;font-size:15px\">{}</p>", escape_html(&body)),
+        html: format!(
+            "{}<p style=\"font-family:sans-serif;font-size:15px\">{}</p>",
+            crate::brand::email_logo(home),
+            escape_html(&body)
+        ),
         ..Message::default()
     })
     .await?;

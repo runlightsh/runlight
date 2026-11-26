@@ -118,7 +118,13 @@ defmodule Runlight.ReportsTest do
         label = "#{c["name"]}, #{expected["lang"]} #{expected["frequency"]}"
         period = Reports.last_period(expected["frequency"], c["at"], c["timezone"])
         assert period_obj(period) == expected["period"], label
-        links = %{dashboard: expected["links"]["dashboard"], unsubscribe: expected["links"]["unsubscribe"]}
+
+        links = %{
+          dashboard: expected["links"]["dashboard"],
+          unsubscribe: expected["links"]["unsubscribe"],
+          home: expected["links"]["home"]
+        }
+
         report = Reports.build_report(rl, site, expected["frequency"], period, expected["lang"], links)
         assert report.subject == expected["subject"], label
         assert report.text == expected["text"], label

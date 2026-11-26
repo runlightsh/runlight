@@ -553,7 +553,9 @@ impl Routes {
                 return Ok(coded("Enter an email address to send the test to", "test_email", 400, None));
             }
             let lang = body.get("lang").filter(|v| !v.is_null()).map_or_else(|| "en".to_string(), js::js_string);
-            return glue::send_test_mail(rl, &to, &lang, &self.0.sample_sent).await;
+            // The logo comes from the install's own address when it has one, as its links do.
+            let home = format!("{}{}", self.0.origin.clone().unwrap_or_else(|| url.origin()), self.0.base);
+            return glue::send_test_mail(rl, &to, &lang, &home, &self.0.sample_sent).await;
         }
         let site = match self.query_site(url) {
             Ok(s) => s,

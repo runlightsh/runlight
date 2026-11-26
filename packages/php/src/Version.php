@@ -14,7 +14,7 @@ final class Version
     /** @var array<string, mixed>|null */
     private static ?array $build = null;
 
-    /** Everything in assets/build.json: the versions, the asset hashes, and the icon. @return array<string, mixed> */
+    /** Everything in assets/build.json: the versions, the asset hashes, the icon, and the email logo. @return array<string, mixed> */
     public static function build(): array
     {
         if (self::$build === null) {

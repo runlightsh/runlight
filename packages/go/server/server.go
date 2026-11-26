@@ -74,7 +74,7 @@ type Server struct {
 }
 
 // serverPaths are the server's own pages, which answer as the server on every name it is reached at, a link domain too.
-var serverPaths = map[string]bool{"/login": true, "/logout": true, "/setup": true, "/invite": true, "/healthz": true, "/auth.css": true, "/auth.js": true, "/api": true, "/mcp": true, "/s.js": true, "/pick.js": true, "/pick-return": true, "/pick-return.js": true, "/e": true, "/embed": true}
+var serverPaths = map[string]bool{"/login": true, "/logout": true, "/setup": true, "/invite": true, "/healthz": true, "/auth.css": true, "/auth.js": true, "/api": true, "/mcp": true, "/s.js": true, "/pick.js": true, "/pick-return": true, "/pick-return.js": true, "/logo.png": true, "/e": true, "/embed": true}
 
 // ShortestSecret is how long a secret or token set by hand should be at least: a shorter one is warned about
 // at start, and wrong guesses at a shorter token are counted.

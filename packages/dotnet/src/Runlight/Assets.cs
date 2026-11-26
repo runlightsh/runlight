@@ -27,6 +27,6 @@ public static class Assets
     /// <summary>An embedded file as text.</summary>
     public static string Text(string name) => Js.Decode(Bytes(name));
 
-    /// <summary>build.json: the version, the hashes, and the icon.</summary>
+    /// <summary>build.json: the version, the hashes, the icon, and the email logo.</summary>
     public static JsObject Build => _build ??= (JsObject)Json.Parse(Text("build.json"))!;
 }

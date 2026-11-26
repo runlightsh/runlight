@@ -89,14 +89,15 @@ public final class Reports {
   private record Listing(String title, List<String[]> rows) {}
 
   /**
-   * One site's report for a period, in a language. {@code links} are absolute: the dashboard and
-   * the recipient's unsubscribe page.
+   * One site's report for a period, in a language. {@code links} are absolute: the dashboard, the
+   * recipient's unsubscribe page, and home, the install's address with its base path, where the
+   * email's logo is served.
    *
    * @param store the Runlight's store
    * @param site a SiteRow: id, name, hostnames, and timezone
    * @param frequency "weekly" or "monthly"
    * @param period a ReportPeriod
-   * @param links {@code dashboard} and {@code unsubscribe}
+   * @param links {@code dashboard}, {@code unsubscribe}, and {@code home}
    * @return a BuiltReport: {@code subject}, {@code html}, and {@code text}
    */
   public static Map<String, Object> buildReport(
@@ -324,8 +325,7 @@ public final class Reports {
             ? u.host() + (u.pathname.endsWith("/") ? Js.slice(u.pathname, 0, -1) : u.pathname)
             : dashboard;
     String at = words.t("email.at", Map.of("where", where));
-    String mark =
-        "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table>";
+    String mark = Version.emailLogo((String) links.get("home"));
 
     String footer =
         words.t(

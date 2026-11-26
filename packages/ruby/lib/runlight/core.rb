@@ -385,6 +385,7 @@ module Runlight
       report = Reports.build_report(self, site, r["frequency"], period, r["lang"], {
         "dashboard" => "#{r["origin"]}/?site=#{Js.encode_uri_component(site["id"])}",
         "unsubscribe" => unsubscribe,
+        "home" => r["origin"],
       })
       send_mail({
         "to" => r["email"],

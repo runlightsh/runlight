@@ -165,6 +165,7 @@ async fn reports_render_as_the_typescript_sdk_renders_them_in_every_language() {
                     &lang,
                     &text(links, "dashboard"),
                     &text(links, "unsubscribe"),
+                    &text(links, "home"),
                 )
                 .await
                 .unwrap();

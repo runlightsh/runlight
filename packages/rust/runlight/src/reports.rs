@@ -123,7 +123,9 @@ struct Delta {
 }
 
 /// One site's report for a period, in a language. The links are absolute:
-/// the dashboard and the recipient's unsubscribe page.
+/// the dashboard and the recipient's unsubscribe page. `home` is the
+/// install's address with its base path, where the email's logo is served.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_report(
     store: &SqlStore,
     site: &SiteRow,
@@ -132,6 +134,7 @@ pub async fn build_report(
     lang: &str,
     dashboard_link: &str,
     unsubscribe_link: &str,
+    home: &str,
 ) -> Result<BuiltReport, DbError> {
     let words = translator(lang);
     let code = words.lang.as_str();
@@ -359,7 +362,7 @@ pub async fn build_report(
         None => dashboard_link.to_string(),
     };
     let at = t("email.at", &[("where", place.clone().into())]);
-    let mark = "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table>";
+    let mark = crate::brand::email_logo(home);
 
     let footer = t(
         "email.footer",

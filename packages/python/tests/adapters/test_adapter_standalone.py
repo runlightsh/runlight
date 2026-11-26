@@ -174,6 +174,8 @@ def test_a_link_domain_never_takes_over_the_dashboards_own_name_sign_in_or_api()
     # The picker's relay page is still the server's.
     assert server.handle(req("/pick-return")).status == 200
     assert server.handle(req("/pick-return.js")).status == 200
+    # So is the logo emails load.
+    assert server.handle(req("/logo.png")).status == 200
     # Broken percent escapes are a link nobody has, here and at /go/, never an error.
     assert server.handle(req("/%E0")).status == 404
     assert server.handle(req("/go/%zz")).status == 404

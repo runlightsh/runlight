@@ -41,6 +41,7 @@ var Build struct {
 	LocalesHash   string `json:"localesHash"`
 	TrackerHash   string `json:"trackerHash"`
 	Icon          string `json:"icon"`
+	LogoPNG       string `json:"logoPng"`
 }
 
 // AgentRanges is the address lists AI companies publish for their agents, as

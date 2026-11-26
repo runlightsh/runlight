@@ -43,7 +43,8 @@ module Runlight
     end
 
     # One site's report for a period, in a language. `links` are absolute: the
-    # dashboard ("dashboard") and the recipient's unsubscribe page ("unsubscribe").
+    # dashboard ("dashboard"), the recipient's unsubscribe page ("unsubscribe"), and
+    # the install's address with its base path ("home"), where the email's logo is served.
     # Gives { "subject", "html", "text" }.
     def build_report(runlight, site, frequency, period, lang, links)
       translator = Messages.translator(lang)
@@ -183,7 +184,7 @@ module Runlight
       u = Http::Url.parse(links["dashboard"])
       where = u.nil? ? links["dashboard"] : u.host + u.pathname.sub(%r{/\z}, "")
       at = t.call("email.at", { "where" => where })
-      mark = "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table>"
+      mark = Brand.email_logo(links["home"])
 
       footer = t.call("email.footer", { "frequency" => t.call(monthly ? "email.monthly" : "email.weekly"), "site" => site["name"] })
       at_line = esc(t.call("email.at", { "where" => "\0" }))

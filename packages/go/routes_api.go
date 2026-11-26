@@ -1520,6 +1520,10 @@ func (rt *Routes) handle(ctx context.Context, request *Request) (answer *Respons
 	}
 	path := firstNonEmpty(u.Pathname[len(rt.base):], "/")
 
+	// The mark for emails, open to anyone: whoever opens a report or an invite is not signed in here.
+	if path == "/logo.png" && request.Method == "GET" {
+		return web.NewResponse(200, logoBytes(), "content-type", "image/png", "cache-control", "public, max-age=86400"), nil
+	}
 	// Checked before any route, so a connected site's pass-through to its install is held to it too.
 	if adminOnly(path, request.Method) && rt.canRead(c) == canFull && c.member {
 		return Coded("Only an owner or admin can change this", "admin_only", 403, nil), nil

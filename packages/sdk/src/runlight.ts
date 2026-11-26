@@ -473,7 +473,7 @@ export class Runlight {
   /** Builds and sends one report. Also used by "Send a sample now". */
   async deliverReport(r: ReportRow, site: SiteRow, period = lastPeriod(r.frequency, this.now(), site.timezone)): Promise<void> {
     const unsubscribe = `${r.origin}/unsubscribe/${r.token}`;
-    const report = await buildReport(this, site, r.frequency, period, r.lang, { dashboard: `${r.origin}/?site=${encodeURIComponent(site.id)}`, unsubscribe });
+    const report = await buildReport(this, site, r.frequency, period, r.lang, { dashboard: `${r.origin}/?site=${encodeURIComponent(site.id)}`, unsubscribe, home: r.origin });
     await this.sendMail({
       to: r.email,
       subject: report.subject,

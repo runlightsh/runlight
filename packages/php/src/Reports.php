@@ -68,11 +68,12 @@ final class Reports
 
     /**
      * One site's report for a period, in a language. `links` are absolute: the
-     * dashboard and the recipient's unsubscribe page.
+     * dashboard, the recipient's unsubscribe page, and home, the install's address
+     * with its base path, where the email's logo is served.
      *
      * @param array{id: string, name: string, hostnames: list<string>, timezone: string} $site
      * @param array{key: string, fromDate: string, toDate: string, previousFrom: string, previousTo: string, dueAt: int} $period
-     * @param array{dashboard: string, unsubscribe: string} $links
+     * @param array{dashboard: string, unsubscribe: string, home: string} $links
      * @return array{subject: string, html: string, text: string}
      */
     public static function buildReport(Runlight $runlight, array $site, string $frequency, array $period, string $lang, array $links): array
@@ -188,7 +189,7 @@ final class Reports
         $u = Url::parse($links['dashboard']);
         $where = $u !== null ? $u->host() . preg_replace('#/$#D', '', $u->pathname) : $links['dashboard'];
         $at = $t('email.at', ['where' => $where]);
-        $mark = '<table role="img" aria-label="Runlight" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;border-collapse:separate"><tr><td width="45" height="48" align="center" bgcolor="#1c1c1f" style="width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap">R<span style="display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top"></span></td></tr></table>';
+        $mark = Brand::emailLogo($links['home']);
 
         $footer = $t('email.footer', ['frequency' => $t($monthly ? 'email.monthly' : 'email.weekly'), 'site' => $site['name']]);
         $atLine = self::esc($t('email.at', ['where' => "\0"]));

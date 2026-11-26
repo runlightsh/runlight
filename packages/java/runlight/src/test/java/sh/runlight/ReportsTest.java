@@ -72,7 +72,8 @@ class ReportsTest {
     Map<String, Object> links =
         Json.object(
             "dashboard", "https://example.com/runlight/?site=default",
-            "unsubscribe", "https://example.com/runlight/unsubscribe?t=x");
+            "unsubscribe", "https://example.com/runlight/unsubscribe?t=x",
+            "home", "https://example.com/runlight");
     for (String lang : Messages.languages()) {
       for (String frequency : List.of("weekly", "monthly")) {
         Map<String, Object> period = Reports.lastPeriod(frequency, utc(2026, 10, 8, 15), "UTC");

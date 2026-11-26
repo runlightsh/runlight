@@ -477,6 +477,7 @@ public sealed partial class Runlight
         {
             ["dashboard"] = origin + "/?site=" + Js.EncodeURIComponent(Id(site)),
             ["unsubscribe"] = unsubscribe,
+            ["home"] = origin,
         }, cancellationToken).ConfigureAwait(false);
         await SendMailAsync(new JsObject
         {

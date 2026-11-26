@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { ACTION_TOOL } from "../packages/sdk/src/assistant-action.ts";
 import * as dashboard from "../packages/sdk/src/generated/dashboard.ts";
 import * as tracker from "../packages/sdk/src/generated/tracker.ts";
-import { RUNLIGHT_ICON } from "../packages/sdk/src/brand.ts";
+import { LOGO_PNG, RUNLIGHT_ICON } from "../packages/sdk/src/brand.ts";
 import { API_VERSION, VERSION } from "../packages/sdk/src/version.ts";
 
 const dir = new URL("../packages/java/runlight/src/main/resources/sh/runlight/assets/", import.meta.url);
@@ -30,6 +30,7 @@ const files: Record<string, string> = {
       localesHash: dashboard.LOCALES_HASH,
       trackerHash: tracker.TRACKER_HASH,
       icon: RUNLIGHT_ICON,
+      logoPng: LOGO_PNG,
     },
     null,
     2,

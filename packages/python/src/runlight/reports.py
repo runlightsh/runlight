@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from . import _intl, _js
+from .brand import email_logo
 from .http import Url
 from .messages import translator
 from .time import add_days, add_months, local_date, start_of
@@ -62,8 +63,8 @@ def _duration(ms: int | float) -> str:
 
 
 def build_report(runlight: Any, site: dict[str, Any], frequency: str, period: dict[str, Any], lang: str, links: dict[str, str]) -> dict[str, str]:
-    """One site's report for a period, in a language. `links` are absolute: the dashboard and the recipient's
-    unsubscribe page."""
+    """One site's report for a period, in a language. `links` are absolute: the dashboard, the recipient's
+    unsubscribe page, and home, the install's address with its base path, where the email's logo is served."""
     tr = translator(lang)
     t, tn, code = tr.t, tr.tn, tr.lang
     tz = site["timezone"]
@@ -203,7 +204,7 @@ def build_report(runlight: Any, site: dict[str, Any], frequency: str, period: di
     u = Url.parse(links["dashboard"])
     where = u.host + re.sub(r"/\Z", "", u.pathname) if u is not None else links["dashboard"]
     at = t("email.at", {"where": where})
-    mark = '<table role="img" aria-label="Runlight" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;border-collapse:separate"><tr><td width="45" height="48" align="center" bgcolor="#1c1c1f" style="width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap">R<span style="display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top"></span></td></tr></table>'
+    mark = email_logo(links["home"])
 
     footer = t("email.footer", {"frequency": t("email.monthly" if monthly else "email.weekly"), "site": site["name"]})
     at_line = _esc(t("email.at", {"where": "\u0000"})).replace(

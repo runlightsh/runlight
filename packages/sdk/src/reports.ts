@@ -1,4 +1,4 @@
-import { EMAIL_LOGO } from "./brand.js";
+import { emailLogo } from "./brand.js";
 import type { Runlight } from "./runlight.js";
 import { translator } from "./messages.js";
 import type { GoalRow, ReportRow, SiteRow, Stats } from "./store.js";
@@ -69,7 +69,8 @@ export async function buildReport(
   frequency: ReportRow["frequency"],
   period: ReportPeriod,
   lang: string,
-  links: { dashboard: string; unsubscribe: string },
+  /** home is the install's address with its base path, where the email's logo is served. */
+  links: { dashboard: string; unsubscribe: string; home: string },
 ): Promise<BuiltReport> {
   const { t, tn, lang: code } = translator(lang);
   const tz = site.timezone;
@@ -198,7 +199,7 @@ export async function buildReport(
     }
   })();
   const at = t("email.at", { where });
-  const mark = EMAIL_LOGO;
+  const mark = emailLogo(links.home);
 
   const footer = t("email.footer", { frequency: t(monthly ? "email.monthly" : "email.weekly"), site: site.name });
   const html = `<!doctype html><html lang="${code}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${esc(subject)}</title>

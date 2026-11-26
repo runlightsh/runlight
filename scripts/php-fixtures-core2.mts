@@ -109,7 +109,7 @@ async function render(timezone: string, sent: typeof hits, withGoals: boolean, a
   for (const lang of [...LANGS, "xx"]) {
     for (const frequency of ["weekly", "monthly"] as const) {
       const period = lastPeriod(frequency, at, timezone);
-      const links = { dashboard: "https://stats.example.com/runlight/?site=default", unsubscribe: "https://stats.example.com/runlight/unsubscribe/abc" };
+      const links = { dashboard: "https://stats.example.com/runlight/?site=default", unsubscribe: "https://stats.example.com/runlight/unsubscribe/abc", home: "https://stats.example.com/runlight" };
       out.push({ lang, frequency, period, links, ...(await buildReport(rl, site, frequency, period, lang, links)) });
     }
   }

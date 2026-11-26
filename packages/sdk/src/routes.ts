@@ -1,4 +1,4 @@
-import { EMAIL_LOGO } from "./brand.js";
+import { LOGO_PNG, emailLogo } from "./brand.js";
 import { AssistantError, PROVIDERS, chat, listModels } from "./assistant.js";
 import { ConnectError, finishConnect, startConnect } from "./connect.js";
 import { PAGES_PER_VISIT, journeys } from "./journeys.js";
@@ -126,6 +126,10 @@ export interface Routes {
 
 const COOKIE = "runlight_token";
 const IMPLEMENTATION = { library: "@runlight/sdk", language: "typescript" };
+
+/** The email logo's bytes, decoded from base64 the first time it is asked for. */
+let logo: Uint8Array<ArrayBuffer> | null = null;
+const logoBytes = (): Uint8Array<ArrayBuffer> => (logo ??= Uint8Array.from(atob(LOGO_PNG), (c) => c.charCodeAt(0)));
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -1023,7 +1027,7 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
         if (runlight.now() - (sampleSent.get(tested) ?? 0) < 60_000) return coded("A test went out a moment ago. Wait a minute and try again.", "test_soon", 429);
         const { t } = translator(String(body.lang ?? "en"));
         const name = settings.source === "app" ? (settings.via ?? "") : (SERVICES.find((x) => x.id === settings.service)?.name ?? "");
-        await runlight.sendMail({ to, subject: t("email.test.subject"), text: t("email.test.body", { service: name }), html: `${EMAIL_LOGO}<p style="font-family:sans-serif;font-size:15px">${escapeHtml(t("email.test.body", { service: name }))}</p>` });
+        await runlight.sendMail({ to, subject: t("email.test.subject"), text: t("email.test.body", { service: name }), html: `${emailLogo(`${origin ?? url.origin}${base}`)}<p style="font-family:sans-serif;font-size:15px">${escapeHtml(t("email.test.body", { service: name }))}</p>` });
         // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
         sampleSent.set(tested, runlight.now());
         return json({ ok: true });
@@ -2136,6 +2140,10 @@ export function createRoutes(runlight: Runlight, options: RoutesOptions = {}): R
     // A body declared past the cap is refused before anything reads it, on hosts that do not cap bodies themselves.
     if (Number(request.headers.get("content-length")) > MAX_JSON_BYTES) return coded("Send a smaller body", "body_too_large", 413);
     try {
+      // The mark for emails, open to anyone: whoever opens a report or an invite is not signed in here.
+      if (path === "/logo.png" && request.method === "GET") {
+        return new Response(logoBytes(), { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+      }
       // Checked before any route, so a connected site's pass-through to its install is held to it too.
       if (adminOnly(path, request.method) && (await canRead(request)) === true && members.has(request)) {
         return coded("Only an owner or admin can change this", "admin_only", 403);

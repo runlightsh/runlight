@@ -69,7 +69,9 @@ defmodule Runlight.Reports do
 
   @doc """
   One site's report for a period, in a language: `%{subject, html, text}`.
-  `links` are absolute: the dashboard and the recipient's unsubscribe page.
+  `links` are absolute: the dashboard, the recipient's unsubscribe page, and
+  home, the install's address with its base path, where the email's logo is
+  served.
   """
   @spec build_report(Runlight.t(), JS.Object.t(), String.t(), map(), String.t(), map()) :: map()
   def build_report(rl, site, frequency, period, lang, links) do
@@ -241,8 +243,7 @@ defmodule Runlight.Reports do
 
     at = t.("email.at", %{"where" => where})
 
-    mark =
-      "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table>"
+    mark = Runlight.Assets.email_logo(links.home)
 
     footer =
       t.("email.footer", %{

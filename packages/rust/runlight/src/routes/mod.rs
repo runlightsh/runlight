@@ -948,6 +948,14 @@ impl Routes {
     async fn route(&self, request: &Request, path: &str, mut url: Url) -> Result<Response, crate::Error> {
         let call = Call::default();
         let method = request.method.as_str();
+        // The mark for emails, open to anyone: whoever opens a report or an invite is not signed in here.
+        if path == "/logo.png" && method == "GET" {
+            return Ok(Response::new(
+                assets::LOGO_PNG.as_slice(),
+                200,
+                Headers::new().with("content-type", "image/png").with("cache-control", "public, max-age=86400"),
+            ));
+        }
         // Checked before any route, so a connected site's pass-through to its install is held to it too.
         if admin_only(path, method) && self.can_read(request, &call).await == CanRead::Yes && call.is_member() {
             return Ok(coded("Only an owner or admin can change this", "admin_only", 403, None));

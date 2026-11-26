@@ -138,6 +138,11 @@ public sealed class Routes
 
     private static JsObject? _locales;
 
+    /// <summary>The email logo's bytes, decoded from base64 the first time it is asked for.</summary>
+    private static byte[]? _logo;
+
+    private static byte[] LogoBytes() => _logo ??= Convert.FromBase64String(Brand.LogoPng);
+
     private readonly Runlight _rl;
     private readonly string _base;
     private readonly string? _token;
@@ -1665,7 +1670,7 @@ public sealed class Routes
                     ["to"] = to,
                     ["subject"] = t.T("email.test.subject"),
                     ["text"] = t.T("email.test.body", new JsObject { ["service"] = name }),
-                    ["html"] = "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table><p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
+                    ["html"] = Brand.EmailLogo((_origin ?? url.Origin) + _base) + "<p style=\"font-family:sans-serif;font-size:15px\">" + EscapeHtml(t.T("email.test.body", new JsObject { ["service"] = name })) + "</p>",
                 }, cancellationToken).ConfigureAwait(false);
                 // Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
                 await Store.SetSettingAsync(tested, Js.Str(_rl.Now()), cancellationToken).ConfigureAwait(false);
@@ -3585,6 +3590,11 @@ public sealed class Routes
         var rl = _rl;
         string @base = _base;
         string method = request.Method;
+        // The mark for emails, open to anyone: whoever opens a report or an invite is not signed in here.
+        if (path == "/logo.png" && method == "GET")
+        {
+            return new Response(LogoBytes(), 200, new Headers { ["content-type"] = "image/png", ["cache-control"] = "public, max-age=86400" });
+        }
         // Checked before any route, so a connected site's pass-through to its install is held to it too.
         if (AdminOnly(path, method) && await CanReadAsync(request, cancellationToken).ConfigureAwait(false) is true && IsMember(request))
         {

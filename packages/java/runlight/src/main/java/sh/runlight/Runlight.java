@@ -815,7 +815,9 @@ public final class Runlight
                 "dashboard",
                 r.get("origin") + "/?site=" + Js.encodeURIComponent(id(site)),
                 "unsubscribe",
-                unsubscribe));
+                unsubscribe,
+                "home",
+                r.get("origin")));
     sendMail(
         Json.object(
             "to",

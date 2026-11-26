@@ -14,7 +14,7 @@ module Runlight
 
     module_function
 
-    # Everything in assets/build.json: the versions, the asset hashes, and the icon.
+    # Everything in assets/build.json: the versions, the asset hashes, the icon, and the email logo.
     def build
       @build ||= begin
         JSON.parse(File.read(File.join(ASSETS, "build.json")))

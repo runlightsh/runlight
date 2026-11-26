@@ -31,7 +31,7 @@ for (const site of await store.sites()) {
   ] as const) {
     const period = lastPeriod(frequency, now, site.timezone);
     for (const lang of ["en", "de", "es", "fr", "xx"]) {
-      const links = { dashboard: `https://stats.example.com/runlight/?site=${site.id}`, unsubscribe: "https://stats.example.com/runlight/unsubscribe/abc" };
+      const links = { dashboard: `https://stats.example.com/runlight/?site=${site.id}`, unsubscribe: "https://stats.example.com/runlight/unsubscribe/abc", home: "https://stats.example.com/runlight" };
       cases.push({ site, frequency, period, lang, links, report: await buildReport(runlight, site, frequency, period, lang, links) });
     }
   }

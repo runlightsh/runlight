@@ -62,6 +62,9 @@ const BASICS: Scenario[] = [
       hit({ k: "event", u: "https://example.com/pricing", i: "pv7", n: "Odd", p: { 'a"b': "1", plan: "pro" } }, "203.0.113.1"),
       get("/api/event-props?period=today&event=Odd"),
       get('/api/event-props?period=today&event=Odd&key=a"b'),
+      // The logo emails show is open to anyone, since whoever opens one is not signed in.
+      { method: "GET", path: "/logo.png", look: ["PNG", "IHDR"] },
+      { method: "POST", path: "/logo.png" },
     ],
   },
   {
@@ -1134,6 +1137,8 @@ const ACCOUNTS: Scenario[] = [
       { method: "GET", path: "/" },
       { method: "GET", path: "/login" },
       { method: "GET", path: "/setup", look: ["RUNLIGHT_TOKEN", 'name="email"'] },
+      // Even before setup, and signed out, the email logo is served.
+      { method: "GET", path: "/logo.png", look: ["PNG"] },
       { method: "GET", path: "/api/stats?period=today" },
       { method: "GET", path: "/api/account" },
       { method: "POST", path: "/setup", form: { code: "wrong", email: OWNER.email, password: OWNER.password, again: OWNER.password }, look: ["That is not this app", 'value="owner@example.com"'] },

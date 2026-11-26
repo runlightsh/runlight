@@ -256,7 +256,7 @@ public static class Reports
         var u = Url.Parse(dashboard);
         string where = u != null ? u.Host + (u.Pathname.EndsWith('/') ? u.Pathname[..^1] : u.Pathname) : dashboard;
         string at = T("email.at", new JsObject { ["where"] = where });
-        string mark = "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table>";
+        string mark = Brand.EmailLogo(links.Str("home") ?? "");
 
         string footer = T("email.footer", new JsObject { ["frequency"] = T(monthly ? "email.monthly" : "email.weekly"), ["site"] = siteName });
         string atLine = Esc(T("email.at", new JsObject { ["where"] = "\0" }));

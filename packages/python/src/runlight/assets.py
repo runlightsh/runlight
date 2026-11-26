@@ -5,8 +5,8 @@ so this port serves the very same bytes. Each is read on first use.
 DASHBOARD_JS, DASHBOARD_CSS, DASHBOARD_HASH, WORLD_JSON, WORLD_HASH, LOCALES (language to its messages as JSON
 text, English left out), LOCALES_HASH, ENGLISH (the English messages as JSON text), TRACKER, TRACKER_HASH,
 PICKER, PICK_RELAY (the picker's relay page script), AGENT_RANGES (the AI agents' published address lists as they
-were when this version was made: {"fetchedAt", "lists": {url: [prefix, ...]}}), and BUILD (assets/build.json: the versions, the hashes, and
-the icon).
+were when this version was made: {"fetchedAt", "lists": {url: [prefix, ...]}}), and BUILD (assets/build.json: the versions, the hashes,
+the icon, and the email logo).
 """
 
 from __future__ import annotations

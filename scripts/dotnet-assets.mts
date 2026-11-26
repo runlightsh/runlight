@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { ACTION_TOOL } from "../packages/sdk/src/assistant-action.ts";
 import * as dashboard from "../packages/sdk/src/generated/dashboard.ts";
 import * as tracker from "../packages/sdk/src/generated/tracker.ts";
-import { RUNLIGHT_ICON } from "../packages/sdk/src/brand.ts";
+import { LOGO_PNG, RUNLIGHT_ICON } from "../packages/sdk/src/brand.ts";
 import { API_VERSION, VERSION } from "../packages/sdk/src/version.ts";
 import { AI_AGENTS, BOT_PATTERN } from "../packages/sdk/src/data/agents.ts";
 import { SOURCES, SOURCE_PATTERNS } from "../packages/sdk/src/data/sources.ts";
@@ -45,6 +45,7 @@ const files: Record<string, string> = {
       localesHash: dashboard.LOCALES_HASH,
       trackerHash: tracker.TRACKER_HASH,
       icon: RUNLIGHT_ICON,
+      logoPng: LOGO_PNG,
     },
     null,
     2,

@@ -56,10 +56,12 @@ type BuiltReport struct {
 	Text    string
 }
 
-// ReportLinks are a report's absolute links: the dashboard and the recipient's unsubscribe page.
+// ReportLinks are a report's absolute links: the dashboard, the recipient's unsubscribe page, and the
+// install's address with its base path (Home), where the email's logo is served.
 type ReportLinks struct {
 	Dashboard   string
 	Unsubscribe string
+	Home        string
 }
 
 type metric struct {
@@ -256,7 +258,7 @@ func BuildReport(ctx context.Context, r *Runlight, site SiteRow, frequency strin
 		where = u.Host() + strings.TrimSuffix(u.Pathname, "/")
 	}
 	at := tr.T("email.at", Vars{"where": where})
-	mark := `<table role="img" aria-label="Runlight" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;border-collapse:separate"><tr><td width="45" height="48" align="center" bgcolor="#1c1c1f" style="width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap">R<span style="display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top"></span></td></tr></table>`
+	mark := emailLogo(links.Home)
 
 	frequencyWord := tr.T("email.weekly", nil)
 	if monthly {
@@ -389,7 +391,7 @@ func (r *Runlight) DeliverReport(ctx context.Context, report ReportRow, site Sit
 		period = &p
 	}
 	unsubscribe := report.Origin + "/unsubscribe/" + report.Token
-	built, err := BuildReport(ctx, r, site, report.Frequency, *period, report.Lang, ReportLinks{Dashboard: report.Origin + "/?site=" + encodeURIComponent(site.ID), Unsubscribe: unsubscribe})
+	built, err := BuildReport(ctx, r, site, report.Frequency, *period, report.Lang, ReportLinks{Dashboard: report.Origin + "/?site=" + encodeURIComponent(site.ID), Unsubscribe: unsubscribe, Home: report.Origin})
 	if err != nil {
 		return err
 	}

@@ -467,6 +467,7 @@ final class Runlight
         $report = Reports::buildReport($this, $site, $r['frequency'], $period, $r['lang'], [
             'dashboard' => "{$r['origin']}/?site=" . Js::encodeURIComponent($site['id']),
             'unsubscribe' => $unsubscribe,
+            'home' => $r['origin'],
         ]);
         $this->sendMail([
             'to' => $r['email'],

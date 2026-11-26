@@ -562,7 +562,8 @@ defmodule Runlight do
     report =
       Runlight.Reports.build_report(rl, site, r["frequency"], period, r["lang"], %{
         dashboard: dashboard,
-        unsubscribe: unsubscribe
+        unsubscribe: unsubscribe,
+        home: r["origin"]
       })
 
     send_mail(rl, %{

@@ -146,6 +146,7 @@ test("a link domain never takes over the dashboard's own name, sign-in, or API",
   assert.equal((await handle(req("/login"))).status, 200, "sign-in is still the sign-in page");
   assert.equal((await handle(req("/pick-return"))).status, 200, "the picker's relay page is still the server's");
   assert.equal((await handle(req("/pick-return.js"))).status, 200);
+  assert.equal((await handle(req("/logo.png"))).headers.get("content-type"), "image/png", "the email logo is still the server's");
   // Broken percent escapes are a link nobody has, here and at /go/, never an error.
   assert.equal((await handle(req("/%E0"))).status, 404);
   assert.equal((await handle(req("/go/%zz"))).status, 404);

@@ -454,7 +454,7 @@ class Runlight:
             r["frequency"],
             period,
             r["lang"],
-            {"dashboard": f"{r['origin']}/?site={_js.encode_uri_component(site['id'])}", "unsubscribe": unsubscribe},
+            {"dashboard": f"{r['origin']}/?site={_js.encode_uri_component(site['id'])}", "unsubscribe": unsubscribe, "home": r["origin"]},
         )
         self.send_mail(
             {

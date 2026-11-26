@@ -50,7 +50,7 @@ func TestReportsRender(t *testing.T) {
 				if js.Canonical(period) != js.Canonical(js.Dig(want, "period")) {
 					t.Errorf("%s %s period %s", lang, frequency, js.Stringify(period))
 				}
-				built, err := runlight.BuildReport(ctx, r, site, frequency, period, lang, runlight.ReportLinks{Dashboard: js.Str(js.Dig(want, "links", "dashboard")), Unsubscribe: js.Str(js.Dig(want, "links", "unsubscribe"))})
+				built, err := runlight.BuildReport(ctx, r, site, frequency, period, lang, runlight.ReportLinks{Dashboard: js.Str(js.Dig(want, "links", "dashboard")), Unsubscribe: js.Str(js.Dig(want, "links", "unsubscribe")), Home: js.Str(js.Dig(want, "links", "home"))})
 				if err != nil {
 					t.Fatal(err)
 				}

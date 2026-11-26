@@ -1289,7 +1289,7 @@ module Runlight
             "to" => to,
             "subject" => t.call("email.test.subject"),
             "text" => t.call("email.test.body", { "service" => name }),
-            "html" => "<table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table><p style=\"font-family:sans-serif;font-size:15px\">#{escape_html(t.call("email.test.body", { "service" => name }))}</p>",
+            "html" => "#{Brand.email_logo("#{@origin || url.origin}#{@base}")}<p style=\"font-family:sans-serif;font-size:15px\">#{escape_html(t.call("email.test.body", { "service" => name }))}</p>",
           })
           # Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
           @lock.synchronize { @sample_sent[tested] = @rl.now }
@@ -2594,6 +2594,10 @@ module Runlight
       rl = @rl
       base = @base
       method = request.method
+      # The mark for emails, open to anyone: whoever opens a report or an invite is not signed in here.
+      if path == "/logo.png" && method == "GET"
+        return Http::Response.new(Brand.logo_bytes, status: 200, headers: { "content-type" => "image/png", "cache-control" => "public, max-age=86400" })
+      end
       # Checked before any route, so a connected site's pass-through to its install is held to it too.
       if admin_only?(path, method) && can_read(request) == true && @members.key?(request)
         return coded("Only an owner or admin can change this", "admin_only", 403)

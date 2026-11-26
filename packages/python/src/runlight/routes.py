@@ -37,6 +37,8 @@ answers every request under the base path. Options take the TypeScript names:
 
 from __future__ import annotations
 
+import base64
+import functools
 import hmac as _hmac
 import re
 import sys
@@ -47,7 +49,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import _js, assets
-from .brand import RUNLIGHT_ICON
+from .brand import RUNLIGHT_ICON, email_logo
 from .env import env_value as env
 from .hash import hmac, random_id, sha256
 from .http import FetchError, Headers, Request, Response, Url
@@ -75,6 +77,14 @@ _HTML_ESCAPES = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#
 
 def escape_html(value: str) -> str:
     return re.sub(r"[&<>\"']", lambda m: _HTML_ESCAPES[m.group(0)], value)
+
+
+@functools.cache
+def _logo_bytes() -> bytes:
+    """The email logo's bytes, decoded from base64 the first time they are asked for."""
+    from . import brand
+
+    return base64.b64decode(brand.LOGO_PNG)
 
 
 def _is_oauth_document(path: str) -> bool:
@@ -1269,7 +1279,7 @@ class Routes:
                         "to": to,
                         "subject": t("email.test.subject"),
                         "text": t("email.test.body", {"service": name}),
-                        "html": f'<table role="img" aria-label="Runlight" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;border-collapse:separate"><tr><td width="45" height="48" align="center" bgcolor="#1c1c1f" style="width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap">R<span style="display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top"></span></td></tr></table><p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
+                        "html": email_logo(f"{self.origin or url.origin}{self.base}") + f'<p style="font-family:sans-serif;font-size:15px">{escape_html(t("email.test.body", {"service": name}))}</p>',
                     }
                 )
                 # Counted once it went out, so a test that failed can be tried again as soon as the setting is fixed.
@@ -2587,6 +2597,9 @@ class Routes:
         rl = self.rl
         base = self.base
         method = request.method
+        # The mark for emails, open to anyone: whoever opens a report or an invite is not signed in here.
+        if path == "/logo.png" and method == "GET":
+            return Response(_logo_bytes(), 200, {"content-type": "image/png", "cache-control": "public, max-age=86400"})
         # Checked before any route, so a connected site's pass-through to its install is held to it too.
         if self._admin_only(path, method) and self._can_read(request) is True and request in self.members:
             return coded("Only an owner or admin can change this", "admin_only", 403)

@@ -200,7 +200,9 @@ impl Runlight {
         };
         let unsubscribe = format!("{}/unsubscribe/{}", r.origin, r.token);
         let dashboard = format!("{}/?site={}", r.origin, crate::sources::encode_uri_component(&site.id));
-        let report = build_report(self.store(), site, &r.frequency, period, &r.lang, &dashboard, &unsubscribe).await?;
+        let report =
+            build_report(self.store(), site, &r.frequency, period, &r.lang, &dashboard, &unsubscribe, &r.origin)
+                .await?;
         self.send_mail(Message {
             to: r.email.clone(),
             subject: report.subject,

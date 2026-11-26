@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Changed
+
+- Emails show the real Runlight logo, the same drawing as the dashboard and the Mac app, instead of an R and a dot drawn in HTML. Each install serves it at `/logo.png` under its own path (such as `/runlight/logo.png`), open to anyone since whoever opens an email is not signed in, and each email loads it from the install that sent it and from nowhere else. A mail app that blocks images shows the word Runlight in its place.
+
 ## 0.5.4 - 2026-11-26
 
 ### Added

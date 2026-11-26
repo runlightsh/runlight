@@ -60,6 +60,7 @@ public final class Standalone {
           "/pick.js",
           "/pick-return",
           "/pick-return.js",
+          "/logo.png",
           "/e",
           "/embed");
 
