@@ -9,15 +9,21 @@ import { Code } from "./settings.js";
 
 const dateOf = (ms: number) => day(new Date(ms).toISOString().slice(0, 10));
 
-/** Settings, API and AI: read-only tokens for scripts and AI assistants, and how to connect one. */
-export function Tokens({ sites }: { sites: Site[] }) {
+/**
+ * Settings, MCP & API: tokens for scripts, apps, and AI assistants, and how to connect one. A token reads stats, or
+ * reads them and changes one site's settings; the API makes a manage token only for one site.
+ */
+export function Tokens({ site: current, sites }: { site: Site; sites: Site[] }) {
   const [tokens, setTokens] = useState<ApiToken[] | null>(null);
   const [name, setName] = useState("");
   const [site, setSite] = useState("");
-  const [made, setMade] = useState<{ name: string; secret: string } | null>(null);
+  const [scope, setScope] = useState<"read" | "manage">("read");
+  const [made, setMade] = useState<{ name: string; secret: string; scope: "read" | "manage" } | null>(null);
   const [error, setError] = useState("");
   const server = `${location.origin}${base}/mcp`;
   const siteName = (id: string) => sites.find((s) => s.id === id)?.name ?? id;
+  // A manage token is for one site, the one these settings are open on unless another is picked.
+  const target = scope === "manage" ? site || current.id : site;
 
   const load = () =>
     api
@@ -33,9 +39,9 @@ export function Tokens({ sites }: { sites: Site[] }) {
     setError("");
     const label = name.trim();
     api
-      .createToken(label, site)
+      .createToken(label, target, scope === "manage" ? "manage" : undefined)
       .then((r) => {
-        setMade({ name: label, secret: r.secret });
+        setMade({ name: label, secret: r.secret, scope });
         setName("");
         return load();
       })
@@ -59,10 +65,16 @@ export function Tokens({ sites }: { sites: Site[] }) {
             {t("tokens.once")}
           </p>
           <Code>{made.secret}</Code>
-          <p class="settings-text">{t("tokens.claudeCode")}</p>
-          <Code>{`claude mcp add --transport http runlight ${server} --header "Authorization: Bearer ${key}"`}</Code>
-          <p class="settings-text">{t("tokens.json")}</p>
-          <Code>{JSON.stringify({ mcpServers: { runlight: { url: server, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}</Code>
+          {made.scope === "manage" ? (
+            <p class="settings-text">{t("tokens.manageUse")}</p>
+          ) : (
+            <>
+              <p class="settings-text">{t("tokens.claudeCode")}</p>
+              <Code>{`claude mcp add --transport http runlight ${server} --header "Authorization: Bearer ${key}"`}</Code>
+              <p class="settings-text">{t("tokens.json")}</p>
+              <Code>{JSON.stringify({ mcpServers: { runlight: { url: server, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}</Code>
+            </>
+          )}
           <button type="button" class="ghost token-done" onClick={() => setMade(null)}>
             <Icon name="check" />
             {t("tokens.done")}
@@ -106,11 +118,15 @@ export function Tokens({ sites }: { sites: Site[] }) {
         <Empty size="card" icon="key" title={t("tokens.emptyTitle")} hint={t("tokens.empty")} />
       ) : null}
       <p class="field-hint domain-note">{t("tokens.revokeNote")}</p>
-      <form class="domain-add token-add" onSubmit={create}>
+      <form class="domain-add token-add token-form" onSubmit={create}>
         <input class="value" type="text" maxLength={100} required placeholder={t("tokens.namePlaceholder")} value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+        <select class="value" value={scope} aria-label={t("tokens.can")} onChange={(e) => setScope((e.target as HTMLSelectElement).value as "read" | "manage")}>
+          <option value="read">{t("tokens.read")}</option>
+          <option value="manage">{t("tokens.manage")}</option>
+        </select>
         {sites.length > 1 ? (
-          <select class="value" value={site} aria-label={t("tokens.scope")} onChange={(e) => setSite((e.target as HTMLSelectElement).value)}>
-            <option value="">{t("tokens.allSites")}</option>
+          <select class="value" value={target} aria-label={t("tokens.scope")} onChange={(e) => setSite((e.target as HTMLSelectElement).value)}>
+            {scope === "manage" ? null : <option value="">{t("tokens.allSites")}</option>}
             {sites.map((s) => (
               <option value={s.id}>{t("tokens.siteOnly", { site: s.name })}</option>
             ))}
@@ -121,6 +137,7 @@ export function Tokens({ sites }: { sites: Site[] }) {
           {t("tokens.create")}
         </button>
       </form>
+      {scope === "manage" ? <p class="field-hint">{t("tokens.manageHint", { site: siteName(target) })}</p> : null}
       {error ? <span class="settings-error">{error}</span> : null}
     </div>
   );

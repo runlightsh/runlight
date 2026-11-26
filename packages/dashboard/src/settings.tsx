@@ -1003,7 +1003,7 @@ export function SettingsModal({ site, sites, view, start, onClose, onSaved, onLa
             ) : section === "people" && me ? (
               <People me={me} site={site} multiSite={install.managed || sites.length > 1} onDemoted={onDemoted} />
             ) : section === "api" ? (
-              <Tokens sites={sites} />
+              <Tokens site={site} sites={sites} />
             ) : section === "links" ? (
               <LinkDomains site={site} />
             ) : section === "data" ? (

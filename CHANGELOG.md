@@ -4,6 +4,10 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 
 ## Unreleased
 
+### Added
+
+- Dashboard: Settings, MCP & API can make a manage token, one that reads stats and also changes one site's goals, short links, funnels, email reports, share links, and settings, for apps like Runlight for Mac or a script. Pick "Read stats and change settings" under what it can do.
+
 ### Changed
 
 - The sign-in page asks people to sign in to see their stats, not their sites, in every language.

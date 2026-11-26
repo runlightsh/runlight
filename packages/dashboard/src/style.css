@@ -4107,6 +4107,19 @@ button.live:hover {
   height: 40px;
 }
 
+/* A new token's form has up to four controls: when they do not fit, they wrap rather than squeeze the name. */
+.token-form {
+  flex-wrap: wrap;
+}
+
+.token-form input.value {
+  flex: 1 1 220px;
+}
+
+.token-form select.value {
+  flex: 1 1 auto;
+}
+
 /* The standalone server with no sites yet: one card in the middle of the page. */
 .first-site {
   display: grid;
