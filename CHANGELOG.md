@@ -7,7 +7,7 @@ Every notable change to Runlight is listed here, newest first. The library, the 
 ### Changed
 
 - The sign-in page asks people to sign in to see their stats, not their sites, in every language.
-- Runlight has a new logo: on the sign-in page, in the dashboard, on browser tabs, in emails, in the server's icons, and as the Craft plugin's icon.
+- Runlight has a new logo: on the sign-in page, in the dashboard, on browser tabs, in emails, in the server's icons, and as the Craft plugin's icon. Emails draw it, green lamp and all, in HTML and CSS, so opening one still fetches nothing.
 
 ## 0.5.3 - 2026-11-25
 

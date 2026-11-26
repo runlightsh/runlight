@@ -493,7 +493,7 @@ public final class Web {
                   + link
                   + "\n\nThe link works for seven days.\n",
               "html",
-              "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><div role=\"img\" aria-label=\"Runlight\" style=\"width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#1c1c1f;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center\">R</div><p>"
+              "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table><p>"
                   + esc(invitedBy)
                   + " invited you to the Runlight at "
                   + esc(host)
@@ -554,7 +554,7 @@ public final class Web {
                 + link
                 + "\n\nIf this was not you, change your password, since someone knows it.\n",
             "html",
-            "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><div role=\"img\" aria-label=\"Runlight\" style=\"width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#1c1c1f;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center\">R</div><p>Someone, most likely you, signed in to Runlight at "
+            "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111827;max-width:480px\"><table role=\"img\" aria-label=\"Runlight\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-bottom:24px;border-collapse:separate\"><tr><td width=\"45\" height=\"48\" align=\"center\" bgcolor=\"#1c1c1f\" style=\"width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap\">R<span style=\"display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top\"></span></td></tr></table><p>Someone, most likely you, signed in to Runlight at "
                 + esc(host)
                 + " with your password while your account was held up by too many failed tries.</p><p><a href=\""
                 + esc(link)

@@ -203,7 +203,7 @@ def build_report(runlight: Any, site: dict[str, Any], frequency: str, period: di
     u = Url.parse(links["dashboard"])
     where = u.host + re.sub(r"/\Z", "", u.pathname) if u is not None else links["dashboard"]
     at = t("email.at", {"where": where})
-    mark = '<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#1c1c1f;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div>'
+    mark = '<table role="img" aria-label="Runlight" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;border-collapse:separate"><tr><td width="45" height="48" align="center" bgcolor="#1c1c1f" style="width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap">R<span style="display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top"></span></td></tr></table>'
 
     footer = t("email.footer", {"frequency": t("email.monthly" if monthly else "email.weekly"), "site": site["name"]})
     at_line = _esc(t("email.at", {"where": "\u0000"})).replace(

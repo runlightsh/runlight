@@ -1487,7 +1487,7 @@ final class Routes
                         'to' => $to,
                         'subject' => $t('email.test.subject'),
                         'text' => $t('email.test.body', ['service' => $name]),
-                        'html' => '<div role="img" aria-label="Runlight" style="width:48px;height:48px;margin-bottom:24px;border-radius:10px;background:#1c1c1f;color:#fff;font:700 26px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;text-align:center">R</div><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
+                        'html' => '<table role="img" aria-label="Runlight" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;border-collapse:separate"><tr><td width="45" height="48" align="center" bgcolor="#1c1c1f" style="width:45px;height:48px;padding:0 0 0 3px;border-radius:11px;background:#1c1c1f;background-image:linear-gradient(#2e2e33,#111113);color:#fafafa;font:700 34px/48px -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;letter-spacing:-6px;text-align:center;white-space:nowrap">R<span style="display:inline-block;width:8px;height:8px;margin-top:8px;border:1px solid #29292d;border-radius:5px;background:#22c55e;vertical-align:top"></span></td></tr></table><p style="font-family:sans-serif;font-size:15px">' . self::escapeHtml($t('email.test.body', ['service' => $name])) . '</p>',
                     ]);
                 } catch (\Throwable $error) {
                     // Only a test that went out counts, so one that failed can be tried again as soon as the setting is fixed.
