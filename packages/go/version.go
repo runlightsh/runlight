@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the release, the same for every Runlight package.
-const Version = "0.5.5"
+const Version = "0.5.6"
 
 // APIVersion is bumped when the HTTP API changes shape, so the dashboard
 // and the hub can tell.

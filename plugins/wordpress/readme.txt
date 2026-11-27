@@ -4,7 +4,7 @@ Tags: analytics, privacy, statistics, ai, cookieless
 Requires at least: 6.5
 Tested up to: 7.2
 Requires PHP: 8.1
-Stable tag: 0.5.5
+Stable tag: 0.5.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -139,7 +139,7 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
-= Unreleased =
+= 0.5.6 =
 * Some nginx setups, WordPress's own example among them, answer every address ending in .js or .css themselves, so Runlight's script and the dashboard's files were not found, nothing was counted, and the dashboard was blank. The plugin now checks that its script loads, and when it does not, the settings page, the Runlight page, and Site Health say so, with the nginx rule that fixes it, written for your site's path.
 
 = 0.5.5 =

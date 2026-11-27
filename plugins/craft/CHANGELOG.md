@@ -1,5 +1,10 @@
 # Release Notes for Runlight
 
+## 0.5.6 - 2026-11-27
+
+### Changed
+- Released with Runlight 0.5.6.
+
 ## 0.5.5 - 2026-11-26
 
 ### Changed

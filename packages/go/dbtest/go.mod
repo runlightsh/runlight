@@ -9,7 +9,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.2
 	github.com/jackc/pgx/v5 v5.13.0
 	modernc.org/sqlite v1.59.0
-	runlight.sh/go v0.5.5
+	runlight.sh/go v0.5.6
 )
 
 require (
