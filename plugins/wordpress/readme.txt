@@ -139,6 +139,9 @@ Sending to a Runlight you run elsewhere, the plugin talks to that Runlight alone
 
 == Changelog ==
 
+= Unreleased =
+* Some nginx setups, WordPress's own example among them, answer every address ending in .js or .css themselves, so Runlight's script and the dashboard's files were not found, nothing was counted, and the dashboard was blank. The plugin now checks that its script loads, and when it does not, the settings page, the Runlight page, and Site Health say so, with the nginx rule that fixes it, written for your site's path.
+
 = 0.5.5 =
 * Released with Runlight 0.5.5.
 
