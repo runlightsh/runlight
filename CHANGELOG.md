@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- WordPress plugin: some nginx setups, WordPress's own example among them, serve every address ending in `.js` or `.css` from disk, so Runlight's script and the dashboard's files answered 404, nothing was counted, and the dashboard was blank, while the settings page said Runlight was counting. The plugin now asks the site for its own script, and when the server answers it itself, the settings page, the dashboard page, and Site Health say so in place of that, with the nginx rule that hands Runlight's path to WordPress, written for the site's own path. A script that loads is checked again a day later, and a site that cannot reach itself an hour later.
+
 ## 0.5.5 - 2026-11-26
 
 ### Changed

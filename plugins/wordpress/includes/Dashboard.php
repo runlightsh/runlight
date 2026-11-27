@@ -154,6 +154,9 @@ final class Dashboard {
 					<?php echo esc_html( $ticket ); ?>
 					<a href="<?php echo esc_url( $setup ); ?>"><?php esc_html_e( 'Check the settings', 'runlight' ); ?></a>
 				</p></div>
+			<?php elseif ( $local && false === Local::reachable() ) : ?>
+				<?php // The frame would load nothing, since the server answers the dashboard's own files itself. ?>
+				<?php Admin::unreachable(); ?>
 			<?php else : ?>
 				<?php Admin::thanks( true ); ?>
 				<?php // Runlight here is this site's own page, which a sandbox could not hold anyway; another Runlight's view stays sandboxed. ?>

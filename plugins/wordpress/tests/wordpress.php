@@ -292,6 +292,12 @@ function esc_html( $text ): string {
 function __( $text, $domain = 'default' ): string {
 	return $text;
 }
+function esc_html__( $text, $domain = 'default' ): string {
+	return esc_html( $text );
+}
+function esc_html_e( $text, $domain = 'default' ): void {
+	echo esc_html( $text );
+}
 function wp_print_script_tag( $attributes ): void {
 	$out = '<script';
 	foreach ( $attributes as $name => $value ) {

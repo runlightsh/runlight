@@ -69,6 +69,64 @@ final class Local {
 		return home_url( ( self::plain_permalinks() ? '/index.php' : '' ) . '/runlight' );
 	}
 
+	/**
+	 * The transient holding the address whose script last loaded from this
+	 * site, so the check runs once a day while it works, or that address after
+	 * "unknown " when the site could not reach itself, so a request that hangs
+	 * slows the admin down once an hour at most. A failure is never kept, so
+	 * the warning goes as soon as the server is fixed.
+	 */
+	public const REACHABLE = 'runlight_reachable';
+
+	/**
+	 * Whether the web server hands Runlight's addresses to WordPress, found by
+	 * asking this site for the script. Some nginx setups, WordPress's own
+	 * example among them, serve every address ending in .js or .css from disk,
+	 * so the script and the dashboard's files answer 404 and nothing is
+	 * counted. True when JavaScript comes back, false when anything else
+	 * does, and null when the site cannot reach itself, which says nothing
+	 * either way (WordPress's own loopback test in Site Health covers that).
+	 */
+	public static function reachable(): ?bool {
+		$address = self::address();
+		$known   = get_transient( self::REACHABLE );
+		if ( $known === $address ) {
+			return true;
+		}
+		if ( 'unknown ' . $address === $known ) {
+			return null;
+		}
+		$response = wp_remote_get(
+			$address . '/s.js',
+			array(
+				'timeout'             => 5,
+				'limit_response_size' => 65536,
+				// As WordPress's own loopback requests do, so a site on a certificate of its own can check itself.
+				'sslverify'           => apply_filters( 'https_local_ssl_verify', false ),
+			)
+		);
+		if ( is_wp_error( $response ) ) {
+			set_transient( self::REACHABLE, 'unknown ' . $address, HOUR_IN_SECONDS );
+			return null;
+		}
+		$type = strtolower( (string) wp_remote_retrieve_header( $response, 'content-type' ) );
+		if ( 200 !== (int) wp_remote_retrieve_response_code( $response ) || ! str_contains( $type, 'javascript' ) ) {
+			return false;
+		}
+		set_transient( self::REACHABLE, $address, DAY_IN_SECONDS );
+		return true;
+	}
+
+	/**
+	 * The nginx rule that hands every address under Runlight's path to
+	 * WordPress. Its ^~ wins over the regular expressions that serve .js and
+	 * .css from disk, and a file that really is there is still served as one.
+	 */
+	public static function nginx_rule(): string {
+		$index = rtrim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' ) . '/index.php';
+		return 'location ^~ ' . self::base() . "/ {\n    try_files \$uri " . $index . "?\$args;\n}";
+	}
+
 	/** This site's id in Runlight, which counts this one site; a site in a network has a file of its own. */
 	private static function site(): string {
 		return 'default';

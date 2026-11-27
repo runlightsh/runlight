@@ -370,6 +370,62 @@ test("the WordPress plugin reports an AI agent only for a page it served, and le
   ]);
 });
 
+test("the WordPress plugin finds a web server that answers Runlight's script itself, and says how to fix it on nginx", (t) => {
+  const answer = wordpressPhp(t, `
+    foreach (["Settings", "Library", "Local", "Admin"] as $class) { require ${JSON.stringify(WORDPRESS + "includes/")} . $class . ".php"; }
+    update_option("permalink_structure", "/%postname%/");
+    $script = "http://127.0.0.1/runlight/s.js";
+    $check = static function (): array {
+      $GLOBALS["wp_test"]["requests"] = [];
+      return [Runlight\\WordPress\\Local::reachable(), $GLOBALS["wp_test"]["requests"]];
+    };
+    $out = [];
+    // nginx answers with its own 404 page, as with WordPress's example rule for .js and .css.
+    $GLOBALS["wp_test"]["http"] = [$script => ["status" => 404, "headers" => ["Content-Type" => "text/html"], "body" => "<h1>404 Not Found</h1>"]];
+    $out[] = $check();
+    $GLOBALS["is_nginx"] = true;
+    $health = Runlight\\WordPress\\Admin::health_reachable();
+    $out[] = [$health["status"], str_contains($health["description"], "location ^~ /runlight/ {\n    try_files \\$uri /index.php?\\$args;\n}")];
+    // Anything but JavaScript is not the script, even with a 200.
+    $GLOBALS["wp_test"]["http"] = [$script => ["status" => 200, "headers" => ["Content-Type" => "text/html"], "body" => "<html>"]];
+    $out[] = $check();
+    // A site that cannot reach itself says nothing either way, and does not try again within the hour.
+    $GLOBALS["wp_test"]["http"] = [];
+    $out[] = $check();
+    $out[] = $check();
+    $out[] = Runlight\\WordPress\\Admin::health_reachable()["status"];
+    delete_transient("runlight_reachable");
+    // Once the script loads, it is not asked for again that day.
+    $GLOBALS["wp_test"]["http"] = [$script => ["status" => 200, "headers" => ["Content-Type" => "application/javascript; charset=utf-8"], "body" => "(()=>{})()"]];
+    $out[] = $check();
+    $out[] = $check();
+    $out[] = Runlight\\WordPress\\Admin::health_reachable()["status"];
+    // The rule follows the site's path: a folder, and index.php with plain permalinks.
+    $GLOBALS["wp_test"]["home"] = "http://127.0.0.1/blog";
+    $out[] = Runlight\\WordPress\\Local::nginx_rule();
+    update_option("permalink_structure", "");
+    $out[] = Runlight\\WordPress\\Local::nginx_rule();
+    // A new address is checked again, since the one that loaded was another.
+    $out[] = $check()[1];
+    echo json_encode($out);
+  `);
+  if (answer === null) return;
+  assert.deepEqual(JSON.parse(answer), [
+    [false, ["http://127.0.0.1/runlight/s.js"]],
+    ["critical", true],
+    [false, ["http://127.0.0.1/runlight/s.js"]],
+    [null, ["http://127.0.0.1/runlight/s.js"]],
+    [null, []],
+    "recommended",
+    [true, ["http://127.0.0.1/runlight/s.js"]],
+    [true, []],
+    "good",
+    "location ^~ /blog/runlight/ {\n    try_files $uri /blog/index.php?$args;\n}",
+    "location ^~ /blog/index.php/runlight/ {\n    try_files $uri /blog/index.php?$args;\n}",
+    ["http://127.0.0.1/blog/index.php/runlight/s.js"],
+  ]);
+});
+
 test("without an object cache, the WordPress plugin's rate counts take two rows in wp_options, however many visitors and minutes", (t) => {
   const answer = wordpressPhp(t, `
     require ${JSON.stringify(WORDPRESS + "includes/Library.php")};

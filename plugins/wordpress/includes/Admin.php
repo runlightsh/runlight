@@ -25,6 +25,98 @@ final class Admin {
 		add_action( 'admin_init', array( self::class, 'after_activation' ) );
 		add_action( 'admin_notices', array( self::class, 'setup_notice' ) );
 		add_action( 'admin_post_runlight_thanked', array( self::class, 'close_thanks' ) );
+		add_filter( 'site_status_tests', array( self::class, 'health_tests' ) );
+	}
+
+	/**
+	 * Says the web server keeps Runlight's addresses from WordPress, so
+	 * nothing is counted, and how to fix it: on nginx, the rule to add, made
+	 * for this site's path. Shown in place of "Runlight is counting this
+	 * site" and of the dashboard, which would be blank.
+	 */
+	public static function unreachable(): void {
+		echo '<div class="notice notice-error inline">';
+		self::unreachable_text();
+		echo '</div>';
+	}
+
+	/** The words of that notice, which Site Health shows too. */
+	private static function unreachable_text(): void {
+		$nginx = ! empty( $GLOBALS['is_nginx'] );
+		?>
+		<p>
+			<?php
+			printf(
+				/* translators: %s: the address of Runlight's script on this site */
+				esc_html__( 'This site’s web server answers %s itself and never passes it to WordPress, so Runlight’s script does not load, nothing is counted, and the dashboard stays blank.', 'runlight' ),
+				'<code>' . esc_html( Local::address() . '/s.js' ) . '</code>'
+			);
+			?>
+		</p>
+		<?php if ( $nginx ) : ?>
+			<p><?php esc_html_e( 'On nginx, add this rule to the site’s server block and reload nginx. Then reload this page.', 'runlight' ); ?></p>
+			<pre style="padding:10px 12px;background:#f6f7f7;overflow-x:auto"><code style="padding:0;background:none"><?php echo esc_html( Local::nginx_rule() ); ?></code></pre>
+		<?php else : ?>
+			<p>
+				<?php
+				printf(
+					/* translators: %s: the path Runlight answers under */
+					esc_html__( 'Have the server pass every address under %s to WordPress, files ending in .js and .css included. Then reload this page.', 'runlight' ),
+					'<code>' . esc_html( Local::base() . '/' ) . '</code>'
+				);
+				?>
+			</p>
+		<?php endif; ?>
+		<p><a href="https://runlight.sh/docs/wordpress/#nginx" target="_blank" rel="noopener"><?php esc_html_e( 'Read more about it in the Runlight docs.', 'runlight' ); ?></a></p>
+		<?php
+	}
+
+	/**
+	 * Runlight's test in Site Health, when it runs in this WordPress.
+	 *
+	 * @param array<string,array<string,mixed>> $tests The tests WordPress runs.
+	 * @return array<string,array<string,mixed>>
+	 */
+	public static function health_tests( array $tests ): array {
+		if ( Local::active() ) {
+			$tests['direct']['runlight_reachable'] = array(
+				'label' => __( 'Runlight’s script loads', 'runlight' ),
+				'test'  => array( self::class, 'health_reachable' ),
+			);
+		}
+		return $tests;
+	}
+
+	/**
+	 * Whether Runlight's script loads from this site, as Site Health shows it.
+	 *
+	 * @return array<string,mixed>
+	 */
+	public static function health_reachable(): array {
+		$reachable = Local::reachable();
+		$result    = array(
+			'label'       => __( 'Runlight’s script loads from this site', 'runlight' ),
+			'status'      => 'good',
+			'badge'       => array(
+				'label' => __( 'Runlight', 'runlight' ),
+				'color' => 'blue',
+			),
+			'description' => '<p>' . esc_html__( 'The web server passes Runlight’s addresses to WordPress, so its script loads and visits are counted.', 'runlight' ) . '</p>',
+			'actions'     => '',
+			'test'        => 'runlight_reachable',
+		);
+		if ( null === $reachable ) {
+			$result['label']       = __( 'Runlight could not check its script from this server', 'runlight' );
+			$result['status']      = 'recommended';
+			$result['description'] = '<p>' . esc_html__( 'This site could not reach itself to ask for Runlight’s script. WordPress’s own loopback test says why.', 'runlight' ) . '</p>';
+		} elseif ( false === $reachable ) {
+			ob_start();
+			self::unreachable_text();
+			$result['label']       = __( 'Runlight’s script does not load, so nothing is counted', 'runlight' );
+			$result['status']      = 'critical';
+			$result['description'] = (string) ob_get_clean();
+		}
+		return $result;
 	}
 
 	/** Set when the plugin is activated, so the next admin page can open the setup screen. */
@@ -355,6 +447,9 @@ final class Admin {
 			<?php $notice = Connect::notice(); ?>
 			<?php if ( null !== $notice ) : ?>
 				<div class="notice inline <?php echo $notice[0] ? 'notice-success' : 'notice-error'; ?>"><p><?php echo esc_html( $notice[1] ); ?></p></div>
+			<?php elseif ( $local && '' === $missing && false === Local::reachable() ) : ?>
+				<?php self::unreachable(); ?>
+				<?php self::local_notices(); ?>
 			<?php elseif ( $local && '' === $missing ) : ?>
 				<div class="notice notice-success inline"><p>
 					<?php esc_html_e( 'Runlight is counting this site.', 'runlight' ); ?>
