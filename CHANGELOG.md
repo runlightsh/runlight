@@ -2,6 +2,12 @@
 
 Every notable change to Runlight is listed here, newest first. The library, the standalone server, the package for every other language, and the WordPress, Drupal, and Craft plugins share one version, so each release is one section here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org). The WordPress plugin keeps its changelog in its readme, and the Craft plugin keeps one of its own for the Craft Plugin Store.
 
+## Unreleased
+
+### Fixed
+
+- Realtime: the pages, sources, and countries of who is on the site now add up to the count above them. Someone still reading a page they opened more than five minutes ago was counted, from their tab's engagement pings, but left out of the lists, so a site could show 2 on the site with no pages listed. A visitor who moved between pages in the five minutes was also listed on each of them. Now each visitor is listed once, on the page of their latest pageview, event, or ping, with the source and country of that visit.
+
 ## 0.5.6 - 2026-11-27
 
 ### Fixed

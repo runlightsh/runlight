@@ -3290,21 +3290,31 @@ public final class SqlStore implements AutoCloseable {
             db.all(
                 "SELECT COUNT(DISTINCT visitor) AS n FROM rl_events WHERE site = ? AND ts >= ? AND kind IN ('pageview', 'event', 'engagement')",
                 list(site, since)));
+    // Each visitor on the site is where their latest row says: a pageview, an event, or an
+    // engagement ping from a tab still open. So the pages, sources, and countries share out the
+    // same visitors as the count, rather than leaving out anyone whose pageview is older than the
+    // five minutes. Through the kind and time index: SQLite otherwise reads the site's whole
+    // history by path.
+    String latest =
+        "(SELECT e.visitor AS visitor, e.path AS path, e.session AS session,\n"
+            + "        ROW_NUMBER() OVER (PARTITION BY e.visitor ORDER BY e.ts DESC, e.id DESC) AS n\n"
+            + "      FROM rl_events e"
+            + (db.dialect().equals("sqlite") ? " INDEXED BY rl_events_site_kind_ts" : "")
+            + "\n      WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event', 'engagement') AND e.visitor IS NOT NULL) l";
     List<Map<String, Object>> pages =
         db.all(
-            // Through the kind and time index: SQLite otherwise reads the site's whole history by
-            // path to group it.
-            "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e"
-                + (db.dialect().equals("sqlite") ? " INDEXED BY rl_events_site_kind_ts" : "")
-                + "\n       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path"
+            "SELECT l.path AS value, COUNT(*) AS visitors FROM "
+                + latest
+                + "\n       WHERE l.n = 1 GROUP BY l.path ORDER BY visitors DESC, l.path"
                 + textOrder()
                 + " LIMIT 10",
             list(site, since));
     List<Map<String, Object>> sources =
         db.all(
-            "SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n"
-                + "       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')\n"
-                + "       GROUP BY s.source ORDER BY visitors DESC, s.source"
+            "SELECT s.source AS value, COUNT(*) AS visitors FROM "
+                + latest
+                + " JOIN rl_sessions s ON s.id = l.session\n"
+                + "       WHERE l.n = 1 GROUP BY s.source ORDER BY visitors DESC, s.source"
                 + textOrder()
                 + " LIMIT 10",
             list(site, since));
@@ -3324,9 +3334,10 @@ public final class SqlStore implements AutoCloseable {
     }
     List<Map<String, Object>> countries =
         db.all(
-            "SELECT s.country AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n"
-                + "       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.country <> ''\n"
-                + "       GROUP BY s.country ORDER BY visitors DESC, s.country"
+            "SELECT s.country AS value, COUNT(*) AS visitors FROM "
+                + latest
+                + " JOIN rl_sessions s ON s.id = l.session\n"
+                + "       WHERE l.n = 1 AND s.country <> '' GROUP BY s.country ORDER BY visitors DESC, s.country"
                 + textOrder()
                 + " LIMIT 10",
             list(site, since));

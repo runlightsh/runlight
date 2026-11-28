@@ -2716,13 +2716,23 @@ defmodule Runlight.Store do
         ]
       )
 
+    # Each visitor on the site is where their latest row says: a pageview, an event, or an engagement
+    # ping from a tab still open. So the pages, sources, and countries share out the same visitors as
+    # the count, rather than leaving out anyone whose pageview is older than the five minutes. Through
+    # the kind and time index: SQLite otherwise reads the site's whole history by path.
+    latest = """
+    (SELECT e.visitor AS visitor, e.path AS path, e.session AS session,
+            ROW_NUMBER() OVER (PARTITION BY e.visitor ORDER BY e.ts DESC, e.id DESC) AS n
+          FROM #{event_kind_table(store)}
+          WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event', 'engagement') AND e.visitor IS NOT NULL) l\
+    """
+
     pages =
       all(
         store,
-        # Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
         """
-        SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM #{event_kind_table(store)}
-               WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path#{order} LIMIT 10\
+        SELECT l.path AS value, COUNT(*) AS visitors FROM #{latest}
+               WHERE l.n = 1 GROUP BY l.path ORDER BY visitors DESC, l.path#{order} LIMIT 10\
         """,
         [site, since]
       )
@@ -2731,9 +2741,8 @@ defmodule Runlight.Store do
       all(
         store,
         """
-        SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session
-               WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')
-               GROUP BY s.source ORDER BY visitors DESC, s.source#{order} LIMIT 10\
+        SELECT s.source AS value, COUNT(*) AS visitors FROM #{latest} JOIN rl_sessions s ON s.id = l.session
+               WHERE l.n = 1 GROUP BY s.source ORDER BY visitors DESC, s.source#{order} LIMIT 10\
         """,
         [site, since]
       )
@@ -2760,9 +2769,8 @@ defmodule Runlight.Store do
       all(
         store,
         """
-        SELECT s.country AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session
-               WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.country <> ''
-               GROUP BY s.country ORDER BY visitors DESC, s.country#{order} LIMIT 10\
+        SELECT s.country AS value, COUNT(*) AS visitors FROM #{latest} JOIN rl_sessions s ON s.id = l.session
+               WHERE l.n = 1 AND s.country <> '' GROUP BY s.country ORDER BY visitors DESC, s.country#{order} LIMIT 10\
         """,
         [site, since]
       )

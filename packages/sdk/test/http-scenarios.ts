@@ -172,6 +172,24 @@ const BASICS: Scenario[] = [
       { method: "POST", path: "/api/check", headers: json, advance: 5 * 86_400_000 },
     ],
   },
+  {
+    // Everyone counted as on the site now is listed once, on the page of their latest pageview, event, or
+    // engagement ping, so a reader whose pageview is older than the five minutes is still on its page.
+    name: "who is on the site now, and where",
+    site: { hostnames: ["example.com"], timezone: "UTC" },
+    start: Date.UTC(2026, 9, 6, 9, 0),
+    token: "conformance",
+    steps: [
+      hit({ k: "pageview", u: "https://example.com/guide", r: "https://www.google.com/", i: "rd1" }, "203.0.113.1", CHROME, { "x-vercel-ip-country": "GB" }),
+      { ...hit({ k: "engagement", u: "https://example.com/guide", i: "rd1", e: 30_000, d: 40 }, "203.0.113.1"), advance: 7 * 60_000 },
+      hit({ k: "pageview", u: "https://example.com/", r: "https://news.ycombinator.com/", i: "mv1" }, "198.51.100.7", IPHONE, { "x-vercel-ip-country": "US" }),
+      { ...hit({ k: "pageview", u: "https://example.com/pricing", r: "https://example.com/", i: "mv2" }, "198.51.100.7", IPHONE, { "x-vercel-ip-country": "US" }), advance: 60_000 },
+      hit({ k: "pageview", u: "https://example.com/pricing", i: "pr1" }, "192.0.2.4", CHROME, { "x-vercel-ip-country": "US" }),
+      { ...hit({ k: "event", u: "https://example.com/pricing", i: "pr1", n: "Signup" }, "192.0.2.4"), advance: 20_000 },
+      get("/api/realtime"),
+      { ...get("/api/realtime"), advance: 6 * 60_000 },
+    ],
+  },
 ];
 
 const ANDROID = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36";

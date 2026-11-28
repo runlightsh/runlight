@@ -117,6 +117,28 @@ test("realtime sources include direct visitors once across pageviews", async () 
   assert.deepEqual((await t.get("/api/realtime")).sources, []);
 });
 
+test("realtime lists every visitor on the site once, on the page they are on now", async () => {
+  const t = setup();
+  await t.send({ k: "pageview", u: "https://example.com/guide", i: "reader" });
+  t.advance(6 * MIN);
+  // Still reading: no pageview in the last five minutes, only the open tab's ping.
+  await t.send({ k: "engagement", u: "https://example.com/guide", i: "reader", e: 30_000 });
+  await t.send({ k: "pageview", u: "https://example.com/", i: "mover1" }, { ip: "198.51.100.7" });
+  await t.send({ k: "pageview", u: "https://example.com/pricing", i: "mover2" }, { ip: "198.51.100.7" });
+  const live = await t.get("/api/realtime");
+  assert.equal(live.visitors, 2);
+  assert.deepEqual(live.pages, [
+    { value: "/guide", visitors: 1 },
+    { value: "/pricing", visitors: 1 },
+  ]);
+  assert.deepEqual(live.sources, [{ value: "", visitors: 2 }]);
+  t.advance(6 * MIN);
+  const later = await t.get("/api/realtime");
+  assert.equal(later.visitors, 0);
+  assert.deepEqual(later.pages, []);
+  assert.deepEqual(later.sources, []);
+});
+
 test("thirty idle minutes start a new session; a new day is a new visitor", async () => {
   const t = setup();
   await t.send({ k: "pageview", u: "https://example.com/", i: "a1" });

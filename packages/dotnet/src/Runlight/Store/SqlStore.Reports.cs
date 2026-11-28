@@ -422,13 +422,17 @@ public sealed partial class SqlStore
             "SELECT COUNT(DISTINCT visitor) AS n FROM rl_events WHERE site = ? AND ts >= ? AND kind IN ('pageview', 'event', 'engagement')",
             A(site, since),
             cancellationToken).ConfigureAwait(false);
+        // Each visitor on the site is where their latest row says: a pageview, an event, or an engagement
+        // ping from a tab still open. So the pages, sources, and countries share out the same visitors as
+        // the count, rather than leaving out anyone whose pageview is older than the five minutes. Through
+        // the kind and time index: SQLite otherwise reads the site's whole history by path.
+        string latest = "(SELECT e.visitor AS visitor, e.path AS path, e.session AS session,\n        ROW_NUMBER() OVER (PARTITION BY e.visitor ORDER BY e.ts DESC, e.id DESC) AS n\n      FROM " + Sql.EventKindTable(Dialect) + "\n      WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event', 'engagement') AND e.visitor IS NOT NULL) l";
         var pages = await Db.AllAsync(
-            // Through the kind and time index: SQLite otherwise reads the site's whole history by path to group it.
-            "SELECT e.path AS value, COUNT(DISTINCT e.visitor) AS visitors FROM " + Sql.EventKindTable(Dialect) + "\n       WHERE e.site = ? AND e.ts >= ? AND e.kind = 'pageview' GROUP BY e.path ORDER BY visitors DESC, e.path" + TextOrder() + " LIMIT 10",
+            "SELECT l.path AS value, COUNT(*) AS visitors FROM " + latest + "\n       WHERE l.n = 1 GROUP BY l.path ORDER BY visitors DESC, l.path" + TextOrder() + " LIMIT 10",
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         var sources = await Db.AllAsync(
-            "SELECT s.source AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event')\n       GROUP BY s.source ORDER BY visitors DESC, s.source" + TextOrder() + " LIMIT 10",
+            "SELECT s.source AS value, COUNT(*) AS visitors FROM " + latest + " JOIN rl_sessions s ON s.id = l.session\n       WHERE l.n = 1 GROUP BY s.source ORDER BY visitors DESC, s.source" + TextOrder() + " LIMIT 10",
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         long start = (long)Math.Floor(now / 60_000.0) * 60_000 - 29 * 60_000;
@@ -446,7 +450,7 @@ public sealed partial class SqlStore
             }
         }
         var countries = await Db.AllAsync(
-            "SELECT s.country AS value, COUNT(DISTINCT e.visitor) AS visitors FROM rl_events e JOIN rl_sessions s ON s.id = e.session\n       WHERE e.site = ? AND e.ts >= ? AND e.kind IN ('pageview', 'event') AND s.country <> ''\n       GROUP BY s.country ORDER BY visitors DESC, s.country" + TextOrder() + " LIMIT 10",
+            "SELECT s.country AS value, COUNT(*) AS visitors FROM " + latest + " JOIN rl_sessions s ON s.id = l.session\n       WHERE l.n = 1 AND s.country <> '' GROUP BY s.country ORDER BY visitors DESC, s.country" + TextOrder() + " LIMIT 10",
             A(site, since),
             cancellationToken).ConfigureAwait(false);
         var recent = await Db.AllAsync(

@@ -6407,6 +6407,388 @@
       ]
     },
     {
+      "name": "who is on the site now, and where",
+      "site": {
+        "hostnames": [
+          "example.com"
+        ],
+        "timezone": "UTC"
+      },
+      "start": 1791277200000,
+      "token": "conformance",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.1",
+            "x-vercel-ip-country": "GB"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/guide",
+            "r": "https://www.google.com/",
+            "i": "rd1"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "203.0.113.1"
+          },
+          "body": {
+            "k": "engagement",
+            "u": "https://example.com/guide",
+            "i": "rd1",
+            "e": 30000,
+            "d": 40
+          },
+          "advance": 420000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            "x-forwarded-for": "198.51.100.7",
+            "x-vercel-ip-country": "US"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/",
+            "r": "https://news.ycombinator.com/",
+            "i": "mv1"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            "x-forwarded-for": "198.51.100.7",
+            "x-vercel-ip-country": "US"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/pricing",
+            "r": "https://example.com/",
+            "i": "mv2"
+          },
+          "advance": 60000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "192.0.2.4",
+            "x-vercel-ip-country": "US"
+          },
+          "body": {
+            "k": "pageview",
+            "u": "https://example.com/pricing",
+            "i": "pr1"
+          },
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/e",
+          "headers": {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "x-forwarded-for": "192.0.2.4"
+          },
+          "body": {
+            "k": "event",
+            "u": "https://example.com/pricing",
+            "i": "pr1",
+            "n": "Signup"
+          },
+          "advance": 20000,
+          "expect": {
+            "status": 202,
+            "headers": {
+              "access-control-allow-origin": "*"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/realtime",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "visitors": 3,
+              "pages": [
+                {
+                  "value": "/pricing",
+                  "visitors": 2
+                },
+                {
+                  "value": "/guide",
+                  "visitors": 1
+                }
+              ],
+              "sources": [
+                {
+                  "value": "",
+                  "visitors": 1
+                },
+                {
+                  "value": "Google",
+                  "visitors": 1
+                },
+                {
+                  "value": "Hacker News",
+                  "visitors": 1
+                }
+              ],
+              "countries": [
+                {
+                  "value": "US",
+                  "visitors": 2
+                },
+                {
+                  "value": "GB",
+                  "visitors": 1
+                }
+              ],
+              "minutes": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                2
+              ],
+              "recent": [
+                {
+                  "ts": 1791277700000,
+                  "kind": "event",
+                  "path": "/pricing",
+                  "name": "Signup",
+                  "country": "US",
+                  "city": "",
+                  "source": "",
+                  "device": "desktop"
+                },
+                {
+                  "ts": 1791277680000,
+                  "kind": "pageview",
+                  "path": "/pricing",
+                  "name": "",
+                  "country": "US",
+                  "city": "",
+                  "source": "",
+                  "device": "desktop"
+                },
+                {
+                  "ts": 1791277680000,
+                  "kind": "pageview",
+                  "path": "/pricing",
+                  "name": "",
+                  "country": "US",
+                  "city": "",
+                  "source": "Hacker News",
+                  "device": "mobile"
+                },
+                {
+                  "ts": 1791277620000,
+                  "kind": "pageview",
+                  "path": "/",
+                  "name": "",
+                  "country": "US",
+                  "city": "",
+                  "source": "Hacker News",
+                  "device": "mobile"
+                },
+                {
+                  "ts": 1791277200000,
+                  "kind": "pageview",
+                  "path": "/guide",
+                  "name": "",
+                  "country": "GB",
+                  "city": "",
+                  "source": "Google",
+                  "device": "desktop"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/realtime",
+          "headers": {
+            "authorization": "Bearer conformance"
+          },
+          "advance": 360000,
+          "expect": {
+            "status": 200,
+            "headers": {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff"
+            },
+            "body": {
+              "visitors": 0,
+              "pages": [],
+              "sources": [],
+              "countries": [],
+              "minutes": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "recent": [
+                {
+                  "ts": 1791277700000,
+                  "kind": "event",
+                  "path": "/pricing",
+                  "name": "Signup",
+                  "country": "US",
+                  "city": "",
+                  "source": "",
+                  "device": "desktop"
+                },
+                {
+                  "ts": 1791277680000,
+                  "kind": "pageview",
+                  "path": "/pricing",
+                  "name": "",
+                  "country": "US",
+                  "city": "",
+                  "source": "",
+                  "device": "desktop"
+                },
+                {
+                  "ts": 1791277680000,
+                  "kind": "pageview",
+                  "path": "/pricing",
+                  "name": "",
+                  "country": "US",
+                  "city": "",
+                  "source": "Hacker News",
+                  "device": "mobile"
+                },
+                {
+                  "ts": 1791277620000,
+                  "kind": "pageview",
+                  "path": "/",
+                  "name": "",
+                  "country": "US",
+                  "city": "",
+                  "source": "Hacker News",
+                  "device": "mobile"
+                },
+                {
+                  "ts": 1791277200000,
+                  "kind": "pageview",
+                  "path": "/guide",
+                  "name": "",
+                  "country": "GB",
+                  "city": "",
+                  "source": "Google",
+                  "device": "desktop"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "the tracker: what counts and what is dropped",
       "site": {
         "hostnames": [
@@ -8328,22 +8710,6 @@
                 },
                 {
                   "value": "/post",
-                  "visitors": 1
-                },
-                {
-                  "value": "/r1",
-                  "visitors": 1
-                },
-                {
-                  "value": "/r2",
-                  "visitors": 1
-                },
-                {
-                  "value": "/r3",
-                  "visitors": 1
-                },
-                {
-                  "value": "/r4",
                   "visitors": 1
                 },
                 {
@@ -27153,7 +27519,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "{\"visitors\":1,\"pages\":[{\"value\":\"/\",\"visitors\":1},{\"value\":\"/post\",\"visitors\":1}],\"sources\":[{\"value\":\"Google\",\"visitors\":1}],\"countries\":[],\"minutes\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],\"recent\":[{\"ts\":1791288060000,\"kind\":\"event\",\"path\":\"/post\",\"name\":\"Signup\",\"country\":\"\",\"city\":\"\",\"source\":\"Google\",\"device\":\"desktop\"},{\"ts\":1791288060000,\"kind\":\"pageview\",\"path\":\"/post\",\"name\":\"\",\"country\":\"\",\"city\":\"\",\"source\":\"Google\",\"device\":\"desktop\"},{\"ts\":1791288000000,\"kind\":\"pageview\",\"path\":\"/\",\"name\":\"\",\"country\":\"\",\"city\":\"\",\"source\":\"Google\",\"device\":\"desktop\"}]}"
+                    "text": "{\"visitors\":1,\"pages\":[{\"value\":\"/post\",\"visitors\":1}],\"sources\":[{\"value\":\"Google\",\"visitors\":1}],\"countries\":[],\"minutes\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],\"recent\":[{\"ts\":1791288060000,\"kind\":\"event\",\"path\":\"/post\",\"name\":\"Signup\",\"country\":\"\",\"city\":\"\",\"source\":\"Google\",\"device\":\"desktop\"},{\"ts\":1791288060000,\"kind\":\"pageview\",\"path\":\"/post\",\"name\":\"\",\"country\":\"\",\"city\":\"\",\"source\":\"Google\",\"device\":\"desktop\"},{\"ts\":1791288000000,\"kind\":\"pageview\",\"path\":\"/\",\"name\":\"\",\"country\":\"\",\"city\":\"\",\"source\":\"Google\",\"device\":\"desktop\"}]}"
                   }
                 ]
               }
