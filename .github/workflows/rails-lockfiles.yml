@@ -47,14 +47,14 @@ jobs:
       # nothing in it needs a newer one: Rails 8.0 on Ruby 3.2, and Rails 8.1 on
       # Ruby 3.4, which also installs it on 4.0. No gems are installed:
       # resolving needs none.
-      - uses: ruby/setup-ruby@4e97ecde5048e1e0816923020652678063ffbf65 # v1.339.0
+      - uses: ruby/setup-ruby@78c62f2208e480ce3d5ae4dfd9b9e181acf48b63 # v1.344.0
         with:
           ruby-version: "3.2"
           bundler-cache: false
       - name: bundle lock --update, for Rails 8.0
         working-directory: packages/ruby
         run: BUNDLE_GEMFILE=test/rails/gemfiles/rails_8_0.gemfile bundle lock --update
-      - uses: ruby/setup-ruby@4e97ecde5048e1e0816923020652678063ffbf65 # v1.339.0
+      - uses: ruby/setup-ruby@78c62f2208e480ce3d5ae4dfd9b9e181acf48b63 # v1.344.0
         with:
           ruby-version: "3.4"
           bundler-cache: false
